@@ -182,6 +182,13 @@ class ConnectionUsageRow(Base):
         ),
         # "Has this task used the connection before?" (a continuing task).
         Index("ix_connection_usage_task_id_kind", "task_id", "kind"),
+        # The calls still in flight (Alembic revision ``0066``, issue #52): the
+        # reaper of abandoned calls and System Health look for them only.
+        Index(
+            "ix_connection_usage_in_flight_started_at",
+            "started_at",
+            postgresql_where=text("status = 'in_flight'"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(

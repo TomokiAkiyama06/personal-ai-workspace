@@ -2,7 +2,15 @@
 
 from fastapi import APIRouter
 
-from paw_backend.api.v1 import accounts, auth, events, health, passkeys
+from paw_backend.api.v1 import (
+    accounts,
+    auth,
+    compute,
+    events,
+    health,
+    passkeys,
+    system_health,
+)
 
 router = APIRouter(prefix="/api/v1")
 router.include_router(health.router)
@@ -10,3 +18,5 @@ router.include_router(events.router)
 router.include_router(auth.router)
 router.include_router(passkeys.router)
 router.include_router(accounts.router)
+router.include_router(system_health.router)
+router.include_router(compute.router)

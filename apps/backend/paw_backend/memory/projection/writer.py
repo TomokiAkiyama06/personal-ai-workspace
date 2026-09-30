@@ -594,14 +594,62 @@ def open_target(root: str | Path, protected: Collection[str]) -> LockedTarget:
     return LockedTarget(root_fd, marker_fd)
 
 
+def _create_marker(root_fd: int) -> int | None:
+    """Publish a complete marker without replacing one; its descriptor, or None.
+
+    The marker is written and synced under a temporary name, then hard linked
+    to ``MARKER_NAME``, which fails if another run published one first (None:
+    that marker is verified and locked instead). A rename would replace it, and
+    the two runs would each lock their own file.
+    """
+    temporary = f"{TEMPORARY_PREFIX}{secrets.token_hex(_TEMPORARY_HEX_BYTES)}"
+    fd = os.open(temporary, _CREATE_FLAGS, FILE_MODE, dir_fd=root_fd)
+    try:
+        os.fchmod(fd, FILE_MODE)
+        view = memoryview(MARKER_CONTENT)
+        while view:
+            written = os.write(fd, view)
+            view = view[written:]
+        os.fsync(fd)
+        try:
+            os.link(
+                temporary,
+                MARKER_NAME,
+                src_dir_fd=root_fd,
+                dst_dir_fd=root_fd,
+                follow_symlinks=False,
+            )
+            published = True
+        except FileExistsError:
+            published = False
+        os.unlink(temporary, dir_fd=root_fd)
+    except BaseException:
+        os.close(fd)
+        try:
+            os.unlink(temporary, dir_fd=root_fd)
+        except OSError:
+            pass
+        raise
+    if not published:
+        os.close(fd)
+        return None
+    return fd
+
+
 def _open_marker(root_fd: int) -> int:
     try:
         fd = os.open(MARKER_NAME, _READ_FLAGS, dir_fd=root_fd)
     except FileNotFoundError:
         if os.listdir(root_fd):
             raise ProjectionTargetError(TargetProblem.NOT_EMPTY) from None
-        _write_file(root_fd, MARKER_NAME, MARKER_CONTENT)
-        return os.open(MARKER_NAME, _READ_FLAGS, dir_fd=root_fd)
+        created = _create_marker(root_fd)
+        if created is not None:
+            return created
+        # Another run published the marker first: verify and lock that one.
+        try:
+            fd = os.open(MARKER_NAME, _READ_FLAGS, dir_fd=root_fd)
+        except OSError:
+            raise ProjectionTargetError(TargetProblem.MARKER_INVALID) from None
     except OSError:
         raise ProjectionTargetError(TargetProblem.MARKER_INVALID) from None
     try:

@@ -6,7 +6,7 @@ when the two drift apart.
 """
 
 MAX_TITLE_CHARS = 200  # also the CHECK of memory_versions.title
-MAX_CONTENT_CHARS = 20_000
+MAX_CONTENT_CHARS = 20_000  # also the CHECK of memory_versions.content (0147)
 MAX_REASON_CHARS = 500
 MAX_MEMORY_TYPE_CHARS = 64  # also the CHECK of memory_versions.memory_type
 MAX_POLICY_SUBJECTS = 20  # subjects one memory (or candidate) may declare

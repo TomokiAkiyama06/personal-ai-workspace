@@ -17,6 +17,12 @@ which is what makes the acceptance conditions of Decisions 0006 and 0007 hold:
   from the parent's (``scope.py``) from **current** values (the caller's
   ``TaskAuthority`` is asked again for every call), so a narrowed grant, an
   archived project or a changed repository ACL takes effect on the very next call.
+* **A worker that lost its queue lease runs no tool** (issue #126, Decision
+  0046). The ``TaskContext`` carries the worker's lease (``TaskContext.lease``) and
+  the Broker checks it for every call (:class:`QueueLeaseVerifier`, the database's
+  answer). A call refused with ``lease_lost`` stops the run here as well
+  (``StopReason.LEASE_LOST``): no other node of the run hands over another call,
+  and the orchestrator ends the run as it does when its heartbeats lose the lease.
 * **A node cannot exceed the parent's budget.** ``NodeBudgetHandle.charge`` records
   to the parent task's rows (there is no budget of a node) and raises
   ``NodeStopped`` for the node that crossed the limit and, through the guard, for
@@ -36,14 +42,20 @@ from paw_backend.tasks.queueing import (
     BudgetStatus,
     BudgetTracker,
     InvalidQueueingArgumentError,
+    QueueLease,
+    TaskQueue,
 )
 from paw_backend.tools import (
+    BrokerReason,
     BudgetProvider,
+    LeaseStatus,
+    LeaseVerifier,
     TaskActivity,
     TaskActivityProvider,
     TaskContext,
     ToolCall,
     ToolOutcome,
+    Verdict,
 )
 from paw_backend.tools import BudgetStatus as ToolBudgetStatus
 
@@ -73,6 +85,7 @@ class RunGuard:
         self._run = run
         self._activity = activity
         self._stop_reason: StopReason | None = None
+        self._on_lease_lost: list[Callable[[], None]] = []
 
     @property
     def stop_reason(self) -> StopReason | None:
@@ -93,9 +106,20 @@ class RunGuard:
         self.stop(StopReason.SUPERSEDED)
         raise NodeStopped(self._stop_reason or StopReason.SUPERSEDED)
 
+    def on_lease_lost(self, callback: Callable[[], None]) -> None:
+        """Call ``callback`` (synchronously, no arguments) whenever the run is
+        stopped for a lost lease. The orchestrator wakes its run loop with it, so
+        that a loss the Broker read (``NodeToolGateway``) ends the run and its
+        other nodes at once, as a loss the heartbeats found does, and not only at
+        the next heartbeat, poll or node timeout (Codex review of PR #144)."""
+        self._on_lease_lost.append(callback)
+
     def stop(self, reason: StopReason) -> None:
         if self._stop_reason is None:
             self._stop_reason = reason
+        if reason is StopReason.LEASE_LOST:
+            for callback in self._on_lease_lost:
+                callback()
 
     async def ensure_active(self) -> None:
         if self._stop_reason is not None:
@@ -177,9 +201,21 @@ class NodeToolGateway:
         context = await self._context_factory()
         await self._guard.ensure_active()
         self._fence.ensure_open()
-        return await self._runner.run(
+        outcome = await self._runner.run(
             ToolCall(tool, arguments, context), approval_id=approval_id
         )
+        if (
+            isinstance(outcome, ToolOutcome)
+            and outcome.decision.verdict is Verdict.DENY
+            and outcome.decision.reason is BrokerReason.LEASE_LOST
+        ):
+            # The Broker read that this worker's lease is gone (lost, expired or
+            # taken over): the whole run stops, not only this call. (A lease that
+            # could not be read, ``lease_unavailable``, refuses the call only; the
+            # heartbeats decide about the lease.)
+            self._guard.stop(StopReason.LEASE_LOST)
+            raise NodeStopped(StopReason.LEASE_LOST)
+        return outcome
 
 
 # What a node may report through ``NodeBudgetHandle.charge``.
@@ -219,7 +255,11 @@ class NodeBudgetHandle:
         # fenced by the run (``run=``): the tracker checks the task's current run
         # under the task row's share lock in the transaction of the increment, so
         # a run that a Fail + Retry / Restart replaced since the last look spends
-        # nothing of the run that took over (the usage is kept per task).
+        # nothing of the run that took over (the usage is kept per task). It is
+        # NOT fenced by the queue lease (issue #153, Decision 0057): it records
+        # work that was done, starts nothing, and a take-over keeps the run, so
+        # the work of a worker that lost its lease unseen is the same run's. A
+        # loss this run already knows of stopped the guard above.
         try:
             await self._tracker.record(self._task_id, kind, amount, run=self._guard.run)
         except StaleRunError:
@@ -248,12 +288,13 @@ class TrackerBudgetProvider(BudgetProvider):
     in flight (Decision 0006 and ``tools/budget.py``). A task with no budget is
     ``UNKNOWN``: a call that needs a budget is denied.
 
-    ``charge`` is NOT fenced by the run (unlike ``NodeBudgetHandle.charge``): the
-    Broker's seam passes no run, and it charges a call after it ran, a call that
-    ``NodeToolGateway.call`` handed over only after it checked the run. So what it
-    records is work that happened; after a run is replaced, only the calls that
-    were already in flight are recorded (the gateway refuses every new one), and
-    hiding them would under-count executed calls.
+    ``charge`` is fenced by the run the call ran for (issue #126, Decision 0046;
+    as ``NodeBudgetHandle.charge``): the tracker checks the task's current run
+    under the task row's share lock in the transaction of the increment. A call
+    whose run was replaced (Fail + Retry / Restart) or whose task ended while it
+    ran is not charged (``StaleRunError``, logged; its audit row says it ran), so
+    it spends nothing of the run that took over. Only calls that were already in
+    flight can be affected: the gateway and the Broker refuse every new one.
     """
 
     def __init__(self, tracker: BudgetTracker) -> None:
@@ -270,5 +311,30 @@ class TrackerBudgetProvider(BudgetProvider):
             return ToolBudgetStatus.EXCEEDED
         return ToolBudgetStatus.WITHIN_BUDGET
 
-    async def charge(self, task_id: uuid.UUID, tool: str) -> None:
-        await self._tracker.record(task_id, BudgetKind.TOOL_CALLS, 1)
+    async def charge(self, task_id: uuid.UUID, run: TaskRun, tool: str) -> None:
+        try:
+            await self._tracker.record(task_id, BudgetKind.TOOL_CALLS, 1, run=run)
+        except StaleRunError:
+            # Not a failure of the store: the run the call ran for is no longer
+            # the task's (or the task ended). Nothing is charged to its successor.
+            logger.info("A tool call of a replaced or ended run was not charged")
+
+
+class QueueLeaseVerifier(LeaseVerifier):
+    """The Tool Broker's ``LeaseVerifier`` seam, backed by the ``TaskQueue``.
+
+    ``check`` asks the database whether the lease is valid now
+    (``TaskQueue.holds_lease``: the entry belongs to the task, is claimed by the
+    worker with that claim generation, and has not expired by the database
+    clock). A read at one instant, no lock, nothing changed; an error propagates
+    and the Broker refuses the call (``lease_unavailable``).
+    """
+
+    def __init__(self, queue: TaskQueue) -> None:
+        if not isinstance(queue, TaskQueue):
+            raise TypeError("queue must be a TaskQueue")
+        self._queue = queue
+
+    async def check(self, task_id: uuid.UUID, lease: QueueLease) -> LeaseStatus:
+        held = await self._queue.holds_lease(task_id, lease)
+        return LeaseStatus.HELD if held else LeaseStatus.LOST

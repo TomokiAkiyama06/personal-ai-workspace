@@ -126,6 +126,20 @@ class TaskRow(Base):
         # the project module lists a project's active tasks (its stop processor,
         # Decision 0008, section 8) and ``project_id`` has no other index.
         Index("ix_tasks_project_id_state", "project_id", "state"),
+        # System Health counts the tasks by state every sample (revision
+        # ``0066``): the active ones, and the ones that ended in the last day.
+        Index(
+            "ix_tasks_active_state",
+            "state",
+            postgresql_where=text(
+                "state IN ('queued', 'running', 'waiting', 'paused', 'evaluating')"
+            ),
+        ),
+        Index(
+            "ix_tasks_ended_updated_at",
+            "updated_at",
+            postgresql_where=text("state IN ('completed', 'cancelled')"),
+        ),
     )
 
 
@@ -478,6 +492,13 @@ class TaskEventRow(Base):
 
     __table_args__ = (
         Index(None, "task_id", "seq"),
+        # The failures and retries of the last hour / day (System Health,
+        # revision ``0066``).
+        Index(
+            "ix_task_events_retry_fail_created_at",
+            "created_at",
+            postgresql_where=text("command IN ('retry', 'fail')"),
+        ),
         _in("command", TaskCommand, "command_valid"),
         _in("from_state", TaskState, "from_state_valid"),
         _in("to_state", TaskState, "to_state_valid"),

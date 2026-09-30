@@ -53,7 +53,7 @@ class AuthServices:
     # itself: ``ApprovalService`` keeps its fail-closed default until a deployment
     # (the approval endpoint) opts in.
     approval_step_up: PasskeyApprovalStepUp
-    # PAW-024 (Decision 0033, Proposed): invite-only registration, QR / link
+    # PAW-024 (Decision 0033, Approved): invite-only registration, QR / link
     # pairing of a new device, and the user lifecycle (delete, restore).
     invitations: InvitationService
     pairing: PairingService

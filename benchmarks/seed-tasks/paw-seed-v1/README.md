@@ -1,6 +1,6 @@
 # paw-seed-v1 — Seed Benchmark Dataset
 
-Personal AI Workspace 自身の Repository から作った、Coding Agent 比較用の初期 Task set です（PAW-016、[Decision 0041](../../../docs/decisions/0041-seed-benchmark-dataset.md)（Proposed））。
+Personal AI Workspace 自身の Repository から作った、Coding Agent 比較用の初期 Task set です（PAW-016、[Decision 0041](../../../docs/decisions/0041-seed-benchmark-dataset.md)（Approved））。
 
 - [`manifest.json`](manifest.json): 索引。Task ごとの種類・難易度・カテゴリ・出典（元の PR / Issue / base commit）を記録します。
 - `tasks/*.json`: [Task schema v1](../../schemas/task-v1.schema.json) の Task。Hidden check は opaque な `reference_id` だけを持ちます。
