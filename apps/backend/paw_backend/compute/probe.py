@@ -131,7 +131,18 @@ class SubprocessRunner:
         )
         try:
             async with asyncio.timeout(timeout_seconds):
-                stdout = await process.stdout.read(_MAX_OUTPUT_BYTES + 1)
+                # ``read(n)`` returns as soon as some output is there, not all
+                # of it: read until the end (``nvidia-smi`` writes a row in more
+                # than one piece). Past the limit the command is stopped: a child
+                # blocked on a full pipe would never exit.
+                stdout = b""
+                while len(stdout) <= _MAX_OUTPUT_BYTES:
+                    chunk = await process.stdout.read(_MAX_OUTPUT_BYTES + 1)
+                    if not chunk:
+                        break
+                    stdout += chunk
+                if len(stdout) > _MAX_OUTPUT_BYTES:
+                    process.kill()  # the child this runner started, nothing else
                 await process.wait()
         except BaseException:
             if process.returncode is None:

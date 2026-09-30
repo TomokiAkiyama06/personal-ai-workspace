@@ -54,6 +54,7 @@
 | [0056](0056-production-worktree-wiring.md) | 本番の組み立てで Orchestrator に Parallel Worktree / Integration Node（`GitWorktreeCoordinator`）を配線する方針（無効にする設定を持たない、worktree の Root の設定と起動時の確認を持たない、git の Runner は `create_app(git_runner=...)`、worktree の要らない Task は Account を尋ねない、`IntegrationGate` は組み立てない。Issue #155） | Approved |
 | [0057](0057-connection-and-node-charge-lease-fencing.md) | Shared Connection の呼び出し（`ConnectionService.execute`）を Queue の Lease で Fencing し（Fail closed。Admission の前）、`NodeBudgetHandle.charge` と GPU 時間の遅い計上は Lease で Fencing しない（Decision 0046 の 6 への追補。Issue #153） | Approved |
 | [0053](0053-memory-content-length-limit.md) | Memory の本文（`memory_versions.content`）の DB の長さの上限（20,000 文字の CHECK、Migration 0147）・上限を超える既存の行があれば Migration を止めて何も変えない・Projection の切り詰め（Decision 0038 の 5・10）は防御として残す（Issue #147） | Approved |
+| [0055](0055-kaggle-full-gpu-mode.md) | Kaggle / Full GPU Mode の方針（始める・終えるのは Owner / Admin だけ: Capability `admin.compute.full_gpu`、走っている Task は `waiting`（Resource）にして Drain、Queue 中の Task は GPU を求めた時点で Hold、Preempt は明示したときだけ、Main LLM が戻ってから再開、再起動で解除、HTTP の API は後の Issue。PAW-037、Issue #33。Decision 0037 の 7・13 を補う） | Approved |
 
 運用は [AGENTS.md](../../AGENTS.md) の「仕様変更」に従います。
 
