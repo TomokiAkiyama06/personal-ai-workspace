@@ -79,6 +79,9 @@ class FakeHolds:
             self.resumed.append(task)
         return ResumeReport(len(resumed), len(self.held))
 
+    async def any_held(self):
+        return bool(self.held)
+
 
 class FullGpuTestCase(unittest.IsolatedAsyncioTestCase):
     specs = None
@@ -580,6 +583,221 @@ class EndTest(FullGpuTestCase):
         self.assertEqual(status.held_tasks, 1)  # still counted as held
 
 
+class WaitForVramTest(FullGpuTestCase):
+    """#164: while the scheduler waits in normal for VRAM another workload holds
+    (Decision 0042's 6), Full GPU Mode holds no task and the drain time does not
+    run; both start once the scheduler leaves normal."""
+
+    async def test_nothing_is_held_or_preempted_while_another_workload_has_it(self):
+        self.probe.external = 20 * GIB  # 80 GiB cannot be free even if empty
+        await self.scheduler.refresh()
+        first, first_lease = await self.running_task()
+
+        async def holder(held):
+            await held.revoked.wait()  # a cooperative holder stops and releases
+            await held.release()
+
+        start = asyncio.create_task(
+            self.mode.start(ADMIN, vram_bytes=80 * GIB, preempt=True)
+        )
+        await settle()
+        for _ in range(16):  # 80 s: longer than the drain time (60 s)
+            await self.clock.advance(5)
+        self.assertFalse(start.done())
+        self.assertEqual(self.mode.status().state, FullGpuState.STARTING)
+        status = self.scheduler.status()
+        self.assertEqual(status.mode, SchedulerMode.NORMAL)
+        self.assertTrue(status.exclusive_waiting_for_vram)
+        self.assertEqual(self.holds.held, [])  # the task goes on
+        self.assertFalse(first_lease.revoked.is_set())  # and is not preempted
+        # Its next local GPU work is admitted and not held either.
+        second, second_lease = await self.running_task()
+        await self.clock.advance(5)
+        self.assertEqual(self.holds.held, [])
+        self.assertEqual(self.control.actions, [])
+
+        self.probe.external = 0  # the other workload ends
+        await self.clock.advance(2)  # the scheduler's next poll: it drains
+        self.assertEqual(self.scheduler.status().mode, SchedulerMode.DRAINING)
+        self.assertCountEqual(self.holds.held, [first, second])
+        holders = [
+            asyncio.create_task(holder(held)) for held in (first_lease, second_lease)
+        ]
+        # The drain time counts from the drain (87 s), not from the request.
+        for _ in range(11):
+            await self.clock.advance(5)
+        self.assertFalse(first_lease.revoked.is_set())
+        self.assertFalse(start.done())
+        await self.clock.advance(5)
+        self.assertTrue(first_lease.revoked.is_set())
+        status = await start
+        await asyncio.gather(*holders)
+        self.assertEqual(status.state, FullGpuState.ON)
+        self.assertTrue(status.preempted)
+
+    async def test_tasks_held_in_a_drain_that_goes_back_to_normal_resume(self):
+        task_id, lease = await self.running_task()
+        start = asyncio.create_task(self.mode.start(ADMIN, vram_bytes=80 * GIB))
+        await settle()
+        self.assertEqual(self.scheduler.status().mode, SchedulerMode.DRAINING)
+        self.assertEqual(self.holds.held, [task_id])
+        self.probe.external = 20 * GIB  # another workload takes the VRAM
+        await lease.release()  # drained, but the VRAM would not be free
+        await settle()
+        self.assertEqual(self.scheduler.status().mode, SchedulerMode.NORMAL)
+        self.assertEqual(self.mode.status().state, FullGpuState.STARTING)
+        self.assertEqual(self.holds.resumed, [task_id])  # it goes on meanwhile
+        again = (await self.scheduler.try_acquire(coding(task_id))).lease
+        self.assertIsNotNone(again)
+        await self.clock.advance(5)
+        self.assertEqual(self.holds.held, [])
+        self.assertEqual(self.control.actions, [])
+
+        self.probe.external = 0
+        await self.clock.advance(2)  # drains again: held again
+        self.assertEqual(self.scheduler.status().mode, SchedulerMode.DRAINING)
+        self.assertEqual(self.holds.held, [task_id])
+        await again.release()
+        self.assertEqual((await start).state, FullGpuState.ON)
+
+    async def test_a_request_that_gives_up_waiting_holds_nothing(self):
+        self.probe.external = 20 * GIB
+        await self.scheduler.refresh()
+        task_id, lease = await self.running_task()
+        start = asyncio.create_task(
+            self.mode.start(ADMIN, vram_bytes=80 * GIB, preempt=True)
+        )
+        await settle()
+        for _ in range(20):  # past the wait: 60 s of drain, 30 s of preemption
+            if start.done():
+                break
+            await self.clock.advance(5)
+        with self.assertRaises(ExclusiveUnavailableError) as caught:
+            await start
+        self.assertEqual(caught.exception.failure, ExclusiveFailure.NOT_FREED)
+        self.assertEqual(self.holds.held, [])
+        self.assertFalse(lease.revoked.is_set())
+        self.assertFalse(self.mode.status().preempted)
+        self.assertIn(task_id, self.holds.running)
+        await lease.release()
+
+
+class EndSweepTest(FullGpuTestCase):
+    """Codex review (#161, P2): the last sweep of ``end()`` is best-effort; what
+    it could not hold is held by the next ticks while the main LLM is away."""
+
+    async def refused(self):
+        task_id = uuid.uuid4()
+        self.holds.running.add(task_id)
+        with self.assertRaises(ComputeUnavailableError):
+            await self.scheduler.acquire(coding(task_id), wait_seconds=0)
+        return task_id
+
+    async def test_a_task_the_last_sweep_could_not_hold_is_held_after(self):
+        await self.mode.start(ADMIN)
+        late = await self.refused()
+        self.holds.fail_hold = True  # the store fails for a moment
+        await self.mode.end(ADMIN)
+        self.assertEqual(self.holds.held, [])
+        await self.mode.tick()  # still failing: kept for the next tick
+        self.holds.fail_hold = False
+        await self.mode.tick()  # the main LLM is not back yet
+        self.assertEqual(self.holds.held, [late])
+        await self.scheduler.refresh()  # the main LLM is back
+        await self.mode.tick()
+        self.assertEqual(self.holds.resumed, [late])
+        self.assertEqual(self.mode.status().state, FullGpuState.OFF)
+
+    async def test_once_the_main_llm_is_back_it_is_not_held_any_more(self):
+        await self.mode.start(ADMIN)
+        late = await self.refused()
+        self.holds.fail_hold = True
+        await self.mode.end(ADMIN)
+        await self.scheduler.refresh()  # the main LLM is back first
+        self.holds.fail_hold = False
+        await self.mode.tick()
+        self.assertEqual(self.holds.held, [])
+        self.assertIn(late, self.holds.running)
+        self.assertEqual(self.mode.status().state, FullGpuState.OFF)
+
+    async def test_a_task_refused_while_the_last_sweep_waits_is_held_after(self):
+        await self.mode.start(ADMIN)
+        first = await self.refused()
+        gate = asyncio.Event()
+        hold = self.holds.hold
+
+        async def slow_hold(task_id):
+            if task_id == first:
+                await gate.wait()
+            return await hold(task_id)
+
+        self.holds.hold = slow_hold
+        end = asyncio.create_task(self.mode.end(ADMIN))
+        await settle()
+        second = await self.refused()  # the lease is not released yet
+        gate.set()
+        await end
+        self.assertEqual(self.holds.held, [first])
+        await self.mode.tick()
+        self.assertEqual(self.holds.held, [first, second])
+
+
+class RecoveryTest(FullGpuTestCase):
+    """A new process (Codex review #161, P2): the reload time counts from its
+    first tick, and no main LLM configured means no resumption."""
+
+    def new_mode(self, scheduler=None):
+        return FullGpuMode(
+            scheduler or self.scheduler,
+            self.holds,
+            Authorizer(self.audit),
+            reload_seconds=120,
+            clock=self.clock,
+        )
+
+    async def test_the_reload_time_counts_from_the_first_tick(self):
+        leftover = uuid.uuid4()
+        self.holds.held.append(leftover)
+        self.scheduler._deployments["main"].state = DeploymentState.UNLOADED
+        mode = self.new_mode()
+        await self.clock.advance(500)  # the process was up a while before
+        status = await mode.tick()
+        self.assertFalse(status.needs_human)
+        self.assertEqual(status.state, FullGpuState.RESUMING)
+        await self.clock.advance(100)
+        self.assertFalse((await mode.tick()).needs_human)
+        await self.clock.advance(21)
+        status = await mode.tick()
+        self.assertTrue(status.needs_human)  # it still waits for the main LLM
+        self.assertEqual(self.holds.resumed, [])
+        self.scheduler._deployments["main"].state = DeploymentState.GPU
+        status = await mode.tick()
+        self.assertEqual(self.holds.resumed, [leftover])
+        self.assertFalse(status.needs_human)
+        self.assertEqual(status.state, FullGpuState.OFF)
+
+    async def test_nothing_held_needs_no_human(self):
+        self.scheduler._deployments["main"].state = DeploymentState.UNLOADED
+        mode = self.new_mode()
+        await mode.tick()
+        await self.clock.advance(121)
+        status = await mode.tick()
+        self.assertFalse(status.needs_human)
+        self.assertEqual(status.state, FullGpuState.OFF)
+
+    async def test_without_a_main_llm_held_tasks_do_not_resume(self):
+        scheduler, *_ = build((embedding_spec(),))
+        await scheduler.refresh()
+        leftover = uuid.uuid4()
+        self.holds.held.append(leftover)
+        mode = self.new_mode(scheduler)
+        await mode.tick()
+        self.assertEqual(self.holds.resumed, [])
+        self.assertEqual(mode.status().state, FullGpuState.RESUMING)
+        await self.clock.advance(121)
+        self.assertTrue((await mode.tick()).needs_human)
+
+
 class ServeTest(FullGpuTestCase):
     async def test_serve_ticks_until_stopped(self):
         stop = asyncio.Event()
@@ -685,6 +903,32 @@ class SchedulerSeamTest(unittest.IsolatedAsyncioTestCase):
             await lease.release()
         self.assertEqual(scheduler.gpu_task_ids(), frozenset())
         self.assertEqual(scheduler.revoke_local_gpu(), 0)
+
+    async def test_a_change_of_mode_is_signalled(self):
+        # #164: Full GPU Mode holds tasks only once the scheduler left normal.
+        scheduler, *_ = build((main_spec(), embedding_spec()))
+        await scheduler.refresh()
+        changed = scheduler.mode_change()
+        self.assertFalse(changed.is_set())
+        lease = (await scheduler.try_acquire(coding(uuid.uuid4()))).lease
+        job = asyncio.create_task(
+            scheduler.acquire(
+                ComputeRequest(ResourceClass.EXCLUSIVE, vram_bytes=GIB),
+                wait_seconds=60,
+            )
+        )
+        await settle()
+        self.assertEqual(scheduler.status().mode, SchedulerMode.DRAINING)
+        self.assertTrue(changed.is_set())
+        again = scheduler.mode_change()
+        self.assertFalse(again.is_set())
+        await lease.release()
+        exclusive = await job  # draining -> exclusive
+        self.assertTrue(again.is_set())
+        last = scheduler.mode_change()
+        await exclusive.release()  # exclusive -> normal
+        self.assertTrue(last.is_set())
+        self.assertFalse(scheduler.mode_change().is_set())
 
 
 if __name__ == "__main__":

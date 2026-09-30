@@ -1179,7 +1179,8 @@ class PushTest(WrapperTestCase):
             ),
             "push",
             *(options if options is not None else ["--quiet", "--no-follow-tags",
-                                                   "--no-recurse-submodules", "--"]),
+                                                   "--no-recurse-submodules",
+                                                   "--no-signed", "--"]),
             url or self.URL,
             refspec or f"{COMMIT}:refs/heads/{PUSHED}",
             *(tail or []),
@@ -1281,6 +1282,20 @@ class PushTest(WrapperTestCase):
                 options=["--quiet", "--no-follow-tags", "--"]
             ),
             "the earlier form": self.push(options=["--quiet", "--"]),
+            # Codex review of #159 (#90): the repository's push.gpgSign is
+            # overridden only by --no-signed.
+            "without --no-signed": self.push(
+                options=["--quiet", "--no-follow-tags", "--no-recurse-submodules", "--"]
+            ),
+            "--signed": self.push(
+                options=[
+                    "--quiet",
+                    "--no-follow-tags",
+                    "--no-recurse-submodules",
+                    "--signed",
+                    "--",
+                ]
+            ),
             "--follow-tags": self.push(
                 options=["--quiet", "--follow-tags", "--no-recurse-submodules", "--"]
             ),

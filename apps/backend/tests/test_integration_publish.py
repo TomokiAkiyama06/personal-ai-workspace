@@ -7,11 +7,16 @@ user running the tests (``SubprocessGitRunner``); GitHub's API is a fake
 Linux user.
 """
 
+import asyncio
+import dataclasses
 import json
 import os
+import shutil
+import subprocess
 import unittest
 import uuid
 from types import SimpleNamespace
+from unittest import mock
 
 from paw_backend.authz import (
     Authorizer,
@@ -28,17 +33,21 @@ from paw_backend.integration import (
     PublishRequest,
     PullRequestNotPublishedError,
 )
+from paw_backend.integration import publish as publish_module
 from paw_backend.integration.publish import (
     MAX_TITLE_CHARS,
     choose_pull_request,
     publisher_agent_id,
+    pull_request_listing,
     pull_request_title,
     push_arguments,
 )
 from paw_backend.repositories import RepositoryPolicy
 from paw_backend.repositories.errors import GhCommandError, GhFailure
 from paw_backend.repositories.git import GitResult, command_name
+from paw_backend.repositories.github import GitHubRepo
 from paw_backend.repositories.github_connection import GhResult
+from paw_backend.repositories.limits import MAX_GH_OUTPUT_BYTES
 from paw_backend.tasks import PullRequestInfo, PullRequestState, RepoRole, TaskRun
 from paw_backend.tools import ScopedRepository
 
@@ -50,13 +59,17 @@ RUN = TaskRun(1, 0)
 HOST = "github.com"
 OWNER, REPO = "octo", "repo"
 REMOTE = f"https://{HOST}/{OWNER}/{REPO}.git"
+_MAX_NUMBER = 2_147_483_647
 
 
 class FakeGitHub:
     """``gh api`` for one repository: lists and creates pull requests.
 
     ``fail`` makes every call exit 1 (``gh``'s answer to an HTTP error);
-    ``fail_create`` only the creation; ``raises`` makes ``run`` raise it."""
+    ``fail_create`` only the creation; ``raises`` makes ``run`` raise it.
+    ``--jq`` is applied with the real ``jq`` when there is one (gh applies it
+    before printing), and an answer longer than ``SubprocessGhRunner``'s cap
+    is refused as it would be (``OUTPUT_TOO_LARGE``)."""
 
     def __init__(self, bare: str) -> None:
         self.bare = bare  # the "GitHub" repository: a head is its branch's tip
@@ -107,13 +120,42 @@ class FakeGitHub:
         if self.fail:
             return GhResult(1, "")
         assert args[:3] == ["api", "--hostname", HOST] and hostname == HOST
+        args, jq = list(args), None
+        if "--jq" in args:
+            at = args.index("--jq")
+            jq = args[at + 1]
+            del args[at : at + 2]
+        result = self._answer(args)
+        if jq is not None and result.returncode == 0 and shutil.which("jq"):
+            projected = await asyncio.to_thread(
+                subprocess.run,
+                ["jq", "-c", jq],
+                input=result.stdout,
+                capture_output=True,
+                text=True,
+            )
+            if projected.returncode != 0:
+                return GhResult(1, "")
+            result = GhResult(0, projected.stdout)
+        if len(result.stdout.encode()) > MAX_GH_OUTPUT_BYTES:
+            raise GhCommandError("api", GhFailure.OUTPUT_TOO_LARGE)
+        return result
+
+    def _answer(self, args) -> GhResult:
         method, endpoint = args[4], args[5]
         assert endpoint == f"repos/{OWNER}/{REPO}/pulls"
         fields = dict(args[i + 1].split("=", 1) for i in range(6, len(args), 2))
         if method == "GET":
             owner, _, branch = fields["head"].partition(":")
             assert owner == OWNER and fields["state"] == "all"
-            found = [p for p in self.pulls if p["head"]["ref"] == branch]
+            found = [
+                p
+                for p in self.pulls
+                if p["head"]["ref"] == branch
+                and fields.get("base", p["base"]["ref"]) == p["base"]["ref"]
+            ]
+            size, page = int(fields["per_page"]), int(fields.get("page", "1"))
+            found = found[(page - 1) * size : page * size]
             for pull in found:
                 if pull["live"]:
                     pull["head"]["sha"] = self.pull(0, branch)["head"]["sha"]
@@ -294,6 +336,7 @@ class PublisherTest(unittest.IsolatedAsyncioTestCase):
                 "--quiet",
                 "--no-follow-tags",
                 "--no-recurse-submodules",
+                "--no-signed",
                 "--",
                 REMOTE,
                 f"{self.head}:refs/heads/{self.branch}",
@@ -349,6 +392,16 @@ class PublisherTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.remote_branch(), self.head)
         self.assertEqual(git("tag", "--list", cwd=self.bare), "")
 
+    async def test_configured_push_signing_never_fails_the_push(self):
+        # Codex review of #159: ``push.gpgSign=true`` in the checkout would make
+        # git sign the push (no key here, and the remote does not accept signed
+        # pushes): it failed and the task stayed ``evaluating``.
+        git("config", "push.gpgSign", "true", cwd=self.checkout)
+
+        await self.publisher().publish(self.request())
+
+        self.assertEqual(self.remote_branch(), self.head)
+
     async def test_a_commit_made_after_the_checks_is_not_pushed(self):
         checked = self.head
         self.commit("later.txt", "not checked\n")
@@ -398,6 +451,66 @@ class PublisherTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(pull_request.state, state)
                 self.assertEqual(self.github.methods(), ["GET"])
 
+    @unittest.skipUnless(shutil.which("jq"), "jq is not installed")
+    async def test_many_long_pull_requests_of_the_branch_fit_in_gh_s_output(self):
+        # Codex review of #159 (#90): GitHub lists every pull request in full
+        # (bodies, both repositories); a branch with a few long ones exceeded
+        # the gh runner's output cap and the task stayed ``evaluating``.
+        for number in range(1, 6):
+            closed = self.github.pull(number, self.branch, state="closed")
+            closed["body"] = "x" * 20_000
+            self.github.pulls.append(closed)
+        self.assertGreater(
+            len(json.dumps(self.github.pulls).encode()), MAX_GH_OUTPUT_BYTES
+        )
+        self.github.pulls.append(self.github.pull(6, self.branch))
+
+        info = await self.publisher().publish(self.request())
+
+        self.assertEqual((info.number, info.state), (6, PullRequestState.OPEN))
+        self.assertEqual(self.github.methods(), ["GET"])
+
+    async def test_pull_requests_to_other_bases_do_not_hide_the_one(self):
+        # Codex review of #166: only the first page was read; newer pull
+        # requests of the branch to other bases hid the one to the default one.
+        for number in range(1, 151):
+            self.github.pulls.append(
+                self.github.pull(number, self.branch, state="closed", base="dev")
+            )
+        self.github.pulls.append(self.github.pull(151, self.branch))
+
+        info = await self.publisher().publish(self.request())
+
+        self.assertEqual((info.number, info.state), (151, PullRequestState.OPEN))
+        self.assertEqual(self.github.methods(), ["GET"])
+
+    async def test_every_page_is_read_when_fewer_rows_fit(self):
+        # Long names ask for fewer rows at a time (``pull_request_listing``):
+        # the later pages are read too, up to as many as with usual names.
+        for number in range(1, 5):
+            self.github.pulls.append(
+                self.github.pull(number, self.branch, state="closed")
+            )
+        self.github.pulls.append(self.github.pull(5, self.branch))
+        real = publish_module.pull_request_listing
+
+        def small(*args):
+            return dataclasses.replace(real(*args), per_page=2)
+
+        with mock.patch.object(publish_module, "pull_request_listing", small):
+            info = await self.publisher().publish(self.request())
+
+        self.assertEqual((info.number, info.state), (5, PullRequestState.OPEN))
+        self.assertEqual(self.github.methods(), ["GET"] * 3)
+
+    async def test_a_longer_listed_url_is_still_refused(self):
+        # The listing cuts what it compares to one character more: a longer
+        # value stays different.
+        longer = self.github.pull(1, self.branch)
+        longer["html_url"] += "0"
+        self.github.pulls.append(longer)
+        await self.refused(PublishProblem.INVALID_RESPONSE)
+
     async def test_a_pull_request_to_another_base_is_not_the_one(self):
         # Codex review of #159: a pull request of the branch against another
         # branch than the default one does not propose the checked changes to
@@ -446,6 +559,48 @@ class PublisherTest(unittest.IsolatedAsyncioTestCase):
     async def test_a_created_pull_request_to_another_base_is_refused(self):
         self.github.answer = self.github.pull(1, self.branch, base="dev")
         await self.refused(PublishProblem.INVALID_RESPONSE)
+
+    @unittest.skipUnless(shutil.which("jq"), "jq is not installed")
+    def test_the_listed_rows_always_fit_in_gh_s_output(self):
+        # Codex review of #166: projecting alone is not enough; with the
+        # longest names GitHub allows, 100 rows would still be too many.
+        branch = f"paw/{uuid.uuid4()}/2147483647/_integration"
+        for owner, repo, base, per_page in (
+            (OWNER, REPO, "main", 100),
+            ("o" * 39, "r" * 100, "b" * 200, None),
+            ("o" * 39, "r" * 100, "\U0001f600" * 255, None),
+        ):
+            with self.subTest(owner=owner, base=base[:8]):
+                github = GitHubRepo(HOST, owner, repo)
+                listing = pull_request_listing(github, branch, base)
+                if per_page is not None:
+                    self.assertEqual(listing.per_page, per_page)
+                self.assertGreaterEqual(listing.per_page, 20)
+                # The worst a real answer holds: every compared string longer
+                # than what it is compared to, and made of 4-byte characters.
+                emoji = "\U0001f600"
+                row = {
+                    "number": _MAX_NUMBER,
+                    "html_url": f"https://{HOST}/{owner}/{repo}/pull/{_MAX_NUMBER}"
+                    + "9" * 100,
+                    "state": "closed" + "x" * 100,
+                    "draft": False,
+                    "merged_at": "2026-09-29T00:00:00Z" + "x" * 100,
+                    "body": "x" * 20_000,
+                    "head": {
+                        "ref": emoji * (len(branch) + 100),
+                        "sha": "f" * 200,
+                        "repo": {"full_name": f"{owner}/{repo}" + "x" * 100},
+                    },
+                    "base": {"ref": emoji * (len(base) + 100)},
+                }
+                projected = subprocess.run(
+                    ["jq", "-c", listing.jq],
+                    input=json.dumps([row] * listing.per_page).encode(),
+                    capture_output=True,
+                    check=True,
+                ).stdout
+                self.assertLessEqual(len(projected), MAX_GH_OUTPUT_BYTES)
 
     def test_the_open_pull_request_is_chosen_among_several(self):
         def info(number, state):
