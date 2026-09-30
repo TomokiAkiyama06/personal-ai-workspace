@@ -31,10 +31,10 @@ function topSegment(x: number, y: number, width: number, height: number): string
   ].join(" ");
 }
 
-/** A round step so the grid has 2–3 lines (0, step, 2·step…). */
+/** A round step so the grid has about 3 lines below the tallest bar (0, 10, 20 for 25). */
 function gridStep(max: number): number {
   if (max <= 2) return 1;
-  const rough = max / 2;
+  const rough = max / 2.5;
   const magnitude = 10 ** Math.floor(Math.log10(rough));
   for (const factor of [1, 2, 5, 10]) {
     if (factor * magnitude >= rough) return factor * magnitude;
@@ -69,14 +69,14 @@ export function UsageChart({ days }: { days: readonly DailyTasks[] }) {
 
   const max = Math.max(1, ...days.map(total));
   const step = gridStep(max);
-  const top = Math.max(step * Math.ceil(max / step), step);
-  const scale = (BASELINE - PLOT_TOP - 8) / top;
+  // Like the design, the tallest bar nearly reaches the top; lines stay below it.
+  const scale = (BASELINE - PLOT_TOP) / max;
   const slot = days.length > 0 ? (width - AXIS_X) / days.length : 0;
   const barWidth = Math.max(4, Math.min(BAR_MAX, slot * 0.55));
   // The design labels the first day, every 4th and the last.
   const labelEvery = Math.max(1, Math.ceil(days.length / 4));
   const ticks: number[] = [];
-  for (let value = 0; value <= top; value += step) ticks.push(value);
+  for (let value = 0; value <= max; value += step) ticks.push(value);
 
   const current = active === null ? null : days[active];
   let tooltipX = 0;
@@ -185,7 +185,14 @@ export function UsageChart({ days }: { days: readonly DailyTasks[] }) {
         })}
         {current && (
           <g className="chart-tooltip" pointerEvents="none">
-            <rect x={tooltipX} y={8} width={TOOLTIP_W} height={TOOLTIP_H} rx={9} />
+            <rect
+              className="chart-tooltip-box"
+              x={tooltipX}
+              y={8}
+              width={TOOLTIP_W}
+              height={TOOLTIP_H}
+              rx={9}
+            />
             <text className="chart-tooltip-date" x={tooltipX + 12} y={26}>
               {longDay(current.date)}
             </text>

@@ -198,7 +198,7 @@ function BreakdownCard({ report, range }: { report: UsageReport; range: UsageRan
       {purposes.length === 0 ? (
         <p className="muted small">{t("usage.purposes.empty")}</p>
       ) : (
-        <table className="purpose-table">
+        <table className="purpose-table" aria-label={t("usage.purposes.title")}>
           <thead>
             <tr>
               <th scope="col">{t("usage.purposes.category")}</th>
@@ -319,7 +319,7 @@ function UsersCard({ users }: { users: readonly UserUsage[] }) {
         <p className="muted small">{t("usage.users.empty")}</p>
       ) : (
         <div className="usage-table-wrap">
-          <table className="users-table">
+          <table className="users-table" aria-label={t("usage.users.title")}>
             <thead>
               <tr>
                 <th scope="col">{t("usage.users.user")}</th>

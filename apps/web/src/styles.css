@@ -2252,6 +2252,8 @@ fieldset {
 }
 
 .usage-toolbar select {
+  width: auto;
+  min-height: 32px;
   height: 32px;
   font-size: 12.5px;
 }
@@ -2414,7 +2416,7 @@ fieldset {
   stroke-width: 2;
 }
 
-.chart-tooltip rect:first-child {
+.chart-tooltip-box {
   fill: var(--input);
   stroke: var(--border-strong);
   stroke-width: 1;
