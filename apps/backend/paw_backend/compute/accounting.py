@@ -63,10 +63,48 @@ class VramView:
     committed: int
     headroom: int
     available: int  # total - headroom - committed; negative under pressure
+    # What the VRAM leases (an Exclusive job's, or the shared ones with
+    # ``vram_bytes``) use, absorbed by their reservations (see account).
+    extra_use: int = 0
 
     @property
     def under_pressure(self) -> bool:
         return self.available < 0
+
+    @property
+    def observed_free(self) -> int:
+        """What the probe sees free on the GPU (Decision 0042)."""
+        return self.total - self.actual
+
+    @property
+    def unseen_reserved(self) -> int:
+        """What the scheduler promised that the probe does not show used yet (a
+        model still loading, work that has not allocated its VRAM)."""
+        return max(0, self.committed - self.actual)
+
+
+def free_vram_admits(view: VramView, need: int) -> bool:
+    """Decision 0042: work that allocates ``need`` bytes of VRAM of its own starts
+    only when the probe shows that much free beyond the safety headroom, after
+    what the scheduler already promised and the probe does not show yet.
+
+    Only the observed free VRAM is used, never the GPU utilisation. The
+    workspace's resident models are not counted twice: a runtime that allocated
+    its whole footprint when it loaded (vLLM / SGLang reserve their KV cache pool)
+    shows it as used, and work inside that footprint (``need`` 0) is not held back
+    here (the relief steps of Decision 0037 handle pressure). As ``committed`` is
+    never below what the probe sees used, this is ``available >= need``."""
+    if need <= 0:
+        return True
+    return view.observed_free - view.unseen_reserved >= need + view.headroom
+
+
+def free_vram_after_emptying(view: VramView) -> int:
+    """What an Exclusive job could get once every model of the workspace is off
+    the GPU: the GPU without the headroom and without what another workload
+    holds (``external``). Decision 0042: when this is below what the job needs,
+    unloading the models cannot help and the job waits instead."""
+    return view.total - view.headroom - view.external
 
 
 def headroom_bytes(total: int, *, minimum_bytes: int, fraction: float) -> int:
@@ -132,4 +170,5 @@ def account(
         committed=committed,
         headroom=headroom,
         available=device.total_bytes - headroom - committed,
+        extra_use=exclusive_use,
     )

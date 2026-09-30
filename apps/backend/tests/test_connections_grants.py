@@ -39,7 +39,7 @@ from . import (
     test_connections_result_limit,
     test_connections_settlement_cancel,
 )
-from .connections_support import PostgresConnectionTestCase
+from .connections_support import FakeLeaseVerifier, PostgresConnectionTestCase
 from .support import make_settings
 from .task_support import TEST_DATABASE_URL, migrate, new_database, requires_postgres
 
@@ -145,6 +145,7 @@ class AsAppRole:
     ) -> ConnectionService:
         database = role_database(APP_ROLE)
         self.addAsyncCleanup(database.dispose)
+        options.setdefault("lease", FakeLeaseVerifier())
         return ConnectionService(
             database,
             Authorizer(authorizer_sink or self.sink),

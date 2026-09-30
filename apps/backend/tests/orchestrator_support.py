@@ -311,6 +311,7 @@ class Harness:
             runtimes=self.runtimes,
             config=self.config,
             clock=self.clock,
+            worktrees=options.pop("worktrees", None),
         )
         assert not options, options
 

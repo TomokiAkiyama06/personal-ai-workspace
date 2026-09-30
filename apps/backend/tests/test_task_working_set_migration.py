@@ -37,6 +37,8 @@ from .task_support import FIRST_RUN, PostgresTaskTestCase, migrate, requires_pos
 from .test_migrations import offline_config
 
 REVISION = "0085"
+# The commands of ``TaskCommand`` that later revisions add to the CHECK list.
+LATER_COMMANDS = {TaskCommand.RELEASE_REPOSITORY_WRITE.value}
 
 
 def previous_revision() -> str:
@@ -75,7 +77,8 @@ class OfflineMigrationTest(unittest.TestCase):
         )
         self.assertEqual(
             {value.strip().strip("'") for value in commands.split(",")},
-            {command.value for command in TaskCommand},
+            # Every command but those a later revision adds (0129, issue #129).
+            {command.value for command in TaskCommand} - LATER_COMMANDS,
         )
 
     def test_the_state_moves_and_the_task_loses_its_single_commit(self):

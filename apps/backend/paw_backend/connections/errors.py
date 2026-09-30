@@ -143,7 +143,10 @@ class QuotaExceededError(ConnectionsError):
 
 class TaskNotUsableError(ConnectionsError):
     """The task cannot use a connection: it does not exist (or is not the user's),
-    it has ended, or a Retry / Restart replaced the run of the caller."""
+    it has ended, or a Retry / Restart replaced the run of the caller, or the
+    worker that asks no longer holds the task's queue lease (``lease_lost``) or
+    its lease could not be read (``lease_unavailable``; issue #153, Decision
+    0057). ``reason`` says which."""
 
     code = "task_not_usable"
 

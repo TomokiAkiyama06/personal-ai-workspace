@@ -49,11 +49,12 @@ credential or a handle): the OUTCOME of every change of a connection or a quota
 connection's status (``connection.status``, reason = the new status; no actor when a
 health check found it), and every REFUSAL to start a call (``connection.use``, denied,
 reason = a ``RefusalReason``: ``quota_exceeded``, ``connection_unavailable``,
-``task_*``, ``task_budget_*``). An allowed call is recorded as its usage row
-(user, task, project, kind, model, purpose, tokens, duration) and by the Authorizer's
-``agent.use`` row; not a third time. These events are written AFTER the change or the
-refusal and are best effort (a failure is logged by exception type and does not undo
-the change; the refusal stands): the decision rows are the fail-closed ones.
+``task_*``, ``task_budget_*``, ``lease_*``). An allowed call is recorded as its usage
+row (user, task, project, kind, model, purpose, tokens, duration) and by the
+Authorizer's ``agent.use`` row; not a third time. These events are written AFTER the
+change or the refusal and are best effort (a failure is logged by exception type and
+does not undo the change; the refusal stands): the decision rows are the fail-closed
+ones.
 Each refusal writes one row per attempt, so a caller that retries in a loop after a
 quota refusal fills the audit table: queue the task until ``resets_at`` instead.
 
@@ -63,8 +64,12 @@ quota refusal fills the audit table: queue the task until ``resets_at`` instead.
 ``context.delegator_id``: a principal that is somebody else is denied); 3. an adapter
 must be registered for the kind; 4. the task's own token budget (PAW-033
 ``BudgetTracker``, if the service was given one): exhausted or not configured refuses
-the call; 5. the ADMISSION (``ConnectionStore.admit``): one transaction that checks
-the task, the connection and the quotas and inserts the ``in_flight`` usage row; 6. the
+the call; 4a. the worker's QUEUE LEASE (``context.lease``, asked of the service's
+``LeaseVerifier`` for every call, as the Tool Broker does: issue #153, Decision 0057):
+a lease that was lost, expired or taken over refuses the call (``lease_lost``), and so
+does one that cannot be read (``lease_unavailable``: fail closed); 5. the ADMISSION
+(``ConnectionStore.admit``): one transaction that checks the task, the connection and
+the quotas and inserts the ``in_flight`` usage row; 6. the
 call: the handle is resolved into a ``Secret`` and the adapter runs, under ONE deadline
 (``request.timeout_seconds``); 7. the SETTLEMENT, always, and before any cancellation
 of the caller gets through (it runs as a task the caller keeps and waits for; the
@@ -189,6 +194,7 @@ from paw_backend.tasks.queueing.errors import BudgetNotConfiguredError
 from paw_backend.tools.calls import TaskContext
 from paw_backend.tools.credentials import MAX_TEXT_CHARS, redact_text
 from paw_backend.tools.interfaces import require_async_method
+from paw_backend.tools.lease import FailClosedLeaseVerifier, LeaseStatus, LeaseVerifier
 
 logger = logging.getLogger(__name__)
 
@@ -219,6 +225,8 @@ _TASK_REFUSALS = {
     RefusalReason.TASK_NOT_FOUND,
     RefusalReason.TASK_ENDED,
     RefusalReason.TASK_SUPERSEDED,
+    RefusalReason.LEASE_LOST,
+    RefusalReason.LEASE_UNAVAILABLE,
 }
 
 
@@ -277,6 +285,7 @@ class ConnectionService:
         secrets: SecretResolver,
         *,
         budget: BudgetTracker | None = None,
+        lease: LeaseVerifier | None = None,
         period_timezone: str = DEFAULT_PERIOD_TIMEZONE,
         database_timeout_seconds: float = DEFAULT_DATABASE_TIMEOUT_SECONDS,
         health_timeout_seconds: float = DEFAULT_HEALTH_TIMEOUT_SECONDS,
@@ -287,6 +296,11 @@ class ConnectionService:
 
         A wrong collaborator fails HERE (``InvalidConnectionInputError`` for a wrong
         type, a bad time zone or number), not on the first call.
+
+        ``lease`` is the queue lease check of ``execute`` (issue #153, Decision
+        0057): in production ``orchestrator.QueueLeaseVerifier`` on the task
+        queue, as the Tool Broker's. Without one no lease is known and every call
+        is refused (``FailClosedLeaseVerifier``, as in the Broker).
 
         ``period_timezone`` is the IANA zone of the calendar windows (``day``, ``week``,
         ``month``); the default is ``Asia/Tokyo`` (Decision 0016, section 4, approved;
@@ -299,6 +313,8 @@ class ConnectionService:
         try:
             require_async_method(audit_sink, "record", 1)
             require_async_method(secrets, "resolve", 1)
+            if lease is not None:
+                require_async_method(lease, "check", 2)
         except TypeError:
             raise fail("collaborator", InputProblem.WRONG_TYPE) from None
         if budget is not None:
@@ -318,6 +334,11 @@ class ConnectionService:
         self._adapters = adapters
         self._secrets = secrets
         self._budget = budget
+        self._lease: LeaseVerifier = (
+            FailClosedLeaseVerifier() if lease is None else lease
+        )
+        # The lease check is one read of the queue: the deadline of a statement.
+        self._lease_timeout = float(database_timeout_seconds)
         self._health_timeout = float(health_timeout_seconds)
         self._audit_timeout = 3.0
 
@@ -690,6 +711,7 @@ class ConnectionService:
                 principal, RefusalReason.CONNECTION_UNAVAILABLE, None, correlation_id
             )
         await self._check_task_budget(principal, context, correlation_id)
+        await self._check_lease(principal, context, correlation_id)
 
         admission = await self._call_store(
             self._store.admit(
@@ -975,6 +997,38 @@ class ConnectionService:
                 await self._refuse(
                     principal, RefusalReason.TASK_BUDGET_EXCEEDED, None, correlation_id
                 )
+
+    async def _check_lease(
+        self, principal: Principal, context: TaskContext, correlation_id: uuid.UUID
+    ) -> None:
+        """Refuse a call of a worker that no longer holds the task's queue lease
+        (issue #153, Decision 0057; the rule of the Tool Broker, Decision 0046).
+
+        Asked for every call, after the checks that refuse on their own and
+        before the admission: a refused call writes no usage row and spends no
+        quota. ``LOST`` is ``lease_lost``; ``UNKNOWN``, an error, a timeout and an
+        answer that is not a ``LeaseStatus`` are ``lease_unavailable`` (the
+        exception's text is not logged). A read at one instant: a call that
+        passed it is not stopped when the lease is lost while it runs, and its
+        settlement asks nothing (the tokens were spent).
+        """
+        try:
+            async with asyncio.timeout(self._lease_timeout):
+                status = await self._lease.check(context.task_id, context.lease)
+        except Exception as error:
+            logger.error(
+                "connection lease check failed: exception_type=%s",
+                log_type_name(error),
+            )
+            status = None
+        if status is LeaseStatus.HELD:
+            return
+        reason = (
+            RefusalReason.LEASE_LOST
+            if status is LeaseStatus.LOST
+            else RefusalReason.LEASE_UNAVAILABLE
+        )
+        await self._refuse(principal, reason, None, correlation_id)
 
     # --- helpers -------------------------------------------------------------
 

@@ -44,10 +44,10 @@ class GatedBudget(FakeBudget):
         self.entered = asyncio.Event()
         self.release = asyncio.Event()
 
-    async def charge(self, task_id, tool) -> None:
+    async def charge(self, task_id, run, tool) -> None:
         self.entered.set()
         await self.release.wait()
-        await super().charge(task_id, tool)
+        await super().charge(task_id, run, tool)
 
 
 def execution_rows(sink) -> list[tuple[str, str]]:

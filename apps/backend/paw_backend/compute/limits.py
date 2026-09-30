@@ -4,7 +4,7 @@ The requirements leave the numbers to the Model / Runtime Benchmark ("Safety
 Headroomの具体的なGB / %は要件定義段階では固定せず、Model Benchmark / Runtime
 Benchmark後に決定する"). These are **provisional** values that only set the order
 of magnitude for one 96 GB GPU; ``docs/decisions/0037-gpu-compute-scheduler.md``
-(Proposed) lists them. Every one of them is a field of ``ComputeConfig`` and can
+(Approved) lists them. Every one of them is a field of ``ComputeConfig`` and can
 be changed there without touching this module; nothing is written to a database.
 """
 
@@ -40,6 +40,10 @@ DEFAULT_MAX_WAITERS = 256
 DEFAULT_PROBE_TIMEOUT_SECONDS = 10.0
 MAX_COMMAND_TIMEOUT_SECONDS = 600.0
 
+# Decision 0042: a warning that work waits for VRAM another workload
+# holds is repeated at most this often for the same kind of work.
+DEFAULT_VRAM_WARNING_INTERVAL_SECONDS = 300.0
+
 # -- models --------------------------------------------------------------------
 DEFAULT_FAILED_RETRY_SECONDS = 60.0  # a failed load is tried again after this
 DEFAULT_CONTROL_TIMEOUT_SECONDS = 300.0  # one load / unload command
@@ -48,6 +52,16 @@ DEFAULT_MAX_CONTEXT_TOKENS = 32_768
 # -- Exclusive -----------------------------------------------------------------
 DEFAULT_VERIFY_TIMEOUT_SECONDS = 60.0  # to see the VRAM free after the unloads
 DEFAULT_VERIFY_POLL_SECONDS = 2.0
+
+# -- Kaggle / Full GPU Mode (PAW-037, Decision 0055) ---------------------------
+# How long running local GPU work may take to end before Full GPU Mode gives up
+# (or, with ``preempt``, asks it to stop) ...
+DEFAULT_FULL_GPU_DRAIN_SECONDS = 600.0
+# ... how long the preempted work then has to stop and release ...
+DEFAULT_FULL_GPU_PREEMPT_SECONDS = 60.0
+# ... and how long the main LLM may take to come back after the end before a
+# human is asked to look (the held tasks keep waiting for it).
+DEFAULT_FULL_GPU_RELOAD_SECONDS = 900.0
 
 # -- runtimes ------------------------------------------------------------------
 # A node's context is estimated as its input in bytes / 3 (a conservative

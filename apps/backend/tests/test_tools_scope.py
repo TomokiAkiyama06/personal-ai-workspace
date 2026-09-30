@@ -14,6 +14,7 @@ from paw_backend.tools import (
     TaskScope,
 )
 from paw_backend.tools.scope import (
+    MAX_PATH_ROOTS,
     PathResolutionError,
     Target,
     TargetKind,
@@ -539,7 +540,7 @@ class TaskScopeTest(unittest.TestCase):
             {"credential_handles": {HANDLE: ["*.github.com"]}},
             {"credential_handles": {HANDLE: ["https://github.com"]}},
             {"credential_handles": {f"cred_{i:032x}": [] for i in range(65)}},
-            {"path_roots": [f"/srv/{i}" for i in range(33)]},
+            {"path_roots": [f"/srv/{i}" for i in range(MAX_PATH_ROOTS + 1)]},
             {"hosts": [f"h{i}.example.com" for i in range(129)]},
         ):
             with self.subTest(overrides=str(overrides)[:60]):

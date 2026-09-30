@@ -129,6 +129,10 @@ class Settings(BaseSettings):
     # began (PAW-034, Decision 0008 section 8). 0 turns it off: tasks that appear
     # after a project's deletion began would then keep running.
     project_task_stop_interval_seconds: int = Field(default=60, ge=0, le=3_600)
+    # How often the tasks of users whose deletion began are stopped (Issue #127,
+    # Decision 0043). 0 turns it off: a deleted user's queued and running tasks
+    # would then keep running.
+    user_task_stop_interval_seconds: int = Field(default=60, ge=0, le=3_600)
     # How often calls through a shared connection that a crashed process left
     # ``in_flight`` are settled as failed (PAW-034, Decision 0016). A row is
     # reaped only a day and an hour after it started. 0 turns it off: such rows
@@ -141,14 +145,34 @@ class Settings(BaseSettings):
     # then only runs right after the transition, and nothing is marked stale or
     # expired in storage (the retrieval still judges both by time).
     freshness_job_interval_seconds: int = Field(default=3_600, ge=0, le=86_400)
+    # System Health (PAW-066, Decision 0059 Proposed). How often the numeric
+    # metrics are sampled into ``health_metric_samples``: the requirements' "last
+    # 24 hours: 10-30 seconds" (FIXED), so no other value and no "off".
+    health_sample_interval_seconds: int = Field(default=30, ge=10, le=30)
+    # How long the hourly aggregates and the health events are kept (the
+    # requirements: important operational events "1年以上").
+    health_retention_days: int = Field(default=400, ge=366, le=3_650)
+    # Without the Compute Scheduler in the application (issue #165), read the GPU
+    # with the scheduler's read-only probe (``nvidia-smi --query-*`` only) for
+    # the report. Off by default: a host without a GPU would report an error.
+    health_gpu_probe: bool = False
 
-    # Memory Markdown Projection (PAW-045, Decision 0038 Proposed): the directory
+    # Memory Markdown Projection (PAW-045, Decision 0038 Approved): the directory
     # ``python -m paw_backend.cli memory-projection-run`` writes the Markdown view
     # of PostgreSQL's memories into (on the HDD in the deployment, for example
     # ``/srv/personal-ai/memory``). Unset: the command refuses to run. The path is
     # checked when the command runs (``memory/projection/writer.py``): absolute,
     # canonical, outside every git work tree and every home directory.
     memory_projection_dir: Path | None = None
+    # Recovery Repository (PAW-047, Decision 0054 Proposed): the git checkout of
+    # the dedicated private repository that ``recovery-backup-run`` writes and
+    # commits (every 30 minutes) and ``recovery-restore`` reads (for example
+    # ``/srv/personal-ai/recovery``). Unset: both commands refuse to run. Checked
+    # when a command runs (``recovery/files.py``): absolute, canonical, outside
+    # every home directory and the projection, the top of a git work tree with
+    # the recovery marker. ``recovery_git_timeout_seconds`` bounds one git command.
+    recovery_repository_dir: Path | None = None
+    recovery_git_timeout_seconds: float = Field(default=300.0, gt=0, le=3_600)
 
     # Repository registration (PAW-027, Decision 0017). Where a user's checkouts
     # live below their home; the roots (per user: ``{home}`` and ``{user}``) an
@@ -253,6 +277,7 @@ class Settings(BaseSettings):
         "operator_database_role",
         "passkey_rp_id",
         "memory_projection_dir",
+        "recovery_repository_dir",
         mode="before",
     )
     @classmethod
@@ -399,6 +424,15 @@ class Settings(BaseSettings):
         if 0 < value < 10:
             raise ValueError(
                 "project_task_stop_interval_seconds must be 0 (off) or 10 to 3600"
+            )
+        return value
+
+    @field_validator("user_task_stop_interval_seconds")
+    @classmethod
+    def _user_stop_interval_is_off_or_at_least_ten_seconds(cls, value: int) -> int:
+        if 0 < value < 10:
+            raise ValueError(
+                "user_task_stop_interval_seconds must be 0 (off) or 10 to 3600"
             )
         return value
 

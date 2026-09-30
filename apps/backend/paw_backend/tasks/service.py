@@ -113,6 +113,7 @@ from paw_backend.authz import Capability
 from paw_backend.db import Database
 from paw_backend.tasks.domain import (
     Actor,
+    ActorKind,
     RepoRole,
     TaskCommand,
     TaskRun,
@@ -135,12 +136,16 @@ from paw_backend.tasks.errors import (
     RepositoryNotInAttemptError,
     RepositoryRoleInsufficientError,
     RepositoryRoleUnresolvedError,
+    RepositoryWriteHolderAliveError,
     RepositoryWriteInFlightError,
+    RepositoryWriteNotFoundError,
+    RepositoryWriteNotHeldError,
     StaleAttemptError,
     StaleRunError,
     TaskConflictError,
     TaskNotActiveError,
     TaskNotFoundError,
+    TaskStateChangedError,
     TaskStepError,
     WorkingSetChangeInvalidError,
     WorkingSetConflictError,
@@ -158,6 +163,8 @@ from paw_backend.tasks.models import (
     utcnow,
 )
 from paw_backend.tasks.project_gate import ProjectGate
+from paw_backend.tasks.queueing.domain import QueueStatus
+from paw_backend.tasks.queueing.models import QueueEntryRow
 from paw_backend.tasks.records import (
     AttemptRepositorySnapshot,
     AttemptSnapshot,
@@ -1308,6 +1315,7 @@ class TaskService:
         worktree: WorktreeState | None = None,
         review: ReviewState | None = None,
         pull_request: PullRequestInfo | None = None,
+        in_state: TaskState | None = None,
     ) -> AttemptRepositorySnapshot:
         """Replace the worktree / review / pull request state of one repository in
         the run's attempt (``task_attempt_repositories``).
@@ -1329,13 +1337,18 @@ class TaskService:
         completed) but only for the current run
         (``StaleAttemptError`` after a Restart, ``StaleRunError`` after a Retry:
         the new run continues the same attempt's state, so a delayed worker of the
-        failed run must not overwrite it). Text that is not ``str``, blank, longer
-        than its column or that PostgreSQL cannot store (NUL, surrogate
-        characters), a pull request number that is not an integer from 1 to
-        ``MAX_PULL_REQUEST_NUMBER``, a group that is not a ``WorktreeState`` /
-        ``ReviewState`` / ``PullRequestInfo``, and a status that is not one of its
-        enumeration's members or values, raise ``InvalidCommandArgumentError``
-        before anything is read. A pull request needs its URL.
+        failed run must not overwrite it). With ``in_state``, also only while the
+        task is in that state under the task's row lock
+        (``TaskStateChangedError``, a ``StaleRunError``: a Cancel does not
+        replace the run, so the integration gate names ``EVALUATING`` to keep a
+        check that outlived it from recording its result). Text that is not
+        ``str``, blank, longer than its column or that PostgreSQL cannot store
+        (NUL, surrogate characters), a pull request number that is not an
+        integer from 1 to ``MAX_PULL_REQUEST_NUMBER``, a group that is not a
+        ``WorktreeState`` / ``ReviewState`` / ``PullRequestInfo``, and a status
+        that is not one of its enumeration's members or values, raise
+        ``InvalidCommandArgumentError`` before anything is read. A pull request
+        needs its URL.
         """
         task_id = _uuid("task_id", task_id)
         run = _run(run)
@@ -1345,9 +1358,13 @@ class TaskService:
         worktree_fields = _worktree(worktree)
         review_fields = _review(review)
         pull_request_fields = _pull_request(pull_request)
+        if in_state is not None:
+            in_state = enum_member("in_state", TaskState, in_state)
         async with self._database.session() as session, session.begin():
             task = await self._require_task(session, task_id, lock=True)
             self._require_current_run(task, run)
+            if in_state is not None and task.state is not in_state:
+                raise TaskStateChangedError()
             row = await self._attempt_repository_row(
                 session, task, repository_id, lock=True
             )
@@ -1720,6 +1737,179 @@ class TaskService:
                 )
                 .values(released_at=utcnow())
             )
+
+    async def release_stale_repository_write(
+        self,
+        task_id: uuid.UUID,
+        reservation_id: uuid.UUID,
+        *,
+        actor: Actor,
+        reason: str,
+        expected_version: int | None = None,
+        in_transaction: InTransactionStep | None = None,
+    ) -> TaskEvent:
+        """Release, by hand, the reservation of a process that crashed (issue #129,
+        Decision 0049; Decision 0035, section 5 leaves such a reservation
+        in place until it expires).
+
+        Like every command here it does NOT authorize: the caller decided that
+        ``actor`` may (``project.task.write_reservation.release`` and a Passkey
+        Step-up, ``projects.task_write_release``) and passes the check of the
+        Step-up as ``in_transaction``, which runs in this transaction after the
+        writes and before the commit (whatever it raises aborts everything). What
+        it enforces, in ONE transaction that holds the task's row lock (the lock
+        every admission takes):
+
+        * ``actor`` is a person (``ActorKind.USER``) and ``reason`` is given (what
+          the person checked: the executor is gone); else
+          ``InvalidCommandArgumentError``, before the database is used;
+        * the reservation is the task's (``RepositoryWriteNotFoundError``) and still
+          holds: neither released nor expired (``RepositoryWriteNotHeldError``);
+        * no worker holds a valid lease on the task's queue entry
+          (``RepositoryWriteHolderAliveError``): the entry is locked
+          (``FOR SHARE``, which a heartbeat's ``FOR UPDATE`` waits for) and only
+          then judged on the database clock, like the queue itself. A live worker
+          may still be running the executor, so its reservation is not given up.
+
+        The release sets ``released_at`` on every repository of the reservation and
+        treats each as written (``modified`` in the reservation's attempt, the
+        evaluation ``not_run`` and the review ``not_started``: both are done again,
+        and a downgrade still needs the change verifiably discarded). It increments
+        the task's version and appends a ``release_repository_write`` event (state
+        unchanged) with ``actor``, ``reason`` and ``detail``: the reservation, its
+        run, its repositories, when it was admitted and when it would have expired.
+        Nothing is written when anything is refused.
+        """
+        task_id = _uuid("task_id", task_id)
+        reservation_id = _uuid("reservation_id", reservation_id)
+        actor = _actor(actor)
+        if actor.kind is not ActorKind.USER:
+            raise InvalidCommandArgumentError(
+                "only a user releases a repository write by hand"
+            )
+        reason = _text("reason", reason, MAX_REASON_LENGTH)
+        if expected_version is not None:
+            expected_version = _int(
+                "expected_version", expected_version, 1, _MAX_INTEGER
+            )
+        if in_transaction is not None and not callable(in_transaction):
+            raise InvalidCommandArgumentError("in_transaction must be callable")
+
+        async with self._database.session() as session, session.begin():
+            task = await self._require_task(session, task_id, lock=True)
+            if expected_version is not None and task.version != expected_version:
+                raise TaskConflictError()
+            rows = list(
+                (
+                    await session.execute(
+                        select(TaskRepositoryWriteRow)
+                        .where(
+                            TaskRepositoryWriteRow.id == reservation_id,
+                            TaskRepositoryWriteRow.task_id == task.id,
+                        )
+                        .order_by(TaskRepositoryWriteRow.repository_id)
+                        .with_for_update()
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if not rows:
+                raise RepositoryWriteNotFoundError()
+            now = utcnow()
+            if any(
+                row.released_at is not None or row.expires_at <= now for row in rows
+            ):
+                raise RepositoryWriteNotHeldError()
+            if await self._queue_lease_alive(session, task.id):
+                raise RepositoryWriteHolderAliveError()
+
+            first = rows[0]
+            for row in rows:
+                row.released_at = now
+                state_row = (
+                    await session.execute(
+                        select(TaskAttemptRepositoryRow)
+                        .where(
+                            TaskAttemptRepositoryRow.task_id == task.id,
+                            TaskAttemptRepositoryRow.attempt == row.attempt,
+                            TaskAttemptRepositoryRow.repository_id == row.repository_id,
+                        )
+                        .with_for_update()
+                    )
+                ).scalar_one_or_none()
+                if state_row is not None:
+                    # What the crashed executor may have written is not known:
+                    # it counts as written, and what was judged goes again.
+                    state_row.modified = True
+                    state_row.evaluation_result = EvaluationResult.NOT_RUN
+                    state_row.review_status = ReviewStatus.NOT_STARTED
+                    state_row.updated_at = now
+            task.updated_at = now
+            try:
+                await session.flush()
+            except StaleDataError:
+                raise TaskConflictError() from None
+            event = await self._append_event(
+                session,
+                task,
+                command=TaskCommand.RELEASE_REPOSITORY_WRITE,
+                from_state=task.state,
+                actor=actor,
+                reason=reason,
+                step_name=None,
+                detail={
+                    "reservation_id": str(reservation_id),
+                    "repository_ids": [str(row.repository_id) for row in rows],
+                    "attempt": first.attempt,
+                    "retry_count": first.retry_count,
+                    "admitted_at": first.admitted_at.isoformat(),
+                    "expires_at": first.expires_at.isoformat(),
+                },
+            )
+            if in_transaction is not None:
+                await in_transaction(session, task.id, task.project_id)
+        await self._notify(event)
+        return event
+
+    @staticmethod
+    async def _queue_lease_alive(session: AsyncSession, task_id: uuid.UUID) -> bool:
+        """Whether a worker holds a valid lease on the task's active queue entry.
+
+        The active entry, ``queued`` or ``claimed``, is locked first (``FOR
+        SHARE``: a claim, a heartbeat, a release or a completion of the queue
+        waits for it or skips it, and this waits for them): a ``queued`` entry
+        cannot be claimed between this finding and the caller's commit. The
+        lease is judged afterwards, in the next statement, on the database clock
+        (``clock_timestamp()``), as ``tasks.queueing.task_queue`` judges it: a
+        wait for the lock must not make an expired lease look valid, nor a
+        process clock a valid one look expired."""
+        entry_ids = list(
+            (
+                await session.execute(
+                    select(QueueEntryRow.id)
+                    .where(
+                        QueueEntryRow.task_id == task_id,
+                        QueueEntryRow.status.in_(
+                            (QueueStatus.QUEUED, QueueStatus.CLAIMED)
+                        ),
+                    )
+                    .with_for_update(read=True)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if not entry_ids:
+            return False
+        alive = await session.execute(
+            select(QueueEntryRow.id).where(
+                QueueEntryRow.id.in_(entry_ids),
+                QueueEntryRow.status == QueueStatus.CLAIMED,
+                QueueEntryRow.lease_expires_at > func.clock_timestamp(),
+            )
+        )
+        return alive.first() is not None
 
     @staticmethod
     async def _live_writes(

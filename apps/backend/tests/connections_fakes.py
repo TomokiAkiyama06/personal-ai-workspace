@@ -15,6 +15,7 @@ from paw_backend.connections import (
     Secret,
 )
 from paw_backend.tasks import TaskRun
+from paw_backend.tools import LeaseStatus
 
 # The plaintext credential of the tests. Built from pieces: it must not be a literal
 # that a secret scanner (or the credential detectors of this code base) recognises,
@@ -116,12 +117,32 @@ class FakeResolver:
         return Secret(self.secrets[handle])
 
 
+class FakeLeaseVerifier:
+    """The queue lease check of the tests (issue #153): answers ``status`` (or
+    raises ``error``, or waits for ``gate``) and records what it was asked."""
+
+    def __init__(self, status: object = LeaseStatus.HELD) -> None:
+        self.status = status
+        self.error: BaseException | None = None
+        self.gate: asyncio.Event | None = None
+        self.asked: list[tuple[object, object]] = []
+
+    async def check(self, task_id, lease):
+        self.asked.append((task_id, lease))
+        if self.gate is not None:
+            await self.gate.wait()
+        if self.error is not None:
+            raise self.error
+        return self.status
+
+
 __all__ = [
     "CANARY",
     "RUN",
     "T0",
     "FakeAdapter",
     "FakeClock",
+    "FakeLeaseVerifier",
     "FakeResolver",
     "handle",
 ]

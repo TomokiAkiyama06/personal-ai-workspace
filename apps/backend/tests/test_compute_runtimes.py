@@ -38,6 +38,7 @@ from paw_backend.orchestrator import (
 )
 from paw_backend.orchestrator.errors import NodeStopped, StopReason
 from paw_backend.orchestrator.runtime import NodeAssignment, validate_runtime
+from paw_backend.orchestrator.workspaces import NodeWorktree
 from paw_backend.tasks.queueing import BudgetKind
 from tests.compute_support import (
     GIB,
@@ -220,6 +221,41 @@ class HybridRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.local.calls, [])
         self.assertEqual(work.budget.charges, [])  # no local GPU time
         self.assertEqual(self.scheduler.status().cloud_leases, 0)
+
+    async def test_the_worktrees_reach_the_runtime_with_the_recorded_placement(self):
+        # PAW-035 x issue #133: the assignment the chosen runtime gets is the
+        # orchestrator's with the placement recorded; the node's worktrees
+        # (its scope's roots) are kept, on the local and on the cloud route.
+        worktrees = {
+            uuid.uuid4(): NodeWorktree(
+                uuid.uuid4(), "/srv/w/node", "paw/t/1/node", protected=("/srv/c",)
+            )
+        }
+
+        class Capturing(Recorder):
+            async def run_node(self, assignment):
+                self.seen = assignment
+                return await super().run_node(assignment)
+
+        for route in ("local", "cloud"):
+            with self.subTest(route=route):
+                self.local = Capturing("local")
+                self.cloud = Capturing("cloud")
+                if route == "cloud":
+                    await fill_main(self.scheduler)
+                work = assignment(goal="x" * 90_000, worktrees=worktrees)
+
+                await self.runtime(cloud=self.cloud).run_node(work)
+
+                seen = (self.local if route == "local" else self.cloud).seen
+                self.assertEqual(seen.worktrees, worktrees)
+                self.assertEqual(len(work.placement.records), 1)
+                self.assertEqual(
+                    work.placement.records[0][0],
+                    ExecutionPlacement.LOCAL_GPU
+                    if route == "local"
+                    else ExecutionPlacement.CLOUD,
+                )
 
     async def test_the_cloud_is_used_only_when_the_policy_allows(self):
         await fill_main(self.scheduler)
