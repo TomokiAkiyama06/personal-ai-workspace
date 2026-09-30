@@ -282,6 +282,11 @@ button.scope-row[aria-current="true"] .scope-count {
   color: var(--text-3);
 }
 
+.memory-card-date {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
 .memory-state {
   padding: 2px 7px;
   border-radius: 5px;

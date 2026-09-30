@@ -391,11 +391,13 @@ export function MemoryDetail({
     setFailure(null);
     setNotice(null);
     try {
-      const written = await source.restore(
-        memoryId,
-        current.version_number,
-        version.version_number,
-      );
+      // After a conflict, the version that won is the one to build on, even
+      // before the pane's reload brings it in.
+      const expected =
+        conflict && conflict.version_number > current.version_number
+          ? conflict.version_number
+          : current.version_number;
+      const written = await source.restore(memoryId, expected, version.version_number);
       setNotice(
         t("memory.version.restored", {
           from: version.version_number,
@@ -439,6 +441,10 @@ export function MemoryDetail({
           </button>
         )}
       </div>
+      {history.error !== null && (
+        // A reload after a write failed: what is shown may be out of date.
+        <LoadError error={history.error} onRetry={history.reload} />
+      )}
       {notice && (
         <p className="memory-notice small" role="status">
           {notice}

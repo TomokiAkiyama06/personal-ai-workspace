@@ -323,7 +323,16 @@ function MemoryList({
   tree: ScopeTree | null;
   selected: string | null;
 }) {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
+  // Updated (UI_DESIGN.md §6.2): the day the current version was written.
+  const day = (iso: string) => {
+    const date = new Date(iso);
+    return Number.isNaN(date.getTime())
+      ? iso
+      : new Intl.DateTimeFormat(locale === "ja" ? "ja-JP" : "en-US", {
+          dateStyle: "medium",
+        }).format(date);
+  };
   return (
     <ul className="memory-list" aria-label={t("memory.list.label")}>
       {items.map((version) => {
@@ -347,9 +356,12 @@ function MemoryList({
               </span>
               <span className="memory-card-meta">
                 <span className={`memory-state tone-${chip.tone}`}>{t(chip.label)}</span>
-                <span className="mono muted">
+                <span className="mono muted ellipsis">
                   {scopeLabel(version, tree)} · {t(fresh.label)}
                 </span>
+                <time className="mono muted memory-card-date" dateTime={version.created_at}>
+                  {day(version.created_at)}
+                </time>
               </span>
             </Link>
           </li>

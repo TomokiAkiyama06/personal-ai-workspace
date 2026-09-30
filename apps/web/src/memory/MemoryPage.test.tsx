@@ -389,6 +389,76 @@ describe("Memory screen", () => {
     expect(edits.at(-1)).toEqual([mergeId, 4, { title: "Merge は必ず人が承認する" }]);
   });
 
+  it("does not show the previous scope's memories while the next scope loads", async () => {
+    const { source } = designSource();
+    renderMemory("/memory", source);
+    const user = userEvent.setup();
+    const scopes = await screen.findByRole("navigation", { name: "スコープ" });
+    await screen.findByRole("list", { name: "メモリ一覧" });
+    source.list = () => new Promise(() => {});
+    await user.click(within(scopes).getByRole("button", { name: /共有/ }));
+    expect(screen.queryByRole("list", { name: "メモリ一覧" })).not.toBeInTheDocument();
+    expect(within(screen.getByRole("main")).getAllByRole("status")[0]).toHaveTextContent(
+      "読み込み中…",
+    );
+  });
+
+  it("shows when each memory was updated", async () => {
+    const { source } = designSource();
+    renderMemory("/memory", source);
+    const list = await screen.findByRole("list", { name: "メモリ一覧" });
+    const merge = within(list).getByRole("link", { name: /Merge は必ず人が承認する/ });
+    expect(merge.querySelector("time")).toHaveAttribute("datetime", "2026-09-18T02:20:00Z");
+    expect(merge.querySelector("time")?.textContent).toMatch(/2026/);
+  });
+
+  it("retries a restore on top of the version that won", async () => {
+    const { source, mergeId } = designSource();
+    renderMemory("/memory/m-merge", source);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("tab", { name: "履歴" }));
+    await user.click(
+      within(screen.getByRole("list", { name: "メモリの履歴グラフ" })).getAllByRole(
+        "button",
+      )[3] as HTMLElement,
+    );
+    source.write(mergeId, { content: "他の人の更新" }, null, { actor_user_id: "u-2" });
+    const history = source.history.bind(source);
+    let reads = 0;
+    source.history = (id) => {
+      reads += 1;
+      return reads === 1 ? history(id) : new Promise(() => {});
+    };
+    await user.click(screen.getByRole("button", { name: "この内容で新しい版を作る" }));
+    await screen.findByRole("alert");
+    await user.click(screen.getByRole("button", { name: "この内容で新しい版を作る" }));
+    const restores = source.calls
+      .filter((call) => call.method === "restore")
+      .map((call) => call.args);
+    expect(restores).toEqual([
+      [mergeId, 3, 1],
+      [mergeId, 4, 1],
+    ]);
+  });
+
+  it("says so when the history cannot be read again after a write", async () => {
+    const { source } = designSource();
+    renderMemory("/memory/m-merge", source);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "編集" }));
+    await user.type(screen.getByRole("textbox", { name: "本文" }), "追記");
+    source.history = async () => {
+      throw new ApiError(503, "memory_busy", "busy");
+    };
+    await user.click(screen.getByRole("button", { name: "保存" }));
+    expect(await screen.findByText("新しい版 v4 を保存しました。")).toBeVisible();
+    expect(
+      await screen.findByText(
+        "メモリが他の操作で使われています。少し待ってから再試行してください。",
+      ),
+    ).toBeVisible();
+  });
+
   it("offers restore only where the Backend can restore", async () => {
     const { source, mergeId } = designSource();
     // v3 retired by another memory: the memory's current version is superseded.
