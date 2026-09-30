@@ -1,0 +1,488 @@
+/* プロジェクト (PAW-061): the PAW-060 design canvas, Projects. Only the tokens of
+   styles.css; kept next to the screen so the shared stylesheet stays untouched. */
+
+.projects-page {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.projects-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  min-height: 56px;
+  padding: 8px 24px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.projects-head h1 {
+  font-size: 17px;
+}
+
+.projects-page > .project-form {
+  margin: 16px 24px 0;
+  max-width: 640px;
+}
+
+.project-form textarea {
+  font: inherit;
+  font-size: 14px;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-input);
+  padding: 10px 12px;
+  width: 100%;
+  resize: vertical;
+}
+
+.project-form textarea:focus {
+  outline: none;
+  border-color: var(--selected-border);
+  box-shadow: 0 0 0 3px rgba(155, 135, 245, 0.18);
+}
+
+.projects-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+/* The list pane (320px) */
+
+.projects-list {
+  width: 320px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 16px;
+  border-right: 1px solid var(--border-soft);
+}
+
+.project-filter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 34px;
+  padding: 0 10px;
+  border-radius: var(--r-input);
+  border: 1px solid var(--border);
+  background: var(--input);
+  color: var(--text-3);
+}
+
+.project-filter:focus-within {
+  border-color: var(--selected-border);
+}
+
+.project-filter input {
+  min-height: 0;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font-size: 12.5px;
+  box-shadow: none;
+}
+
+.project-items {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.project-item {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 13px 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--text);
+  text-decoration: none;
+}
+
+.project-item:hover {
+  border-color: var(--border-strong);
+}
+
+.project-item[aria-current="page"] {
+  background: var(--row-current);
+  border-color: var(--selected-border);
+}
+
+.project-item-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.project-item-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+.project-item .mono {
+  font-size: 10.5px;
+}
+
+.project-archived-toggle {
+  align-self: flex-start;
+  color: var(--link);
+}
+
+.project-note {
+  margin-top: 6px;
+  padding: 11px 13px;
+  border-radius: 11px;
+  border: 1px dashed var(--border-strong);
+  font-size: 11.5px;
+  line-height: 1.7;
+  color: var(--text-3);
+}
+
+/* Lifecycle status: a dot and a word (never colour alone) */
+
+.project-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border-radius: var(--r-chip);
+  background: var(--input);
+  color: var(--text-2);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+
+.project-status .status-dot {
+  width: 6px;
+  height: 6px;
+}
+
+.project-status.active .status-dot {
+  background: var(--ok);
+}
+
+.project-status.pending_deletion .status-dot {
+  background: var(--error);
+}
+
+.project-status.large {
+  padding: 3px 9px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.project-status.large.active {
+  background: var(--ok-bg);
+  color: var(--ok);
+}
+
+.project-status.large.pending_deletion {
+  background: var(--error-bg);
+  color: var(--error);
+}
+
+/* The detail pane */
+
+.projects-detail {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 18px 24px 28px;
+}
+
+.projects-detail .projects-back {
+  display: none;
+}
+
+.projects-select {
+  font-size: 13px;
+}
+
+.project-unavailable {
+  max-width: 640px;
+}
+
+.project-unavailable strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.project-detail-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.project-detail-head h2 {
+  font-size: 19px;
+  min-width: 0;
+}
+
+.project-detail-head .count-chip {
+  font-family: var(--font-sans);
+  padding: 3px 9px;
+}
+
+.project-description {
+  font-size: 13px;
+  white-space: pre-wrap;
+}
+
+.project-tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--border-soft);
+  overflow-x: auto;
+}
+
+.project-tabs button {
+  min-height: 0;
+  padding: 9px 13px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-2);
+  font-size: 13px;
+  font-weight: 400;
+  white-space: nowrap;
+}
+
+.project-tabs button[aria-selected="true"] {
+  border-bottom-color: var(--accent);
+  color: var(--text);
+  font-weight: 600;
+}
+
+.project-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.project-stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.project-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding: 14px 16px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.project-stat .small {
+  font-size: 11.5px;
+  color: var(--text-3);
+}
+
+.project-stat .mono {
+  font-size: 10.5px;
+  color: var(--text-3);
+}
+
+.project-stat-value {
+  font-size: 19px;
+  font-weight: 600;
+}
+
+.project-card {
+  border-radius: 12px;
+  background: var(--nav);
+}
+
+.project-card .card-head {
+  min-height: 42px;
+  padding: 6px 16px;
+}
+
+.project-card .table-head,
+.project-card .table-row {
+  padding-left: 16px;
+  padding-right: 16px;
+}
+
+.project-card .table-head {
+  font-size: 10px;
+}
+
+.project-card .table-row {
+  min-height: 0;
+  padding-top: 11px;
+  padding-bottom: 11px;
+  font-size: 12px;
+}
+
+.project-card .card-row.project-form {
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.project-form h4 {
+  font-size: 13px;
+}
+
+.project-repo-row {
+  grid-template-columns:
+    minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 1.2fr) minmax(0, 1fr)
+    minmax(0, 1fr);
+}
+
+.project-member-row {
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 1.4fr) minmax(0, 1fr);
+}
+
+.project-member-row .cell-main {
+  font-size: 12.5px;
+}
+
+.project-member-row .avatar {
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  background: var(--border);
+  color: var(--text);
+  font-size: 11px;
+}
+
+.project-override {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 6px;
+  color: var(--warning);
+}
+
+.project-override svg {
+  flex-shrink: 0;
+  margin-top: 4px;
+}
+
+.project-override-detail {
+  display: block;
+  color: var(--text-3);
+  font-size: 11px;
+}
+
+.project-role-select {
+  min-height: 28px;
+  height: 28px;
+  width: auto;
+  padding: 0 8px;
+  font-size: 12px;
+}
+
+.project-lifecycle .card-head h3 {
+  font-size: 13px;
+}
+
+.project-delete h4 {
+  font-size: 13px;
+  color: var(--danger-title);
+}
+
+.project-delete .field {
+  margin-top: 6px;
+  max-width: 360px;
+}
+
+/* 768–1279px: a narrower list, two statistics per row. */
+@media (max-width: 1279px) {
+  .projects-list {
+    width: 260px;
+  }
+
+  .project-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+/* < 768px: one pane at a time (the list, or the selected project with a way back);
+   the tables become labelled stacks. */
+@media (max-width: 767px) {
+  .projects-head {
+    padding: 8px 16px;
+  }
+
+  .projects-page > .project-form {
+    margin: 12px 16px 0;
+  }
+
+  .projects-body {
+    flex-direction: column;
+  }
+
+  .projects-list {
+    width: auto;
+    border-right: 0;
+  }
+
+  .projects-detail {
+    padding: 8px 16px 24px;
+  }
+
+  .projects-body.has-selection .projects-list,
+  .projects-body:not(.has-selection) .projects-detail {
+    display: none;
+  }
+
+  .projects-detail .projects-back {
+    display: flex;
+  }
+
+  .project-card .table-head {
+    display: none;
+  }
+
+  .project-card .table-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 4px;
+  }
+
+  .project-card .table-row > [data-label] {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    min-width: 0;
+  }
+
+  .project-card .table-row > [data-label]::before {
+    content: attr(data-label);
+    flex: 0 0 84px;
+    color: var(--text-3);
+    font-family: var(--font-sans);
+    font-size: 11px;
+  }
+
+  /* The first cell (the repository / the member) is the row's title. */
+  .project-card .table-row > :first-child {
+    align-items: center;
+    margin-bottom: 2px;
+  }
+
+  .project-card .table-row > :first-child::before {
+    display: none;
+  }
+}
