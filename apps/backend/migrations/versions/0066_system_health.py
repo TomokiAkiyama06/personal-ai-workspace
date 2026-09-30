@@ -2,7 +2,7 @@
 connection reaper (PAW-066, issue #52, Decision 0059 Proposed).
 
 Revision ID: 0066
-Revises: 0147
+Revises: 0154
 Create Date: 2026-09-30
 
 * ``health_metric_samples``: one row per metric, resolution (0 = a raw sample,
@@ -39,7 +39,7 @@ from alembic import op
 from paw_backend.db_roles import grant_app_privileges
 
 revision: str = "0066"
-down_revision: str | Sequence[str] | None = "0147"
+down_revision: str | Sequence[str] | None = "0154"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

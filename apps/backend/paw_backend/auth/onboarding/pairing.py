@@ -42,7 +42,9 @@ values are Decision 0033 section 2 (Approved 2026-09-28)::
 * **The new session** has ``auth_method = pairing`` and no Step-up. Its Passkey gate
   is the sign-in's for a User (the policy and the Passkeys registered) and ``open``
   for an approved Owner / Admin (the trusted device's Passkey Step-up stood in for
-  the new device's Passkey assertion).
+  the new device's Passkey assertion). That approved session may also register
+  its first Passkey without a Step-up inside the Step-up window (#154, Decision
+  0043 point 11: the helpers below, used by the Passkey service).
 * **Locks**: the user's row ``FOR UPDATE`` first, then the pairing's: issuing,
   revoking, claiming, deciding and completing never wait for each other in the
   opposite order. Two claims of one token: exactly one succeeds.
@@ -234,6 +236,84 @@ async def end_live_pairings_in(
         {"now": now, "reason": reason.value, "id": user_id},
     )
     return [row.audit_ref for row in result.all()]
+
+
+# -- the Passkey registration of an approved pairing's session (Decision 0043, 11) --
+#
+# The allowance of a session is the ``device_pairings`` row that CREATED it
+# (``created_session``), ``completed`` with ``approval_required`` (a trusted
+# device's Passkey Step-up and the confirmation code), whose
+# ``passkey_allowance_ended_at`` is still NULL; the session itself must be a
+# pairing session of the same user. The Step-up window is the caller's to judge
+# (``Freshness.signed_in_recently``: the session is created when the pairing
+# completes).
+
+_ALLOWANCE = """
+    FROM device_pairings p JOIN auth_sessions s ON s.id = p.created_session
+   WHERE p.created_session = :session_id AND p.user_id = :user_id
+     AND s.user_id = :user_id AND s.auth_method = 'pairing'
+     AND p.state = 'completed' AND p.approval_required
+     AND p.passkey_allowance_ended_at IS NULL"""
+
+
+async def paired_passkey_allowance_in(
+    session: AsyncSession, *, session_id: uuid.UUID, user_id: uuid.UUID
+) -> bool:
+    """Whether the session still has its approved pairing's one registration."""
+    row = (
+        await session.execute(
+            text(f"SELECT 1 {_ALLOWANCE}"),
+            {"session_id": session_id, "user_id": user_id},
+        )
+    ).first()
+    return row is not None
+
+
+async def spend_passkey_allowance_in(
+    session: AsyncSession,
+    *,
+    session_id: uuid.UUID,
+    user_id: uuid.UUID,
+    now: datetime,
+) -> bool:
+    """End the session's allowance (it registered a Passkey); whether one was there.
+
+    Called for every registration of the session, with or without a Step-up ("the
+    session has not registered a Passkey yet"). The caller holds the user's row
+    lock (``FOR UPDATE``); the ``IS NULL`` condition spends it at most once anyway.
+    """
+    result = await session.execute(
+        text(
+            f"""UPDATE device_pairings SET passkey_allowance_ended_at = greatest(
+                       CAST(:now AS timestamptz), clock_timestamp())
+                 WHERE id IN (SELECT p.id {_ALLOWANCE})
+             RETURNING id"""
+        ),
+        {"session_id": session_id, "user_id": user_id, "now": now},
+    )
+    return bool(result.all())
+
+
+async def end_passkey_allowances_in(
+    session: AsyncSession, user_id: uuid.UUID, now: datetime
+) -> int:
+    """End every unspent allowance of the user (a Passkey of theirs was revoked).
+
+    The allowance stands in for a Passkey Step-up, and a revocation forgets every
+    Passkey Step-up of the user's sessions (Decision 0025); neither may outlive it.
+    The caller holds the user's row lock (``FOR UPDATE``).
+    """
+    result = await session.execute(
+        text(
+            """UPDATE device_pairings SET passkey_allowance_ended_at = greatest(
+                      CAST(:now AS timestamptz), clock_timestamp())
+                WHERE user_id = :user_id AND state = 'completed'
+                  AND approval_required AND passkey_allowance_ended_at IS NULL
+            RETURNING id"""
+        ),
+        {"user_id": user_id, "now": now},
+    )
+    return len(result.all())
 
 
 class PairingService:
