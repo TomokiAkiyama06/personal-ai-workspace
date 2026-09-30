@@ -43,6 +43,28 @@ class DeleteTest(OnboardingTestCase):
             session_id=(auth or self.admin_auth).record.id,
         )
 
+    async def test_deleting_ends_the_passkey_ceremonies_the_user_began(self):
+        # Issue #127: a ceremony begun before the deletion cannot finish after it.
+        bob = await self.make_user("bob")
+        carol = await self.make_user("carol")
+        for user in (bob, carol):
+            auth = await self.sign_in(user, step_up=False)
+            await self.execute(
+                "INSERT INTO passkey_challenges (id, user_id, session_id, purpose, "
+                "challenge, created_at, expires_at) VALUES (gen_random_uuid(), :u, "
+                ":s, 'register', :c, :now, :later)",
+                u=user.id,
+                s=auth.record.id,
+                c=b"c" * 32,
+                now=T0,
+                later=T0 + timedelta(minutes=5),
+            )
+
+        await self.delete(bob.id)
+
+        remaining = await self.query("SELECT user_id FROM passkey_challenges")
+        self.assertEqual([row.user_id for row in remaining], [carol.id])
+
     async def test_deleting_an_active_user_closes_the_account_at_once(self):
         bob = await self.make_user("bob")
         first = await self.sign_in(bob, step_up=False)
