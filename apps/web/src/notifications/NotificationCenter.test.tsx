@@ -9,6 +9,7 @@ import {
   mergeNotification,
   NotificationProvider,
   type NotificationSource,
+  useNotificationOwner,
 } from "./store";
 
 function manualSource() {
@@ -359,5 +360,31 @@ describe("Notification Center", () => {
       .map((item) => item.querySelector(".notification-title")?.textContent);
     expect(titles).toEqual(["解析が完了しました", "6 時間成功していません"]);
     expect(within(panel).getByText("2 件をまとめて表示")).toBeInTheDocument();
+  });
+
+  it("forgets the notifications only for another account or a sign-out", () => {
+    function Owner({ userId }: { userId: string | null | undefined }) {
+      useNotificationOwner(userId);
+      return null;
+    }
+    const { source, emit } = manualSource();
+    const view = (userId: string | null | undefined) => (
+      <I18nProvider>
+        <RouterProvider>
+          <NotificationProvider source={source}>
+            <Owner userId={userId} />
+            <NotificationBell />
+          </NotificationProvider>
+        </RouterProvider>
+      </I18nProvider>
+    );
+    const { rerender } = render(view("u-1"));
+    emit({ key: "a", severity: "warning", title: "承認待ち", at });
+    // A transient error (unknown account) keeps them.
+    rerender(view(undefined));
+    rerender(view("u-1"));
+    expect(screen.getByRole("button", { name: "通知 1 件未読" })).toBeInTheDocument();
+    rerender(view("u-2"));
+    expect(screen.getByRole("button", { name: "通知" })).toBeInTheDocument();
   });
 });

@@ -32,7 +32,15 @@ export function App() {
   const { t } = useI18n();
   const { path } = useRouter();
   const { state, refresh } = useSession();
-  useNotificationOwner(state.status === "signed_in" ? state.data.user.id : null);
+  // Loading / a transient error keeps the notifications: only a sign-out or
+  // another account clears them.
+  useNotificationOwner(
+    state.status === "signed_in"
+      ? state.data.user.id
+      : state.status === "signed_out"
+        ? null
+        : undefined,
+  );
 
   // A device opened a pairing QR code / link. It normally has no session yet; if
   // it has one, completing the pairing replaces it (the Backend's replace_token).

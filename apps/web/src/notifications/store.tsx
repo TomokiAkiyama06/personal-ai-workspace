@@ -217,12 +217,14 @@ export function NotificationProvider({
 /**
  * Notifications belong to the signed-in account: they are forgotten when it signs
  * out or another account signs in, so one account never sees another's.
+ * `userId` is the account, `null` when signed out, `undefined` when unknown.
  */
-export function useNotificationOwner(userId: string | null): void {
+export function useNotificationOwner(userId: string | null | undefined): void {
   const { clear } = useNotifications();
   const owner = useRef(userId);
   useEffect(() => {
-    if (owner.current === userId) return;
+    // `undefined`: not known right now (loading, a transient error).
+    if (userId === undefined || owner.current === userId) return;
     owner.current = userId;
     clear();
   }, [userId, clear]);
