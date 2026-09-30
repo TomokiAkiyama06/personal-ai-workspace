@@ -23,9 +23,22 @@ Footprint（weights + KV Cache Pool + Runtime Buffer + Temporary Workspace）は
 
 ### Load / Unload と VRAM
 
-<!-- TABLE:VRAM -->
+| Model | Runtime | `gpu-memory-utilization` の予算（GiB） | Load 後（GiB） | Run 中のピーク（GiB） | ピーク − 予算（GiB） | Load（秒） | Unload（秒） |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| gpt-oss-120b | vLLM | 87.9（0.92） | 87.4 | 95.0 | +7.0 | 412 | 10 |
+| Qwen3.8-27B-FP8 | vLLM | 86.0（0.90） | 83.4 | 94.4 | +8.4 | 180 | 1 |
+| Devstral-Small-2-24B | vLLM | 86.0（0.90） | 84.6 | 94.0 | +8.0 | 197 | 2 |
+| Qwen3-Coder-Next-FP8 | vLLM | 90.8（0.95） | 90.2 | 91.0 | +0.2 | 404 | 2 |
+| KAT-Coder-V2.5-Dev | vLLM | 87.9（0.92） | 87.3 | 88.4 | +0.4 | 308 | 2 |
+| Nemotron-3.5-Lightning-30B-A3B-NVFP4 | vLLM | 86.0（0.90） | 85.3 | 87.2 | +1.2 | 142 | 1 |
+| Qwen3.6-35B-A3B-FP8 | vLLM | 86.0（0.90） | 85.6 | 86.3 | +0.3 | 69 | 2 |
+| Qwen3-Coder-30B-A3B-Instruct | vLLM | 86.0（0.90） | 85.7 | 85.7 | -0.3 | 91 | 1 |
+| Qwen3.5-27B-FP8 | vLLM | 86.0（0.90） | 83.4 | 85.6 | -0.4 | 189 | 2 |
+| gpt-oss-20b | vLLM | 86.0（0.90） | 85.4 | 85.5 | -0.5 | 102 | 1 |
+| Qwen3.6-27B-FP8 | vLLM | 86.0（0.90） | 83.4 | 85.5 | -0.6 | 211 | 2 |
+| Qwen3-Coder-Next-Q5_K_M-llamacpp | llama.cpp | - | 65.8 | 65.9 | - | 224 | 2 |
 
-- `gpu-memory-utilization`（0.90 / 0.92）× GPU 全体を vLLM の予算とすると、GPU 全体の使用量のピークが予算を **最大 8.4 GiB 上回った**（Qwen3.8-27B-FP8: 予算 86.0 GiB、ピーク 94.4 GiB。Qwen3-Coder-Next-FP8: +4.9 GiB。gpt-oss-120b: +7.0 GiB を 3 秒だけ）。09-28 の記録は GPU 全体の使用量だけで、Process ごとの内訳がないため、他の Workload の分を含むかは分からない。09-30 の Run は Process ごとの使用量も 5 秒ごとに記録した（下の「09-30 の内訳」）。
+- vLLM の `gpu-memory-utilization` × GPU 全体を予算とすると、12 Run のうち 3 Run で GPU 全体の使用量のピークが予算を **7.0〜8.4 GiB 上回った**。09-30 の Run は Process ごとの使用量も 5 秒ごとに記録し、Devstral の超過（+8.0 GiB）は **vLLM の EngineCore 自身の分**だった（Run 中に GPU にいた Process はそれだけ）。09-28 の Qwen3.8-27B-FP8（+8.4 GiB、35 分続いた）と gpt-oss-120b（+7.0 GiB、3 秒だけ）は GPU 全体の使用量しか記録しておらず、他の Workload の分を含むかは分からない。原因は特定していない（vLLM が KV Pool の外に取る一時領域と考えられる）。
 - Load の時間は、HDD（281 MB/s）からの初回の Load で最長 **412 秒**（gpt-oss-120b、Weight 66 GiB）。Page cache が温まっていると 1〜2 分。Unload は 1〜10 秒。
 
 ### Context の見積もり
@@ -70,7 +83,7 @@ Footprint（weights + KV Cache Pool + Runtime Buffer + Temporary Workspace）は
 
 ### 5. 変えない値
 
-- `kv_safety` 90%、Class の上限（100 / 95 / 85 / 70%）、縮退の 5 段目（Context を 50%）、再試行の 60 秒、Exclusive の確認 60 秒、Node の待ち 600 秒は、今回の Benchmark（1 つの Agent Harness を並列 4 で走らせる）では検証できない。KV Cache の実際の使用率のピークは Pool の 3.7〜41.7% で、並列 4 では Pool が足りなくなった Run はない。これらは本番の運用の観測（Observability の Metric）で見直す。
+- `kv_safety` 90%、Class の上限（100 / 95 / 85 / 70%）、縮退の 5 段目（Context を 50%）、再試行の 60 秒、Exclusive の確認 60 秒、Node の待ち 600 秒は、今回の Benchmark（1 つの Agent Harness を並列 4 で走らせる）では検証できない。KV Cache の実際の使用率のピークは Pool の 1.3〜41.7% で、並列 4 では Pool が足りなくなった Run はない。これらは本番の運用の観測（Observability の Metric）で見直す。
 
 ## 代替案
 

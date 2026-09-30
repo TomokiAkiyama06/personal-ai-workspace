@@ -663,6 +663,8 @@ personal-ai-workspace/
 │  ├─ SECURITY_RBAC_AUDIT.md
 │  ├─ SECURITY_TOOL_PERMISSIONS.md
 │  ├─ UI_DESIGN.md
+│  ├─ benchmarks/
+│  │  └─ paw-017-main-coding-2026-09.md
 │  └─ decisions/
 │     ├─ 0002-start-workspace-implementation-before-model-comparison.md
 │     ├─ 0003-backend-cli-web-implementation-stack.md
@@ -693,6 +695,7 @@ personal-ai-workspace/
 | [REQUIREMENTS.md](../REQUIREMENTS.md) / [AGENTS.md](../AGENTS.md) | 要件と Agent の作業ルールの正本 |
 | [docs/](./) | Architecture、各機能の設計、Backlog、Issue 対応表 |
 | [docs/decisions/](decisions/README.md) | 重要な仕様・設計判断の提案と承認経緯 |
+| [docs/benchmarks/](benchmarks/paw-017-main-coding-2026-09.md) | Model 比較 Run の報告（条件・結果・起きた問題。生の結果は Repository に入れない） |
 | [apps/backend/](../apps/backend/README.md) | Core API、認証・権限、Orchestrator、Memory、Tool Broker（現在はSkeleton: REST / Event経路、Health、DB接続、Migration。Owner の初期設定・復旧は server-local の管理コマンド、PAW-021） |
 | [apps/web/](../apps/web/README.md) | Backend API を利用する Web UI |
 | [apps/cli/](../apps/cli/README.md) | Web と同じ Backend API を利用する CLI |
