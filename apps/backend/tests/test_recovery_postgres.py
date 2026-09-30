@@ -446,6 +446,137 @@ class RecoveryPostgresTest(PostgresProjectTestCase):
         self.assertEqual("target_not_empty", again.refused)
         self.assertEqual(after, {table: self.rows(table) for table in TARGET_TABLES})
 
+    async def test_the_memories_of_a_skipped_repository_are_held_back(self) -> None:
+        # A repository whose name has a credential is skipped (registered again
+        # by hand, under a new id): its repo memories are not restored with the
+        # old id either, and are listed with its redacted name (Decision 0061).
+        skipped, held, v_held1, v_held2 = (uuid4() for _ in range(4))
+        with self.engine.begin() as connection:
+            connection.execute(
+                insert(RepositoryRow),
+                [
+                    dict(
+                        id=skipped,
+                        project_id=self.project,
+                        name=SECRET,
+                        default_branch="main",
+                        source="github_clone",
+                        acl_allowed=None,
+                        created_by=self.owner,
+                        created_at=T0,
+                        updated_at=T0,
+                    )
+                ],
+            )
+            connection.execute(insert(Memory), [dict(id=held, created_at=T0)])
+            connection.execute(
+                insert(MemoryVersion),
+                [
+                    dict(
+                        id=identifier,
+                        memory_id=held,
+                        version_number=number,
+                        scope="repo",
+                        repo_id=skipped,
+                        memory_type="fact",
+                        title="Repo fact",
+                        content="repo text",
+                        status=status,
+                        confirmation_state="confirmed",
+                        freshness_policy="permanent",
+                        actor_type="system",
+                        created_at=T0,
+                    )
+                    for identifier, number, status in (
+                        (v_held1, 1, "superseded"),
+                        (v_held2, 2, "active"),
+                    )
+                ],
+            )
+            connection.execute(
+                insert(MemoryRelation),
+                [
+                    dict(
+                        id=uuid4(),
+                        from_version_id=source,
+                        to_version_id=target,
+                        relation_type=kind,
+                        created_at=T0,
+                    )
+                    for source, target, kind in (
+                        (v_held2, v_held1, "supersedes"),
+                        (self.v2, v_held1, "extends"),
+                    )
+                ],
+            )
+            connection.execute(
+                insert(MemorySource),
+                [
+                    dict(
+                        id=uuid4(),
+                        memory_version_id=v_held2,
+                        source_type="task",
+                        source_ref="task:7",
+                        conversation_id=None,
+                        created_at=T0,
+                    )
+                ],
+            )
+        await self.back_up()
+        before = {table: self.rows(table) for table in TARGET_TABLES}
+        clone = self.world.clone()
+        self.clean_tables()
+
+        dry = await self.restorer(clone).run()
+        self.assertTrue(dry.ok, dry)
+        applied = await self.restorer(clone).run(apply=True)
+        self.assertTrue(applied.ok, applied)
+        reason = (
+            "users=2 projects=1 repos=1 memories=2 versions=3 skipped_repos=1 "
+            "held_memories=1 held_versions=2 held_relations=2 held_sources=1"
+        )
+        self.assertEqual(
+            [
+                ("recovery.restore.planned", reason),
+                ("recovery.restore.applied", reason),
+            ],
+            self.audit("recovery_restore")[-2:],
+        )
+        for result in (dry, applied):
+            [listed] = [step for step in result.manual_steps if str(skipped) in step]
+            self.assertIn("[REDACTED]", listed)
+            self.assertIn(str(held), listed)
+            self.assertNotIn(SECRET, "\n".join(result.manual_steps))
+
+        after = {table: self.rows(table) for table in TARGET_TABLES}
+        self.assertNotIn(skipped, [row["id"] for row in after["repositories"]])
+        self.assertNotIn(held, [row["id"] for row in after["memories"]])
+        self.assertEqual(
+            [
+                row
+                for row in before["memory_versions"]
+                if row["id"] not in {self.v_gone, v_held1, v_held2}
+            ],
+            after["memory_versions"],
+        )
+        self.assertEqual(
+            [
+                row
+                for row in before["memory_relations"]
+                if row["to_version_id"] != v_held1
+            ],
+            after["memory_relations"],
+        )
+        self.assertEqual(
+            [
+                row
+                for row in before["memory_sources"]
+                if row["source_type"] != "conversation"
+                and row["memory_version_id"] != v_held2
+            ],
+            after["memory_sources"],
+        )
+
     async def test_the_checkout_stays_locked_until_the_restore_is_done(self) -> None:
         await self.back_up()
         clone = self.world.clone()
