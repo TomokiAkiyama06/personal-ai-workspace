@@ -126,6 +126,14 @@ describe("使用状況", () => {
     expect(screen.getByText("会話の本文・Private Memory は表示しません")).toBeVisible();
   });
 
+  it("does not show the admin screen to a Member who opens it directly", async () => {
+    const { source } = fakeSource();
+    renderUsage("/admin/usage", "user", source);
+    expect(await screen.findByRole("heading", { name: "自分の使用状況" })).toBeVisible();
+    expect(window.location.pathname).toBe("/settings/usage");
+    expect(screen.queryByRole("navigation", { name: "管理のタブ" })).not.toBeInTheDocument();
+  });
+
   it("offers a Member only their own usage, in 設定 › 自分の使用状況", async () => {
     const { source, load } = fakeSource();
     renderUsage("/settings/usage", "user", source);
