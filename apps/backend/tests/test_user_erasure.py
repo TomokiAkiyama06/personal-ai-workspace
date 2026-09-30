@@ -928,6 +928,23 @@ class ExternalCredentialsTest(ErasureTestCase):
             [(bob.id, CredentialsOutcome.PENDING)],
         )
 
+    async def test_a_user_restored_after_the_listing_is_not_reported(self):
+        # Codex P2 (PR #142): the Owner restores the user between the run's listing
+        # and the reminder. The reminder rechecks under the row lock: the operator
+        # must not be told to revoke the credentials of an active user.
+        bob = await self.make_user("bob")
+        await self.delete(bob)
+        await self.execute(
+            "UPDATE users SET status = 'active' WHERE id = :id", id=bob.id
+        )
+        before = await self.credentials_audit()
+
+        service = self.erasure(T0 + timedelta(hours=1))
+        self.assertIsNone(await service.check_credentials(bob.id))
+        self.assertIsNone(await service.check_credentials(bob.id, revoked=True))
+
+        self.assertEqual(await self.credentials_audit(), before)
+
     async def test_active_restored_invited_owner_and_deleted_users_are_not_reported(
         self,
     ):

@@ -306,10 +306,11 @@ def _show(report: ErasureRunReport, err: TextIO | None) -> int:
         elif not result.ok:
             _say(
                 err,
-                f"NOT RECORDED: the credentials revocation of user {result.user_id} "
+                f"NOT CHECKED: the credentials revocation of user {result.user_id} "
                 f"({result.outcome.value}"
                 + (f", {result.error_type}" if result.error_type else "")
-                + "). Confirm it again on the next run.",
+                + "). It is checked again on the next run (repeat "
+                "--credentials-revoked if it was given).",
             )
     if report.ok and report.credentials_ok:
         _say(

@@ -208,7 +208,7 @@ class CredentialsOutcome(StrEnum):
     PENDING = "credentials_pending"
     # The operator confirmed it in this run (recorded).
     REVOKED = "credentials_revoked"
-    # The confirmation could not be recorded (a lock held too long, another error).
+    # Neither could be recorded (a lock held too long, another error).
     FAILED = "failed"
 
 
@@ -492,18 +492,12 @@ class UserErasureService:
         if not isinstance(user_id, uuid.UUID):
             raise TypeError("user_id must be a uuid.UUID")
         correlation_id = uuid.uuid4()
-        if not revoked:
-            await self._audit.record_best_effort(
-                self._audit.event(
-                    AuthAction.USER_CREDENTIALS,
-                    AuthReason.CREDENTIALS_PENDING,
-                    allowed=False,
-                    correlation_id=correlation_id,
-                    resource_kind="user",
-                    resource_id=user_id,
-                )
-            )
-            return CredentialsResult(user_id, CredentialsOutcome.PENDING)
+        # Both the reminder and the confirmation lock the user's row and check
+        # again that the user is still ``pending_deletion`` without a confirmation:
+        # a user the Owner restored after the listing is neither reminded of (the
+        # operator must not revoke an active user's credentials) nor confirmed
+        # (Codex P2, PR #142).
+        outcome = CredentialsOutcome.REVOKED if revoked else CredentialsOutcome.PENDING
         try:
             async with self._database.session() as session, session.begin():
                 await session.execute(
@@ -525,8 +519,8 @@ class UserErasureService:
                     session,
                     self._audit.event(
                         AuthAction.USER_CREDENTIALS,
-                        AuthReason.CREDENTIALS_REVOKED,
-                        allowed=True,
+                        AuthReason(outcome.value),
+                        allowed=revoked,
                         correlation_id=correlation_id,
                         resource_kind="user",
                         resource_id=user_id,
@@ -534,9 +528,9 @@ class UserErasureService:
                 )
         except Exception as error:
             error_type = type(getattr(error, "orig", None) or error).__name__
-            logger.error("Recording a credentials revocation failed (%s)", error_type)
+            logger.error("Checking a credentials revocation failed (%s)", error_type)
             return CredentialsResult(user_id, CredentialsOutcome.FAILED, error_type)
-        return CredentialsResult(user_id, CredentialsOutcome.REVOKED)
+        return CredentialsResult(user_id, outcome)
 
     async def due_user_ids(
         self, *, after: uuid.UUID | None = None, limit: int = PAGE_SIZE
