@@ -10,7 +10,8 @@ As the Memory Projection (Decision 0038 6) and the audit retention job (Decision
   dry run), ``recovery.restore.applied`` (written in the **same** transaction as
   the restored rows: both or neither), ``recovery.restore.refused`` (a check
   failed; nothing was written) or ``recovery.restore.failed`` (the write failed
-  and was rolled back).
+  and was rolled back). The counts of ``planned`` / ``applied`` add the
+  held-back repository memories when a repository was skipped (Decision 0061).
 
 ``reason`` holds counts or a closed code, never a path, a URL, a message or a
 row's text; ``decision = allow``, no actor (a server-local command). "Last" is by
@@ -30,7 +31,9 @@ from paw_backend.db import Database
 
 BACKUP_RESOURCE_KIND = "recovery_backup_run"
 RESTORE_RESOURCE_KIND = "recovery_restore"
-REASON_MAX_LENGTH = 64
+# Room for the restore's counts with the held-back ones (Decision 0061), each
+# number up to 10 digits; the column itself is ``text``.
+REASON_MAX_LENGTH = 256
 
 
 class RecoveryAction(StrEnum):
