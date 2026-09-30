@@ -20,7 +20,7 @@ Backend の Process（Service 用 Linux User、例: paw）
                  └─ git（固定の -c・固定の環境。受け付けた形だけ）
 ```
 
-Wrapper は Client（Backend）を信用しない。`$SSH_ORIGINAL_COMMAND` を POSIX の語の規則（`shlex.split`。`eval` しない）で分解し、次の全部を満たすときだけ git を `exec` する。1 つでも外れれば終了コード **126** で拒否する（fail closed。git を起動しない）。
+Wrapper は Client（Backend）を信用しない。`$SSH_ORIGINAL_COMMAND` を POSIX の語の規則（`shlex.split`。`eval` しない）で分解し、次の全部を満たすときだけ git を `exec` する。1 つでも外れれば終了コード **126**（中身のある Submodule の拒否だけは **125**。下の「終了コード」）で拒否する（fail closed。git を起動しない）。
 
 1. 先頭の語が `paw-git-run/v1`、4 語目が `--`。
 2. cwd は、その User の Root（既定 `<home>/workspaces`）の中の、既存の Directory。**Symbolic Link をすべて解決した後の Path** で判定する。
@@ -75,6 +75,7 @@ git の環境は固定の許可リストだけ（`PATH`・`HOME`・`LC_ALL=C`・
 
 - 受け付けた呼び出し: git 自身の終了コード（Wrapper は git を `exec` する）。
 - 拒否: **126**。git の 0／1（`merge-base --is-ancestor`・`merge-tree` はこれを答えとして読む）、128／129（git 自身の失敗）、255（`ssh` 自身の失敗。`SshGitRunner` は `ssh_unavailable` として扱う。Decision 0029 の 5）のどれとも重ならない。
+- 中身のある Submodule（`populated_submodule`）の拒否: **125**（[Decision 0063](../../../../docs/decisions/0063-wrapper-populated-submodule-exit-code.md)）。Backend は 125 を Human が片付ける `dirty`、それ以外の拒否（126。呼び出し・Wrapper・Server の設定の誤り）を `git_failed` として扱う。125 も上のどれとも重ならない。Wrapper は Backend と同時か先に入れ替える（古い Wrapper の 126 は、新しい Backend では中身のある Submodule でも `git_failed` になる。Fail closed）。
 
 ### Log（Secret を出さない）
 

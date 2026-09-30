@@ -1881,6 +1881,34 @@ class MainTest(WrapperTestCase):
         self.assertEqual(code, wrapper.REJECTED)
         self.assertEqual(executed, [])
 
+    def test_a_populated_submodule_has_its_own_exit_status(self):
+        # Decision 0063: the backend reads 125 as a worktree a human must
+        # clean up (``dirty``) and 126 as any other refusal (``git_failed``).
+        def refuse(invocation):
+            raise wrapper.Rejected("populated_submodule")
+
+        executed = []
+        with contextlib.redirect_stderr(io.StringIO()) as stderr:
+            code = wrapper.main(
+                [f"--root={self.root}", f"--home={self.home}"],
+                {
+                    "SSH_ORIGINAL_COMMAND": self.command(
+                        ["rev-parse", "--show-toplevel"]
+                    )
+                },
+                execve=lambda path, args, env: executed.append(args),
+                chdir=lambda path: None,
+                log=lambda message: None,
+                check=refuse,
+            )
+        self.assertEqual(code, wrapper.POPULATED_SUBMODULE)
+        self.assertEqual(code, 125)
+        self.assertNotIn(code, (0, 1, 128, 129, 255, wrapper.REJECTED))
+        self.assertEqual(executed, [])
+        self.assertEqual(
+            stderr.getvalue(), "paw-git-wrapper: rejected (populated_submodule)\n"
+        )
+
     def test_an_interactive_login_is_refused(self):
         code, executed, logged, _, _ = self.run_main(None)
         self.assertEqual(code, wrapper.REJECTED)
@@ -2499,12 +2527,14 @@ class EndToEndTest(unittest.IsolatedAsyncioTestCase):
         git("config", "filter.x.clean", f"touch {marker}; cat", cwd=f"{worktree}/sub")
         fs.write(f"{worktree}/sub", ".gitattributes", "* filter=x\n")
         fs.write(f"{worktree}/sub", "code.txt", "changed\n")
+        # Its own exit status (Decision 0063): the backend reads it as a
+        # worktree a human must clean up, not as ``git_failed``.
         result = await self.run_git(status, cwd=worktree)
-        self.assertEqual(result.returncode, wrapper.REJECTED)
+        self.assertEqual(result.returncode, wrapper.POPULATED_SUBMODULE)
         self.assertFalse(_consume(marker))
         submodules = [*status[:2], "submodule", "status", "--cached"]
         result = await self.run_git(submodules, cwd=worktree)
-        self.assertEqual(result.returncode, wrapper.REJECTED)
+        self.assertEqual(result.returncode, wrapper.POPULATED_SUBMODULE)
         # Not populated: the submodule is listed (the backend reads it as
         # "not exactly its commit"), and nothing inside it ran.
         shutil.rmtree(f"{worktree}/sub")

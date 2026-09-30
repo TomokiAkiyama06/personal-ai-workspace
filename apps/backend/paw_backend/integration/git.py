@@ -46,6 +46,7 @@ from dataclasses import dataclass
 from paw_backend.repositories.errors import GitCommandError, GitFailure
 from paw_backend.repositories.git import GitResult, GitRunner, command_name
 from paw_backend.repositories.paths import LinuxAccount
+from paw_backend.repositories.ssh import WRAPPER_REJECTED_CODE
 from paw_backend.repositories.validation import validate_branch
 
 _OBJECT_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
@@ -298,8 +299,13 @@ class WorktreeGit:
         line (initialized, or a path git split over lines) is not clean. It
         runs first, so the ``status`` never runs inside an initialized
         submodule. It fails (``no submodule mapping``) for a gitlink missing
-        from ``.gitmodules``: not clean either."""
+        from ``.gitmodules``: not clean either. So does the SSH wrapper's
+        refusal of a populated submodule (its own exit status, 125); any other
+        refusal of the wrapper (126) is not a worktree a human could clean up
+        and raises ``git_failed`` (Decision 0063)."""
         submodules = await self._run(["submodule", "status", "--cached"], account, path)
+        if submodules.returncode == WRAPPER_REJECTED_CODE:
+            raise GitCommandError("submodule", GitFailure.NONZERO_EXIT)
         if submodules.returncode != 0 or any(
             not line.startswith("-") for line in submodules.stdout.splitlines()
         ):
