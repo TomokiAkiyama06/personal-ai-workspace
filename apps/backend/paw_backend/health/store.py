@@ -7,8 +7,11 @@ two Backend processes line up, and a sample is never placed in the future.
   sampling interval (``date_bin``). A second process sampling in the same bucket
   inserts nothing (``ON CONFLICT DO NOTHING``): one sample per interval.
 * :meth:`HealthStore.record_changes`: an event per component whose severity
-  differs from its last event, under a transaction-level advisory lock so that
-  two processes do not both record the same change.
+  differs from its last event and that is not older than it, under a
+  transaction-level advisory lock so that two processes do not both record the
+  same change. A change seen before the last event (another process recorded
+  the same outage and its end first) is dropped: the events of a component stay
+  in the order they were seen, and a late replay opens no second outage.
 * :meth:`HealthStore.roll_up`: moves the rows older than a tier's age into the
   next resolution (``DELETE ... RETURNING`` feeding ``INSERT ... ON CONFLICT DO
   UPDATE`` in one statement: a row is moved once and counted once, even when
@@ -156,16 +159,16 @@ SELECT count(*) FROM gone
 _RECORD_CHANGE = """
 INSERT INTO health_events
     (occurred_at, component, severity, previous_severity, status, reasons)
-SELECT COALESCE(CAST(:occurred_at AS timestamptz), now()),
-       :component, :severity, last.severity, :status, :reasons
-FROM (SELECT 1) AS one
+SELECT change.at, :component, :severity, last.severity, :status, :reasons
+FROM (SELECT COALESCE(CAST(:occurred_at AS timestamptz), now()) AS at) AS change
 LEFT JOIN LATERAL (
-    SELECT severity FROM health_events
+    SELECT severity, occurred_at FROM health_events
     WHERE component = :component
     ORDER BY id DESC
     LIMIT 1
 ) AS last ON true
 WHERE last.severity IS DISTINCT FROM :severity
+  AND (last.occurred_at IS NULL OR change.at >= last.occurred_at)
 RETURNING id
 """
 
@@ -228,7 +231,8 @@ class HealthStore:
         occurred_at: datetime | None = None,
     ) -> int:
         """An event for each component whose severity is not the one of its last
-        event (or that has none); return how many were recorded. ``occurred_at``
+        event (or that has none) and that is not older than that event; return
+        how many were recorded. ``occurred_at``
         is when the report was taken (a report recorded late, after PostgreSQL
         came back); ``None`` is the database's ``now()``."""
         if not components:

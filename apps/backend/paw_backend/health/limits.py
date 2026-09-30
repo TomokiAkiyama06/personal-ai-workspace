@@ -19,8 +19,8 @@ JOB_STATUS_MAX_AGE_SECONDS = 300.0
 # PostgreSQL: the readiness check itself taking longer than this is a warning.
 DATABASE_SLOW_MS = 1_000
 
-# Tasks that failed in the last hour: one is a warning (a single failure), this
-# many an error (a continuing failure).
+# Task failures (``fail`` events, a retried task counting each) in the last hour:
+# one is a warning (a single failure), this many an error (a continuing failure).
 TASK_FAILURES_ERROR = 5
 # Tasks in a detected loop (repeated failures) in the last hour: one is a
 # warning, this many an error. A retry is always a warning.

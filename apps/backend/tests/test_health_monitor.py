@@ -13,8 +13,9 @@ import unittest
 from paw_backend.health import limits
 from paw_backend.health.domain import Component, ComponentHealth, Severity, Status
 from paw_backend.health.monitor import HealthMonitor
+from paw_backend.health.sources import DatabaseSource
 
-from .support import wait_until
+from .support import FakeDatabase, wait_until
 
 
 class CountingSource:
@@ -111,6 +112,29 @@ class ReportTest(unittest.IsolatedAsyncioTestCase):
         self.assertIs(by[Component.TASK_QUEUE].severity, Severity.WARNING)
         self.assertIs(by[Component.DATABASE].status, Status.OK)
         self.assertNotIn("password", "\n".join(logs.output))
+
+    async def test_a_database_check_that_times_out_is_critical(self):
+        # PAW_DATABASE_TIMEOUT_SECONDS may exceed the monitor's own timeout: a
+        # PostgreSQL that does not answer in time is down, not a check that failed.
+        class StalledDatabase(FakeDatabase):
+            @property
+            def configured(self) -> bool:
+                return True
+
+            async def check(self):
+                await asyncio.Event().wait()
+
+        monitor = HealthMonitor(
+            [DatabaseSource(StalledDatabase())], check_timeout_seconds=0.05
+        )
+        with self.assertLogs("paw_backend.health.monitor", "WARNING"):
+            report = await monitor.report()
+        (database,) = report.components
+        self.assertEqual(
+            (database.severity, database.status, database.reasons),
+            (Severity.CRITICAL, Status.UNAVAILABLE, ("database_unavailable",)),
+        )
+        self.assertEqual(database.metrics["up"], 0)
 
     def test_one_source_per_component(self):
         with self.assertRaises(ValueError):

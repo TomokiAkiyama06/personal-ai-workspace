@@ -243,14 +243,27 @@ class HealthPostgresTest(unittest.IsolatedAsyncioTestCase):
         )
         return task_id
 
+    def insert_event(self, task, command, from_state, to_state, age):
+        self.sql(
+            "INSERT INTO task_events (task_id, attempt, retry_count, command,"
+            " from_state, to_state, actor_kind, task_version, created_at)"
+            " VALUES (:t, 1, 1, :c, :f, :to, 'system', 2, now() - :age)",
+            t=task,
+            c=command,
+            f=from_state,
+            to=to_state,
+            age=age,
+        )
+
     async def test_task_counts(self):
         self.insert_task("queued")
         self.insert_task("running")
         self.insert_task("waiting", wait="resource")
-        self.insert_task("failed", age=timedelta(minutes=5))
-        self.insert_task("failed", age=timedelta(hours=5))
-        self.insert_task("failed", age=timedelta(days=5))
+        for age in (timedelta(minutes=5), timedelta(hours=5), timedelta(days=5)):
+            failed = self.insert_task("failed", age=age)
+            self.insert_event(failed, "fail", "running", "failed", age)
         self.insert_task("completed", age=timedelta(hours=1))
+        self.insert_task("completed", age=timedelta(days=2))
         result = await TaskQueueSource(self.database).check()
         metrics = result.metrics
         self.assertEqual(
@@ -262,6 +275,22 @@ class HealthPostgresTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(metrics["completed_last_day"], 1)
         self.assertIs(result.severity, Severity.WARNING)
+
+    async def test_failures_of_a_retried_task_are_each_counted(self):
+        # Five failures in the last hour, each retried: the task is running again,
+        # yet the failures reach the error threshold (Codex P1 on PR #170).
+        task = self.insert_task("running")
+        for minutes in range(5):
+            age = timedelta(minutes=10 + minutes)
+            self.insert_event(task, "fail", "running", "failed", age)
+            self.insert_event(task, "retry", "failed", "queued", age)
+        result = await TaskQueueSource(self.database).check()
+        self.assertEqual(
+            (result.metrics["failed_last_hour"], result.metrics["retries_last_hour"]),
+            (5, 5),
+        )
+        self.assertIs(result.severity, Severity.ERROR)
+        self.assertIn("task_failures", result.reasons)
 
     async def test_retries_and_loops(self):
         task = self.insert_task("running")
@@ -296,6 +325,36 @@ class HealthPostgresTest(unittest.IsolatedAsyncioTestCase):
         )
         (event,) = await self.store.events(since=seen, limit=5)
         self.assertEqual(event.occurred_at, seen)
+
+    async def test_a_change_older_than_the_last_event_is_not_recorded(self):
+        # Two processes saw the same outage; A recorded critical then info, B's
+        # older critical comes afterwards and must not open a second outage.
+        base = datetime(2026, 9, 30, 3, 0, tzinfo=UTC)
+        for severity, minute in ((Severity.CRITICAL, 1), (Severity.INFO, 3)):
+            await self.store.record_changes(
+                [health(Component.DATABASE, severity)],
+                occurred_at=base + timedelta(minutes=minute),
+            )
+        for severity, minute in ((Severity.CRITICAL, 2), (Severity.INFO, 4)):
+            recorded = await self.store.record_changes(
+                [health(Component.DATABASE, severity)],
+                occurred_at=base + timedelta(minutes=minute),
+            )
+            self.assertEqual(recorded, 0)
+        events = await self.store.events(since=base, limit=10)
+        self.assertEqual(
+            [(e.severity, e.occurred_at) for e in events],
+            [
+                ("info", base + timedelta(minutes=3)),
+                ("critical", base + timedelta(minutes=1)),
+            ],
+        )
+        # A change after the last event is still recorded.
+        later = base + timedelta(minutes=5)
+        recorded = await self.store.record_changes(
+            [health(Component.DATABASE, Severity.CRITICAL)], occurred_at=later
+        )
+        self.assertEqual(recorded, 1)
 
     async def test_connections(self):
         self.sql(
@@ -363,15 +422,37 @@ class HealthPostgresTest(unittest.IsolatedAsyncioTestCase):
         indexes = dict(
             self.sql(
                 "SELECT indexname, indexdef FROM pg_indexes WHERE indexname IN"
-                " ('ix_task_events_retry_created_at',"
-                " 'ix_loop_failure_signatures_created_at')"
+                " ('ix_task_events_retry_fail_created_at',"
+                " 'ix_loop_failure_signatures_created_at',"
+                " 'ix_tasks_active_state', 'ix_tasks_ended_updated_at')"
             )
         )
         self.assertIn(
-            "WHERE ((command)::text = 'retry'::text)",
-            indexes["ix_task_events_retry_created_at"],
+            "WHERE ((command)::text = ANY ((ARRAY['retry'::character varying,"
+            " 'fail'::character varying])::text[]))",
+            indexes["ix_task_events_retry_fail_created_at"],
         )
         self.assertIn("(created_at)", indexes["ix_loop_failure_signatures_created_at"])
+        self.assertIn("(state) WHERE", indexes["ix_tasks_active_state"])
+        self.assertIn("(updated_at) WHERE", indexes["ix_tasks_ended_updated_at"])
+
+    def test_the_task_counts_use_the_partial_indexes(self):
+        # The sample runs every 10-30 seconds: it must not read every task that
+        # ever ended, nor every task event (Codex P2 on PR #170).
+        from paw_backend.health.sources import _TASK_EVENTS, _TASKS
+
+        with self.engine.begin() as connection:
+            connection.execute(text("SET LOCAL enable_seqscan = off"))
+            plans = {
+                sql: "\n".join(
+                    row[0] for row in connection.execute(text(f"EXPLAIN {sql}"))
+                )
+                for sql in (_TASKS, _TASK_EVENTS)
+            }
+        # With sequential scans off, one is planned only when no index serves.
+        for plan in plans.values():
+            self.assertNotIn("Seq Scan", plan)
+        self.assertIn("ix_task_events_retry_fail_created_at", plans[_TASK_EVENTS])
 
     def test_the_in_flight_index_is_partial(self):
         ((definition,),) = self.sql(

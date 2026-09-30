@@ -15,9 +15,14 @@ Create Date: 2026-09-30
   abandoned calls (``orchestrator/connection_reaper.py``) and System Health look
   for the rows that are still ``in_flight`` (issue #52's note from PR #106): the
   index holds only those, so it stays small as the settled rows grow.
-* ``ix_task_events_retry_created_at`` (``task_events (created_at) WHERE command =
-  'retry'``) and ``ix_loop_failure_signatures_created_at``: System Health counts
-  the retries and the detected loops of the last hour (Codex P1 on PR #170).
+* ``ix_task_events_retry_fail_created_at`` (``task_events (created_at) WHERE
+  command IN ('retry', 'fail')``) and ``ix_loop_failure_signatures_created_at``:
+  System Health counts the failures, the retries and the detected loops of the
+  last hour / day (Codex P1 on PR #170).
+* ``ix_tasks_active_state`` (``tasks (state)`` of the active tasks) and
+  ``ix_tasks_ended_updated_at`` (``tasks (updated_at)`` of the completed and
+  cancelled ones): System Health counts the tasks by state every sample without
+  reading the tasks that ended long ago (Codex P2 on PR #170).
 
 Privileges of the application role (``PAW_APP_DATABASE_ROLE``): SELECT, INSERT,
 UPDATE and DELETE on ``health_metric_samples`` (the roll-up merges rows with
@@ -26,9 +31,9 @@ aggregates), SELECT, INSERT and DELETE on ``health_events`` (the purge after the
 retention period; an event is never updated). No privilege on ``connection_usage``
 changes.
 
-``CREATE INDEX`` blocks the writes of ``connection_usage``, ``task_events`` and
-``loop_failure_signatures`` while it runs (not ``CONCURRENTLY``: Alembic runs the
-revision in a transaction); each build reads its table once.
+``CREATE INDEX`` blocks the writes of ``connection_usage``, ``task_events``,
+``loop_failure_signatures`` and ``tasks`` while it runs (not ``CONCURRENTLY``:
+Alembic runs the revision in a transaction); each build reads its table once.
 """
 
 from collections.abc import Sequence
@@ -71,7 +76,11 @@ STATUSES = (
 )
 MAX_REASONS_CHARS = 500
 IN_FLIGHT_INDEX = "ix_connection_usage_in_flight_started_at"
-RETRY_INDEX = "ix_task_events_retry_created_at"
+TASK_EVENTS_INDEX = "ix_task_events_retry_fail_created_at"
+ACTIVE_TASKS_INDEX = "ix_tasks_active_state"
+ENDED_TASKS_INDEX = "ix_tasks_ended_updated_at"
+ACTIVE_STATES = ("queued", "running", "waiting", "paused", "evaluating")
+ENDED_STATES = ("completed", "cancelled")
 LOOP_INDEX = "ix_loop_failure_signatures_created_at"
 
 
@@ -178,17 +187,31 @@ def upgrade() -> None:
         postgresql_where=sa.text("status = 'in_flight'"),
     )
     op.create_index(
-        RETRY_INDEX,
+        TASK_EVENTS_INDEX,
         "task_events",
         ["created_at"],
-        postgresql_where=sa.text("command = 'retry'"),
+        postgresql_where=sa.text("command IN ('retry', 'fail')"),
     )
     op.create_index(LOOP_INDEX, "loop_failure_signatures", ["created_at"])
+    op.create_index(
+        ACTIVE_TASKS_INDEX,
+        "tasks",
+        ["state"],
+        postgresql_where=sa.text(f"state IN ({_listed(ACTIVE_STATES)})"),
+    )
+    op.create_index(
+        ENDED_TASKS_INDEX,
+        "tasks",
+        ["updated_at"],
+        postgresql_where=sa.text(f"state IN ({_listed(ENDED_STATES)})"),
+    )
 
 
 def downgrade() -> None:
+    op.drop_index(ENDED_TASKS_INDEX, table_name="tasks")
+    op.drop_index(ACTIVE_TASKS_INDEX, table_name="tasks")
     op.drop_index(LOOP_INDEX, table_name="loop_failure_signatures")
-    op.drop_index(RETRY_INDEX, table_name="task_events")
+    op.drop_index(TASK_EVENTS_INDEX, table_name="task_events")
     op.drop_index(IN_FLIGHT_INDEX, table_name="connection_usage")
     op.drop_table("health_events")
     op.drop_table("health_metric_samples")

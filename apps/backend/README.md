@@ -4193,7 +4193,7 @@ Component ごとに Source が 1 つあり、読むだけです。返すのは N
 | --- | --- |
 | `database` | `SELECT 1` と所要時間。応答しなければ `critical` |
 | `compute` | Compute Scheduler の `status()`（VRAM、Utilization、Lease と待ち、Relief、Model ごとの状態）と Full GPU Mode。Scheduler は `create_app(compute=..., full_gpu=...)` か `app.state.system_health.compute.attach(...)` で渡す（#165）。なければ `PAW_HEALTH_GPU_PROBE` の Probe、どちらもなければ `not_configured` |
-| `task_queue` | 全 User の Task の状態別の数、直近の失敗、直近 1 時間の Retry と Loop（同じ失敗の Signature の繰り返し） |
+| `task_queue` | 全 User の Task の状態別の数、直近 1 時間・1 日の失敗（`task_events` の `fail`。Retry された Task も失敗ごとに数える）、直近 1 時間の Retry と Loop（同じ失敗の Signature の繰り返し） |
 | `memory_worker` | Memory の Consolidation Queue の待ちと Dead letter |
 | `connections` | Codex / Claude の接続の状態・有効・最後の確認・実行中の呼び出し（Credential と Handle は読まない） |
 | `connection_reaper` | `AbandonedCallReaper.stats`（Cycle の数、片付けた行、連続の失敗、最後の Error の型） |
@@ -4205,7 +4205,7 @@ Check は並行に走り、1 つが 5 秒を超える・例外を出すと、そ
 
 DB があれば、Lifespan の Loop が `PAW_HEALTH_SAMPLE_INTERVAL_SECONDS` の Interval ごと（最初は起動の 1 Interval 後）に Report を作り、数値と各 Component の Severity の段階（0〜3）を `health_metric_samples` に入れます（DB の時計の枠に揃え、同じ枠には 1 回だけ）。20 Cycle ごとに、24 時間より古い生の行を 1 分、7 日より古い 1 分を 5 分、30 日より古い 5 分を 1 時間の集計（件数・合計・最小・最大）へ移し、`PAW_HEALTH_RETENTION_DAYS` より古い 1 時間の集計と Event を消します。移す行の削除と Merge は 1 文なので、Process が複数でも 1 つの Sample は 1 回だけ数えます。
 
-Component の Severity が前の Event と変わったときだけ `health_events` に 1 行を残します（集約しない。Advisory Lock の中で「最後の Event と違うときだけ」入れる）。PostgreSQL に書けなかった間の Report は Process の中に残し（最大 100）、書けるようになってから Report の時刻で順に記録します（PostgreSQL の停止も残る）。
+Component の Severity が前の Event と変わったときだけ `health_events` に 1 行を残します（集約しない。Advisory Lock の中で「最後の Event と違い、それより古くないときだけ」入れる。別の Process が同じ停止とその終わりを先に記録した後に届いた古い変化は捨て、2 度目の停止を作らない）。PostgreSQL に書けなかった間の Report は Process の中に残し（最大 100）、書けるようになってから Report の時刻で順に記録します（PostgreSQL の停止も残る）。
 
 ### Endpoint と権限
 
@@ -4220,13 +4220,13 @@ Component の Severity が前の Event と変わったときだけ `health_event
 
 ### Database と権限
 
-Migration `0066` が `health_metric_samples`（Application の Role に SELECT / INSERT / UPDATE / DELETE）と `health_events`（SELECT / INSERT / DELETE。更新はできない）を作り、`connection_usage (started_at) WHERE status = 'in_flight'` の部分 Index（#52 の Comment。Reaper と `connections` が使う）、`task_events (created_at) WHERE command = 'retry'` の部分 Index と `loop_failure_signatures (created_at)` の Index（`task_queue` の Retry と Loop）を加えます。Source が読むのは Application の Role が既に読める Table だけです。
+Migration `0066` が `health_metric_samples`（Application の Role に SELECT / INSERT / UPDATE / DELETE）と `health_events`（SELECT / INSERT / DELETE。更新はできない）を作り、`connection_usage (started_at) WHERE status = 'in_flight'` の部分 Index（#52 の Comment。Reaper と `connections` が使う）、`task_events (created_at) WHERE command IN ('retry', 'fail')` の部分 Index と `loop_failure_signatures (created_at)` の Index（`task_queue` の失敗・Retry・Loop）、`tasks (state)` の実行中の Task の部分 Index と `tasks (updated_at)` の完了・取消の Task の部分 Index（`task_queue` の状態別の数。終わって久しい Task を読まない）を加えます。Source が読むのは Application の Role が既に読める Table だけです。
 
 ### 制限と未確認の点
 
 - 通知（Notification Center、Rule）、SSE / WebSocket の Event、UI は後の Issue です。
 - OOM と Escalation の実行の数はまだありません（記録する場所がない）。
-- `task_queue` と `memory_worker` の Dead letter の数は Table を走査します（Index を足していない）。Task が非常に多くなったら Index を検討します。
+- `memory_worker` の Dead letter の数は Table を走査します（Index を足していない）。
 - 実 GPU と実際の Timer（Backup、Projection、Audit retention）を使った確認はしていません（Test は Fake と PostgreSQL）。
 
 ## Repository Registration / Per-user Checkout

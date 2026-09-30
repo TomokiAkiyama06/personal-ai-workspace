@@ -4,7 +4,9 @@
 its ``max_age_seconds`` (all of them at once, each within
 ``CHECK_TIMEOUT_SECONDS``) and returns the report. Concurrent callers share one
 refresh. A source that raises or times out is ``check_failed`` (``WARNING``),
-named by its component only: nothing the error says is kept or logged.
+named by its component only: nothing the error says is kept or logged. A source
+with an ``on_timeout()`` answers a timeout with it instead (the database:
+``CRITICAL`` / ``unavailable``, whatever ``PAW_DATABASE_TIMEOUT_SECONDS`` is).
 
 :meth:`HealthMonitor.run` is the sampling loop of the application (when
 a database is configured; ``PAW_HEALTH_SAMPLE_INTERVAL_SECONDS``, 10 to 30):
@@ -121,14 +123,18 @@ class HealthMonitor:
             async with asyncio.timeout(self._timeout):
                 return await source.check()
         except Exception as error:  # a broken check must not break the report
-            reason = (
-                "check_timeout" if isinstance(error, TimeoutError) else "check_error"
-            )
+            timed_out = isinstance(error, TimeoutError)
             logger.warning(
                 "Health check of %s failed (%s)",
                 source.component.value,
                 type(error).__name__,
             )
+            # A source whose silence is itself the finding (PostgreSQL not
+            # answering in time is down) says what a timeout means.
+            on_timeout = getattr(source, "on_timeout", None)
+            if timed_out and on_timeout is not None:
+                return on_timeout()
+            reason = "check_timeout" if timed_out else "check_error"
             return ComponentHealth(
                 source.component, Severity.WARNING, Status.CHECK_FAILED, (reason,)
             )

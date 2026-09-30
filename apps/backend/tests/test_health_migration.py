@@ -79,8 +79,18 @@ class OfflineMigrationTest(unittest.TestCase):
         self.assertIn(f'{samples} TO "paw_app"', sql)
         self.assertIn('GRANT DELETE, INSERT, SELECT ON health_events TO "paw_app"', sql)
         self.assertIn(
-            "CREATE INDEX ix_task_events_retry_created_at ON task_events (created_at)"
-            " WHERE command = 'retry'",
+            "CREATE INDEX ix_task_events_retry_fail_created_at ON task_events"
+            " (created_at) WHERE command IN ('retry', 'fail')",
+            sql,
+        )
+        self.assertIn(
+            "CREATE INDEX ix_tasks_active_state ON tasks (state) WHERE state IN"
+            " ('queued', 'running', 'waiting', 'paused', 'evaluating')",
+            sql,
+        )
+        self.assertIn(
+            "CREATE INDEX ix_tasks_ended_updated_at ON tasks (updated_at)"
+            " WHERE state IN ('completed', 'cancelled')",
             sql,
         )
         self.assertIn(
@@ -94,7 +104,9 @@ class OfflineMigrationTest(unittest.TestCase):
     def test_downgrade(self):
         sql = self.sql("downgrade", f"{REVISION}:{previous_revision()}")
         self.assertIn("DROP INDEX ix_connection_usage_in_flight_started_at", sql)
-        self.assertIn("DROP INDEX ix_task_events_retry_created_at", sql)
+        self.assertIn("DROP INDEX ix_task_events_retry_fail_created_at", sql)
+        self.assertIn("DROP INDEX ix_tasks_active_state", sql)
+        self.assertIn("DROP INDEX ix_tasks_ended_updated_at", sql)
         self.assertIn("DROP INDEX ix_loop_failure_signatures_created_at", sql)
         self.assertIn("DROP TABLE health_events", sql)
         self.assertIn("DROP TABLE health_metric_samples", sql)

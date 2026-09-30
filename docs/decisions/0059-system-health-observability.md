@@ -2,7 +2,7 @@
 
 - Status: Proposed
 - Date: 2026-09-30
-- Scope: PAW-066（[#52](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/52)）の `apps/backend/paw_backend/health/`（Source、Monitor、Store）、`/api/v1/system/health*`、Capability `system_health.summary.read` と `admin.system_health.view`、Migration `0066`（`health_metric_samples`、`health_events`、`connection_usage` の部分 Index、`task_events` の Retry と `loop_failure_signatures` の時刻の Index）、`AbandonedCallReaper.stats`
+- Scope: PAW-066（[#52](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/52)）の `apps/backend/paw_backend/health/`（Source、Monitor、Store）、`/api/v1/system/health*`、Capability `system_health.summary.read` と `admin.system_health.view`、Migration `0066`（`health_metric_samples`、`health_events`、`connection_usage` の部分 Index、`task_events` の失敗・Retry と `loop_failure_signatures` の時刻の Index、`tasks` の実行中・終了した Task の部分 Index）、`AbandonedCallReaper.stats`
 - Supersedes: なし。[Decision 0004](0004-rbac-capability-and-audit-policy.md)（Approved）の Capability 表と読み取り専用の許可リストに 2 つを加える（書き換えない）
 - Approval: なし（未承認）
 
@@ -30,7 +30,7 @@
 | --- | --- |
 | `database` | `Database.check()`（`SELECT 1`）と所要時間 |
 | `compute` | Compute Scheduler の `status()`（VRAM の actual / reserved / external / headroom / available、Utilization、Lease と待ちの数、Relief、各 Model の Role・状態＝Residency）と Full GPU Mode の `status()`。Scheduler がなければ、`PAW_HEALTH_GPU_PROBE` を有効にしたときだけ読み取り専用の Probe、どちらもなければ `not_configured` |
-| `task_queue` | 全 User の Task の数（状態別、`waiting` は理由別、直近 1 時間・1 日の `failed`、1 日の `completed` / `cancelled`）、直近 1 時間の Retry（`task_events` の `retry`）と Loop（`loop_failure_signatures` で同じ Attempt・Approach の同じ Signature が Loop Policy の `repeat_threshold` 回以上＝検知器の TRY_ALTERNATIVE / ESCALATE の条件）。ID・題名・Project は返さない |
+| `task_queue` | 全 User の Task の数（状態別、`waiting` は理由別、1 日の `completed` / `cancelled`）、直近 1 時間・1 日の失敗（`task_events` の `fail`。Retry された Task は失敗ごとに数える。Codex の P1、PR #170）、直近 1 時間の Retry（`task_events` の `retry`）と Loop（`loop_failure_signatures` で同じ Attempt・Approach の同じ Signature が Loop Policy の `repeat_threshold` 回以上＝検知器の TRY_ALTERNATIVE / ESCALATE の条件）。ID・題名・Project は返さない |
 | `memory_worker` | Memory の Consolidation Queue（待ち・Lease 中・最古の待ち時間・直近 1 日の Dead letter）。Memory Worker の Model 自体は `compute` |
 | `connections` | Shared Codex / Claude Connection の設定の有無・有効・状態・最後の確認からの時間・実行中の呼び出し。Credential と Handle は読まない |
 | `connection_reaper` | `AbandonedCallReaper` の各 Cycle（片付けた件数、連続の失敗、最後の Error の型）。#52 の Comment（PR #106）への対応 |
@@ -41,14 +41,14 @@
 
 ### 2. Severity の閾値（`apps/backend/paw_backend/health/limits.py`）
 
-- `database`: 応答しない＝`CRITICAL`、Check が 1 秒を超える＝`WARNING`。
+- `database`: 応答しない＝`CRITICAL`（Monitor の 5 秒で終わらない Check も含む。`PAW_DATABASE_TIMEOUT_SECONDS` がそれより長くても `check_failed` にしない。Codex の P1、PR #170）、Check が 1 秒を超える＝`WARNING`。
 - `compute`: Probe が読めない・Main の構成変更が必要（Relief 6）・Model の操作が失敗（`failed`）・通常 Mode で Main が GPU にいない・Full GPU Mode の終了後に Main が戻らない＝`ERROR`。VRAM の圧迫・Relief の実行中・VRAM 待ちの仕事・Full GPU Mode の開始失敗＝`WARNING`。
 - `task_queue`: 直近 1 時間の失敗 1 件＝`WARNING`、5 件以上＝`ERROR`。Loop 1 件＝`WARNING`、3 件以上＝`ERROR`。Retry 1 件以上＝`WARNING`（Notification Policy の「retry」）。
 - `memory_worker`: 直近 1 日の Dead letter 1 件以上＝`WARNING`。
 - `connections`: 有効な接続が `expired`＝`ERROR`、`unavailable`＝`WARNING`。無効・未設定は `INFO`（どちらも使わない構成がある）。
 - `connection_reaper`: Cycle の失敗 1〜2 回連続＝`WARNING`、3 回連続＝`ERROR`。1 行でも片付けた＝`WARNING`（Process が呼び出しの途中で落ちた印）。
 - Job: 一度も動いていない＝`INFO`（`never_ran`。その構成で動かしていないことがある）。最後の Run の失敗＝`WARNING`、3 回連続＝`ERROR`（Notification Policy の「継続失敗」）。最後の成功が古い（Backup 2 時間／24 時間、Projection 1 時間／24 時間、Audit retention 2 日／7 日。`WARNING`／`ERROR`）。数値は `deploy/systemd` の Timer（30 分、5 分、毎日）から決めた暫定値。
-- Check 自体が失敗・5 秒で終わらない＝`WARNING`（`check_failed`）。全体の Severity は Component の最悪値。
+- Check 自体が失敗・5 秒で終わらない＝`WARNING`（`check_failed`。`database` を除く）。全体の Severity は Component の最悪値。
 
 ### 3. 誰が何を読めるか（新しい Capability 2 つ）
 
@@ -67,7 +67,7 @@
 
 ### 5. 重要 Event（`health_events`）
 
-- Component の Severity が前の Event と変わったときだけ 1 行を記録する（前後の Severity、Status、理由の Code。数値は持たない）。時系列とは別の Table で、集約しない。2 つの Process が同じ変化を二重に記録しないよう、Transaction の Advisory Lock の中で「最後の Event と違うときだけ」入れる。
+- Component の Severity が前の Event と変わったときだけ 1 行を記録する（前後の Severity、Status、理由の Code。数値は持たない）。時系列とは別の Table で、集約しない。2 つの Process が同じ変化を二重に記録しないよう、Transaction の Advisory Lock の中で「最後の Event と違い、それより古くないときだけ」入れる（複数の Process が同じ停止を後から書くとき、古い変化が 2 度目の停止を作らない。Codex の P1、PR #170）。
 - PostgreSQL に書けなかった間の Report は Process の中に残し（Severity が変わったものだけ、最大 100）、書けるようになった最初の Cycle で順に、Report を作った時刻で記録する。PostgreSQL 自体の停止（`critical`）も、復旧の後に Event として残る（Codex の P1、PR #170）。Process が再起動すると、残していた分は失われる。
 - 保存期間は 4 と同じ `PAW_HEALTH_RETENTION_DAYS`（1 年以上）。
 - 要件の他の重要 Event（Task の開始・失敗、Permission denial、Security の操作、Recovery の Push 失敗）は、それぞれ既に `task_events`・`audit_events` に残っている。ここでは複製しない。
@@ -79,11 +79,12 @@
 ### 7. Index（#52 の Comment と、Source の読み取り）
 
 - `connection_usage (started_at) WHERE status = 'in_flight'` の部分 Index を Migration `0066` で加える。実行中の行だけを持つので小さく、Reaper と `connections` の Source がこれで引く。
-- 直近の Retry と Loop を数えるため、`task_events (created_at) WHERE command = 'retry'` の部分 Index と `loop_failure_signatures (created_at)` の Index も加える。
+- 直近の失敗・Retry・Loop を数えるため、`task_events (created_at) WHERE command IN ('retry', 'fail')` の部分 Index と `loop_failure_signatures (created_at)` の Index も加える。
+- Task の状態別の数は 10〜30 秒ごとに読むので、`tasks (state)` の実行中の Task（`queued` / `running` / `waiting` / `paused` / `evaluating`）の部分 Index と、`tasks (updated_at)` の完了・取消の Task の部分 Index を加え、終わって久しい Task を読まない（Codex の P2、PR #170）。
 
 ### 8. Migration の Revision 番号
 
-- この Lane に割り当てられた `0052` は、既に `0052_research_provenance.py` が使っている（Alembic の Revision が重複すると History が壊れる）。そこで Issue の PAW 番号から `0066` とした（`down_revision = 0147`）。Merge の時に振り直してよい。
+- この Lane に割り当てられた `0052` は、既に `0052_research_provenance.py` が使っている（Alembic の Revision が重複すると History が壊れる）。そこで Issue の PAW 番号から `0066` とした（`down_revision = 0154`）。Merge の時に振り直してよい。
 
 ## 決めてほしいこと
 

@@ -10,8 +10,8 @@ The thresholds are ``limits.py`` (Decision 0059, Proposed).
   :class:`FullGpuStatusProvider` protocols; without a scheduler, optionally the
   read-only GPU probe (``nvidia-smi --query-*``) alone; else ``not_configured``.
   It never loads or unloads a model and never starts anything but the probe.
-* :class:`TaskQueueSource`: tasks by state, failures of the last hour / day,
-  retries and detected loops of the last hour.
+* :class:`TaskQueueSource`: tasks by state, failures (events) of the last
+  hour / day, retries and detected loops of the last hour.
 * :class:`MemoryWorkerSource`: the Memory consolidation queue.
 * :class:`ConnectionSource`: the shared Codex / Claude connections (status,
   enabled, last check, calls in flight). Never the credential or its handle.
@@ -102,13 +102,7 @@ class DatabaseSource:
         status = await self._database.check()
         latency = round((time.monotonic() - started) * 1000, 1)
         if status is not DatabaseStatus.OK:
-            return _health(
-                self.component,
-                Severity.CRITICAL,
-                Status.UNAVAILABLE,
-                ["database_unavailable"],
-                {"up": 0, "latency_ms": latency},
-            )
+            return self._unavailable({"up": 0, "latency_ms": latency})
         slow = latency > limits.DATABASE_SLOW_MS
         return _health(
             self.component,
@@ -116,6 +110,21 @@ class DatabaseSource:
             Status.DEGRADED if slow else Status.OK,
             ["database_slow"] if slow else [],
             {"up": 1, "latency_ms": latency},
+        )
+
+    def on_timeout(self) -> ComponentHealth:
+        """The monitor's answer when the check outlives its timeout: the probe's
+        own deadline (``PAW_DATABASE_TIMEOUT_SECONDS``) may be longer, and a
+        PostgreSQL that does not answer in time is down, not a check that failed."""
+        return self._unavailable({"up": 0})
+
+    def _unavailable(self, metrics: dict[str, MetricValue]) -> ComponentHealth:
+        return _health(
+            self.component,
+            Severity.CRITICAL,
+            Status.UNAVAILABLE,
+            ["database_unavailable"],
+            metrics,
         )
 
 
@@ -342,6 +351,10 @@ class ComputeSource:
 
 # -- tasks and the Memory Worker -----------------------------------------------------
 
+# The tasks by state: the active ones through the partial index
+# ``ix_tasks_active_state``, the ones that ended in the last day through
+# ``ix_tasks_ended_updated_at`` (revision ``0066``): the cost does not grow with
+# the tasks that ended long ago.
 _TASKS = """
 SELECT
     count(*) FILTER (WHERE state = 'queued'),
@@ -352,17 +365,12 @@ SELECT
     count(*) FILTER (WHERE state = 'waiting' AND wait_reason = 'user'),
     count(*) FILTER (WHERE state = 'paused'),
     count(*) FILTER (WHERE state = 'evaluating'),
-    count(*) FILTER (WHERE state = 'failed'
-                     AND updated_at >= now() - interval '1 hour'),
-    count(*) FILTER (WHERE state = 'failed'
-                     AND updated_at >= now() - interval '24 hours'),
-    count(*) FILTER (WHERE state = 'completed'
-                     AND updated_at >= now() - interval '24 hours'),
-    count(*) FILTER (WHERE state = 'cancelled'
-                     AND updated_at >= now() - interval '24 hours')
+    count(*) FILTER (WHERE state = 'completed'),
+    count(*) FILTER (WHERE state = 'cancelled')
 FROM tasks
 WHERE state IN ('queued', 'running', 'waiting', 'paused', 'evaluating')
-   OR updated_at >= now() - interval '24 hours'
+   OR (state IN ('completed', 'cancelled')
+       AND updated_at >= now() - interval '24 hours')
 """
 _TASK_COLUMNS = (
     "queued",
@@ -373,18 +381,25 @@ _TASK_COLUMNS = (
     "waiting_user",
     "paused",
     "evaluating",
-    "failed_last_hour",
-    "failed_last_day",
     "completed_last_day",
     "cancelled_last_day",
 )
 
 
-# Retries (the ``retry`` command) of the last hour: the partial index
-# ``ix_task_events_retry_created_at`` (revision ``0066``) holds only those rows.
-_RETRIES = """
-SELECT count(*) FROM task_events
-WHERE command = 'retry' AND created_at >= now() - interval '1 hour'
+# Failures (the ``fail`` command, the only way into ``failed``) of the last hour
+# and day, and retries of the last hour, as events: a task that fails, is retried
+# and fails again counts each failure, whatever its state now (Codex P1 on PR
+# #170). The partial index ``ix_task_events_retry_fail_created_at`` (revision
+# ``0066``) holds only those rows.
+_TASK_EVENTS = """
+SELECT
+    count(*) FILTER (WHERE command = 'fail'
+                     AND created_at >= now() - interval '1 hour'),
+    count(*) FILTER (WHERE command = 'fail'),
+    count(*) FILTER (WHERE command = 'retry'
+                     AND created_at >= now() - interval '1 hour')
+FROM task_events
+WHERE command IN ('retry', 'fail') AND created_at >= now() - interval '24 hours'
 """
 # Loops of the last hour (PAW-033): a task attempt and approach whose same failure
 # signature was recorded at least the loop policy's ``repeat_threshold`` times,
@@ -423,8 +438,8 @@ class TaskQueueSource:
     async def check(self) -> ComponentHealth:
         timeout = limits.CHECK_TIMEOUT_SECONDS
         (row,) = await self._database.fetch_abortable(_TASKS, timeout_seconds=timeout)
-        ((retries,),) = await self._database.fetch_abortable(
-            _RETRIES, timeout_seconds=timeout
+        ((failed, failed_day, retries),) = await self._database.fetch_abortable(
+            _TASK_EVENTS, timeout_seconds=timeout
         )
         ((loops,),) = await self._database.fetch_abortable(
             _LOOPS, {"threshold": self._loop_threshold}, timeout_seconds=timeout
@@ -432,13 +447,14 @@ class TaskQueueSource:
         metrics = {
             name: int(value) for name, value in zip(_TASK_COLUMNS, row, strict=True)
         }
+        metrics["failed_last_hour"] = int(failed)
+        metrics["failed_last_day"] = int(failed_day)
         metrics["retries_last_hour"] = int(retries)
         metrics["loops_last_hour"] = int(loops)
-        failed = metrics["failed_last_hour"]
         reasons = []
         severities = [Severity.INFO]
         for count, reason, error_at in (
-            (failed, "task_failures", limits.TASK_FAILURES_ERROR),
+            (int(failed), "task_failures", limits.TASK_FAILURES_ERROR),
             (int(loops), "loops_detected", limits.TASK_LOOPS_ERROR),
             (int(retries), "task_retries", None),
         ):
