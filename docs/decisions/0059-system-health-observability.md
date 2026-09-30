@@ -1,10 +1,10 @@
 # System Health / Observability Backend の方針（見る対象と閾値、誰が何を読めるか、時系列の保存と Downsampling、重要 Event、通知との関係）
 
-- Status: Proposed
+- Status: Approved
 - Date: 2026-09-30
 - Scope: PAW-066（[#52](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/52)）の `apps/backend/paw_backend/health/`（Source、Monitor、Store）、`/api/v1/system/health*`、Capability `system_health.summary.read` と `admin.system_health.view`、Migration `0066`（`health_metric_samples`、`health_events`、`connection_usage` の部分 Index、`task_events` の失敗・Retry と `loop_failure_signatures` の時刻の Index、`tasks` の実行中・終了した Task の部分 Index）、`AbandonedCallReaper.stats`
 - Supersedes: なし。[Decision 0004](0004-rbac-capability-and-audit-policy.md)（Approved）の Capability 表と読み取り専用の許可リストに 2 つを加える（書き換えない）
-- Approval: なし（未承認）
+- Approval: 2026-09-30、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで直接回答して承認（判断が必要な点 1〜8 の全点。末尾の「承認時の決定」）
 
 ## 背景
 
@@ -102,3 +102,7 @@
 承認されたら `Approval` に記録し、Status を Approved に改める。数値は `apps/backend/paw_backend/health/limits.py` と `PAW_HEALTH_*` の設定で変えられる。
 方針を変えるときは、この Decision を書き換えず、新しい Decision から `Supersedes` する。
 [REQUIREMENTS.md](../../REQUIREMENTS.md) の原文は書き換えない。
+
+## 承認時の決定（2026-09-30）
+
+Human は、作業 Session で判断が必要な点について推奨つきの説明を受け、直接回答して承認した（判断が必要な点 1〜8 の全点）。1 により、Agent の OOM と Escalation の数は後続の #183 で扱う（Codex の OOM の P1 はこれで解決）。また、Loop の数は Task の今の Attempt に限らず、直前 1 時間に検出された Loop をすべて数える（Codex の P1 に対して Human が直接選んだ）。
