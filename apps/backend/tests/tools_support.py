@@ -21,6 +21,7 @@ from paw_backend.tasks import (
     RepositoryRoleInsufficientError,
     RepositoryRoleUnresolvedError,
 )
+from paw_backend.tasks.queueing import QueueLease
 from paw_backend.tasks.working_set import marks_changed, role_allows
 from paw_backend.tools import (
     ApprovalLevel,
@@ -30,6 +31,7 @@ from paw_backend.tools import (
     BudgetStatus,
     Environment,
     InMemoryApprovalStore,
+    LeaseStatus,
     LexicalPathResolver,
     ScopedRepository,
     TaskActivity,
@@ -58,6 +60,9 @@ OTHER_HANDLE = "cred_" + "b2" * 16
 TASK = uid(501)
 # The run of a task that was just created (attempt 1, never retried).
 RUN = TaskRun(1, 0)
+# The queue lease of the worker that runs it (entry 1, first claim): the fencing
+# token every call carries (issue #126).
+LEASE = QueueLease(1, "w1", 1)
 NOW = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
 
 C = ToolCapability
@@ -238,6 +243,7 @@ def make_context(**overrides) -> TaskContext:
         "primary_project_id": P1,
         # a task that was just created: attempt 1, never retried
         "run": RUN,
+        "lease": LEASE,
     }
     arguments.update(overrides)
     return TaskContext(**arguments)
@@ -271,6 +277,7 @@ class FakeBudget:
         self.error = error
         self.checks: list[tuple[uuid.UUID, str]] = []
         self.charges: list[tuple[uuid.UUID, str]] = []
+        self.charged_runs: list[TaskRun] = []  # the run each charge was for
 
     async def check(self, task_id, tool):
         self.checks.append((task_id, tool))
@@ -278,8 +285,9 @@ class FakeBudget:
             raise self.error
         return self.status
 
-    async def charge(self, task_id, tool):
+    async def charge(self, task_id, run, tool):
         self.charges.append((task_id, tool))
+        self.charged_runs.append(run)
         if self.error is not None:
             raise self.error
 
@@ -296,6 +304,22 @@ class FakeTaskActivity:
     async def check(self, task_id, run):
         self.checks.append(task_id)
         self.runs.append(run)
+        if self.error is not None:
+            raise self.error
+        return self.answer
+
+
+class FakeLease:
+    """Answers what the test says about the worker's lease; records every
+    question (the task and the lease it was about)."""
+
+    def __init__(self, answer=LeaseStatus.HELD, *, error=None) -> None:
+        self.answer = answer
+        self.error = error
+        self.checks: list[tuple[uuid.UUID, QueueLease]] = []
+
+    async def check(self, task_id, lease):
+        self.checks.append((task_id, lease))
         if self.error is not None:
             raise self.error
         return self.answer
@@ -425,6 +449,8 @@ class Harness:
         self.budget = overrides.pop("budget", FakeBudget())
         # The default task is alive; a test moves it with ``task_activity.answer``.
         self.task_activity = overrides.pop("task_activity", FakeTaskActivity())
+        # The default worker holds its lease; a test moves it with ``lease.answer``.
+        self.lease = overrides.pop("lease", FakeLease())
         self.directory = overrides.pop(
             "directory",
             StaticDirectory(
@@ -450,6 +476,7 @@ class Harness:
             self.broker_sink,
             budget=self.budget,
             task_activity=self.task_activity,
+            lease=self.lease,
             path_resolver=overrides.pop("path_resolver", LexicalPathResolver()),
             registrations=self.registrations,
             use_gate=self.use_gate,
@@ -474,6 +501,7 @@ class Harness:
 __all__ = [
     "ALL_PROJECTS",
     "HANDLE",
+    "LEASE",
     "OTHER_HANDLE",
     "P1",
     "P2",
@@ -484,6 +512,7 @@ __all__ = [
     "U1",
     "U2",
     "AGENT",
+    "FakeLease",
     "FakeTaskActivity",
     "Harness",
     "make_call",

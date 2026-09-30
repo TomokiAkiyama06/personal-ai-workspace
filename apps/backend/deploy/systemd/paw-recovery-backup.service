@@ -1,0 +1,67 @@
+# Recovery Repository backup of the Personal AI Workspace (PAW-047,
+# Decision 0054 Proposed). Started every 30 minutes by paw-recovery-backup.timer;
+# run it by hand for a manual backup.
+#
+# It copies the Memory Markdown Projection (PAW_MEMORY_PROJECTION_DIR) and writes
+# the machine-readable recovery files (users without credentials, projects and
+# members, repositories, memory versions / relations / sources, policies, task
+# summaries) into PAW_RECOVERY_REPOSITORY_DIR, a clone of the dedicated PRIVATE
+# repository; it commits what changed (one commit per run, none without a
+# change) and pushes fast-forward to the branch's upstream. It never
+# force-pushes. That checkout holds every user's private memory: directories
+# 0700, files 0600, owned by the User below.
+#
+# User: the OS user the backend runs as (here paw). The job reads with the
+# backend's own database credential (PAW_DATABASE_URL: SELECT, and INSERT on
+# audit_events) and pushes with that user's deploy key for the private
+# repository (for example /var/lib/paw/.ssh, outside /home: ProtectHome=true
+# hides /home). Never a person's own account or key.
+#
+# Install (as root), adjusting the paths and the User to your deployment:
+#   install -d -o paw -g paw -m 0700 /srv/personal-ai/recovery
+#   sudo -u paw git clone <private repository> /srv/personal-ai/recovery
+#   (in an empty clone: git -C /srv/personal-ai/recovery symbolic-ref HEAD
+#    refs/heads/main; git config branch.main.remote origin;
+#    git config branch.main.merge refs/heads/main)
+#   cp paw-recovery-backup.service paw-recovery-backup.timer \
+#      paw-recovery-backup-failure.service /etc/systemd/system/
+#   systemctl daemon-reload
+#   systemctl enable --now paw-recovery-backup.timer
+#
+# /etc/paw/recovery-backup.env sets PAW_DATABASE_URL,
+# PAW_MEMORY_PROJECTION_DIR=/srv/personal-ai/memory and
+# PAW_RECOVERY_REPOSITORY_DIR=/srv/personal-ai/recovery, owned by root, mode
+# 0640, group paw (never world-readable). Never put the URL on the ExecStart
+# line or in Environment=.
+
+[Unit]
+Description=Personal AI Workspace Recovery Repository backup
+Wants=network-online.target
+After=network-online.target postgresql.service
+# A non-zero exit (a refused checkout, a projection that did not complete, a
+# failed read, write, commit or push, an unrecordable outcome, an unreachable
+# database, a concurrent run) starts the failure unit.
+OnFailure=paw-recovery-backup-failure.service
+
+[Service]
+Type=oneshot
+User=paw
+EnvironmentFile=/etc/paw/recovery-backup.env
+WorkingDirectory=/opt/paw/apps/backend
+ExecStart=/opt/paw/venv/bin/python -m paw_backend.cli recovery-backup-run
+UMask=0077
+# systemd sends SIGTERM when this is exceeded: the command waits for the running
+# file or git step, records recovery.backup.failed and exits 3 (OnFailure=
+# fires); TimeoutStopSec leaves it time to do so before SIGKILL. A git command
+# is bounded by PAW_RECOVERY_GIT_TIMEOUT_SECONDS (default 300).
+TimeoutStartSec=20min
+KillSignal=SIGTERM
+TimeoutStopSec=6min
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+# The projection is read under its lock (a lock is a write to the file table,
+# not to the directory): only the checkout is writable.
+ReadWritePaths=/srv/personal-ai/recovery
+ReadOnlyPaths=/srv/personal-ai/memory

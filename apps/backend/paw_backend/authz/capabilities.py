@@ -70,6 +70,10 @@ class Capability(StrEnum):
     # never does. ``account.read`` also covers the read-only view of the sessions.
     ACCOUNT_READ = "account.read"
     ACCOUNT_MANAGE = "account.manage"
+    # The compact System Health state for the Global Header: the overall severity
+    # and whether Codex / Claude are available (PAW-066, Decision 0059
+    # Proposed). Any human role; read-only; never an Agent's.
+    SYSTEM_HEALTH_SUMMARY_READ = "system_health.summary.read"
     # Admin (and Owner): "Admin-only" in docs/SECURITY_RBAC_AUDIT.md.
     ADMIN_USERS_MANAGE = "admin.users.manage"
     ADMIN_USAGE_VIEW = "admin.usage.view"
@@ -84,6 +88,14 @@ class Capability(StrEnum):
     # The workspace authentication policy (Passkey requirement per role, Step-up
     # window; Decision 0015): an Admin may look at it, only the Owner changes it.
     ADMIN_AUTH_POLICY_VIEW = "admin.auth_policy.view"
+    # Start and end Kaggle / Full GPU Mode (issue #33, Decision 0055):
+    # every local GPU task of every user is held while an exclusive job has the
+    # GPU. Owner / Admin, never an Agent.
+    ADMIN_COMPUTE_FULL_GPU = "admin.compute.full_gpu"
+    # The System Health detail: every component, its metrics, the time series and
+    # the health events (PAW-066, Decision 0059 Proposed). Owner / Admin;
+    # read-only; never an Agent's.
+    ADMIN_SYSTEM_HEALTH_VIEW = "admin.system_health.view"
     # Owner only.
     OWNER_ADMINS_MANAGE = "owner.admins.manage"
     OWNER_OWNERSHIP_TRANSFER = "owner.ownership.transfer"
@@ -111,6 +123,11 @@ class Capability(StrEnum):
     # repository itself is decided separately, with the permission of the change
     # (``tasks.working_set.required_permission``), and both must allow.
     PROJECT_TASK_WORKING_SET_MANAGE = "project.task.working_set.manage"
+    # Release, by hand, the repository write reservation a crashed process left
+    # on a task of the project (issue #129, Decision 0049): project
+    # Manager, and Owner / Admin. Not delegable; a Passkey Step-up besides
+    # (``projects.task_write_release``).
+    PROJECT_TASK_WRITE_RESERVATION_RELEASE = "project.task.write_reservation.release"
 
 
 class RepoPermission(StrEnum):
@@ -183,6 +200,11 @@ CAPABILITIES: MappingProxyType[Capability, CapabilityInfo] = MappingProxyType(
         # change credentials and sessions). Reading is on the read-only allowlist.
         C.ACCOUNT_READ: _info(Scope.SYSTEM, delegable=False, read_only=True),
         C.ACCOUNT_MANAGE: _info(Scope.SYSTEM, delegable=False),
+        # Operational data, no user content: on the read-only allowlist
+        # (Decision 0059). Not delegable: no agent needs to watch the system.
+        C.SYSTEM_HEALTH_SUMMARY_READ: _info(
+            Scope.SYSTEM, delegable=False, read_only=True
+        ),
         C.SHARED_MEMORY_READ: _info(Scope.SYSTEM, delegable=True, read_only=True),
         C.SHARED_MEMORY_MANAGE: _info(Scope.SYSTEM, delegable=False),
         C.SHARED_MEMORY_CREATE: _info(Scope.SYSTEM, delegable=False),
@@ -202,6 +224,10 @@ CAPABILITIES: MappingProxyType[Capability, CapabilityInfo] = MappingProxyType(
         C.ADMIN_CONFIG_MANAGE: _info(Scope.SYSTEM, delegable=False),
         C.ADMIN_PROJECTS_MANAGE: _info(Scope.SYSTEM, delegable=False),
         C.ADMIN_AUTH_POLICY_VIEW: _info(Scope.SYSTEM, delegable=False),
+        C.ADMIN_COMPUTE_FULL_GPU: _info(Scope.SYSTEM, delegable=False),
+        C.ADMIN_SYSTEM_HEALTH_VIEW: _info(
+            Scope.SYSTEM, delegable=False, read_only=True
+        ),
         C.OWNER_ADMINS_MANAGE: _info(Scope.SYSTEM, delegable=False),
         C.OWNER_OWNERSHIP_TRANSFER: _info(Scope.SYSTEM, delegable=False),
         C.OWNER_RECOVERY_MANAGE: _info(Scope.SYSTEM, delegable=False),
@@ -230,6 +256,10 @@ CAPABILITIES: MappingProxyType[Capability, CapabilityInfo] = MappingProxyType(
         # .write``, AND), and every change but adding a ``referenced`` repository
         # needs STRONG_APPROVAL (a human, with Step-up).
         C.PROJECT_TASK_WORKING_SET_MANAGE: _info(Scope.PROJECT, delegable=True),
+        # Not delegable (Decision 0049): it lifts a guard that exists
+        # because an agent's executor may still be writing; a person decides,
+        # after checking that the executor is gone.
+        C.PROJECT_TASK_WRITE_RESERVATION_RELEASE: _info(Scope.PROJECT, delegable=False),
     }
 )
 del C

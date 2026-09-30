@@ -247,6 +247,9 @@ class HybridRuntime:
             deployment=self._deployment,
             context_tokens=min(tokens, _MAX_ESTIMATE),
             allow_cloud=allow_cloud,
+            # Full GPU Mode holds the task whose node uses or waits for the GPU
+            # (PAW-037).
+            task_id=assignment.task_id,
         )
         try:
             lease = await self._scheduler.acquire(
@@ -671,7 +674,9 @@ class TrackerLateGpuCharge:
     call that already ran): it records GPU time that was used, by a local call
     that did not stop when its node was cancelled and held its lease until it
     ended. Hiding it would let such calls use the GPU beyond the task's
-    ``GPU_SECONDS`` unseen."""
+    ``GPU_SECONDS`` unseen. Nor is it fenced by the queue lease (issue #153,
+    Decision 0057): the lease fences what a worker starts, not the record of
+    what it used."""
 
     def __init__(self, tracker: object) -> None:
         require_async_method(tracker, "record", 3)

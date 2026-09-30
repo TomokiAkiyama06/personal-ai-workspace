@@ -518,6 +518,8 @@ class MemoryVersionRulesTest(MemoryDatabaseTestCase):
             ],
             "ck_memory_versions_title_length": [{"title": ""}, {"title": "t" * 201}],
             "ck_memory_versions_content_not_empty": [{"content": ""}],
+            # Revision 0147 (issue #147): the limit of the services, in the schema.
+            "ck_memory_versions_content_length": [{"content": "c" * 20_001}],
             "ck_memory_versions_importance_range": [
                 {"importance": -1},
                 {"importance": 101},
@@ -563,6 +565,10 @@ class MemoryVersionRulesTest(MemoryDatabaseTestCase):
                         self.violation(partial(self.add_version, memory, **overrides)),
                         expected,
                     )
+
+    def test_the_longest_accepted_content_is_twenty_thousand_characters(self):
+        version = self.add_version(self.add_memory(), content="c" * 20_000)
+        self.assertIsNotNone(version)
 
     def test_a_version_needs_an_existing_memory(self):
         orphan = lambda: self.session.execute(  # noqa: E731

@@ -29,7 +29,10 @@ type is free text within ``[a-z][a-z0-9_]{0,63}``) are replaced by
 Repository, which must not hold secrets. PostgreSQL keeps the text as it is. A
 text longer than ``MAX_TEXT_CHARS`` cannot be scanned whole: its file holds the
 first ``MAX_TEXT_CHARS`` characters and ``[TRUNCATED]``, the front matter says
-``truncated: true`` and the run counts it apart from the redactions.
+``truncated: true`` and the run counts it apart from the redactions. Since
+revision 0147 the schema bounds a memory's text (20,000 characters) and title
+far below ``MAX_TEXT_CHARS``, so this cannot happen to a stored version; the cut
+stays as a defence, should the bound ever be raised (Decision 0053, 2).
 """
 
 import json

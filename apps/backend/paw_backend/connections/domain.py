@@ -137,6 +137,11 @@ class RefusalReason(StrEnum):
     QUOTA_EXCEEDED = "quota_exceeded"
     TASK_BUDGET_EXCEEDED = "task_budget_exceeded"
     TASK_BUDGET_NOT_CONFIGURED = "task_budget_not_configured"
+    # The queue lease of the worker that asks (issue #153, Decision 0057; the
+    # reasons of the Tool Broker, Decision 0046): lost, expired or taken over,
+    # or it could not be read (no verifier, an error, a timeout, no answer).
+    LEASE_LOST = "lease_lost"
+    LEASE_UNAVAILABLE = "lease_unavailable"
 
 
 def window_start(period: QuotaPeriod, now: datetime, zone: tzinfo) -> datetime:

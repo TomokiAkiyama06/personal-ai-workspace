@@ -1,15 +1,15 @@
 """Limits and provisional defaults of Memory versioning and freshness (PAW-042).
 
 Every value that comes from a caller is bounded by one of these. The text limits
-repeat the CHECK constraints of ``memory_versions`` (revision 0040) where one
-exists; the others are provisional (Decision 0034) and can change without a
-migration.
+repeat the CHECK constraints of ``memory_versions`` (revisions 0040 and 0147)
+where one exists; the others are provisional (Decision 0034) and can change
+without a migration.
 """
 
 from datetime import timedelta
 
 MAX_TITLE_CHARS = 200  # also the CHECK of memory_versions.title
-MAX_CONTENT_CHARS = 20_000  # the same bound as Shared Memory administration
+MAX_CONTENT_CHARS = 20_000  # also the CHECK of memory_versions.content (0147)
 MAX_MEMORY_TYPE_CHARS = 64  # also the CHECK of memory_versions.memory_type
 MAX_REASON_CHARS = 500
 MAX_BRANCH_CHARS = 255

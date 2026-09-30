@@ -183,11 +183,13 @@ class TaskEndTest(PostgresVersioningTestCase):
     # -- fenced to the end (Codex P1 on PR #151) ------------------------------------
 
     async def test_a_cleanup_after_a_reopening_leaves_the_new_run_alone(self):
-        # The sweep saw the task ended, then a Retry re-opened it and the new run
-        # opened an approval and wrote a session memory before the cleanup ran.
+        # The sweep saw the task ended, then a Retry re-opened it, the new run
+        # started, opened an approval and wrote a session memory before the
+        # cleanup ran.
         task_id = await self.new_task(self.bare_tasks)
         await self.end(task_id, TaskState.FAILED, self.bare_tasks)
         await self.bare_tasks.execute(task_id, TaskCommand.RETRY, actor=SYSTEM)
+        await self.bare_tasks.execute(task_id, TaskCommand.START, actor=SYSTEM)
         memory = self.session_memory(task_id)
         approval = await self.open_approval(task_id)
 
@@ -196,6 +198,71 @@ class TaskEndTest(PostgresVersioningTestCase):
         self.assertEqual(report, TaskEndReport(task_id, 0, 0))
         self.assertEqual(self.status_of(memory), "active")
         self.assertEqual(await self.approval_status(approval), "pending")
+
+    async def test_a_cleanup_after_a_reopening_before_the_new_run_finishes_the_end(
+        self,
+    ):
+        # Codex P2 on PR #151 (task_end.py:233), Decision 0064: a Retry took the
+        # fence first. Until the re-opened task moves (Start), every
+        # ``session_only`` memory of the task is the ended run's.
+        for reopen, ended in (
+            (TaskCommand.RETRY, TaskState.FAILED),
+            (TaskCommand.RESTART, TaskState.CANCELLED),
+        ):
+            with self.subTest(command=reopen.value):
+                task_id = await self.new_task(self.bare_tasks)
+                memory = self.session_memory(task_id)
+                await self.end(task_id, ended, self.bare_tasks)
+                survivor = await self.open_approval(task_id)
+                await self.bare_tasks.execute(task_id, reopen, actor=SYSTEM)
+
+                report = await self.cleanup.finish(task_id)
+
+                self.assertEqual(report, TaskEndReport(task_id, 1, 1))
+                self.assertEqual(self.status_of(memory), "deprecated")
+                self.assertEqual(await self.approval_status(survivor), "revoked")
+                # Once the new run starts, its memories are its own.
+                await self.bare_tasks.execute(task_id, TaskCommand.START, actor=SYSTEM)
+                later = self.session_memory(task_id, "new run note")
+                self.assertEqual(
+                    await self.cleanup.finish(task_id), TaskEndReport(task_id, 0, 0)
+                )
+                self.assertEqual(self.status_of(later), "active")
+
+    async def test_a_cleanup_that_waited_behind_a_reopening_still_finishes(self):
+        # The listener's cleanup of the end waits for the task row while the
+        # Retry that re-opens the task holds it; once the Retry commits, the
+        # fence must read the Retry's event too (not the snapshot the lock
+        # wait began with), and finish the ended run.
+        task_id = await self.new_task(self.bare_tasks)
+        memory = self.session_memory(task_id)
+        await self.end(task_id, TaskState.FAILED, self.bare_tasks)
+        with self.engine.connect() as retry:
+            version = retry.execute(
+                text("SELECT version FROM tasks WHERE id = :t FOR UPDATE"),
+                {"t": task_id},
+            ).scalar_one()
+            retry.execute(
+                text("UPDATE tasks SET state = 'queued', version = :v WHERE id = :t"),
+                {"t": task_id, "v": version + 1},
+            )
+            retry.execute(
+                text(
+                    "INSERT INTO task_events (task_id, attempt, retry_count,"
+                    " command, from_state, to_state, actor_kind, task_version,"
+                    " created_at) VALUES (:t, 1, 1, 'retry', 'failed', 'queued',"
+                    " 'system', :v, now())"
+                ),
+                {"t": task_id, "v": version + 1},
+            )
+            finishing = asyncio.create_task(self.cleanup.finish(task_id))
+            done, _ = await asyncio.wait({finishing}, timeout=0.5)
+            self.assertEqual(done, set())  # the cleanup waits for the task row
+            retry.commit()
+            report = await asyncio.wait_for(finishing, 10)
+
+        self.assertEqual(report, TaskEndReport(task_id, 0, 1))
+        self.assertEqual(self.status_of(memory), "deprecated")
 
     async def test_a_reopening_waits_until_the_cleanup_is_over(self):
         task_id = await self.new_task(self.bare_tasks)
@@ -223,7 +290,9 @@ class TaskEndTest(PostgresVersioningTestCase):
 
         self.assertEqual(report, TaskEndReport(task_id, 0, 1))
         self.assertEqual(self.status_of(memory), "deprecated")
-        # After the Retry, a new run's memory is no longer the ended task's.
+        # After the Retry and the new run's Start, a new run's memory is no
+        # longer the ended task's.
+        await self.bare_tasks.execute(task_id, TaskCommand.START, actor=SYSTEM)
         later = self.session_memory(task_id, "new run note")
         self.assertEqual(
             await self.cleanup.finish(task_id), TaskEndReport(task_id, 0, 0)
@@ -287,15 +356,44 @@ class TaskEndTest(PostgresVersioningTestCase):
 
         self.assertEqual(self.status_of(memory), "deprecated")
 
-    async def test_a_reopened_task_is_not_residue(self):
-        task_id = await self.new_task(self.bare_tasks)
-        memory = self.session_memory(task_id)
-        await self.end(task_id, TaskState.FAILED, self.bare_tasks)
-        await self.bare_tasks.execute(task_id, TaskCommand.RETRY, actor=SYSTEM)
+    async def test_a_reopened_task_is_residue_until_it_moves(self):
+        # Decision 0064: re-opened but not moved yet, its memories are still
+        # the ended run's (the listener's cleanup may have lost the fence to
+        # the Retry); once it moved (Start), it is not residue any more.
+        residue = TaskEndResidue(self._database())
+        waiting = await self.new_task(self.bare_tasks)
+        left = self.session_memory(waiting)
+        await self.end(waiting, TaskState.FAILED, self.bare_tasks)
+        survivor = await self.open_approval(waiting)
+        await self.bare_tasks.execute(waiting, TaskCommand.RETRY, actor=SYSTEM)
+        moved = await self.new_task(self.bare_tasks)
+        await self.end(moved, TaskState.FAILED, self.bare_tasks)
+        await self.bare_tasks.execute(moved, TaskCommand.RETRY, actor=SYSTEM)
+        await self.bare_tasks.execute(moved, TaskCommand.START, actor=SYSTEM)
+        kept = self.session_memory(moved)
+        await self.open_approval(moved)
+        # An event that is no transition (a change of the Working Set: the
+        # state stays) does not count as moving.
+        with self.engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO task_events (task_id, attempt, retry_count,"
+                    " command, from_state, to_state, actor_kind, task_version,"
+                    " created_at) SELECT id, attempt, retry_count,"
+                    " 'change_working_set', state, state, 'system', version, now()"
+                    " FROM tasks WHERE id = :t"
+                ),
+                {"t": waiting},
+            )
 
-        self.assertNotIn(task_id, await TaskEndResidue(self._database()).task_ids(100))
+        found = await residue.task_ids(100)
+        self.assertIn(waiting, found)
+        self.assertNotIn(moved, found)
         await self.cleanup.sweep()
-        self.assertEqual(self.status_of(memory), "active")
+        self.assertEqual(self.status_of(left), "deprecated")
+        self.assertEqual(await self.approval_status(survivor), "revoked")
+        self.assertEqual(self.status_of(kept), "active")
+        self.assertNotIn(waiting, await residue.task_ids(100))
 
     async def test_the_residue_is_bounded(self):
         ended = []
@@ -310,6 +408,37 @@ class TaskEndTest(PostgresVersioningTestCase):
         found = await residue.task_ids(100)
         self.assertEqual(list(found), sorted(found))
         self.assertTrue(set(ended) <= set(found))
+
+    async def test_tasks_that_keep_failing_do_not_starve_the_rest(self):
+        ended = []
+        for _ in range(3):
+            task_id = await self.new_task(self.bare_tasks)
+            await self.open_approval(task_id)
+            await self.end(task_id, TaskState.CANCELLED, self.bare_tasks)
+            ended.append(task_id)
+        # The last in id order: at least two residue tasks come before it.
+        target = max(ended)
+        residue = TaskEndResidue(self._database())
+        pending = await residue.task_ids(100)
+        self.assertIn(target, pending)
+        revoke = self.approvals.revoke_task
+
+        async def fails_but_for_the_target(task_id):
+            if task_id != target:
+                raise RuntimeError("store down")
+            return await revoke(task_id)
+
+        swept = []
+        with (
+            patch.object(self.approvals, "revoke_task", fails_but_for_the_target),
+            self.assertLogs("paw_backend.orchestrator.task_end", "WARNING"),
+        ):
+            # A sweep of two resumes after the last one: every residue task is
+            # reached, however many before it fail each time.
+            for _ in range(len(pending) // 2 + 1):
+                swept.extend(report.task_id for report in await self.cleanup.sweep(2))
+        self.assertIn(target, swept)
+        self.assertNotIn(target, await residue.task_ids(100))
 
     # -- the maintenance loop's cycle, on the real jobs ------------------------------
 
@@ -441,6 +570,23 @@ class FinishTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(approvals.calls[-1], reopened.task_id)
         self.assertEqual(freshness.calls, [ended.task_id])  # memories stay retired
         await cleanup.on_task_event(object())  # not an event: ignored
+
+    async def test_a_sweep_past_the_last_task_starts_over_at_once(self):
+        # A full sweep that ended on the last residue task leaves its position
+        # there; the next sweep finds nothing after it and must start over in
+        # the same call, not give up a whole maintenance interval.
+        cleanup, approvals, _ = self.cleanup()
+        pending = tuple(sorted(uuid.uuid4() for _ in range(2)))
+
+        async def task_ids(limit, *, after=None):
+            return tuple(t for t in pending if after is None or t > after)[:limit]
+
+        cleanup._residue.task_ids = task_ids
+        first = await cleanup.sweep(2)
+        second = await cleanup.sweep(2)
+
+        self.assertEqual([r.task_id for r in first], list(pending))
+        self.assertEqual([r.task_id for r in second], list(pending))
 
     def test_it_refuses_what_it_cannot_use(self):
         cleanup, approvals, freshness = self.cleanup()

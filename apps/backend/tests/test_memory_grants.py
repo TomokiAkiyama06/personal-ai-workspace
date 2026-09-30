@@ -673,6 +673,24 @@ class ApplicationDeniedTest(ApplicationRoleTestCase):
         ).scalar_one()
         self.assertEqual(title, "Original title")
 
+    def test_the_content_length_limit_holds_for_the_application_role(self):
+        # Revision 0147 (issue #147): the role inserts versions, so the limit of
+        # the services must hold for it too, and it cannot drop the limit.
+        memory = self.add_memory()
+        self.assertIsNotNone(self.add_version(memory, content="c" * 20_000))
+        self.assertEqual(
+            self.violation(
+                lambda: self.add_version(
+                    memory, version_number=2, status="history", content="c" * 20_001
+                )
+            ),
+            "ck_memory_versions_content_length",
+        )
+        self.denied(
+            "ALTER TABLE memory_versions"
+            " DROP CONSTRAINT ck_memory_versions_content_length"
+        )
+
     def test_the_schema_cannot_be_truncated_or_altered(self):
         self.rows()
         for table in MEMORY_TABLES:

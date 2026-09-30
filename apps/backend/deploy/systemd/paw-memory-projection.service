@@ -1,5 +1,5 @@
 # Memory Markdown Projection of the Personal AI Workspace (PAW-045,
-# Decision 0038 Proposed). Started every 5 minutes by paw-memory-projection.timer.
+# Decision 0038 Approved). Started every 5 minutes by paw-memory-projection.timer.
 #
 # It writes the Markdown view of every memory in PostgreSQL (the source of
 # truth) into PAW_MEMORY_PROJECTION_DIR: users/<id>/, projects/<id>/,
