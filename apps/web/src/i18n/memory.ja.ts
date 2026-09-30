@@ -91,6 +91,7 @@ export const memoryJa = {
 
   "memory.graph.label": "メモリの履歴グラフ",
   "memory.graph.current": "現在 / {state}",
+  "memory.graph.retiredCandidate": "{state} · {confirmation}",
   "memory.graph.meta": "v{number} · {date} · {who}",
   "memory.graph.relatedMeta": "{relation} · v{number} · {date}",
   "memory.graph.related": "関連: {title}",

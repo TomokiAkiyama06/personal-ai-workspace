@@ -18,12 +18,13 @@ Personal AI Workspace の Web UI です。
 | login / passkey / device management | サインイン（Brand Panel とシステム状態、ユーザー名・パスワード（表示切替）・この端末を信頼する。429 は待ち時間を表示）、Passkey の Gate（`enrollment_required` は登録、`assertion_required` は確認）、設定 › 端末とセッション（信頼済み端末・個別 / 他のすべての端末からサインアウト、新しい端末を追加の QR / リンクと残り時間、承認待ちの端末を確認コードの入力と Passkey の Step-up で承認・拒否、Passkey の一覧・この端末に追加・削除）、新しい端末の `/pair#<token>`（端末名を入れて続ける、承認待ちは確認コードを表示して完了を待つ。拒否・期限切れの `invalid_token` で終える） |
 | responsive layout | Design の 3 段階: 1280px 以上は Sidebar（252px）と Header の検索、768–1279px は Icon Rail（78px、短い Label）、768px 未満は Drawer（320px）と下部 Tab（チャット / タスク / メモリ / 通知 / 設定）、通知は全画面。Theme はシステム / ライト / ダーク（User Menu・言語と外観・サインイン画面。`localStorage` に保存）。Font は IBM Plex Sans JP / IBM Plex Mono を Build に同梱 |
 | Notification Center shell | Header の Bell（未読数）、Non-modal の Dropdown（未読 N・すべて既読・すべて / 未読 / 重要 / タスクの絞り込み・同種の通知をまとめて件数表示・すべての通知を見る / 通知ルール）、スマートフォンでは `/notifications` の全画面、ERROR / CRITICAL の Non-modal Banner。通知の Data は `NotificationSource` で受け、Backend に通知の API がないため今は接続していない（Decision 0044 の 11） |
+| メモリ（[PAW-063](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/49)） | Design の Memory Board の 3 ペイン（スコープの Tree / メモリ一覧 / 詳細）。詳細は本文・履歴・ソース・詳細の Tab、履歴は GitLens 風の Graph（自分の版を 1 本の Lane、Relation でつながる他のメモリを右の Lane）と選択中の版（変更者・理由・関係・鮮度、現在の版との差分）。過去の版の復元は、その内容で新しい Active の版を作る（Decision 0034）。編集は開始時の版番号を送り、`memory_version_conflict` なら「編集中に別の更新がありました」と差分を出して、最新の版の上で保存し直せる。1280px 未満はスコープを Select に、768px 未満は一覧 → 詳細の 2 階層。Backend に Memory の HTTP API がまだないため、Data は `MemorySource`（`src/memory/source.tsx`）で受け、Source がないあいだは「まだ表示できない」ことを表示する（Notification Center と同じ方式） |
 
 Navigation は Design の Roles のとおりです: 新しいチャット、チャット、プロジェクト、エージェント / タスク、メモリ、プルリクエスト、区切り、管理（Owner / Admin だけ。役割の Badge つき）、設定。User Menu はプロフィール・設定・端末とセッション（承認待ち N）・使用状況・キーボードショートカット・ヘルプ・テーマ・サインアウト・Version。設定は「ワークスペースへ戻る」の Header と、アカウント /（Owner / Admin は）ワークスペースの Sidebar です。後続の Issue の画面は Placeholder です。
 
 Step-up が要る操作（Passkey の登録・削除、新しい端末の承認など）は、まず Request を送り、Backend が `step_up_required` / `step_up_method_insufficient` を返したときだけ、同じ画面の中に本人確認（Passkey、許されれば Password）を出して、確認後に再送します。新しい端末の承認は常に Passkey の Step-up が要るので Passkey だけを出し、Password の Step-up のあとの再送が `step_up_method_insufficient` なら Passkey だけでもう一度確認を求めます。
 
-含めていないもの（後続の Issue）: 招待の受け取り・Owner / Password Reset の Token の使用・Password の変更の画面、管理画面、Chat / Project / Agent / Memory / PR / Usage の中身（Placeholder）、PWA / Tauri、実 Browser と実 Authenticator の E2E Test。
+含めていないもの（後続の Issue）: 招待の受け取り・Owner / Password Reset の Token の使用・Password の変更の画面、管理画面、Chat / Project / Agent / PR / Usage の中身（Placeholder）、Memory の HTTP API との接続、PWA / Tauri、実 Browser と実 Authenticator の E2E Test。
 
 ## 構成
 
@@ -39,6 +40,7 @@ apps/web/
 │  ├─ auth/                    # Session の状態、WebAuthn の変換、Step-up
 │  ├─ i18n/                    # Catalog（ja / en）、translate、エラーの文言
 │  ├─ notifications/           # Notification Center の状態と Bell / Banner
+│  ├─ memory/                  # メモリ画面（3 ペイン・履歴 Graph・差分）と MemorySource
 │  ├─ shell/                   # Header・Navigation（Sidebar / Rail / Drawer / 下部 Tab）・User Menu・Icon・QR Code
 │  ├─ pages/                   # サインイン、Passkey Gate、設定（プロフィール / 端末とセッション / 言語と外観）、Pairing、Placeholder
 │  ├─ styles.css               # Design Token（ダーク / ライトの CSS 変数）と Breakpoint

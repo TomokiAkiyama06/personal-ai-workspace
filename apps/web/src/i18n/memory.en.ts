@@ -93,6 +93,7 @@ export const memoryEn: Record<keyof typeof memoryJa, string> = {
 
   "memory.graph.label": "Memory history graph",
   "memory.graph.current": "Current / {state}",
+  "memory.graph.retiredCandidate": "{state} · {confirmation}",
   "memory.graph.meta": "v{number} · {date} · {who}",
   "memory.graph.relatedMeta": "{relation} · v{number} · {date}",
   "memory.graph.related": "Related: {title}",

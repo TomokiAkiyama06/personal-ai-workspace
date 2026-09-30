@@ -34,9 +34,10 @@ function nodeClass(node: GraphNode): string {
   const version = node.version;
   if (node.current && version.status === "active") return "node current";
   if (version.status === "deprecated") return "node deprecated";
-  if (version.status !== "active") return "node retired";
+  // An unconfirmed candidate keeps its colour after it is superseded.
   if (version.confirmation_state === "inferred") return "node inferred";
   if (version.confirmation_state === "observed") return "node observed";
+  if (version.status !== "active") return "node retired";
   return "node active";
 }
 
@@ -99,10 +100,17 @@ export function HistoryGraph({
           const version = node.version;
           const state = t(stateChip(version).label);
           const link = node.own ? undefined : linkOf(node, layout.edges);
+          const unconfirmed =
+            version.confirmation_state !== "confirmed" && version.status !== "active";
           const title = node.own
             ? node.current && version.status === "active"
               ? t("memory.graph.current", { state })
-              : state
+              : unconfirmed
+                ? t("memory.graph.retiredCandidate", {
+                    state,
+                    confirmation: t(`memory.confirmation.${version.confirmation_state}`),
+                  })
+                : state
             : version.title;
           const meta = node.own
             ? t("memory.graph.meta", {

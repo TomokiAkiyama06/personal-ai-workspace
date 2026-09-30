@@ -481,14 +481,16 @@ button.scope-row[aria-current="true"] .scope-count {
 
 .memory-history {
   display: flex;
+  flex-wrap: wrap;
   gap: 20px;
   align-items: flex-start;
 }
 
 .memory-graph {
   position: relative;
-  flex-shrink: 0;
-  width: 330px;
+  flex: 0 0 auto;
+  width: 300px;
+  max-width: 100%;
   margin: 8px 4px;
 }
 
@@ -590,7 +592,7 @@ button.graph-row.related .graph-row-title {
 }
 
 .memory-version {
-  flex: 1;
+  flex: 1 1 260px;
   min-width: 0;
   display: flex;
   flex-direction: column;
@@ -603,8 +605,9 @@ button.graph-row.related .graph-row-title {
 
 .memory-version-head {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 9px;
+  gap: 4px 9px;
 }
 
 .memory-version-head h3 {
@@ -637,7 +640,7 @@ button.graph-row.related .graph-row-title {
 
 .memory-version-facts {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 8px;
   margin: 0;
   font-size: 11.5px;
@@ -792,14 +795,6 @@ button.graph-row.related .graph-row-title {
 
   .memory-list-pane {
     width: 280px;
-  }
-
-  .memory-history {
-    flex-direction: column;
-  }
-
-  .memory-version {
-    width: 100%;
   }
 }
 
