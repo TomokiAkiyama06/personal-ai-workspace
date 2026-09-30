@@ -892,6 +892,66 @@ class ExclusiveFreeVramTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.scheduler.status().mode, SchedulerMode.EXCLUSIVE)
         await lease.release()
 
+    async def test_the_time_spent_draining_does_not_use_the_vram_wait(self):
+        # Codex review (#167, P2): with ``drain_seconds``, ``wait_seconds``
+        # bounds only the wait for another workload's VRAM. A drain that ends
+        # because another workload took the VRAM does not use that budget.
+        self.probe.external = 20 * GIB
+        running = (await self.scheduler.try_acquire(coding())).lease
+        job = asyncio.create_task(
+            self.scheduler.acquire(
+                ComputeRequest(EX, vram_bytes=80 * GIB),
+                wait_seconds=60,
+                drain_seconds=60,
+            )
+        )
+        await settle()
+        await self.clock.advance(10)
+        self.probe.external = 0
+        await self.clock.advance(2)
+        self.assertEqual(self.scheduler.status().mode, SchedulerMode.DRAINING)
+        # 55 seconds of draining, then another workload takes the VRAM.
+        self.probe.external = 20 * GIB
+        await self.clock.advance(55)
+        await running.release()
+        await settle()
+        self.assertEqual(self.scheduler.status().mode, SchedulerMode.NORMAL)
+        # About 12 of the 60 seconds were spent waiting for VRAM: it waits on.
+        self.assertFalse(job.done())
+        await self.clock.advance(40)
+        self.assertFalse(job.done())
+        self.probe.external = 0
+        await self.clock.advance(2)
+        lease = await job
+        self.assertEqual(self.scheduler.status().mode, SchedulerMode.EXCLUSIVE)
+        await lease.release()
+
+    async def test_the_vram_wait_still_ends_after_a_drain(self):
+        # The budget left after a drain is still bounded.
+        self.probe.external = 20 * GIB
+        running = (await self.scheduler.try_acquire(coding())).lease
+        job = asyncio.create_task(
+            self.scheduler.acquire(
+                ComputeRequest(EX, vram_bytes=80 * GIB),
+                wait_seconds=60,
+                drain_seconds=60,
+            )
+        )
+        await settle()
+        await self.clock.advance(10)
+        self.probe.external = 0
+        await self.clock.advance(2)
+        self.probe.external = 20 * GIB
+        await self.clock.advance(55)
+        await running.release()
+        await settle()
+        self.assertFalse(job.done())
+        await self.clock.advance(50)
+        with self.assertRaises(ExclusiveUnavailableError) as raised:
+            await job
+        self.assertEqual(raised.exception.failure, ExclusiveFailure.NOT_FREED)
+        self.assertEqual(self.scheduler.status().mode, SchedulerMode.NORMAL)
+
     async def test_a_drain_longer_than_its_time_gives_up(self):
         running = (await self.scheduler.try_acquire(coding())).lease
         job = asyncio.create_task(

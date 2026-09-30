@@ -1442,10 +1442,9 @@ class ComputeScheduler:
                 # Full GPU Mode holds the tasks and may revoke the leases,
                 # PAW-037).
                 logger.info("Exclusive GPU job requested: draining local GPU work")
+                drain_started = self._clock.monotonic()
                 drain_deadline = (
-                    deadline
-                    if drain_seconds is None
-                    else self._clock.monotonic() + drain_seconds
+                    deadline if drain_seconds is None else drain_started + drain_seconds
                 )
                 await self._drain(drain_deadline)
                 async with self._control_lock:
@@ -1471,7 +1470,11 @@ class ComputeScheduler:
                         logger.info("Exclusive GPU job started")
                         return lease
                 # Another workload took the VRAM while the GPU drained: back to
-                # normal, and wait again.
+                # normal, and wait again. With ``drain_seconds`` the drain had
+                # its own time: the VRAM wait keeps what was left of
+                # ``wait_seconds`` (Codex review #167).
+                if drain_seconds is not None:
+                    deadline += self._clock.monotonic() - drain_started
                 self._set_mode(SchedulerMode.NORMAL)
                 self._pump()
         except BaseException:
