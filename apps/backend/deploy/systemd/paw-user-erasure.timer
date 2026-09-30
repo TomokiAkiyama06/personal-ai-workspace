@@ -1,0 +1,16 @@
+# Runs paw-user-erasure.service once a day (Issue #127, Decision 0043). A user is
+# erased at most about a day after their 30 days ended; one that cannot be erased
+# is reported every day until it is.
+
+[Unit]
+Description=Daily erasure of deleted users' personal data of the Personal AI Workspace
+
+[Timer]
+OnCalendar=daily
+# Run at the next boot when the server was off at the scheduled time.
+Persistent=true
+RandomizedDelaySec=15min
+Unit=paw-user-erasure.service
+
+[Install]
+WantedBy=timers.target
