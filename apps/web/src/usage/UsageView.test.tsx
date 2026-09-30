@@ -74,7 +74,7 @@ describe("使用状況", () => {
     expect(screen.getByText("11h 42m")).toBeVisible();
     expect(screen.getByText("平均 4m 28s / タスク")).toBeVisible();
     expect(screen.getByText("失敗 1 · ループ検知 2")).toBeVisible();
-    expect(screen.getByRole("img", { name: /日別のタスク実行数/ })).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: /日別のタスク実行数/ })).toBeInTheDocument();
     expect(screen.getByText("113 タスク · 4.1M トークン")).toBeVisible();
     expect(screen.getByRole("rowheader", { name: "実装 / リファクタ" })).toBeVisible();
     expect(screen.getByRole("rowheader", { name: "調査 / 要約" })).toBeVisible();
@@ -158,16 +158,19 @@ describe("使用状況", () => {
         .getAllByRole("cell")
         .map((cell) => cell.textContent),
     ).toEqual(["6", "3", "1", "10"]);
-    expect(screen.queryByRole("img", { name: /日別のタスク実行数/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: /日別のタスク実行数/ })).not.toBeInTheDocument();
   });
 
   it("shows a day's numbers when its bar gets keyboard focus", async () => {
     const { source } = fakeSource();
     renderUsage("/admin/usage", "owner", source);
     await screen.findByText("157");
-    const day = screen.getByRole("button", { name: /^2026\/09\/17 / });
+    const chart0 = screen.getByRole("group", { name: /日別のタスク実行数/ });
+    // The days are controls of the chart's group (not hidden inside an image).
+    expect(within(chart0).getAllByRole("button")).toHaveLength(14);
+    const day = within(chart0).getByRole("button", { name: /^2026\/09\/17 / });
     act(() => day.focus());
-    const chart = screen.getByRole("img", { name: /日別のタスク実行数/ });
+    const chart = screen.getByRole("group", { name: /日別のタスク実行数/ });
     expect(within(chart).getByText("2026/09/17")).toBeInTheDocument();
     expect(day).toHaveAccessibleName("2026/09/17 Local 14, Codex 8, Claude 3");
   });

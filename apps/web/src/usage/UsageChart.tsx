@@ -89,12 +89,14 @@ export function UsageChart({ days }: { days: readonly DailyTasks[] }) {
 
   return (
     <div className="usage-chart" ref={ref}>
+      {/* A group, not an image: an image hides the focusable days from assistive technology. */}
+      {/* biome-ignore lint/a11y/useSemanticElements: an SVG cannot be a <fieldset>; the group labels the chart's day controls */}
       <svg
         className="chart-svg"
         width={width}
         height={HEIGHT}
         viewBox={`0 0 ${width} ${HEIGHT}`}
-        role="img"
+        role="group"
         aria-label={t("usage.chart.label")}
         onMouseLeave={() => setActive(null)}
       >
