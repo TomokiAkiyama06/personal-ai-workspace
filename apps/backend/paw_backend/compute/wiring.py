@@ -21,7 +21,10 @@ Decision 0058, 1):
   work for up to ``drain_seconds`` (600 by default), longer than an HTTP request
   should wait: the start runs in the background and the route answers at once
   (``202``); the state is read with ``GET`` (Decision 0058, 3). Ending it while
-  the start is still in progress abandons the start (Decision 0058, 4).
+  the start is still in progress abandons the start (Decision 0058, 4). So does
+  the shutdown, which then gives the models back and resumes the held tasks
+  before the scheduler's loops stop, within the shutdown time (Codex review
+  #168): the start may have unloaded some models already.
 
 GPU safety: nothing here reads or touches the GPU but through the scheduler (its
 read-only probe and the injected ``ModelControl``).
@@ -57,6 +60,10 @@ logger = logging.getLogger("paw_backend.compute")
 # hours of a busy GPU.
 DEFAULT_KEPT_VRAM_WARNINGS = 50
 MAX_KEPT_VRAM_WARNINGS = 1_000
+# At shutdown, after an abandoned start: how long to pause between two attempts
+# to load the main LLM again and resume the held tasks (real time: the caller
+# bounds the whole with the shutdown timeout).
+RECOVERY_PAUSE_SECONDS = 0.1
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,10 +173,13 @@ class FullGpuController:
     request's: :class:`FullGpuMode` authorizes it again (and audits it) for
     ``admin.compute.full_gpu``."""
 
-    def __init__(self, mode: FullGpuMode) -> None:
+    def __init__(self, mode: FullGpuMode, scheduler: ComputeScheduler) -> None:
         if not isinstance(mode, FullGpuMode):
             raise TypeError("mode must be a FullGpuMode")
+        if not isinstance(scheduler, ComputeScheduler):
+            raise TypeError("scheduler must be a ComputeScheduler")
         self._mode = mode
+        self._scheduler = scheduler
         self._start: asyncio.Task[None] | None = None
 
     @property
@@ -224,9 +234,30 @@ class FullGpuController:
         return await self._mode.end(principal)
 
     async def close(self) -> None:
-        """At shutdown: abandon a start in progress."""
-        if self.start_pending:
-            await self._cancel_start()
+        """At shutdown, before the scheduler's loops stop: abandon a start in
+        progress and undo what it did. The start may have unloaded models
+        already (the scheduler is back to normal, Full GPU Mode ``resuming``):
+        the scheduler is refreshed (it loads the main LLM again) and the mode
+        ticked (it resumes the held tasks) until the mode is ``off``. The
+        caller bounds this with the shutdown timeout; what is left then is done
+        by the next process (it resumes the tasks held by this one)."""
+        if not self.start_pending:
+            return
+        await self._cancel_start()
+        while self._mode.status().state is FullGpuState.RESUMING:
+            try:
+                await self._scheduler.refresh()
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:  # tried again after the pause
+                logger.warning(
+                    "The GPU could not be read after an abandoned Full GPU Mode "
+                    "start (%s)",
+                    type(error).__name__,
+                )
+            if (await self._mode.tick()).state is not FullGpuState.RESUMING:
+                break
+            await asyncio.sleep(RECOVERY_PAUSE_SECONDS)
 
     async def _cancel_start(self) -> None:
         task = self._start

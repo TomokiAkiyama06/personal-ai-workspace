@@ -285,6 +285,7 @@ class ComputeAppTestCase(unittest.IsolatedAsyncioTestCase):
     who = OWNER
     control = True
     with_database = True
+    settings_overrides = {}
 
     async def asyncSetUp(self):
         self.setup, self.probe, self.fake, self.clock = fake_gpu(control=self.control)
@@ -293,9 +294,10 @@ class ComputeAppTestCase(unittest.IsolatedAsyncioTestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
         if self.with_database:
-            settings, database = configured(**QUIET)
+            settings, database = configured(**QUIET, **self.settings_overrides)
         else:
-            settings, database = make_settings(**QUIET), FakeDatabase()
+            settings = make_settings(**QUIET, **self.settings_overrides)
+            database = FakeDatabase()
         self.app = create_app(settings, database=database, compute=self.setup)
         self.audit = InMemoryAuditSink()
         self.app.state.principal_provider = StaticProvider(self.who)
@@ -519,6 +521,52 @@ class FullGpuHttpTest(ComputeAppTestCase):
         self.assertNotIn(("unload", "main"), self.fake.actions)
         await lease.release()
 
+    async def test_a_start_stopped_at_shutdown_after_an_unload_is_recovered(self):
+        # Codex review #168 (P1): the shutdown comes after the start emptied the
+        # GPU, while it waits for the probe to show the memory freed (the main
+        # LLM's runtime is slow to exit). The start is abandoned and, before the
+        # loops stop, the main LLM is loaded again and the held task resumes.
+        task_id = uuid.uuid4()
+        self.holds.running.add(task_id)
+        lease = (
+            await self.scheduler.try_acquire(
+                ComputeRequest(
+                    ResourceClass.CODING,
+                    deployment="main",
+                    context_tokens=1_000,
+                    task_id=task_id,
+                )
+            )
+        ).lease
+        main_pid = self.fake.pids["main"]
+        self.fake.linger.add("main")
+        with self.assertLogs("paw_backend.compute", level="WARNING"):
+            self.assertEqual((await self.client.post(URL, json={})).status_code, 202)
+            await settle()
+            self.assertEqual(self.holds.held, [task_id])
+            await lease.release()
+            self.assertTrue(
+                await self.advance_until(
+                    lambda: ("unload", "main") in self.fake.actions
+                )
+            )
+            await self.clock.advance(1)
+            self.assertIs(self.mode_state(), FullGpuState.STARTING)
+            self.assertIs(
+                self.scheduler.status().deployment("main").state,
+                DeploymentState.UNLOADED,
+            )
+            # The runtime has exited now; the process shuts down.
+            self.fake.linger.clear()
+            self.probe.resident.pop(main_pid)
+            await self.stop_app()
+        self.assertEqual(self.scheduler.status().mode, SchedulerMode.NORMAL)
+        self.assertIs(
+            self.scheduler.status().deployment("main").state, DeploymentState.GPU
+        )
+        self.assertEqual(self.holds.resumed, [task_id])
+        self.assertEqual(self.holds.held, [])
+
     async def test_the_body_is_checked(self):
         for body in (
             {"preempt": "yes"},
@@ -618,6 +666,55 @@ class AdminTest(ComputeAppTestCase):
                 await self.advance_until(lambda: self.mode_state() is FullGpuState.ON)
             )
             self.assertEqual((await self.client.delete(URL)).status_code, 200)
+
+
+class ShutdownTimeoutTest(ComputeAppTestCase):
+    settings_overrides = {"shutdown_timeout_seconds": 1}
+
+    async def test_a_recovery_that_cannot_finish_is_bounded(self):
+        # The shutdown cancels the main LLM's unload: it failed, and is tried
+        # again only after ``failed_retry_seconds``. The recovery gives up at
+        # the shutdown timeout; the held task stays held for the next process.
+        task_id = uuid.uuid4()
+        self.holds.running.add(task_id)
+        lease = (
+            await self.scheduler.try_acquire(
+                ComputeRequest(
+                    ResourceClass.CODING,
+                    deployment="main",
+                    context_tokens=1_000,
+                    task_id=task_id,
+                )
+            )
+        ).lease
+        unloading_main = asyncio.Event()
+        never = asyncio.Event()
+        unload = self.fake.unload
+
+        async def stuck_main_unload(deployment):
+            if deployment == "main":
+                unloading_main.set()
+                await never.wait()
+            await unload(deployment)
+
+        self.fake.unload = stuck_main_unload
+        with self.assertLogs("paw_backend.compute", level="WARNING"):
+            self.assertEqual((await self.client.post(URL, json={})).status_code, 202)
+            await settle()
+            await lease.release()
+            self.assertTrue(await self.advance_until(unloading_main.is_set))
+            with self.assertLogs("paw_backend.app", level="WARNING") as logs:
+                started = asyncio.get_running_loop().time()
+                await self.stop_app()
+                elapsed = asyncio.get_running_loop().time() - started
+        self.assertIn("next process resumes the held tasks", "".join(logs.output))
+        self.assertLess(elapsed, 3)
+        self.assertEqual(self.scheduler.status().mode, SchedulerMode.NORMAL)
+        self.assertIs(
+            self.scheduler.status().deployment("main").state, DeploymentState.FAILED
+        )
+        self.assertEqual(self.holds.held, [task_id])
+        self.assertIsNone(self.app.state.compute.full_gpu)
 
 
 if __name__ == "__main__":

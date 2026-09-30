@@ -68,10 +68,12 @@
 - `local_runtimes` は `compute` と Database と `orchestrator_config` がないと `TypeError`（Scheduler を通らずに Local の Model を使う経路を作らない）。
 - `ScheduledMemoryWorker` と `PlacedEmbedder` は、Memory Worker と Embedder がまだ Application に組み込まれていないので、ここでは配線しない（それらを組み込む Issue で同じ Scheduler を渡す）。
 
-### 8. 終了時: 開始の途中なら取りやめる。`on` のままならプロセスとともに終わる
+### 8. 終了時: 開始の途中なら取りやめ、Unload した Model を戻してから Loop を止める。`on` のままならプロセスとともに終わる
 
-- Lifespan の終わりに `serve` の Loop を止め、開始の途中なら 4 と同じく取りやめる（`shutdown_timeout_seconds` まで待つ）。
-- `on` のまま終わると、Exclusive の Lease はプロセスとともに消える。次のプロセスの Scheduler は Probe で空きがあるときだけ Main を Load し、Hold した Task は Main が戻ってから再開する（0055 の 7、Approved。変えない）。終了時に Model を Load し直すことはしない。
+- Lifespan の終わりに、開始の途中なら 4 と同じく取りやめる。開始はすでに Model を Unload しているかもしれない（`_empty_gpu()` の途中や、Unload の後の確認の間）。そこで `serve` の Loop を止める**前に**、Scheduler の `refresh()`（Main を Load し直す）と `FullGpuMode.tick()`（Main が戻れば Hold した Task を再開する）を、Full GPU Mode が `off` になるまで繰り返す（間は 0.1 秒）。全体を `shutdown_timeout_seconds`（既定 5 秒）で打ち切り、間に合わなければ WARNING を出す。残り（Main の Load、Hold した Task の再開）は次のプロセスが行う（0055 の 7。Hold した Task は Task の履歴から見つける）。その後で Loop を止める。
+- 当初の案は「Loop を先に止め、開始を取りやめるだけ」だったが、Codex review（PR #168、P1）が、Unload の後に取りやめると、このプロセスでは Main も Task も戻らないまま終わると指摘した（再現した）。Main の Load は数分かかることがあり、既定の 5 秒で終わるとは限らない。終わらない分は次のプロセスに任せる。Unload の途中で取りやめた Model は `failed` になり、`failed_retry_seconds`（60 秒）後まで Load し直されないので、その場合も次のプロセスが戻す。
+- `on` のまま終わると、Exclusive の Lease はプロセスとともに消える。次のプロセスの Scheduler は Probe で空きがあるときだけ Main を Load し、Hold した Task は Main が戻ってから再開する（0055 の 7、Approved。変えない）。`on` のときは終了時に Model を Load し直さない（Exclusive の仕事がまだ GPU を使っているかもしれない）。
+- 代わりに、取りやめだけをして Load し直しと再開をすべて次のプロセスに任せる案（当初の案）、`on` のときも終了時に Load し直す案もある。
 
 ## 代替案
 
@@ -97,7 +99,7 @@
 5. **`GET` / `POST` / `DELETE` のすべてを `admin.compute.full_gpu` で認可し（`GET` も毎回 Audit）、開始と終了は `FullGpuMode` がもう一度判定する**（5）でよいか。推奨: はい。`GET` 用に読み取り専用の Capability を新しく置く案もある。
 6. **応答の形は 6 のとおり（状態・GPU の概要・最新の警告。Task の ID・PID・Model の名前は出さない）、Scheduler か Database がなければ `503`（`compute_not_configured`）**（6）でよいか。推奨: はい。
 7. **Local の Model で走る Runtime は `local_runtimes`（`LocalRuntime`）で渡し、組み立てが `HybridRuntime`（Cloud なし、遅い GPU 時間は同じ `BudgetTracker`）で包む。Memory Worker と Embedder は後の Issue**（7）でよいか。推奨: はい。
-8. **終了時は開始の途中なら取りやめ、`on` のままならプロセスとともに終わる（Model の Load し直しは次のプロセスの Scheduler に任せる）**（8）でよいか。推奨: はい。
+8. **終了時は、開始の途中なら取りやめ、Loop を止める前に Unload した Model を Load し直して Hold した Task を再開する（`shutdown_timeout_seconds` まで。残りは次のプロセス）。`on` のままならプロセスとともに終わる（Load し直しは次のプロセスの Scheduler）**（8）でよいか。推奨: はい。取りやめだけで、戻すのはすべて次のプロセスに任せる案もある。
 
 ## 承認後の扱い
 

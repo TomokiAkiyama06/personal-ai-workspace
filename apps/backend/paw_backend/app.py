@@ -138,7 +138,9 @@ def create_app(
                         app.state.authorizer,
                         clock=compute_services.setup.clock,
                     )
-                    compute_services.full_gpu = FullGpuController(mode)
+                    compute_services.full_gpu = FullGpuController(
+                        mode, compute_services.scheduler
+                    )
                     background.add(asyncio.create_task(mode.serve(compute_stop)))
             # Expired Research Scratch items are only hidden until something
             # deletes them (PAW-050): purge them regularly, from the start on.
@@ -195,16 +197,28 @@ def create_app(
                 background.add(asyncio.create_task(maintenance.run()))
             yield
         finally:
-            compute_stop.set()
             if compute_services is not None and compute_services.full_gpu is not None:
-                # A start in progress is abandoned (the scheduler goes back to
-                # normal); a Full GPU Mode that is on ends with the process.
-                with contextlib.suppress(Exception):
+                # A start in progress is abandoned: the scheduler goes back to
+                # normal, the models it unloaded are loaded again and the held
+                # tasks resume, while the loops still run (Codex review #168).
+                # A Full GPU Mode that is on ends with the process.
+                try:
                     await asyncio.wait_for(
                         compute_services.full_gpu.close(),
                         settings.shutdown_timeout_seconds,
                     )
+                except TimeoutError:
+                    logger.warning(
+                        "The models were not back after an abandoned Full GPU Mode "
+                        "start within the shutdown timeout: the next process "
+                        "resumes the held tasks"
+                    )
+                except Exception as error:
+                    logger.warning(
+                        "Full GPU Mode could not be closed (%s)", type(error).__name__
+                    )
                 compute_services.full_gpu = None
+            compute_stop.set()
             if stop_loop is not None:
                 stop_loop.stop()
             if user_stop_loop is not None:
