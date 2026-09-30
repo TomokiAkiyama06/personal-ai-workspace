@@ -68,6 +68,7 @@
 | [0064](0064-reopened-task-session-only-memories.md) | 再開（Retry / Restart）した後にまだ遷移がない Task の `session_only` の Memory と開いた承認を終わった Run のものとして後処理する（Fence と Sweep の Query を「終了状態、または最新の遷移が終了状態から」に広げる。Migration なし。Decision 0047 の 1 だけを Supersede。Issue #90 の #151 `task_end.py:233`） | Approved |
 | [0061](0061-restore-skipped-repository-memories.md) | Restore で飛ばした Repository（名前・既定の Branch の Credential を伏せ字にしたもの）の Repo 単位の記憶を戻さず、Dry run と Apply の手作業の手順に一覧で出し、Audit の `reason` に件数を足す（Decision 0054 の 9・12 の該当点を Supersede。Issue #171） | Approved |
 | [0062](0062-integration-push-fixed-form-no-options.md) | Integration Gate の Push の固定の形を `push --quiet --no-follow-tags --no-recurse-submodules --no-signed -- <URL> <commit>:refs/heads/paw/...` にし、SSH の Wrapper もこの形だけを受け付ける（Checkout の `push.followTags` / `push.recurseSubmodules` / `push.gpgSign` を打ち消す。Decision 0052 の 3・9 の形だけを Supersede。Issue #90） | Approved |
+| [0065](0065-manual-supersedes-undo.md) | 手動の `supersedes` を取り消すときは、古い記憶を有効に戻さず、その最後の内容で新しい版を作る（案 B。Decision 0034 の 8 が委ねた点。Issue #49 / #186） | Approved |
 
 運用は [AGENTS.md](../../AGENTS.md) の「仕様変更」に従います。
 
