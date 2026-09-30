@@ -170,12 +170,14 @@ class GitWorktreeCoordinator:
     ) -> dict[uuid.UUID, NodeWorktree]:
         if not isinstance(request, NodeWorkspaceRequest):
             raise TypeError("request must be a NodeWorkspaceRequest")
+        repositories = [r for r in request.scope.repositories if gets_worktree(r)]
+        prepared: dict[uuid.UUID, NodeWorktree] = {}
+        if not repositories:
+            # Nothing to prepare: no account is needed (issue #155).
+            return prepared
         account = await self._account(request.task)
         base = worktree_base(account, self._subdir)
-        prepared: dict[uuid.UUID, NodeWorktree] = {}
-        for repository in request.scope.repositories:
-            if not gets_worktree(repository):
-                continue
+        for repository in repositories:
             async with self._lock(request.task.id, request.run, repository.repo_id):
                 prepared[repository.repo_id] = await self._git_errors(
                     self._prepare(account, base, request, repository)
@@ -185,12 +187,15 @@ class GitWorktreeCoordinator:
     async def integrate(self, request: IntegrationRequest) -> IntegrationReport:
         if not isinstance(request, IntegrationRequest):
             raise TypeError("request must be a IntegrationRequest")
+        repositories = [r for r in request.scope.repositories if gets_worktree(r)]
+        if not repositories:
+            # Nothing to integrate: a task without a worktree repository goes on
+            # as it did without a coordinator, account or not (issue #155).
+            return IntegrationReport()
         account = await self._account(request.task)
         base = worktree_base(account, self._subdir)
         results = []
-        for repository in request.scope.repositories:
-            if not gets_worktree(repository):
-                continue
+        for repository in repositories:
             async with self._lock(request.task.id, request.run, repository.repo_id):
                 results.append(
                     await self._git_errors(
@@ -206,12 +211,13 @@ class GitWorktreeCoordinator:
         has one (read only: nothing is created or merged)."""
         if not isinstance(request, IntegrationRequest):
             raise TypeError("request must be a IntegrationRequest")
+        repositories = [r for r in request.scope.repositories if r.root is not None]
+        if not repositories:
+            return ()
         account = await self._account(request.task)
         base = worktree_base(account, self._subdir)
         found = []
-        for repository in request.scope.repositories:
-            if repository.root is None:
-                continue
+        for repository in repositories:
             place = self._place(base, request.task.id, request.run, repository, None)
             head = await self._git_errors(
                 self._git.branch_commit(repository.root, place.branch, account)

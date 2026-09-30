@@ -7,6 +7,7 @@ machine-readable identifier.
 
 from typing import ClassVar
 
+from paw_backend.authz import Reason
 from paw_backend.compute.domain import ExclusiveFailure, Refusal
 
 
@@ -65,3 +66,27 @@ class ExclusiveUnavailableError(ComputeError):
     def __init__(self, failure: ExclusiveFailure) -> None:
         self.failure = failure
         super().__init__(f"The GPU could not be given exclusively ({failure.value})")
+
+
+class FullGpuPermissionDeniedError(ComputeError):
+    """The Authorizer denied starting or ending Full GPU Mode (PAW-037): only the
+    Owner and Admins hold ``admin.compute.full_gpu``. ``reason`` is the stable
+    reason code of the (audited) decision; ``Reason.AUDIT_UNAVAILABLE`` means the
+    decision could not be recorded."""
+
+    code = "full_gpu_permission_denied"
+
+    def __init__(self, reason: Reason) -> None:
+        self.reason = reason
+        super().__init__("Permission denied")
+
+
+class FullGpuModeStateError(ComputeError):
+    """Full GPU Mode cannot do this now: starting it while it is starting or on,
+    ending it while it is not on. ``state`` is the mode's state (a constant)."""
+
+    code = "full_gpu_mode_state"
+
+    def __init__(self, state: str) -> None:
+        self.state = state
+        super().__init__(f"Full GPU Mode is {state}")

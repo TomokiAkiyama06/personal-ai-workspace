@@ -10,6 +10,7 @@ import asyncio
 import os
 import pathlib
 import re
+import sys
 import unittest
 
 from paw_backend.compute import (
@@ -20,9 +21,11 @@ from paw_backend.compute import (
     ProbeUnavailableError,
 )
 from paw_backend.compute.probe import (
+    _MAX_OUTPUT_BYTES,
     QUERY_APPS_ARGV,
     QUERY_GPU_ARGV,
     CommandResult,
+    SubprocessRunner,
     parse_gpu_rows,
     parse_process_rows,
 )
@@ -214,6 +217,37 @@ class ProbeTest(unittest.TestCase):
         for timeout in (0, -1, True, "1", 601):
             with self.subTest(timeout=timeout), self.assertRaises(ValueError):
                 NvidiaSmiProbe(timeout=timeout)
+
+
+class SubprocessRunnerTest(unittest.TestCase):
+    """The runner reads a command's whole output, not only its first write
+    (``nvidia-smi`` writes a row in more than one piece: the probe then saw a
+    row of one field and refused every reading). The command is the Python
+    interpreter printing text; nothing touches a GPU."""
+
+    def run_python(self, code: str, **options):
+        runner = SubprocessRunner()
+        return asyncio.run(
+            runner.run((sys.executable, "-c", code), timeout_seconds=30, **options)
+        )
+
+    def test_output_written_in_pieces_is_read_whole(self):
+        code = (
+            "import sys, time\n"
+            "sys.stdout.write('0'); sys.stdout.flush(); time.sleep(0.2)\n"
+            "sys.stdout.write(', GPU-x, Fake, 97887, 30869, 100\\n')\n"
+        )
+        result = self.run_python(code)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "0, GPU-x, Fake, 97887, 30869, 100\n")
+
+    def test_output_over_the_limit_is_refused(self):
+        code = (
+            "import sys\n"
+            f"for _ in range({_MAX_OUTPUT_BYTES // 65_536 + 2}):\n"
+            "    sys.stdout.write('x' * 65_536); sys.stdout.flush()\n"
+        )
+        self.assertEqual(self.run_python(code), CommandResult(-1, ""))
 
 
 @unittest.skipUnless(
