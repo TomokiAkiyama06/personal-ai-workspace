@@ -16,6 +16,7 @@ from sqlalchemy.exc import ArgumentError
 
 from paw_backend.db_roles import validate_role_name
 from paw_backend.security import normalize_origin
+from paw_backend.web import validate_dist_dir
 
 _DRIVER = "postgresql+psycopg"
 _HOST = re.compile(r"\[[0-9a-f:.]+\]|[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?")
@@ -67,6 +68,9 @@ class Settings(BaseSettings):
     # origins are refused. Requests without an Origin header (non-browser
     # clients) are not affected.
     allowed_origins: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    # The built Web App (``apps/web/dist``, PAW-060, Decision 0044 Proposed), served
+    # on this same origin by ``paw_backend.web.WebAppMiddleware``. Unset: API only.
+    web_dist_dir: Path | None = None
 
     # PostgreSQL. ``None`` keeps the app running; readiness then reports
     # ``not_configured`` instead of the process refusing to start.
@@ -265,6 +269,7 @@ class Settings(BaseSettings):
     @field_validator(
         "tls_certfile",
         "tls_keyfile",
+        "web_dist_dir",
         "database_url",
         "migration_database_url",
         "operator_database_url",
@@ -297,6 +302,11 @@ class Settings(BaseSettings):
             raise ValueError(f"database_url must use postgresql:// or {_DRIVER}://")
         url = url.set(drivername=_DRIVER)
         return SecretStr(url.render_as_string(hide_password=False))
+
+    @field_validator("web_dist_dir")
+    @classmethod
+    def _valid_web_dist_dir(cls, value: Path | None) -> Path | None:
+        return None if value is None else validate_dist_dir(value)
 
     @field_validator("app_database_role", "operator_database_role")
     @classmethod

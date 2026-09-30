@@ -51,6 +51,14 @@ jobs:
         with:
           python-version: '3.13'
 
+      # The Web App's checks (apps/web: Biome, TypeScript, Vitest, Vite build) run
+      # inside run_ci.py; in GitHub Actions they are required (never skipped).
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: apps/web/.node-version
+          package-manager-cache: false
+
       - name: Install validation dependencies
         run: python -m pip install --disable-pip-version-check -r .github/requirements-ci.txt
 

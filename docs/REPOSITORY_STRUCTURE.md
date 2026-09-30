@@ -2,7 +2,8 @@
 
 現在の Repository は要件・設計文書、GitHub 運用と CI、Application と Benchmark / Evaluator の配置先で構成します。
 `apps/backend/`にはBackendの最小Application Skeleton（PAW-020）を実装しています。
-`apps/web/`・`apps/cli/`・`evaluator/` は README による役割の整理までです。`benchmarks/`にはTask / Evaluator Result
+`apps/web/`にはWeb UIのApplication Shell / 認証画面（PAW-060、React + TypeScript + Vite）を実装しています。
+`apps/cli/`・`evaluator/` は README による役割の整理までです。`benchmarks/`にはTask / Evaluator Result
 schemaとそのvalidator、test fixtureを配置しています。
 
 ## 現在の構造
@@ -26,7 +27,8 @@ personal-ai-workspace/
 │  │  ├─ run_ci.py
 │  │  ├─ test_check_repository.py
 │  │  ├─ test_dependency_pins.py
-│  │  └─ test_install_hooks.py
+│  │  ├─ test_install_hooks.py
+│  │  └─ test_run_ci.py
 │  └─ workflows/
 │     ├─ ci.yml
 │     └─ claude-review.yml
@@ -79,6 +81,7 @@ personal-ai-workspace/
 │  │  │  ├─ middleware.py
 │  │  │  ├─ security.py
 │  │  │  ├─ server.py
+│  │  │  ├─ web.py
 │  │  │  ├─ auth/
 │  │  │  │  ├─ __init__.py
 │  │  │  │  ├─ audit.py
@@ -617,6 +620,7 @@ personal-ai-workspace/
 │  │     ├─ test_tools_runner.py
 │  │     ├─ test_tools_runner_accounting.py
 │  │     ├─ test_tools_scope.py
+│  │     ├─ test_web_app.py
 │  │     ├─ tools_store_contract.py
 │  │     ├─ tools_support.py
 │  │     ├─ test_worktrees_coordinator.py
@@ -626,7 +630,17 @@ personal-ai-workspace/
 │  ├─ cli/
 │  │  └─ README.md
 │  └─ web/
-│     └─ README.md
+│     ├─ .node-version
+│     ├─ .npmrc
+│     ├─ README.md
+│     ├─ biome.json
+│     ├─ index.html
+│     ├─ package-lock.json
+│     ├─ package.json
+│     ├─ public/
+│     ├─ src/            # App、theme、i18n、api、auth、notifications、shell、pages と各 *.test.ts(x)
+│     ├─ tsconfig.json
+│     └─ vite.config.ts
 ├─ benchmarks/
 │  ├─ README.md
 │  ├─ __init__.py
