@@ -78,12 +78,21 @@ from paw_backend.tools.credentials import is_credential_handle
 MAX_PATH_LENGTH = 1024
 MAX_URL_LENGTH = 2048
 MAX_HOST_LENGTH = 253
+# The parent's own path roots; a Worker's scope adds its worktree for each
+# repository in front of them (``orchestrator.scope.derive_child_scope``).
 MAX_ROOTS = 32
 MAX_HOSTS = 128
-MAX_PROJECTS = 32
 MAX_REPOSITORIES = 32
+# The task's own project, plus one for each repository (a Working Set of
+# ``MAX_REPOSITORIES`` may span that many other projects).
+MAX_PROJECTS = MAX_REPOSITORIES + 1
 MAX_REMOTES = 8  # URLs registered for one repository
 MAX_CREDENTIAL_HANDLES = 64
+# The parent's own, plus what a Worker's worktree protects for each repository
+# (the checkout, the integration worktree, the worktree area, its ``.git``).
+MAX_EXCLUDED_PATHS = MAX_ROOTS + 4 * MAX_REPOSITORIES
+# The parent's own roots, plus a Worker's worktree for each repository.
+MAX_PATH_ROOTS = MAX_ROOTS + MAX_REPOSITORIES
 
 _FORBIDDEN_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp"})
 _PERCENT_SEPARATOR = re.compile(r"%(?:2[eEfF]|5[cC])")
@@ -428,6 +437,18 @@ class TaskScope:
     of one of them, or a URL below one of its remotes, is out of scope
     (fail closed), whatever the roots and hosts say. An excluded repository is
     never also in ``repositories``.
+
+    ``excluded_paths`` are directories the scope may reach through its
+    ``path_roots`` but must not touch, whatever repository they belong to (a
+    Worker node that works in its own worktree must not write to the user's
+    checkout of the same repository, nor to the task's integration worktree:
+    PAW-035). A path in one of them is out of scope, like a path of an excluded
+    repository, **unless** it also lies in a path root that is itself strictly
+    inside that excluded path: such a root is carved out of it (a Worker's own
+    worktree inside the excluded worktree area of the account, PAW-035). An
+    excluded repository is never carved out, and ``orchestrator.scope.
+    scope_within`` lets a child add such a root only for the worktrees the
+    backend prepared.
     """
 
     path_roots: tuple[str, ...]
@@ -436,6 +457,7 @@ class TaskScope:
     credential_handles: Mapping[str, frozenset[str]] = field(default_factory=dict)
     repositories: tuple[ScopedRepository, ...] = ()
     excluded_repositories: tuple[ScopedRepository, ...] = ()
+    excluded_paths: tuple[str, ...] = ()
 
     def repository(self, repo_id: uuid.UUID) -> ScopedRepository | None:
         """The working-set repository with this id (``None`` when not in it)."""
@@ -483,8 +505,16 @@ class TaskScope:
             raise ValueError("a repository is excluded twice")
         if excluded_ids & {r.repo_id for r in repositories}:
             raise ValueError("a repository is both in the working set and excluded")
+        excluded_paths: list[str] = []
+        for path in _collection(self.excluded_paths, "excluded_paths"):
+            normalised = normalise_path(path)  # absolute only: no base
+            if normalised == "/":
+                raise ValueError("the file system root cannot be excluded")
+            if normalised not in excluded_paths:
+                excluded_paths.append(normalised)
         if (
-            len(roots) > MAX_ROOTS
+            len(roots) > MAX_PATH_ROOTS
+            or len(excluded_paths) > MAX_EXCLUDED_PATHS
             or len(hosts) > MAX_HOSTS
             or len(projects) > MAX_PROJECTS
             or len(repositories) > MAX_REPOSITORIES
@@ -499,6 +529,7 @@ class TaskScope:
         object.__setattr__(self, "credential_handles", MappingProxyType(handles))
         object.__setattr__(self, "repositories", tuple(repositories))
         object.__setattr__(self, "excluded_repositories", tuple(excluded))
+        object.__setattr__(self, "excluded_paths", tuple(excluded_paths))
 
 
 class PathResolver(Protocol):
@@ -592,10 +623,25 @@ async def classify_targets(
             for repository in scope.excluded_repositories
             if repository.root is not None
         ]
+        excluded_paths = []
+        for path in scope.excluded_paths:
+            excluded = await _resolve(resolver, path, timeout_seconds)
+            carved = [
+                root
+                for root in roots
+                if root != excluded and path_within(root, excluded)
+            ]
+            excluded_paths.append((excluded, carved))
         for target in paths:
             resolved = await _resolve(resolver, target.value, timeout_seconds)
-            if not any(path_within(resolved, root) for root in roots) or any(
-                path_within(resolved, root) for root in excluded_roots
+            if (
+                not any(path_within(resolved, root) for root in roots)
+                or any(path_within(resolved, root) for root in excluded_roots)
+                or any(
+                    path_within(resolved, excluded)
+                    and not any(path_within(resolved, root) for root in carved)
+                    for excluded, carved in excluded_paths
+                )
             ):
                 outside.append(TargetKind.PATH)
             touched.update(

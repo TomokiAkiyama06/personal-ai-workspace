@@ -6,9 +6,11 @@ planner role proposes, ``plan.py`` accepts), run the independent nodes in parall
 (``scheduling.py``), retry, change approach or escalate a failing node, pass the
 structured results of finished nodes to the nodes that depend on them, and report
 the outcome to the task (``evaluating``, ``failed`` or ``waiting``). What the
-orchestrator does **not** do: run an agent (an ``AgentRuntime`` does), integrate
-worktrees (PAW-035), evaluate or complete the task (the Evaluator), choose the
-real parallelism (PAW-036) or persist the working set (issue #85).
+orchestrator does **not** do: run an agent (an ``AgentRuntime`` does), run git
+(a ``NodeWorkspaces``, PAW-035, prepares the worktrees of the Worker nodes and
+integrates their branches: ``workspaces.py``), evaluate or complete the task (the
+Evaluator), choose the real parallelism (PAW-036) or persist the working set
+(issue #85).
 
 The duties that earlier Decisions gave to "the orchestrator" and where each is met
 --------------------------------------------------------------------------------
@@ -23,6 +25,10 @@ The duties that earlier Decisions gave to "the orchestrator" and where each is m
   is reduced to a fixed name (``errors.error_class_of``).
 * **Never hand a tool call to a terminated task** and **build ``TaskContext.run``
   from the task** (Decision 0006, 9): ``gateway.py``.
+* **No tool call of a worker that lost its queue lease** (issue #126, Decision
+  0046): ``_context`` puts this worker's claim in ``TaskContext.lease`` and the
+  Broker checks it for every call (``gateway.QueueLeaseVerifier``); a refusal for
+  a lost lease stops the run (``gateway.NodeToolGateway``).
 * **Write repositories are ``TaskScope.repositories``, with remotes registered**
   (Decision 0006, 8): they come from the caller's ``TaskAuthority.parent_scope``
   (the seam until issue #85 persists the working set, Decision 0014) and reach a
@@ -52,13 +58,15 @@ import uuid
 from collections.abc import Awaitable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
+from types import MappingProxyType
 
-from paw_backend.authz import AgentGrant, GrantEscalationError
+from paw_backend.authz import AgentGrant, Capability, GrantEscalationError
 from paw_backend.orchestrator.config import Clock, OrchestratorConfig, SystemClock
 from paw_backend.orchestrator.domain import (
     DagState,
     NextStep,
     NodeRole,
+    NodeState,
     RunOutcome,
 )
 from paw_backend.orchestrator.errors import (
@@ -102,12 +110,27 @@ from paw_backend.orchestrator.validation import (
     check_uuid,
     check_worker_id,
 )
+from paw_backend.orchestrator.workspaces import (
+    WORKTREE_CONFLICT,
+    WORKTREE_UNAVAILABLE,
+    IntegrationReport,
+    IntegrationRequest,
+    IntegrationState,
+    NodeWorkspaceRequest,
+    NodeWorkspaces,
+    NodeWorktree,
+    RepositoryIntegration,
+    WorktreeConflictError,
+    WorktreeUnavailableError,
+    gets_worktree,
+)
 from paw_backend.projects.errors import ProjectBusyError
 from paw_backend.tasks import (
     Actor,
     IllegalTransitionError,
     LogLevel,
     ProjectNotActiveError,
+    RepositoryNotInAttemptError,
     StaleAttemptError,
     StaleRunError,
     TaskCommand,
@@ -119,6 +142,7 @@ from paw_backend.tasks import (
     TaskSnapshot,
     TaskState,
     WaitReason,
+    WorktreeState,
 )
 from paw_backend.tasks.queueing import (
     BudgetKind,
@@ -132,6 +156,7 @@ from paw_backend.tasks.queueing import (
     NextAction,
     Priority,
     QueueEntry,
+    QueueLease,
     StaleRuntimeSessionError,
     TaskQueue,
     decide_next_action,
@@ -144,6 +169,11 @@ from paw_backend.tools.interfaces import require_async_method
 logger = logging.getLogger(__name__)
 
 _RETRYING_STEPS = frozenset({NextStep.RETRY, NextStep.ALTERNATIVE, NextStep.ESCALATE})
+# The guard's stops that end the whole run for this worker: an attempt that ends
+# after one is not settled (``_settle``); the top of the loop closes the run.
+_RUN_ENDING_STOPS = frozenset(
+    {StopReason.TASK_ENDED, StopReason.SUPERSEDED, StopReason.LEASE_LOST}
+)
 
 # Recorded as the reason of the task commands the orchestrator issues (fixed text).
 REASON_DAG_SUCCEEDED = "All required nodes succeeded"
@@ -153,6 +183,8 @@ REASON_NO_BUDGET = "The task has no budget preset"
 REASON_RETRIES = "The retry budget is used up"
 REASON_WAIT = "The budget or a repeated failure needs a decision"
 REASON_INTERNAL = "The orchestrator stopped on an unexpected error"
+REASON_INTEGRATION_CONFLICT = "The integration of the worker branches needs a decision"
+REASON_INTEGRATION_FAILED = "The worker branches could not be integrated"
 # A command fenced by ``expected_version`` is decided again when another change of
 # the task commits between the read and the write; this many times, then it fails.
 COMMAND_ATTEMPTS = 5
@@ -342,6 +374,8 @@ class _Spec:
     attempt: int
     approach: int
     node: NodeRecord | None
+    # The Worker nodes this node depends on directly (PAW-035), in node order.
+    upstream_workers: tuple[str, ...] = ()
     # The DAG of a node's attempt (``None`` for the planning call).
     dag_id: uuid.UUID | None = None
 
@@ -360,6 +394,11 @@ class _Run:
     generation: int | None = None
     proved_at: float = 0.0  # the injected clock when the last lease proof began
     not_before: dict[str, float] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        # A lost lease that the guard learns of (the Broker's ``lease_lost``)
+        # wakes the run loop like one the heartbeats found.
+        self.guard.on_lease_lost(self.lost.set)
 
     def lose(self) -> None:
         self.guard.stop(StopReason.LEASE_LOST)
@@ -381,6 +420,7 @@ class Orchestrator:
         runtimes: Mapping[str, AgentRuntime],
         config: OrchestratorConfig,
         clock: Clock | None = None,
+        worktrees: NodeWorkspaces | None = None,
     ) -> None:
         """Every collaborator is checked here, once, so that a wrong one fails
         loudly at construction (``TypeError``, or ``InvalidOrchestratorArgumentError``
@@ -404,6 +444,9 @@ class Orchestrator:
         require_async_method(tools, "run", 1)
         require_async_method(authority, "parent_grant", 1)
         require_async_method(authority, "parent_scope", 1)
+        if worktrees is not None:
+            require_async_method(worktrees, "prepare_node", 1)
+            require_async_method(worktrees, "integrate", 1)
         clock = clock or SystemClock()
         if not callable(getattr(clock, "monotonic", None)):
             raise TypeError("clock must have monotonic()")
@@ -439,6 +482,7 @@ class Orchestrator:
         self._runtimes = dict(runtimes)
         self._config = config
         self._clock = clock
+        self._worktrees = worktrees
         self._heartbeat_seconds = float(interval)
 
     # -- entry points -----------------------------------------------------------
@@ -977,13 +1021,27 @@ class Orchestrator:
         crash between closing the DAG and failing the task. The DAG is taken over
         (bound to the lease, ``_acquire_dag``: it records the run and fences the
         worker before) but nothing runs, so neither the budget nor the timer is
-        involved; the task command is fenced by the run (``_end_task``)."""
+        involved; the task command is fenced by the run (``_end_task``).
+
+        With a ``NodeWorkspaces`` (PAW-035), handing a succeeded DAG on integrates
+        the Worker branches again (a Retry after a failed integration, an unblock
+        after a human resolved a conflict), which runs git: the lease is then
+        kept by heartbeats as in ``_drive``, and a run whose lease is lost meanwhile
+        issues no task command (``_integrate``)."""
+        run.proved_at = self._clock.monotonic()
         taken = await self._acquire_dag(dag.id, run.entry, run.worker_id, run.run)
         run.epoch = taken.epoch
         if taken.state is DagState.ACTIVE:  # re-opened meanwhile: not ended
             raise DagStateError()
         await self._log(run, LogLevel.INFO, f"The DAG had already {taken.state.value}")
-        return await self._finish_dag(run, taken, None)
+        if self._worktrees is None or taken.state is not DagState.SUCCEEDED:
+            return await self._finish_dag(run, taken, None)
+        heartbeat = asyncio.create_task(self._heartbeats(run))
+        try:
+            return await self._finish_dag(run, taken, None)
+        finally:
+            heartbeat.cancel()
+            await asyncio.gather(heartbeat, return_exceptions=True)
 
     async def _drive_until_lost(self, run: _Run) -> RunReport:
         """``_drive``, but never past a lost lease.
@@ -1233,6 +1291,9 @@ class Orchestrator:
             else dag
         )
         if final.state is DagState.SUCCEEDED:
+            integrated = await self._integrate(run, final)
+            if integrated is not None:
+                return integrated
             ended = await self._end_task(
                 run, TaskCommand.BEGIN_EVALUATION, Actor.system(), REASON_DAG_SUCCEEDED
             )
@@ -1249,6 +1310,112 @@ class Orchestrator:
             task_id,
             final.state,
         )
+
+    async def _integrate(self, run: _Run, dag: DagRecord) -> RunReport | None:
+        """Integrate the Worker branches of a succeeded DAG (PAW-035) before the
+        task goes to evaluation, so that the tests, the Evaluator and the review
+        see the integrated result, never a single Worker's branch. ``None`` when
+        the task may go on to evaluation (integrated, or nothing to integrate);
+        otherwise the task was put in ``waiting`` (a conflict or uncommitted
+        changes: a human decides) or ``failed`` (git could not be used; a Retry
+        integrates again, the DAG's results stand) and this is the report."""
+        if self._worktrees is None:
+            return None
+        workers = tuple(
+            node.key
+            for node in dag.nodes
+            if node.role is NodeRole.WORKER and node.state is NodeState.SUCCEEDED
+        )
+        try:
+            scope = await self._authority.parent_scope(run.task)
+            report = await self._worktrees.integrate(
+                IntegrationRequest(
+                    task=run.task, run=run.run, workers=workers, scope=scope
+                )
+            )
+            if not isinstance(report, IntegrationReport):
+                raise TypeError("integrate must return an IntegrationReport")
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            return await self._integration_failed(run, dag, error)
+        if run.lost.is_set():
+            # Another worker may hold the entry now: it integrates again (the
+            # merges already made are not repeated) and decides the task.
+            return RunReport(RunOutcome.LEASE_LOST, run.task.id, dag.state)
+        for repository in report.repositories:
+            await self._log(run, *_integration_line(repository))
+        try:
+            await self._record_integration(run, report)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            return await self._integration_failed(run, dag, error)
+        if report.clean:
+            return None
+        ended = await self._end_task(
+            run,
+            TaskCommand.WAIT,
+            Actor.system(),
+            REASON_INTEGRATION_CONFLICT,
+            WaitReason.USER,
+        )
+        return RunReport(
+            RunOutcome.INTEGRATION_CONFLICT if ended else RunOutcome.TASK_ENDED,
+            run.task.id,
+            dag.state,
+        )
+
+    async def _integration_failed(
+        self, run: _Run, dag: DagRecord, error: Exception
+    ) -> RunReport:
+        """Integrating (or recording it) failed: the task fails, and a Retry
+        integrates again (the DAG's results stand). The cause is named by its
+        reason or its class only."""
+        if run.lost.is_set():
+            return RunReport(RunOutcome.LEASE_LOST, run.task.id, dag.state)
+        cause = (
+            error.reason.value
+            if isinstance(error, WorktreeUnavailableError)
+            else error_class_of(error)
+        )
+        await self._log(run, LogLevel.ERROR, f"Integration failed ({cause})")
+        ended = await self._end_task(
+            run, TaskCommand.FAIL, Actor.system(), REASON_INTEGRATION_FAILED
+        )
+        return RunReport(
+            RunOutcome.INTEGRATION_FAILED if ended else RunOutcome.TASK_ENDED,
+            run.task.id,
+            dag.state,
+        )
+
+    async def _record_integration(self, run: _Run, report: IntegrationReport) -> None:
+        """Each integrated repository's integration branch, worktree and commit
+        go into its own state in the attempt (``TaskService.update_attempt`` with
+        its ``repository_id``; Decision 0036, 11): a Multi-Repo task records every
+        repository. The new HEAD resets that repository's review and evaluation
+        results (they belonged to another revision). A repository the attempt
+        does not have (``RepositoryNotInAttemptError``) is skipped; any other
+        failure propagates (Codex P2 on PR #130): the task must not go on to
+        evaluate a HEAD the attempt does not name, and the caller fails it so
+        that a Retry integrates and records again."""
+        for repository in report.repositories:
+            if repository.state is not IntegrationState.MERGED:
+                continue
+            try:
+                await self._tasks.update_attempt(
+                    run.task.id,
+                    run=run.run,
+                    repository_id=repository.repo_id,
+                    worktree=WorktreeState(
+                        repository.branch, repository.path, repository.head
+                    ),
+                )
+            except StaleRunError:
+                run.guard.stop(StopReason.SUPERSEDED)
+                return
+            except RepositoryNotInAttemptError:
+                continue
 
     async def _end_after_stop(
         self, run: _Run, stop: _Stop, dag: DagRecord | None
@@ -1417,6 +1584,11 @@ class Orchestrator:
             attempt=attempt.number,
             approach=attempt.approach,
             node=node,
+            upstream_workers=tuple(
+                dependency
+                for dependency in node.depends_on
+                if dag.node(dependency).role is NodeRole.WORKER
+            ),
             dag_id=dag.id,
         )
 
@@ -1480,10 +1652,17 @@ class Orchestrator:
 
     # -- one attempt --------------------------------------------------------------
 
-    async def _context(self, run: _Run, spec: _Spec) -> TaskContext:
+    async def _context(
+        self,
+        run: _Run,
+        spec: _Spec,
+        worktrees: Mapping[uuid.UUID, NodeWorktree] | None = None,
+    ) -> TaskContext:
         """The ``TaskContext`` of one tool call, from CURRENT values: the run comes
         from the task snapshot the worker was started with (``TaskEvent.run``), the
-        delegator from the task, the grant and scope derived from the parent's."""
+        lease from the claim this worker holds, the delegator from the task, the
+        grant and scope derived from the parent's (with the node's own worktrees,
+        PAW-035, when it has them)."""
         parent_grant = await self._authority.parent_grant(run.task)
         parent_scope = await self._authority.parent_scope(run.task)
         grant = node_grant(
@@ -1505,6 +1684,7 @@ class Orchestrator:
             parent_scope,
             role=spec.role,
             repositories=None if spec.node is None else spec.node.repositories,
+            worktrees=worktrees,
         )
         return TaskContext(
             task_id=run.task.id,
@@ -1513,13 +1693,23 @@ class Orchestrator:
             scope=scope,
             primary_project_id=run.task.project_id,
             run=run.run,
+            # The fencing token of every tool call (issue #126, Decision 0046):
+            # the Broker refuses the call once this claim no longer holds.
+            lease=QueueLease.of(run.entry, run.worker_id),
         )
 
     async def _attempt(self, run: _Run, spec: _Spec) -> _Finished:
         """Run one attempt through the agent runtime; only cancellation escapes."""
         fence = AttemptFence()
         try:
-            await self._context(run, spec)  # fail early on a grant / scope problem
+            # Fail early on a grant / scope problem.
+            context = await self._context(run, spec)
+            # Read only, and the one mapping both the runtime and the tool
+            # context see: a runtime cannot clear it (the user's checkout back
+            # in scope) or add a root to it (Codex review of PAW-035).
+            worktrees = MappingProxyType(
+                dict(await self._prepare_worktrees(run, spec, context))
+            )
             assignment = NodeAssignment(
                 task_id=run.task.id,
                 node_key=spec.key,
@@ -1532,9 +1722,13 @@ class Orchestrator:
                 attempt=spec.attempt,
                 approach=spec.approach,
                 tools=NodeToolGateway(
-                    run.guard, self._tools, lambda: self._context(run, spec), fence
+                    run.guard,
+                    self._tools,
+                    lambda: self._context(run, spec, worktrees),
+                    fence,
                 ),
                 budget=NodeBudgetHandle(run.guard, self._budget, run.task.id, fence),
+                worktrees=worktrees,
                 placement=self._placement(run, spec, fence),
             )
             outcome = await self._with_timeout(
@@ -1549,6 +1743,11 @@ class Orchestrator:
                 else "ScopeEscalation",
                 retryable=False,
             )
+        except WorktreeConflictError:
+            # The upstream branches conflict: the same merge conflicts again.
+            return _Finished.failure(WORKTREE_CONFLICT, retryable=False)
+        except WorktreeUnavailableError:
+            return _Finished.failure(WORKTREE_UNAVAILABLE)
         except asyncio.CancelledError:
             raise
         except Exception as error:
@@ -1562,6 +1761,37 @@ class Orchestrator:
         if not isinstance(outcome, NodeOutcome):
             return _Finished.failure(INVALID_OUTCOME)
         return _Finished(outcome=outcome)
+
+    async def _prepare_worktrees(
+        self, run: _Run, spec: _Spec, context: TaskContext
+    ) -> Mapping[uuid.UUID, NodeWorktree]:
+        """The dedicated worktrees of a Worker node that may write (PAW-035): one
+        per repository of its scope that has a checkout and is ``working`` /
+        ``target`` (``gets_worktree``). None for any other node,
+        or when the orchestrator has no ``NodeWorkspaces``."""
+        if (
+            self._worktrees is None
+            or spec.node is None
+            or spec.role is not NodeRole.WORKER
+            or Capability.PROJECT_REPO_WRITE not in context.grant.capabilities
+            or not any(gets_worktree(r) for r in context.scope.repositories)
+        ):
+            return {}
+        prepared = await self._worktrees.prepare_node(
+            NodeWorkspaceRequest(
+                task=run.task,
+                run=run.run,
+                node_key=spec.key,
+                upstream_workers=spec.upstream_workers,
+                scope=context.scope,
+            )
+        )
+        worktrees = dict(prepared)
+        # The scope is derived again with the worktrees: a worktree the
+        # implementation made up for a repository outside the node's scope is a
+        # ScopeEscalation, never a wider scope.
+        await self._context(run, spec, worktrees)
+        return worktrees
 
     def _placement(
         self, run: _Run, spec: _Spec, fence: AttemptFence
@@ -1619,6 +1849,14 @@ class Orchestrator:
         """Write the outcome of an attempt. ``(dag, stop)``: ``stop`` when the
         outcome means the run must not start more nodes (a budget or a loop)."""
         store, epoch = self._store, run.epoch
+        if run.guard.stop_reason in _RUN_ENDING_STOPS:
+            # The run is over for this worker (its lease is gone, its run was
+            # replaced, or the task ended): nothing of it is written, whatever the
+            # attempt reports. A runtime may have caught the ``NodeStopped`` of a
+            # tool call and returned an outcome anyway; after a lease that only
+            # ran out, nobody has raised the DAG's epoch yet, so the store would
+            # still take it (Decision 0046). The top of the loop closes the run.
+            return dag, None
         if finished.stopped is not None:
             reason = finished.stopped
             if reason is StopReason.BUDGET_EXCEEDED:
@@ -1632,12 +1870,6 @@ class Orchestrator:
                     step=NextStep.HOLD,
                 )
                 return dag, await self._budget_stop(run)
-            if run.guard.stop_reason is reason and reason in (
-                StopReason.TASK_ENDED,
-                StopReason.SUPERSEDED,
-                StopReason.LEASE_LOST,
-            ):
-                return dag, None  # the top of the loop sees it and closes the DAG
             dag = await store.fail_node(
                 dag.id,
                 epoch,
@@ -1980,6 +2212,29 @@ class Orchestrator:
                 break
         await self._end_task(run, TaskCommand.FAIL, Actor.system(), REASON_PLAN_FAILED)
         return RunReport(RunOutcome.PLAN_FAILED, task_id)
+
+
+def _integration_line(repository: RepositoryIntegration) -> tuple[LogLevel, str]:
+    """The fixed task-log line of one repository's integration (PAW-035): ids,
+    node keys and counts only, never a path or a file name."""
+    name = f"Integration of repository {repository.repo_id}"
+    state = repository.state
+    if state is IntegrationState.MERGED:
+        return LogLevel.INFO, f"{name}: {len(repository.merged)} branch(es) merged"
+    if state is IntegrationState.NOTHING:
+        return LogLevel.INFO, f"{name}: nothing to integrate"
+    if state is IntegrationState.CONFLICT:
+        return (
+            LogLevel.WARNING,
+            f"{name}: the branch of node {repository.blocking_node} conflicts"
+            f" ({len(repository.conflicted_files)} file(s))",
+        )
+    where = (
+        "the integration worktree"
+        if repository.blocking_node is None
+        else f"the worktree of node {repository.blocking_node}"
+    )
+    return LogLevel.WARNING, f"{name}: {where} has uncommitted changes"
 
 
 def _ended_for_good(dag: DagRecord, run: TaskRun) -> bool:

@@ -202,6 +202,13 @@ class DevicePairingRow(Base):
     ended_reason: Mapped[str | None] = mapped_column(Text)
     attempts: Mapped[int] = mapped_column(Integer)
     locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Decision 0043, point 11 (#154, revision 0154): when the one Passkey
+    # registration without a Step-up that an approved pairing gives its session
+    # stopped being available (the session registered a Passkey, either way, or a
+    # Passkey of the user was revoked). NULL while it is unspent.
+    passkey_allowance_ended_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
 
     __table_args__ = (
         UniqueConstraint("audit_ref"),
@@ -304,6 +311,12 @@ class DevicePairingRow(Base):
             "ended_reason_valid",
         ),
         CheckConstraint("attempts >= 0", name="attempts_not_negative"),
+        # Only an approved, completed pairing has an allowance to end.
+        CheckConstraint(
+            "passkey_allowance_ended_at IS NULL "
+            "OR (state = 'completed' AND approval_required)",
+            name="allowance_needs_approval",
+        ),
     )
 
 

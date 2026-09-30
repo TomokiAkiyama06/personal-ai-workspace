@@ -29,7 +29,7 @@ import uuid
 from datetime import datetime
 from enum import StrEnum
 
-from sqlalchemy import insert, select
+from sqlalchemy import func, insert, literal, select, true
 
 from paw_backend.authz.models import AuditEventRecord
 from paw_backend.db import Database
@@ -80,39 +80,52 @@ async def record_projection_outcome(
 async def projection_status(database: Database) -> ProjectionStatus:
     """The last recorded run and the last completed one (``None`` when none)."""
     table = AuditEventRecord.__table__
-    last_completed = (
-        select(table.c.occurred_at)
+    completed = (
+        select(table.c.occurred_at, table.c.recorded_at)
         .where(
             table.c.resource_kind == RESOURCE_KIND,
             table.c.action == ProjectionAction.COMPLETED.value,
         )
         .order_by(table.c.recorded_at.desc(), table.c.occurred_at.desc())
         .limit(1)
-        .scalar_subquery()
+        .subquery("last_completed")
     )
-    # One statement, so both answers come from the same snapshot: a run that
-    # commits meanwhile cannot make the last run and the last success disagree.
     runs = (
-        select(
-            table.c.action,
-            table.c.occurred_at,
-            table.c.reason,
-            last_completed.label("last_completed_at"),
-        )
+        select(table.c.action, table.c.occurred_at, table.c.reason)
         .where(
             table.c.resource_kind == RESOURCE_KIND,
             table.c.action.in_([action.value for action in ProjectionAction]),
         )
         .order_by(table.c.recorded_at.desc(), table.c.occurred_at.desc())
         .limit(1)
+        .subquery("last_run")
+    )
+    # One statement, so every answer comes from the same snapshot: a run that
+    # commits meanwhile cannot make the last run and the last success disagree.
+    # ``now()`` is the database clock the ``0025`` trigger stamps ``recorded_at``
+    # with, so the age of the last success never depends on a host's clock.
+    status = select(
+        func.now().label("checked_at"),
+        runs.c.action,
+        runs.c.occurred_at,
+        runs.c.reason,
+        completed.c.occurred_at.label("last_completed_at"),
+        completed.c.recorded_at.label("last_completed_recorded_at"),
+    ).select_from(
+        select(literal(1).label("one"))
+        .subquery("one")
+        .outerjoin(runs, true())
+        .outerjoin(completed, true())
     )
     async with database.session() as session:
-        last = (await session.execute(runs)).first()
+        row = (await session.execute(status)).one()
     return ProjectionStatus(
-        last_action=None if last is None else last.action,
-        last_run_at=None if last is None else last.occurred_at,
-        last_reason=None if last is None else last.reason,
-        last_completed_at=None if last is None else last.last_completed_at,
+        last_action=row.action,
+        last_run_at=row.occurred_at,
+        last_reason=row.reason,
+        last_completed_at=row.last_completed_at,
+        last_completed_recorded_at=row.last_completed_recorded_at,
+        checked_at=row.checked_at,
     )
 
 
