@@ -6,6 +6,7 @@ import { PairPage } from "./pages/PairPage";
 import { PasskeyGatePage } from "./pages/PasskeyGatePage";
 import { PlaceholderPage } from "./pages/PlaceholderPage";
 import { SettingsPage } from "./pages/SettingsPage";
+import { PROJECTS_PATH, ProjectsPage } from "./projects/ProjectsPage";
 import { useRouter } from "./router";
 import { AppShell } from "./shell/AppShell";
 import { isActive, NEW_CHAT_PATH, PRIMARY_NAV, SECONDARY_NAV } from "./shell/navigation";
@@ -21,6 +22,7 @@ const OTHER_SCREENS: readonly { path: string; label: MessageKey }[] = [
 function SignedInPage() {
   const { path } = useRouter();
   if (path === "/notifications") return <NotificationsPage />;
+  if (path === PROJECTS_PATH || path.startsWith(`${PROJECTS_PATH}/`)) return <ProjectsPage />;
   const other = OTHER_SCREENS.find((entry) => entry.path === path);
   if (other) return <PlaceholderPage screen={other.label} />;
   const item = [...PRIMARY_NAV, ...SECONDARY_NAV].find((entry) => isActive(entry, path));
