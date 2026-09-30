@@ -16,6 +16,7 @@ import {
   type ControlCommand,
   type ControlOptions,
   type DagNode,
+  decodeSegment,
   elapsed,
   isUnsettled,
   MAX_NAME_LENGTH,
@@ -57,7 +58,8 @@ function isLive(task: TaskSummary): boolean {
 function selectedTaskId(path: string): string | null {
   if (!path.startsWith(`${TASKS_PATH}/`)) return null;
   const id = path.slice(TASKS_PATH.length + 1);
-  return id ? decodeURIComponent(id) : null;
+  // A malformed escape is a task that does not exist, not a crash.
+  return id ? (decodeSegment(id) ?? id) : null;
 }
 
 export function Unavailable({ title }: { title: MessageKey }) {
@@ -139,13 +141,14 @@ function TasksView({ source }: { source: TaskSource }) {
   );
 
   const tasks = list.status === "ready" ? list.data.tasks : [];
-  // No push channel yet: the list is read again while a task can still change.
-  const unsettled = tasks.some((task) => isUnsettled(task.state));
+  // No push channel yet: the list is read again while it is shown (a task
+  // changes, or a new one appears).
+  const loaded = list.status === "ready";
   useEffect(() => {
-    if (!unsettled) return;
+    if (!loaded) return;
     const timer = window.setInterval(refreshList, REFRESH_MS);
     return () => window.clearInterval(timer);
-  }, [unsettled, refreshList]);
+  }, [loaded, refreshList]);
   const visible = tasks.filter((task) => matches(task, filter));
   const now = useNow(tasks.some(isLive));
   // On a wide screen the first task is open until one is chosen; on a phone the

@@ -8,7 +8,7 @@ import { errorMessage } from "../i18n/errors";
 import { Link, useRouter } from "../router";
 import { Icon } from "../shell/icons";
 import type { PullRequestRecord } from "./model";
-import { REFRESH_MS, shortId } from "./model";
+import { decodeSegment, REFRESH_MS, shortId } from "./model";
 import { CheckMark } from "./parts";
 import { type TaskSource, useTaskSource } from "./source";
 import { TASKS_PATH, Unavailable } from "./TasksPage";
@@ -35,7 +35,7 @@ function matches(pr: PullRequestRecord, filter: Filter): boolean {
 function selectedPullId(path: string): string | null {
   if (!path.startsWith(`${PULLS_PATH}/`)) return null;
   const id = path.slice(PULLS_PATH.length + 1);
-  return id ? decodeURIComponent(id) : null;
+  return id ? (decodeSegment(id) ?? id) : null;
 }
 
 /** A GitHub link is followed only if it is an https URL (the Backend records one). */
@@ -76,11 +76,11 @@ function PullsView({ source }: { source: TaskSource }) {
   useEffect(reload, [reload]);
 
   const all = load.status === "ready" ? load.data : [];
-  // Review, evaluation and Merge Ready change while an open or draft PR is shown;
-  // a failed background read keeps what is shown.
-  const unsettled = all.some((pr) => pr.state === "open" || pr.state === "draft");
+  // Review, evaluation and Merge Ready change and new PRs appear while the list
+  // is shown; a failed background read keeps what is shown.
+  const loaded = load.status === "ready";
   useEffect(() => {
-    if (!unsettled) return;
+    if (!loaded) return;
     const timer = window.setInterval(() => {
       source
         .listPullRequests()
@@ -88,7 +88,7 @@ function PullsView({ source }: { source: TaskSource }) {
         .catch(() => {});
     }, REFRESH_MS);
     return () => window.clearInterval(timer);
-  }, [unsettled, source]);
+  }, [loaded, source]);
   const visible = all.filter((pr) => matches(pr, filter));
   const shown = all.find((pr) => pr.id === (selectedId ?? visible[0]?.id)) ?? null;
 

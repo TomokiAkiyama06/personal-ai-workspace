@@ -280,3 +280,12 @@ export function orderedNodes(nodes: readonly DagNode[]): DagNode[] {
     .sort((a, b) => a.column - b.column || a.row - b.row || a.index - b.index)
     .map((position) => position.node);
 }
+
+/** A route segment decoded, or null when it is not valid percent-encoding. */
+export function decodeSegment(segment: string): string | null {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return null;
+  }
+}

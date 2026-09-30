@@ -465,4 +465,10 @@ describe("Tasks page", () => {
     renderTasks("/agents/unknown", source);
     expect(await screen.findByText("このタスクは見つかりませんでした。")).toBeInTheDocument();
   });
+
+  it("treats a malformed escape in the path as a task that does not exist", async () => {
+    const { source } = fakeTaskSource();
+    renderTasks("/agents/%E0%A4%A", source);
+    expect(await screen.findByText("このタスクは見つかりませんでした。")).toBeInTheDocument();
+  });
 });

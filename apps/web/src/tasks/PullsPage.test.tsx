@@ -91,4 +91,29 @@ describe("Pull requests page", () => {
       vi.useRealTimers();
     }
   });
+
+  it("keeps reading the list while it is empty, so the first PR appears", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const pullRequests: ReturnType<typeof samplePullRequests> = [];
+      const { source } = fakeTaskSource(undefined, pullRequests);
+      renderPulls("/pulls", source);
+      expect(
+        await screen.findByText("エージェントが作ったプルリクエストはまだありません。"),
+      ).toBeInTheDocument();
+      pullRequests.push(...samplePullRequests());
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(
+        await screen.findByRole("heading", { name: "認証セッションの失効判定を一本化する" }),
+      ).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not crash on a malformed escape in the path", async () => {
+    const { source } = fakeTaskSource();
+    renderPulls("/pulls/%", source);
+    expect(await screen.findByText("プルリクエストを選んでください。")).toBeInTheDocument();
+  });
 });
