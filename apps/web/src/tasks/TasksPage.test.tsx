@@ -324,6 +324,44 @@ describe("Tasks page", () => {
     );
   });
 
+  it("keeps the list when the read after a control fails", async () => {
+    const { source } = fakeTaskSource();
+    renderTasks("/agents", source);
+    const user = userEvent.setup();
+    const list = await screen.findByRole("navigation", { name: "タスクの一覧" });
+    await screen.findByRole("article", { name: "認証セッションの修正" });
+    source.listTasks = () => Promise.reject(new ApiError(503, "service_unavailable", "x"));
+    await user.click(screen.getByRole("button", { name: "一時停止" }));
+    const detail = screen.getByRole("article", { name: "認証セッションの修正" });
+    await waitFor(() =>
+      expect(detail.querySelector(".task-title-block .state-pill")).toHaveTextContent("一時停止中"),
+    );
+    expect(within(list).getAllByRole("link")).toHaveLength(4);
+    expect(within(list).queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("closes a control's form when the task no longer accepts it", async () => {
+    const tasks = sampleTasks();
+    const failed = tasks.find((task) => task.id === TASK_205);
+    if (failed) {
+      failed.state = "failed";
+      failed.waitReason = null;
+    }
+    const { source } = fakeTaskSource(tasks);
+    renderTasks(`/agents/${TASK_205}`, source);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "最初からやり直す" }));
+    if (failed) {
+      failed.state = "queued";
+      failed.version = 4;
+    }
+    source.control = () => Promise.reject(new ApiError(409, "conflict", "x"));
+    await user.click(screen.getByRole("button", { name: "最初からやり直すを実行" }));
+    await waitFor(() =>
+      expect(screen.queryByRole("form", { name: "最初からやり直す" })).not.toBeInTheDocument(),
+    );
+  });
+
   it("ignores a poll that was in flight when a control answered", async () => {
     const { source } = fakeTaskSource();
     let resolveStale: (task: TaskDetail) => void = () => {};

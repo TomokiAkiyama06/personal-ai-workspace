@@ -76,4 +76,19 @@ describe("Pull requests page", () => {
     await user.click(screen.getByRole("button", { name: "下書き 1" }));
     expect(within(list).getByRole("link")).toHaveTextContent("ログ出力の整理");
   });
+
+  it("reads open pull requests again while the screen is open", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const { source } = fakeTaskSource();
+      const list = vi.spyOn(source, "listPullRequests");
+      renderPulls("/pulls", source);
+      await screen.findByRole("heading", { name: "認証セッションの失効判定を一本化する" });
+      const before = list.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(list.mock.calls.length).toBeGreaterThan(before);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

@@ -101,21 +101,22 @@ function TasksView({ source }: { source: TaskSource }) {
       .catch((error: unknown) => setList({ status: "error", error }));
   }, [source]);
   useEffect(reload, [reload]);
+  // A background read (polling, after a control): a failure keeps the last list.
+  const refreshList = useCallback(() => {
+    source
+      .listTasks()
+      .then((data) => setList({ status: "ready", data }))
+      .catch(() => {});
+  }, [source]);
 
   const tasks = list.status === "ready" ? list.data.tasks : [];
   // No push channel yet: the list is read again while a task can still change.
   const unsettled = tasks.some((task) => isUnsettled(task.state));
   useEffect(() => {
     if (!unsettled) return;
-    // A failed background read keeps the last list (and keeps polling).
-    const timer = window.setInterval(() => {
-      source
-        .listTasks()
-        .then((data) => setList({ status: "ready", data }))
-        .catch(() => {});
-    }, REFRESH_MS);
+    const timer = window.setInterval(refreshList, REFRESH_MS);
     return () => window.clearInterval(timer);
-  }, [unsettled, source]);
+  }, [unsettled, refreshList]);
   const visible = tasks.filter((task) => matches(task, filter));
   const now = useNow(tasks.some(isLive));
   // On a wide screen the first task is open until one is chosen; on a phone the
@@ -191,7 +192,7 @@ function TasksView({ source }: { source: TaskSource }) {
         </nav>
         <div className="task-detail-pane">
           {shownId ? (
-            <TaskDetailView key={shownId} source={source} id={shownId} onChanged={reload} />
+            <TaskDetailView key={shownId} source={source} id={shownId} onChanged={refreshList} />
           ) : (
             list.status === "ready" && <p className="muted small">{t("tasks.select")}</p>
           )}
@@ -385,7 +386,7 @@ function TaskDetailView({
             : send(command)
         }
       />
-      {form && (
+      {form && ACCEPTED_CONTROLS[data.state].includes(form) && (
         <ControlForm
           key={form}
           command={form}

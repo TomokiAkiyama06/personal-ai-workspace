@@ -8,7 +8,7 @@ import { errorMessage } from "../i18n/errors";
 import { Link, useRouter } from "../router";
 import { Icon } from "../shell/icons";
 import type { PullRequestRecord } from "./model";
-import { shortId } from "./model";
+import { REFRESH_MS, shortId } from "./model";
 import { CheckMark } from "./parts";
 import { type TaskSource, useTaskSource } from "./source";
 import { TASKS_PATH, Unavailable } from "./TasksPage";
@@ -76,6 +76,19 @@ function PullsView({ source }: { source: TaskSource }) {
   useEffect(reload, [reload]);
 
   const all = load.status === "ready" ? load.data : [];
+  // Review, evaluation and Merge Ready change while an open or draft PR is shown;
+  // a failed background read keeps what is shown.
+  const unsettled = all.some((pr) => pr.state === "open" || pr.state === "draft");
+  useEffect(() => {
+    if (!unsettled) return;
+    const timer = window.setInterval(() => {
+      source
+        .listPullRequests()
+        .then((data) => setLoad({ status: "ready", data }))
+        .catch(() => {});
+    }, REFRESH_MS);
+    return () => window.clearInterval(timer);
+  }, [unsettled, source]);
   const visible = all.filter((pr) => matches(pr, filter));
   const shown = all.find((pr) => pr.id === (selectedId ?? visible[0]?.id)) ?? null;
 
