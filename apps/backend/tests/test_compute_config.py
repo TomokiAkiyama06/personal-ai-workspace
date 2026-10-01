@@ -167,7 +167,12 @@ def commands(**overrides):
 class CommandModelControlTest(unittest.IsolatedAsyncioTestCase):
     async def test_each_action_runs_the_configured_argv(self):
         runner = RecordingRunner(stdout="4242\n")
-        control = CommandModelControl({"main": commands()}, runner=runner, timeout=30)
+        control = CommandModelControl(
+            {"main": commands()},
+            runner=runner,
+            timeout=30,
+            host_memory=lambda: 64 * GIB,  # not this machine's /proc/meminfo
+        )
         await control.place("main", Placement.LOCAL_GPU)
         await control.unload("main")
         self.assertEqual(await control.processes("main"), frozenset({4242}))

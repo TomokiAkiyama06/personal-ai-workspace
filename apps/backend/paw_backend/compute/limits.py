@@ -4,9 +4,13 @@ The requirements leave the numbers to the Model / Runtime Benchmark ("Safety
 Headroomの具体的なGB / %は要件定義段階では固定せず、Model Benchmark / Runtime
 Benchmark後に決定する"). These are **provisional** values that only set the order
 of magnitude for one 96 GB GPU; ``docs/decisions/0037-gpu-compute-scheduler.md``
-(Approved) lists them. Every one of them is a field of ``ComputeConfig`` and can
-be changed there without touching this module; nothing is written to a database.
+(Approved) lists them, and ``0039-compute-scheduler-calibration.md`` (Approved)
+checked them against the PAW-017 measurements. Every one of them is a field of
+``ComputeConfig`` and can be changed there without touching this module; nothing
+is written to a database.
 """
+
+from types import MappingProxyType
 
 from paw_backend.compute.domain import ResourceClass
 
@@ -38,7 +42,7 @@ DEFAULT_PROBE_MAX_AGE_SECONDS = 15.0  # an older reading admits no GPU work
 DEFAULT_REFRESH_SECONDS = 5.0
 DEFAULT_MAX_WAITERS = 256
 DEFAULT_PROBE_TIMEOUT_SECONDS = 10.0
-MAX_COMMAND_TIMEOUT_SECONDS = 600.0
+MAX_COMMAND_TIMEOUT_SECONDS = 600.0  # the probe's commands
 
 # Decision 0042: a warning that work waits for VRAM another workload
 # holds is repeated at most this often for the same kind of work.
@@ -46,7 +50,12 @@ DEFAULT_VRAM_WARNING_INTERVAL_SECONDS = 300.0
 
 # -- models --------------------------------------------------------------------
 DEFAULT_FAILED_RETRY_SECONDS = 60.0  # a failed load is tried again after this
-DEFAULT_CONTROL_TIMEOUT_SECONDS = 300.0  # one load / unload command
+# One load / unload command. Decision 0039, 2 (Approved): a first load from the
+# HDD took 412 s (gpt-oss-120b), so 900 s, about twice the longest measured.
+DEFAULT_CONTROL_TIMEOUT_SECONDS = 900.0
+# The ceiling of that setting (Codex P2 on #179: 900 s must still validate),
+# twice the default; the probe's commands keep ``MAX_COMMAND_TIMEOUT_SECONDS``.
+MAX_CONTROL_TIMEOUT_SECONDS = 1_800.0
 DEFAULT_MAX_CONTEXT_TOKENS = 32_768
 
 # -- Exclusive -----------------------------------------------------------------
@@ -71,3 +80,15 @@ BYTES_PER_TOKEN_ESTIMATE = 3
 DEFAULT_OUTPUT_TOKENS = 8_192
 DEFAULT_MEMORY_OUTPUT_TOKENS = 2_048
 DEFAULT_NODE_WAIT_SECONDS = 600.0  # a node waits this long for local capacity
+
+# -- the host (issue #182, Decision 0039, 4; the values: Decision 0072, Proposed)
+# A GPU runtime is not started while the host's ``MemAvailable`` is below this:
+# its first load may build JIT kernels (FlashInfer) with several GiB of host RAM
+# per compiler process. On 2026-09-30 an unbounded build (27 ``cicc``, about
+# 75 GiB) exhausted the host's memory and the machine rebooted.
+DEFAULT_MIN_HOST_AVAILABLE_BYTES = 32 * GIB
+# What the model commands run with: at most 4 JIT build jobs (each ``cicc`` took
+# up to 4.4 GiB) and one ``nvcc`` thread per FlashInfer job.
+DEFAULT_JIT_BUILD_ENV = MappingProxyType(
+    {"MAX_JOBS": "4", "FLASHINFER_NVCC_THREADS": "1"}
+)
