@@ -57,10 +57,14 @@ export interface IncomingNotification {
   remote?: boolean;
 }
 
-/** Sends the read state of stored notifications to the Backend. */
+/**
+ * Sends the read state of stored notifications to the Backend. Each resolves
+ * with the account's unread total after the change; a rejection puts the entry
+ * back to unread (the Backend still has it unread).
+ */
 export interface NotificationRemote {
-  markRead: (ids: string[]) => void;
-  markAllRead: () => void;
+  markRead: (ids: string[]) => Promise<number>;
+  markAllRead: () => Promise<number>;
 }
 
 export interface NotificationAction {
@@ -124,6 +128,11 @@ interface NotificationValue {
   clear: () => void;
   /** Where marking stored notifications read is sent (`null`: nowhere). */
   setRemote: (remote: NotificationRemote | null) => void;
+  /**
+   * The Backend's unread total of the stored notifications (the list holds the
+   * newest only): the badge counts it instead of the stored entries shown.
+   */
+  setRemoteUnread: (total: number | null) => void;
 }
 
 const NotificationContext = createContext<NotificationValue | null>(null);
@@ -197,10 +206,26 @@ export function NotificationProvider({
   const setRemote = useCallback((value: NotificationRemote | null) => {
     remote.current = value;
   }, []);
-  const sendRead = useCallback((key: string) => {
-    const item = latest.current.find((entry) => entry.key === key);
-    if (item?.remote && !item.read && item.ids.length > 0) remote.current?.markRead(item.ids);
+  const [remoteUnread, setRemoteUnread] = useState<number | null>(null);
+  // A failed write: the entries are unread again (as on the Backend), and the
+  // total is the one before the optimistic change, until the next list.
+  const restore = useCallback((keys: Set<string>, total: number | null) => {
+    setItems((current) =>
+      current.map((item) => (keys.has(item.key) ? { ...item, read: false } : item)),
+    );
+    setRemoteUnread(total);
   }, []);
+  const sendRead = useCallback(
+    (key: string) => {
+      const item = latest.current.find((entry) => entry.key === key);
+      const target = remote.current;
+      if (!item?.remote || item.read || item.ids.length === 0 || !target) return;
+      const before = remoteUnread;
+      setRemoteUnread((total) => (total === null ? null : Math.max(0, total - item.ids.length)));
+      target.markRead(item.ids).then(setRemoteUnread, () => restore(new Set([key]), before));
+    },
+    [remoteUnread, restore],
+  );
   const push = useCallback((incoming: IncomingNotification) => {
     setItems((current) => mergeNotification(current, incoming));
   }, []);
@@ -226,9 +251,17 @@ export function NotificationProvider({
     [sendRead],
   );
   const markAllRead = useCallback(() => {
-    if (latest.current.some((item) => item.remote && !item.read)) remote.current?.markAllRead();
+    const target = remote.current;
+    if (target && (remoteUnread ?? 0) + latest.current.filter((i) => i.remote && !i.read).length) {
+      const keys = new Set(
+        latest.current.filter((item) => item.remote && !item.read).map((item) => item.key),
+      );
+      const before = remoteUnread;
+      setRemoteUnread(0);
+      target.markAllRead().then(setRemoteUnread, () => restore(keys, before));
+    }
     setItems((current) => current.map((item) => ({ ...item, read: true })));
-  }, []);
+  }, [remoteUnread, restore]);
   const dismiss = useCallback(
     (key: string) => {
       // Closing the banner reads the entry (it stays in the list).
@@ -241,12 +274,15 @@ export function NotificationProvider({
   );
   const clear = useCallback(() => {
     setItems((current) => (current.length === 0 ? current : []));
+    setRemoteUnread(null);
   }, []);
   useEffect(() => source?.subscribe(push, resolve), [source, push, resolve]);
   const value = useMemo(
     () => ({
       items,
-      unread: items.filter((item) => !item.read).length,
+      unread:
+        items.filter((item) => !item.read && !item.remote).length +
+        (remoteUnread ?? items.filter((item) => !item.read && item.remote).length),
       push,
       resolve,
       resolveMatching,
@@ -255,8 +291,20 @@ export function NotificationProvider({
       dismiss,
       clear,
       setRemote,
+      setRemoteUnread,
     }),
-    [items, push, resolve, resolveMatching, markRead, markAllRead, dismiss, clear, setRemote],
+    [
+      items,
+      remoteUnread,
+      push,
+      resolve,
+      resolveMatching,
+      markRead,
+      markAllRead,
+      dismiss,
+      clear,
+      setRemote,
+    ],
   );
   return <NotificationContext.Provider value={value}>{children}</NotificationContext.Provider>;
 }

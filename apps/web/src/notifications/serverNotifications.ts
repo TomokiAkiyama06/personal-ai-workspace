@@ -79,20 +79,20 @@ export function toIncoming(item: StoredNotification, t: Translate): IncomingNoti
   };
 }
 
+/** Mounted once for every screen of a signed-in session past the Passkey gate. */
+export function ServerNotifications(): null {
+  useServerNotifications();
+  return null;
+}
+
 export function useServerNotifications(): void {
   const { t } = useI18n();
-  const { push, resolveMatching, setRemote } = useNotifications();
+  const { push, resolveMatching, setRemote, setRemoteUnread } = useNotifications();
 
   useEffect(() => {
     setRemote({
-      markRead: (ids) => {
-        notificationsApi.markRead(ids).catch(() => {
-          // Read here already; the next list shows the Backend's state.
-        });
-      },
-      markAllRead: () => {
-        notificationsApi.markAllRead().catch(() => {});
-      },
+      markRead: async (ids) => (await notificationsApi.markRead(ids)).unread,
+      markAllRead: async () => (await notificationsApi.markAllRead()).unread,
     });
     return () => setRemote(null);
   }, [setRemote]);
@@ -111,8 +111,9 @@ export function useServerNotifications(): void {
       }
       inFlight = true;
       try {
-        const { notifications } = await notificationsApi.list();
+        const { notifications, unread } = await notificationsApi.list();
         if (cancelled) return;
+        setRemoteUnread(unread);
         // Oldest first, so that the entries count and order as they arrived.
         for (const item of [...notifications].reverse()) push(toIncoming(item, t));
         const current = new Set(notifications.map((item) => `${SERVER_KEY_PREFIX}${item.key}`));
@@ -162,5 +163,5 @@ export function useServerNotifications(): void {
       window.clearInterval(timer);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [t, push, resolveMatching]);
+  }, [t, push, resolveMatching, setRemoteUnread]);
 }

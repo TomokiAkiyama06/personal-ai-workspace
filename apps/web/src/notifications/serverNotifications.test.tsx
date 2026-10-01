@@ -168,4 +168,45 @@ describe("stored notifications in the Notification Center", () => {
     unmount();
     expect(FakeEventSource.instances[0]?.closed).toBe(true);
   });
+
+  it("counts the Backend's unread total, not only the entries loaded", async () => {
+    mockApi({
+      "GET /auth/session": reply(200, session()),
+      "GET /notifications": reply(200, { notifications: [stored()], unread: 150 }),
+    });
+    renderApp("/");
+    expect(await screen.findByRole("button", { name: "通知 150 件未読" })).toBeInTheDocument();
+  });
+
+  it("a read the Backend refused is unread again", async () => {
+    const { calls } = mockApi({
+      "GET /auth/session": reply(200, session()),
+      "GET /notifications": reply(200, { notifications: [stored()], unread: 1 }),
+      "POST /notifications/read": reply(503, {
+        error: { code: "service_unavailable", message: "x" },
+      }),
+    });
+    renderApp("/");
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "バナーを閉じる" }));
+    await waitFor(() => expect(calls.some((call) => call.method === "POST")).toBe(true));
+    expect(await screen.findByRole("button", { name: "通知 1 件未読" })).toBeInTheDocument();
+  });
+
+  it("stays connected on the settings screens", async () => {
+    mockApi({
+      "GET /auth/session": reply(200, session()),
+      "GET /notifications": [
+        reply(200, { notifications: [], unread: 0 }),
+        reply(200, { notifications: [stored()], unread: 1 }),
+      ],
+      "GET /auth/sessions": reply(200, { sessions: [session().session] }),
+      "GET /auth/passkeys": reply(200, { passkeys: [] }),
+    });
+    renderApp("/settings/devices");
+    expect(await screen.findByRole("navigation", { name: "設定メニュー" })).toBeInTheDocument();
+    const [stream] = FakeEventSource.instances;
+    await act(async () => stream?.emit("notification.changed"));
+    expect(await screen.findByRole("button", { name: "バナーを閉じる" })).toBeInTheDocument();
+  });
 });
