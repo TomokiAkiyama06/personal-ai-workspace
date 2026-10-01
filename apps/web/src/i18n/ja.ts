@@ -243,6 +243,32 @@ export const ja = {
   "error.webauthn_unsupported": "このブラウザは Passkey に対応していません。",
   "error.webauthn_cancelled": "Passkey の操作が取り消されたか、タイムアウトしました。",
   "error.unknown": "エラーが発生しました（{code}）。",
+  // The project routes (issue #184).
+  "error.confirmation_mismatch": "確認の名前がプロジェクトの名前と一致しません。",
+  "error.project_state": "プロジェクトの今の状態では、この操作はできません。",
+  "error.deletion_window_closed": "30 日の保留期間が過ぎたため、復元できません。",
+  "error.no_manager": "Manager が残っていないため、復元できません。",
+  "error.last_manager": "最後の Manager の役割は変えられません。",
+  "error.account_not_active": "このユーザーのアカウントは有効ではありません。",
+  "error.project_busy": "プロジェクトが他の操作の途中です。少し待ってからやり直してください。",
+  "error.repository_busy": "リポジトリが他の操作の途中です。少し待ってからやり直してください。",
+  "error.projects_unavailable": "このサーバーではプロジェクトを使えません。",
+  "error.repository_name_taken": "同じ名前のリポジトリがこのプロジェクトにあります。",
+  "error.repository_limit": "このプロジェクトに登録できるリポジトリの上限に達しています。",
+  "error.remote_already_registered": "この URL のリポジトリはすでに登録されています。",
+  "error.remote_rejected": "このリポジトリのリモートの URL は登録できません。",
+  "error.checkout_exists": "このリポジトリの作業コピーはすでにあります。",
+  "error.checkout_in_progress": "作業コピーを作っている途中です。少し待ってください。",
+  "error.checkout_gone": "操作の途中でリポジトリの登録が削除されました。",
+  "error.path_rejected":
+    "このディレクトリは登録できません（場所・所有者・Git の状態を確認してください）。",
+  "error.linux_account_unavailable":
+    "あなたの Linux アカウントが見つからないため、リポジトリを扱えません。",
+  "error.git_failed": "git の実行に失敗しました。",
+  "error.gh_command_failed": "GitHub CLI（gh）の実行に失敗しました。",
+  "error.github_unavailable":
+    "GitHub を使えません（このサーバーで GitHub への接続が設定されていません）。",
+  "error.conflict": "この操作は今の状態と矛盾するため、行えませんでした。",
 
   "passkeyGate.title": "Passkey が必要です",
   "passkeyGate.enrollBody":

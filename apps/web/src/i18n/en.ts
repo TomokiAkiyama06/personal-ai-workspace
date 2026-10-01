@@ -242,6 +242,31 @@ export const en: Record<MessageKey, string> = {
   "error.webauthn_unsupported": "This browser does not support passkeys.",
   "error.webauthn_cancelled": "The passkey operation was cancelled or timed out.",
   "error.unknown": "Something went wrong ({code}).",
+  // The project routes (issue #184).
+  "error.confirmation_mismatch": "The confirmation does not match the project's name.",
+  "error.project_state": "The project's current state does not allow this.",
+  "error.deletion_window_closed": "The 30 days have passed: the project cannot be restored.",
+  "error.no_manager": "The project has no Manager left, so it cannot be restored.",
+  "error.last_manager": "The last Manager's role cannot be changed.",
+  "error.account_not_active": "This user's account is not active.",
+  "error.project_busy": "The project is busy with another change. Try again shortly.",
+  "error.repository_busy": "The repository is busy with another change. Try again shortly.",
+  "error.projects_unavailable": "Projects are not available on this server.",
+  "error.repository_name_taken": "The project has a repository with this name.",
+  "error.repository_limit": "The project has reached its repository limit.",
+  "error.remote_already_registered": "A repository with this URL is registered already.",
+  "error.remote_rejected": "The repository's remote URL cannot be registered.",
+  "error.checkout_exists": "A working copy of this repository exists already.",
+  "error.checkout_in_progress": "The working copy is being created. Please wait.",
+  "error.checkout_gone": "The repository was unregistered during the operation.",
+  "error.path_rejected":
+    "This directory cannot be registered (check its location, owner and Git state).",
+  "error.linux_account_unavailable":
+    "Your Linux account was not found, so repositories cannot be handled.",
+  "error.git_failed": "git failed.",
+  "error.gh_command_failed": "The GitHub CLI (gh) failed.",
+  "error.github_unavailable": "GitHub is not available (no GitHub connection on this server).",
+  "error.conflict": "The request conflicts with the current state.",
 
   "passkeyGate.title": "A passkey is required",
   "passkeyGate.enrollBody":

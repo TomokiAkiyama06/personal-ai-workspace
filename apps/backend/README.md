@@ -3187,7 +3187,7 @@ DB を使わない Test（`records`、`validation`、`rules`、`store_validation
 [PAW-026](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/23)（Revision `0026`）で実装しました。設計は [要件](../../REQUIREMENTS.md)の「Project roles and membership」「Project lifecycle」「New Project defaults」と
 [Decision 0004](../../docs/decisions/0004-rbac-capability-and-audit-policy.md)（承認済み）に従い、要件が決めていない選択は [Decision 0008（承認済み）](../../docs/decisions/0008-project-membership-and-lifecycle-policy.md)にまとめています。
 **Decision 0008 は 2026-09-25 に Human が承認しました。** 招待の期限（14 日）、Member と招待の合計（200）、Project 名と説明の長さ（1〜100 文字、2,000 文字）は暫定値として承認されました。Project 名と説明の長さは DB の CHECK 制約にも書かれているため、変えるには新しい Migration と `models.py` の変更が要ります（`limits.py` の定数だけでは足りません）。Member と招待の合計は `limits.MAX_MEMBERS_PER_PROJECT` で、招待の期限は `domain.invite_expiry` で決まり、どちらも Migration は要りません（詳しくは Decision 0008 の「背景」）。
-**HTTP の Endpoint はありません**（Session は PAW-022）。`ProjectService` は、認証済みの `Principal` を受け取り、`Authorizer` で判定します。
+HTTP の API は Issue [#184](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/184) で足しました（[HTTP の API](#http-の-apiissue-184decision-0066-proposed)）。`ProjectService` は、認証済みの `Principal` を受け取り、`Authorizer` で判定します。
 作成・招待への応答・退出の Capability（`project.create`、`project.invitation.respond`、`project.leave`）は [Decision 0022（Approved、2026-09-26。0008 の 5 を置き換え、0004 を拡張する）](../../docs/decisions/0022-project-lifecycle-capabilities.md) に従った、Issue [#82](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/82) の実装です（[認可と Audit](#認可と-audit)）。
 
 | ファイル | 内容 |
@@ -3399,7 +3399,7 @@ Method の全ての引数を、DB にも Authorizer にも触れる前に検証�
 
 #### HTTP の Endpoint
 
-**ありません（Service までです）。** `api/v1/` にある Router は `health` と `events` だけで、他の管理系の Capability（Shared Memory の管理など）も HTTP の Endpoint を持たず、認証（PAW-022）が無いので `require_capability` の Route は 401 しか返せません。Route を足すときは `Depends(require_capability(Capability.ADMIN_PROJECTS_MANAGE))` を付けて `list_all_projects` を呼びます（Route の Test は `tests/test_authz_routes.py` の一覧が強制します）。
+`GET /api/v1/admin/projects?status=&limit=&cursor=`（Issue #184。`require_capability(Capability.ADMIN_PROJECTS_MANAGE)` の Guard の後に `list_all_projects` を呼ぶ）。Guard の判定も Audit に 1 行残るので、1 回の呼び出しで `admin.projects.manage` の行は 2 つになります（Decision 0066 の 1、Proposed）。応答は `{projects: [{id, name, status, created_at, deletion_scheduled_at}], next_cursor}` です。
 
 #### 制限と未確認の点
 
@@ -3413,6 +3413,28 @@ Method の全ての引数を、DB にも Authorizer にも触れる前に検証�
 `tests/test_projects_admin_cursor.py`（Cursor の符号化と、敵対的な入力の表・乱数の Fuzz。DB なし）、`test_projects_admin_access.py`（Actor・引数の表・拒否・Audit の Fail-closed。DB URL のない `Database` で「DB を読まない」ことを確かめる）、
 `test_projects_admin_list.py`（実 PostgreSQL: 全 Project、状態、削除待ちの期限、Deleted の除外、Keyset の安定（ページの間の挿入・削除・状態変更・同時に走る Writer）、Audit の行）、`test_projects_admin_grants.py`（Application の Role で上の Test を全て実行し、`projects` の 5 列の `SELECT` だけを持つ Role でも一覧が動くこと）です。
 実装の変異 23 個（並びの向き、`id` の向き、行値比較の等号、`id` を落とす、Deleted を含める、Filter の無視、`limit + 1` の先読み、Cursor を先読みの行から作る、認可を外す、別の Capability、Filter を Audit に残さない、Cursor の Filter・正規形・長さ・時刻の範囲・型・先頭の 0・大文字の UUID の検証を緩める、`deleted` の Filter、`status` の大文字小文字、`limit` の検証、認可の前の引数の検証の順序、`description` を SELECT に足す）を、すべて Test が検出しました。
+
+### HTTP の API（Issue #184、Decision 0066 Proposed）
+
+`paw_backend/api/v1/projects.py`。Web の プロジェクト の画面（PAW-061、`apps/web/src/projects/api.ts`）が使います。振る舞いは `ProjectService` と `RepositoryService` にあり、Route は変換と、画面の一覧・詳細の組み立てだけをします。`create_app` は Database があるとき `app.state.projects` / `app.state.repositories` を作ります（ないときは 503 `projects_unavailable`）。
+
+| Route | Guard（Capability） | Service |
+| --- | --- | --- |
+| `GET /projects` | `account.read` | `list_projects`（Active・Archived・自分が Manager の Pending deletion。状態ごとに最大 1000 件、超えたら `truncated`）と、Project ごとの `list_repositories` の名前 |
+| `POST /projects` | `project.create` | `create_project` |
+| `GET /projects/{id}` | `project.read` | `get_project`、`list_repositories`、`list_members_named`、Manager には `list_invites_named` |
+| `GET /projects/{id}/repositories`、`/members` | `project.read` | 同上の一部 |
+| `POST /projects/{id}/archive`・`unarchive`・`begin-deletion`（`{confirm_name}`）・`restore` | `project.lifecycle.manage` | 同名の Method |
+| `PUT /projects/{id}/members/{user_id}/role`（`{role}`） | `project.members.manage` | `change_role` |
+| `POST /projects/{id}/repositories`（`source` で 4 通り） | `project.repo.add` | `register_existing` / `clone_from_github` / `create_local` / `create_github` |
+| `GET /admin/projects` | `admin.projects.manage` | `list_all_projects` |
+
+- **Guard**: Project の Route の Resource は、URL の ID と保存済みの Project の行の状態から作ります（`_project_of`）。Member でない User・存在しない Project・Deleted・形の正しくない ID は、どれも同じ 403 `forbidden` です（存在を教えません）。Service も自分の Transaction で同じ Capability を判定するので、`REQUIRED` の操作は Audit が 2 行になります（Decision 0058 の 3 と同じ形）。
+- **表示名**: `list_members_named` / `list_invites_named` は `list_members` / `list_invites` と同じ認可・並びで、その Project に Membership の行がある User の `login_name` だけを同じ Transaction で読みます（`store.login_names_of_members`）。招待は Session の Role が Manager のときだけ読みます（`project.members.manage` は `REQUIRED` なので、開くたびに Audit が 1 行残ります）。
+- **Repository の登録**は Request の中で git を動かします（Clone は Policy の Timeout、既定 900 秒まで）。git は `create_app(git_runner=...)`、GitHub に作る経路と Private の Clone は `create_app(gh_runner=...)` を渡したときだけ使えます（ないと 503 `github_unavailable`）。
+- **Error** は Service の型から固定の `code` と Message に変えます（Decision 0066 の 6 の表。Message に入力・Path・git の出力は入りません）。
+- 入れていない操作（招待と User の検索、招待への応答、退出、Member の削除、名前・説明の変更、ACL の変更、作業コピー）は Decision 0066 の 8 です。
+- Test: `tests/test_projects_http.py`（実 PostgreSQL。一覧・詳細・ACL Override・招待の見え方、Member でない User と存在しない Project の 403 と何も漏れないこと、Viewer / Contributor の拒否、Lifecycle、Admin の復元と一覧の Paging、役割の変更と最後の Manager、登録の 4 通りの変換と Error）。
 
 ### 同時実行
 

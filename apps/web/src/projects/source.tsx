@@ -1,10 +1,11 @@
-// Where the プロジェクト screen gets its data. Nothing provides a source yet: the
-// Backend has no project / repository / membership routes (see model.ts), so the
-// screen shows that projects are not available until one is plugged in here.
+// Where the プロジェクト screen gets its data: by default the Backend's project
+// routes (`projectsApi`, api.ts; issue #184). A provider replaces it (the tests
+// give a fake source); `null` shows that projects are not available.
 import { createContext, type ReactNode, useContext } from "react";
+import { projectsApi } from "./api";
 import type { ProjectsSource } from "./model";
 
-const ProjectsSourceContext = createContext<ProjectsSource | null>(null);
+const ProjectsSourceContext = createContext<ProjectsSource | null>(projectsApi);
 
 export function ProjectsSourceProvider({
   source,
@@ -16,7 +17,7 @@ export function ProjectsSourceProvider({
   return <ProjectsSourceContext.Provider value={source}>{children}</ProjectsSourceContext.Provider>;
 }
 
-/** The projects source, or `null` while the Backend has no routes for it. */
+/** The projects source, or `null` when a provider says there is none. */
 export function useProjectsSource(): ProjectsSource | null {
   return useContext(ProjectsSourceContext);
 }
