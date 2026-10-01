@@ -564,6 +564,25 @@ async def list_open_invites(
     return [member_from_row(r) for r in rows]
 
 
+async def login_names_of_members(
+    session: AsyncSession, project_id: uuid.UUID, user_ids: list[uuid.UUID]
+) -> dict[uuid.UUID, str]:
+    """``{user_id: login_name}`` of those ``user_ids`` that have a row in the project.
+
+    Joined with ``project_members`` of ``project_id`` (accepted or invited), so a
+    user without a membership row of this project is never named, whatever id
+    the caller passes. For the HTTP layer's member list (issue #184).
+    """
+    if not user_ids:
+        return {}
+    rows = await session.execute(
+        select(USERS.c.id, USERS.c.login_name)
+        .join(MEMBERS, MEMBERS.c.user_id == USERS.c.id)
+        .where(MEMBERS.c.project_id == project_id, USERS.c.id.in_(user_ids))
+    )
+    return {row.id: row.login_name for row in rows}
+
+
 async def count_members(
     session: AsyncSession, project_id: uuid.UUID, now: datetime
 ) -> int:
