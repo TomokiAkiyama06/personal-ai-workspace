@@ -11,6 +11,7 @@ from paw_backend.api.v1 import (
     memory,
     passkeys,
     system_health,
+    usage,
 )
 
 router = APIRouter(prefix="/api/v1")
@@ -22,3 +23,4 @@ router.include_router(accounts.router)
 router.include_router(system_health.router)
 router.include_router(compute.router)
 router.include_router(memory.router)
+router.include_router(usage.router)
