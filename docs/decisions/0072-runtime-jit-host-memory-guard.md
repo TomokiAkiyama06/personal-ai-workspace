@@ -1,6 +1,7 @@
 # Model の Runtime の起動で、JIT ビルドの並列数を絞り、ホストの MemAvailable を確かめる値と範囲
 
-- Status: Proposed
+- Status: Approved
+- Approval: 2026-10-01、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで直接回答して承認（判断点1〜5、すべて推奨どおり。末尾の「承認時の決定」）
 - Date: 2026-10-01
 - Scope: Issue [#182](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/182)（[Decision 0039](0039-compute-scheduler-calibration.md) の 4。「この Decision では値を決めない」とした値）。関連: Decision 0039 の 2（Model の操作の上限 900 秒）と、Issue #90 に記録した #179 の Codex P2（設定の検証の上限）
 - Supersedes: なし。[Decision 0037](0037-gpu-compute-scheduler.md)・[Decision 0039](0039-compute-scheduler-calibration.md)（ともに Approved）は書き換えない
@@ -72,3 +73,7 @@ Workspace の Backend が Model の Runtime を起動するのは `CommandModelC
 
 承認されたら `Approval` に記録し、Status を Approved に改める。値は `apps/backend/paw_backend/compute/limits.py` にあり、PR（#182）で実装済み。
 方針を変えるときは、この Decision を書き換えず、新しい Decision から `Supersedes` する。
+
+## 承認時の決定（2026-10-01）
+
+Human は、作業 Session で判断が必要な点について推奨つきの説明を受け、直接回答して承認した（判断点1〜5、すべて推奨どおり）。
