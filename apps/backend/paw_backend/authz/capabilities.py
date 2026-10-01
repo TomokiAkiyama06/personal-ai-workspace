@@ -74,7 +74,7 @@ class Capability(StrEnum):
     # and whether Codex / Claude are available (PAW-066, Decision 0059
     # Proposed). Any human role; read-only; never an Agent's.
     SYSTEM_HEALTH_SUMMARY_READ = "system_health.summary.read"
-    # A person's own Notification Center (issue #188, Decision 0070 Proposed):
+    # A person's own Notification Center (issue #188, Decision 0070 Approved):
     # reading their notifications and the event stream (``notification.read``,
     # read-only), marking them read and dismissing them (``notification.manage``).
     # Which notifications a person receives is decided by the store (their own,

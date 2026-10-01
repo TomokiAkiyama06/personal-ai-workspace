@@ -1,7 +1,7 @@
 """Server-to-client event paths: Server-Sent Events and WebSocket.
 
 Both need a session (``notification.read``, every human role; issue #188,
-Decision 0070 Proposed): an anonymous request is refused (401, or close code
+Decision 0070 Approved): an anonymous request is refused (401, or close code
 1008 for a WebSocket) before it takes a subscriber slot. They carry the system
 events (``system.connected``, ``system.heartbeat``) and ``notification.changed``,
 a hint without content that the client's notifications changed: it reaches the

@@ -1,4 +1,4 @@
-"""Stored notifications (issue #188, Decision 0070 Proposed).
+"""Stored notifications (issue #188, Decision 0070 Approved).
 
 ``domain.py`` is the vocabulary (a notification is codes and numbers; its
 audience is one user or the holders of a system-wide capability), ``models.py``

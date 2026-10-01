@@ -2,7 +2,7 @@
 
 The event types: the system events (``system.connected`` and
 ``system.heartbeat``, for everybody connected) and ``notification.changed``
-(issue #188, Decision 0070 Proposed): the notifications of its audience changed,
+(issue #188, Decision 0070 Approved): the notifications of its audience changed,
 so a client reads ``GET /api/v1/notifications`` again. It carries no content
 (``data`` is empty): what a user may read is decided by that authorized read,
 never by the stream.

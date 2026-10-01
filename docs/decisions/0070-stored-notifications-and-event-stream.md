@@ -1,6 +1,7 @@
 # 保存される通知と認証つきの Event の配信（通知の形と宛先、既読・非表示、Capability、Stream の認証と再確認、System Health からの通知、保存期間）
 
-- Status: Proposed
+- Status: Approved
+- Approval: 2026-10-01、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで直接回答して承認（判断点1〜10、すべて推奨どおり。末尾の「承認時の決定」）
 - Date: 2026-10-01
 - Scope: Issue [#188](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/188)（UI は #51 / PR #173）の `apps/backend/paw_backend/notifications/`、`/api/v1/notifications*`、`/api/v1/events/*` の認証、`paw_backend/events.py` の宛先、`health/store.py` の通知、Capability `notification.read` と `notification.manage`、Migration `0188`（`notifications`、`notification_receipts`）、`apps/web/src/notifications/serverNotifications.ts`
 - Supersedes: なし。[Decision 0004](0004-rbac-capability-and-audit-policy.md)（Approved）の Capability 表と読み取り専用の許可リストに 2 つを加える（書き換えない）。[Decision 0044](0044-web-app-serving-and-session.md) の 11 / D9 で後回しにした通知の API を足す。[Decision 0059](0059-system-health-observability.md) の 6（通知は後の Issue）の続き
@@ -76,3 +77,7 @@ System Health の Roll-up（既定 1 日 1 回相当）で、作成から 90 日
 承認されたら `Approval` に記録し、Status を Approved に改める。
 方針を変えるときは、この Decision を書き換えず、新しい Decision から `Supersedes` する。
 [REQUIREMENTS.md](../../REQUIREMENTS.md) と [docs/NOTIFICATION_POLICY.md](../NOTIFICATION_POLICY.md) の原文は書き換えない。
+
+## 承認時の決定（2026-10-01）
+
+Human は、作業 Session で判断が必要な点について推奨つきの説明を受け、直接回答して承認した（判断点1〜10、すべて推奨どおり）。

@@ -22,7 +22,7 @@ two Backend processes line up, and a sample is never placed in the future.
   statement.
 * :meth:`HealthStore.series` and :meth:`HealthStore.events`: the reads of the API.
 
-With ``notify=True`` (the application, issue #188, Decision 0070 Proposed) a
+With ``notify=True`` (the application, issue #188, Decision 0070 Approved) a
 recorded change is also a stored notification for the System Health audience
 (``admin.system_health.view``: the Owner and the Admins), in the same transaction
 (so once, whichever process records it): ``system_health.component_changed``

@@ -225,7 +225,7 @@ Endpoint は `/api/v1` 以下です。OpenAPI Schema は `/api/v1/openapi.json` 
 | `GET /api/v1/health/ready` | Readiness。DB へ `SELECT 1` を実行する |
 | `GET /api/v1/events/stream` | Server-Sent Events（Session が必要） |
 | `WebSocket /api/v1/events/ws` | WebSocket（Session が必要） |
-| `/api/v1/notifications`、`/read`、`/{id}/dismiss` | 自分の通知の一覧・既読・非表示。[通知](#通知issue-188decision-0070proposed) |
+| `/api/v1/notifications`、`/read`、`/{id}/dismiss` | 自分の通知の一覧・既読・非表示。[通知](#通知issue-188decision-0070approved) |
 | `/api/v1/auth/*` | Login、Session、Password、Step-up、Owner の Token、認証 Policy（12 個の Endpoint）。[Login / Session / Password Policy](#login--session--password-policy) |
 | `/api/v1/auth/passkeys/*` | Passkey の登録・認証（Step-up）・一覧・失効（6 個の Endpoint）。[Passkey / Step-up](#passkey--step-up) |
 | `/api/v1/system/health/summary` | 全体の Severity と Codex / Claude の可否（全 User）。[System Health](#system-health--observability) |
@@ -261,9 +261,9 @@ CORS は有効にしていません。Web Client の配信 Origin が決まっ�
 ## Event 経路
 
 `paw_backend.events.EventBus` はプロセス内の Fan-out です。永続化と再送はなく、接続後に発行された Event だけを受け取ります。
-Event は `system.connected`（接続直後に 1 回）、`system.heartbeat`（一定間隔）、`notification.changed`（[通知](#通知issue-188decision-0070proposed)。内容を持たず「通知の一覧を読み直す」合図だけ）です。
+Event は `system.connected`（接続直後に 1 回）、`system.heartbeat`（一定間隔）、`notification.changed`（[通知](#通知issue-188decision-0070approved)。内容を持たず「通知の一覧を読み直す」合図だけ）です。
 
-**2 つの Endpoint は Session が必要です**（`notification.read`、全 Human Role。Issue #188、Decision 0070 Proposed）。認証されていない接続は、枠を取る前に SSE が 401、WebSocket が Close Code 1008 になります。
+**2 つの Endpoint は Session が必要です**（`notification.read`、全 Human Role。Issue #188、Decision 0070 Approved）。認証されていない接続は、枠を取る前に SSE が 401、WebSocket が Close Code 1008 になります。
 
 - `notification.changed` は宛先（`EventAudience`: User の ID、またはその時点の Role が持つ System の Capability）の Stream にだけ届きます。宛先は送りません
 - 開いている Stream は `PAW_EVENT_SESSION_CHECK_SECONDS`（既定 60 秒）ごとに Session を確かめ直します（Session の Idle の期限は延ばさない。開いた Stream は操作ではない）。Sign-out・失効・期限切れ・User の停止・DB の無応答で Stream は終わり（WebSocket は 1008）、Client は接続し直して認証を受け直します。Role の変更は、次の確認から宛先の判定に効きます
@@ -276,7 +276,7 @@ Event は `system.connected`（接続直後に 1 回）、`system.heartbeat`（�
   - 負けた接続は、Response の Header を送る前に SSE が 503（`event_capacity_reached`）、WebSocket が Close Code 1013 になります。
   - 枠は、Stream の終了、切断（Stream の開始前を含む）、エラー、キャンセルのどの場合も必ず解放されます。
 
-## 通知（Issue #188、Decision 0070、Proposed）
+## 通知（Issue #188、Decision 0070、Approved）
 
 `paw_backend/notifications`（Table は Migration `0188` の `notifications` と `notification_receipts`）。通知は Code と数値だけ（`kind`・`params`・`severity`・`category`・集約の `key`）を持ち、文は Web App が作ります。宛先は 1 人の User（`recipient_user_id`）か、System の Capability（`audience_capability`）を持つ人で、後者は**読む時点の Role** で決めます（降格した Admin にはすぐ見えなくなる）。既読・非表示は User ごとの `notification_receipts` に残り、端末をまたいで保たれます。
 

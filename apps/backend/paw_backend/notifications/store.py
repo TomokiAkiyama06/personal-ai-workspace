@@ -1,4 +1,4 @@
-"""Stored notifications in PostgreSQL (issue #188, Decision 0070 Proposed).
+"""Stored notifications in PostgreSQL (issue #188, Decision 0070 Approved).
 
 Producers add a notification inside their own transaction (:func:`add_in`,
 :func:`resolve_in`): the notification commits with what it reports, or not at

@@ -1,4 +1,4 @@
-"""The vocabulary of stored notifications (issue #188, Decision 0070 Proposed).
+"""The vocabulary of stored notifications (issue #188, Decision 0070 Approved).
 
 A notification is what the Notification Center lists (``docs/NOTIFICATION_POLICY.md``):
 a severity, a category, the subsystem's ``kind`` code, the aggregation ``key``

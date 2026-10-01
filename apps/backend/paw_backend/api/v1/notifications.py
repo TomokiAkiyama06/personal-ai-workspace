@@ -1,4 +1,4 @@
-"""A person's Notification Center (issue #188, Decision 0070 Proposed):
+"""A person's Notification Center (issue #188, Decision 0070 Approved):
 ``/api/v1/notifications``.
 
 * ``GET /notifications`` (``notification.read``): the newest notifications the

@@ -1,5 +1,5 @@
 """Stored notifications and their per-user read / dismissed state (issue #188,
-Decision 0070 Proposed).
+Decision 0070 Approved).
 
 Revision ID: 0188
 Revises: 0066
