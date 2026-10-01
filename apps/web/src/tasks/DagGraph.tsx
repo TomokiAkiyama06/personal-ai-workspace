@@ -180,22 +180,6 @@ export function NodeDetail({
       {titles.length > 0 && (
         <p className="small muted">{t("tasks.dag.dependsOn", { nodes: titles.join("、") })}</p>
       )}
-      {node.toolCalls && node.toolCalls.length > 0 && (
-        <div className="stack-xs">
-          <span className="section-label">{t("tasks.node.toolCalls")}</span>
-          <ul className="plain-list">
-            {node.toolCalls.map((call) => (
-              <li key={call.id} className="attempt-row">
-                <span className="mono">{call.name}</span>
-                <span className={`attempt-state status-${call.status}`}>
-                  {t(`tasks.tool.${call.status}`)}
-                </span>
-                <span className="mono muted push-right">{formatTime(call.startedAt)}</span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
       <div className="stack-xs">
         <span className="section-label">{t("tasks.node.attempts")}</span>
         {node.attempts.length === 0 ? (

@@ -47,7 +47,14 @@ export function sampleTasks(now = Date.now()): TaskDetail[] {
       updatedAt: ago(now, 5),
       agent: "Codex",
       model: "gpt-5-codex · 高",
-      currentStep: { name: "実装", startedAt: ago(now, 64) },
+      currentStep: {
+        name: "実装",
+        startedAt: ago(now, 64),
+        toolCalls: [
+          { id: "tc-1", name: "read_file", status: "succeeded", startedAt: ago(now, 60) },
+          { id: "tc-2", name: "apply_patch", status: "started", startedAt: ago(now, 12) },
+        ],
+      },
       budget: { preset: "standard", remainingPercent: 68 },
       repositories: [
         {
@@ -120,10 +127,6 @@ export function sampleTasks(now = Date.now()): TaskDetail[] {
               placement: "cloud",
               startedAt: ago(now, 64),
             },
-          ],
-          toolCalls: [
-            { id: "tc-1", name: "read_file", status: "succeeded", startedAt: ago(now, 60) },
-            { id: "tc-2", name: "apply_patch", status: "started", startedAt: ago(now, 12) },
           ],
         },
         {

@@ -169,6 +169,16 @@ export const tasksJa = {
   "pulls.authority":
     "CI が通り、レビューが承認済みでも、それは Merge の許可にはなりません。今回の Task / Session で明示的に許可した場合のみ、エージェントがマージまで進みます。",
   "pulls.back": "プルリクエストの一覧へ戻る",
+
+  // The task API's errors (apps/backend/paw_backend/api/v1/tasks.py).
+  "error.task_not_found": "このタスクは見つかりませんでした。",
+  "error.task_conflict":
+    "タスクが変わりました。最新の状態を確認してから、もう一度操作してください。",
+  "error.illegal_transition": "今のタスクの状態では、この操作はできません。",
+  "error.invalid_command_argument": "入力を確認してください（今すぐ停止には理由が必要です）。",
+  "error.task_creator_only": "タスクを再開・再試行・やり直しできるのは、タスクを作った人だけです。",
+  "error.project_not_active": "プロジェクトが有効ではないため、タスクを動かせません。",
+  "error.tasks_not_configured": "このサーバーではタスクの実行が構成されていません。",
 } as const;
 
 export const tasksEn: Record<keyof typeof tasksJa, string> = {
@@ -337,4 +347,13 @@ export const tasksEn: Record<keyof typeof tasksJa, string> = {
   "pulls.authority":
     "Passing CI and approved reviews are not permission to merge. An agent merges only when you explicitly allow it in the current task or session.",
   "pulls.back": "Back to pull requests",
+
+  "error.task_not_found": "This task was not found.",
+  "error.task_conflict": "The task changed. Check its current state and try again.",
+  "error.illegal_transition": "The task does not accept this in its current state.",
+  "error.invalid_command_argument": "Check the input (Stop Now needs a reason).",
+  "error.task_creator_only":
+    "Only the person who created the task can resume, retry or restart it.",
+  "error.project_not_active": "The project is not active, so the task cannot run.",
+  "error.tasks_not_configured": "Tasks are not configured on this server.",
 };

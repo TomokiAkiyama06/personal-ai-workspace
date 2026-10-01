@@ -10,6 +10,7 @@ from paw_backend.api.v1 import (
     health,
     passkeys,
     system_health,
+    tasks,
 )
 
 router = APIRouter(prefix="/api/v1")
@@ -20,3 +21,4 @@ router.include_router(passkeys.router)
 router.include_router(accounts.router)
 router.include_router(system_health.router)
 router.include_router(compute.router)
+router.include_router(tasks.router)

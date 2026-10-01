@@ -294,7 +294,7 @@ function TaskDetailView({
   id: string;
   onChanged: (task: TaskDetail) => void;
 }) {
-  const { t } = useI18n();
+  const { t, formatTime } = useI18n();
   const [load, setLoad] = useState<Load<TaskDetail>>({ status: "loading" });
   const [pending, setPending] = useState<ControlCommand | null>(null);
   const [controlError, setControlError] = useState<string | null>(null);
@@ -356,7 +356,9 @@ function TaskDetailView({
       <div className="stack">
         <BackLink />
         <p className="form-error" role="alert">
-          {isApiError(load.error, "not_found") ? t("tasks.notFound") : errorMessage(t, load.error)}
+          {isApiError(load.error, "not_found", "task_not_found")
+            ? t("tasks.notFound")
+            : errorMessage(t, load.error)}
         </p>
         <button type="button" className="secondary small-button" onClick={fetchTask}>
           {t("app.retry")}
@@ -489,6 +491,25 @@ function TaskDetailView({
           </Link>
         ))}
       </dl>
+
+      {data.currentStep?.toolCalls && data.currentStep.toolCalls.length > 0 && (
+        <section className="stack-xs step-tools" aria-labelledby="step-tools-title">
+          <span id="step-tools-title" className="section-label">
+            {t("tasks.node.toolCalls")} · {data.currentStep.name}
+          </span>
+          <ul className="plain-list">
+            {data.currentStep.toolCalls.map((call) => (
+              <li key={call.id} className="attempt-row">
+                <span className="mono">{call.name}</span>
+                <span className={`attempt-state status-${call.status}`}>
+                  {t(`tasks.tool.${call.status}`)}
+                </span>
+                <span className="mono muted push-right">{formatTime(call.startedAt)}</span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
 
       <section className="task-card-panel dag-panel" aria-labelledby="dag-title">
         <div className="panel-head">

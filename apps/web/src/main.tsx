@@ -5,6 +5,8 @@ import { SessionProvider } from "./auth/session";
 import { I18nProvider } from "./i18n";
 import { NotificationProvider } from "./notifications/store";
 import { RouterProvider } from "./router";
+import { apiTaskSource } from "./tasks/apiSource";
+import { TaskSourceProvider } from "./tasks/source";
 import { ThemeProvider } from "./theme";
 // IBM Plex Sans JP / IBM Plex Mono (the design's fonts), bundled into the build's
 // assets so the page's CSP can stay font-src 'self' (no font CDN).
@@ -24,7 +26,9 @@ if (root) {
           <RouterProvider>
             <SessionProvider>
               <NotificationProvider>
-                <App />
+                <TaskSourceProvider source={apiTaskSource}>
+                  <App />
+                </TaskSourceProvider>
               </NotificationProvider>
             </SessionProvider>
           </RouterProvider>
