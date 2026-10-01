@@ -181,6 +181,36 @@ class ComputeSourceTest(unittest.IsolatedAsyncioTestCase):
                 self.assertIs(health.severity, Severity.ERROR)
                 self.assertIn(reason, health.reasons)
 
+    async def test_a_main_model_not_seen_on_the_gpu(self):
+        # Codex review (#170, P2): the state ``gpu`` is the scheduler's plan; when
+        # its processes could not be seen on the GPU, Main is not resident.
+        scheduler, _, _, _ = build()
+        await scheduler.refresh()
+        status = scheduler.status()
+        main = status.deployment("main")
+        self.assertIs(main.observed_on_gpu, True)
+        others = tuple(d for d in status.deployments if d.name != "main")
+        unseen = replace(
+            status, deployments=(replace(main, observed_on_gpu=False), *others)
+        )
+        health = await ComputeSource(StaticScheduler(unseen)).check()
+        self.assertIs(health.severity, Severity.ERROR)
+        self.assertIn("main_model_not_resident", health.reasons)
+        self.assertEqual(health.metrics["models_on_gpu"], 2)
+        parts = {part["role"]: part for part in health.parts}
+        self.assertIs(parts["main"]["observed_on_gpu"], False)
+        self.assertIs(parts["memory_worker"]["observed_on_gpu"], True)
+        # Without a model control there is nothing to ask: the state decides.
+        unasked = replace(
+            status,
+            deployments=tuple(
+                replace(d, observed_on_gpu=None) for d in status.deployments
+            ),
+        )
+        health = await ComputeSource(StaticScheduler(unasked)).check()
+        self.assertEqual((health.severity, health.status), (Severity.INFO, Status.OK))
+        self.assertEqual(health.metrics["models_on_gpu"], 3)
+
     async def test_full_gpu_mode(self):
         scheduler, _, _, _ = build()
         await scheduler.refresh()
