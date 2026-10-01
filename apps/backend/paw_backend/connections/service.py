@@ -2,8 +2,9 @@
 
 What it is (and is not)
 -----------------------
-A backend library on PostgreSQL. It has no HTTP endpoint (sessions come with PAW-022)
-and makes no network call and starts no process: the provider is reached only through
+A backend library on PostgreSQL. Its quotas and usage are served over HTTP by
+``api/v1/usage.py`` (issue #187); the connections themselves have no endpoint yet. It
+makes no network call and starts no process: the provider is reached only through
 a registered :class:`~paw_backend.connections.adapter.ConnectionAdapter` (none ships
 here) with a credential that only the secret store's resolver can produce
 (:mod:`~paw_backend.connections.secret`). The Orchestrator (PAW-034) calls
@@ -17,10 +18,12 @@ Authorization (the existing capabilities of Decision 0004; none is added)
   ``get_connection``, ``list_connections``: ``admin.config.manage`` (Owner / Admin);
 * ``set_quota``, ``remove_quota``: ``admin.quota.manage`` (Owner / Admin), and the
   quota of an Owner only by the Owner (Decision 0016, section 7);
-* ``quota_status``, ``list_usage`` of ANOTHER user: ``admin.usage.view``;
-* ``quota_status``, ``list_usage`` of one's OWN, ``availability`` and ``execute``:
-  ``agent.use``, a ``Scope.SELF`` capability: the resource is owned by the user the
-  call is for, so an Owner does not read or spend another user's;
+* ``quota_status``, ``list_usage``, ``usage_report`` of ANOTHER user, and
+  ``workspace_usage_report``: ``admin.usage.view``;
+* ``quota_status``, ``list_usage``, ``usage_report`` of one's OWN, ``availability``
+  and ``execute``: ``agent.use``, a ``Scope.SELF`` capability: the resource is
+  owned by the user the call is for, so an Owner does not read or spend another
+  user's;
 * ``check_health``: backend-internal (a scheduler), no actor, like
   ``ProjectService.purge_expired``.
 
@@ -171,6 +174,7 @@ from paw_backend.connections.records import (
     QuotaUsage,
     UsageRecord,
 )
+from paw_backend.connections.report import UsageRange, UsageReport
 from paw_backend.connections.secret import Secret, SecretResolver
 from paw_backend.connections.store import Admitted, ConnectionStore, Refused
 from paw_backend.connections.validation import (
@@ -669,6 +673,37 @@ class ConnectionService:
         await self._authorize_view(principal, user_id)
         return await self._call_store(
             self._store.list_usage(user_id, kind, limit, offset)
+        )
+
+    async def usage_report(
+        self, principal: Principal, usage_range: UsageRange, user_id: uuid.UUID
+    ) -> UsageReport:
+        """One user's report for the Usage screen (``connections/report.py``). One's
+        own needs ``agent.use``, another user's ``admin.usage.view`` (as
+        ``quota_status``)."""
+        self._actor(principal)
+        usage_range = validate_enum("usage_range", usage_range, UsageRange)
+        user_id = validate_uuid("user_id", user_id)
+        await self._authorize_view(principal, user_id)
+        return await self._call_store(
+            self._store.usage_report(usage_range, user_id, principal.user_id)
+        )
+
+    async def workspace_usage_report(
+        self, principal: Principal, usage_range: UsageRange
+    ) -> UsageReport:
+        """The whole workspace's report: every user's totals and quotas, and the
+        asking user's own quotas. Needs ``admin.usage.view``."""
+        self._actor(principal)
+        usage_range = validate_enum("usage_range", usage_range, UsageRange)
+        await self._authorize(
+            principal,
+            Capability.ADMIN_USAGE_VIEW,
+            Resource(kind=_RESOURCE_USAGE),
+            uuid.uuid4(),
+        )
+        return await self._call_store(
+            self._store.usage_report(usage_range, None, principal.user_id)
         )
 
     # --- use -----------------------------------------------------------------

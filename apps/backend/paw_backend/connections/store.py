@@ -87,6 +87,15 @@ from paw_backend.connections.records import (
     QuotaUsage,
     UsageRecord,
 )
+from paw_backend.connections.report import (
+    DailyTasks,
+    KindTotal,
+    PurposeTotal,
+    UsageRange,
+    UsageReport,
+    UserTotal,
+    report_window,
+)
 from paw_backend.connections.validation import (
     validate_bool,
     validate_seconds,
@@ -133,6 +142,28 @@ SUMS_SQL = (
     " COALESCE(sum(COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)), 0),"
     " COALESCE(sum(duration_ms), 0) FROM connection_usage"
     " WHERE user_id = %(user)s AND kind = %(kind)s AND started_at >= %(since)s"
+)
+
+# The usage report (``usage_report``): the calls of one user (or every user) that
+# started in ``[since, until)``, and their tokens (an unknown count is 0).
+_REPORT_FILTER = (
+    "(%(user)s::uuid IS NULL OR user_id = %(user)s)"
+    " AND started_at >= %(since)s AND started_at < %(until)s"
+)
+_TOKENS_SUM = "COALESCE(sum(COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)), 0)"
+# Every user of the workspace report: the ones that are not deleted, and a deleted
+# one whose calls are in the period (the totals count them). Owner, Admins, Users,
+# then by login name.
+USERS_REPORT_SQL = (
+    "SELECT u.id, u.login_name, u.system_role, u.status,"
+    " count(DISTINCT c.task_id),"
+    " COALESCE(sum(COALESCE(c.input_tokens, 0) + COALESCE(c.output_tokens, 0)), 0)"
+    " FROM users u LEFT JOIN connection_usage c ON c.user_id = u.id"
+    " AND c.started_at >= %(since)s AND c.started_at < %(until)s"
+    " WHERE u.status <> 'deleted' OR c.id IS NOT NULL"
+    " GROUP BY u.id, u.login_name, u.system_role, u.status"
+    " ORDER BY CASE u.system_role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1"
+    " ELSE 2 END, u.login_name"
 )
 
 
@@ -518,51 +549,60 @@ class ConnectionStore:
         those of the same moment. Ordered by kind, metric and period (declaration
         order).
         """
-        kinds = None if kind is None else kind.value
 
         async def work(connection: psycopg.AsyncConnection) -> tuple[QuotaUsage, ...]:
             now = await self._instant(connection)
-            cursor = await connection.execute(
-                "SELECT kind, metric, period, limit_value FROM connection_quotas"
-                " WHERE user_id = %(user)s AND (%(kind)s::text IS NULL"
-                " OR kind = %(kind)s)",
-                {"user": user_id, "kind": kinds},
-            )
-            configured = sorted(
-                (
-                    (ConnectionKind(k), QuotaMetric(m), QuotaPeriod(p), limit)
-                    for k, m, p, limit in await cursor.fetchall()
-                ),
-                key=lambda item: (
-                    tuple(ConnectionKind).index(item[0]),
-                    _METRICS.index(item[1]),
-                    _PERIODS.index(item[2]),
-                ),
-            )
-            sums: dict[tuple[ConnectionKind, datetime], _Sums] = {}
-            result = []
-            for item_kind, metric, period, limit in configured:
-                since = window_start(period, now, self._zone)
-                if (item_kind, since) not in sums:
-                    sums[(item_kind, since)] = await self._sums(
-                        connection, user_id, item_kind, since
-                    )
-                result.append(
-                    QuotaUsage(
-                        item_kind,
-                        metric,
-                        period,
-                        _limit_of(limit),
-                        sums[(item_kind, since)].used(metric),
-                        since,
-                        window_end(period, now, self._zone),
-                    )
-                )
-            return tuple(result)
+            return await self._quota_status_in(connection, now, user_id, kind)
 
         return await self._database.transact_abortable(
             work, timeout_seconds=self._timeout
         )
+
+    async def _quota_status_in(
+        self,
+        connection: psycopg.AsyncConnection,
+        now: datetime,
+        user_id: uuid.UUID,
+        kind: ConnectionKind | None,
+    ) -> tuple[QuotaUsage, ...]:
+        """``quota_status`` at ``now``, inside the caller's transaction."""
+        cursor = await connection.execute(
+            "SELECT kind, metric, period, limit_value FROM connection_quotas"
+            " WHERE user_id = %(user)s AND (%(kind)s::text IS NULL"
+            " OR kind = %(kind)s)",
+            {"user": user_id, "kind": None if kind is None else kind.value},
+        )
+        configured = sorted(
+            (
+                (ConnectionKind(k), QuotaMetric(m), QuotaPeriod(p), limit)
+                for k, m, p, limit in await cursor.fetchall()
+            ),
+            key=lambda item: (
+                tuple(ConnectionKind).index(item[0]),
+                _METRICS.index(item[1]),
+                _PERIODS.index(item[2]),
+            ),
+        )
+        sums: dict[tuple[ConnectionKind, datetime], _Sums] = {}
+        result = []
+        for item_kind, metric, period, limit in configured:
+            since = window_start(period, now, self._zone)
+            if (item_kind, since) not in sums:
+                sums[(item_kind, since)] = await self._sums(
+                    connection, user_id, item_kind, since
+                )
+            result.append(
+                QuotaUsage(
+                    item_kind,
+                    metric,
+                    period,
+                    _limit_of(limit),
+                    sums[(item_kind, since)].used(metric),
+                    since,
+                    window_end(period, now, self._zone),
+                )
+            )
+        return tuple(result)
 
     # --- usage ----------------------------------------------------------------------
 
@@ -582,6 +622,130 @@ class ConnectionStore:
             },
         )
         return tuple(usage_record(row) for row in rows)
+
+    async def usage_report(
+        self, usage_range: UsageRange, user_id: uuid.UUID | None, viewer_id: uuid.UUID
+    ) -> UsageReport:
+        """The report of ``user_id`` (``None``: the whole workspace) over
+        ``usage_range`` (``connections/report.py``).
+
+        One transaction, one instant (the database's): the period, the sums and
+        the quotas are those of the same moment. ``viewer_id`` is whose quotas a
+        workspace report carries (the user who asked).
+        """
+
+        async def work(connection: psycopg.AsyncConnection) -> UsageReport:
+            now = await self._instant(connection)
+            window = report_window(usage_range, now, self._zone)
+            scope = {"user": user_id}
+            current = {
+                **scope,
+                "since": window.start,
+                "until": window.end,
+                "starts": list(window.starts),
+            }
+
+            async def rows(sql: str, params: dict[str, Any]) -> list[tuple]:
+                cursor = await connection.execute(sql, params)
+                return await cursor.fetchall()
+
+            (total,) = await rows(
+                f"SELECT count(DISTINCT task_id), {_TOKENS_SUM}"
+                f" FROM connection_usage WHERE {_REPORT_FILTER}",
+                current,
+            )
+            (previous,) = await rows(
+                "SELECT count(DISTINCT task_id) FROM connection_usage"
+                f" WHERE {_REPORT_FILTER}",
+                {
+                    **scope,
+                    "since": window.previous_start,
+                    "until": window.previous_end,
+                },
+            )
+            # The day of a call: the index of the last day start at or before it
+            # (``width_bucket`` over the sorted instants of the days' midnights).
+            daily = await rows(
+                "SELECT width_bucket(started_at, %(starts)s::timestamptz[]) AS day,"
+                " kind, count(DISTINCT task_id) FROM connection_usage"
+                f" WHERE {_REPORT_FILTER} GROUP BY day, kind",
+                current,
+            )
+            kinds = await rows(
+                f"SELECT kind, count(DISTINCT task_id), {_TOKENS_SUM}"
+                f" FROM connection_usage WHERE {_REPORT_FILTER} GROUP BY kind",
+                current,
+            )
+            purposes = await rows(
+                f"SELECT purpose, count(DISTINCT task_id), {_TOKENS_SUM}"
+                f" FROM connection_usage WHERE {_REPORT_FILTER} GROUP BY purpose",
+                current,
+            )
+            users = None
+            if user_id is None:
+                users = []
+                for row in await rows(USERS_REPORT_SQL, current):
+                    users.append(
+                        UserTotal(
+                            row[0],
+                            row[1],
+                            row[2],
+                            row[3],
+                            int(row[4]),
+                            int(row[5]),
+                            await self._quota_status_in(connection, now, row[0], None),
+                        )
+                    )
+            quotas = await self._quota_status_in(
+                connection, now, viewer_id if user_id is None else user_id, None
+            )
+            kind_order = tuple(ConnectionKind)
+            purpose_order = tuple(UsagePurpose)
+            return UsageReport(
+                usage_range,
+                window.days,
+                window.start,
+                window.end,
+                int(total[0]),
+                int(previous[0]),
+                int(total[1]),
+                tuple(
+                    sorted(
+                        (
+                            DailyTasks(
+                                window.days[day - 1], ConnectionKind(kind), int(count)
+                            )
+                            for day, kind, count in daily
+                            if 1 <= day <= len(window.days)
+                        ),
+                        key=lambda item: (item.day, kind_order.index(item.kind)),
+                    )
+                ),
+                tuple(
+                    sorted(
+                        (
+                            KindTotal(ConnectionKind(kind), int(tasks), int(tokens))
+                            for kind, tasks, tokens in kinds
+                        ),
+                        key=lambda item: kind_order.index(item.kind),
+                    )
+                ),
+                tuple(
+                    sorted(
+                        (
+                            PurposeTotal(UsagePurpose(purpose), int(tasks), int(tokens))
+                            for purpose, tasks, tokens in purposes
+                        ),
+                        key=lambda item: purpose_order.index(item.purpose),
+                    )
+                ),
+                quotas,
+                None if users is None else tuple(users),
+            )
+
+        return await self._database.transact_abortable(
+            work, timeout_seconds=self._timeout
+        )
 
     async def _sums(
         self,

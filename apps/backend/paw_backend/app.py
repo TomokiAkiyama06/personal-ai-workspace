@@ -25,6 +25,7 @@ from paw_backend.compute.wiring import (
     build_compute,
 )
 from paw_backend.config import Settings
+from paw_backend.connections.wiring import build_connection_service
 from paw_backend.db import Database
 from paw_backend.errors import ERROR_RESPONSES, register_error_handlers
 from paw_backend.events import EventBus, publish_heartbeats
@@ -299,6 +300,14 @@ def create_app(
     elif local_runtimes is not None:
         raise TypeError("local_runtimes need a database")
     app.state.task_execution = task_execution
+    # The quota / usage routes' connection service (issue #187): with a database.
+    app.state.connections = (
+        build_connection_service(
+            settings, database, app.state.authorizer, auth.audit_sink
+        )
+        if database.configured
+        else None
+    )
     app.state.compute = compute_services
     probe = NvidiaSmiProbe() if settings.health_gpu_probe and compute is None else None
     app.state.system_health = build_system_health(

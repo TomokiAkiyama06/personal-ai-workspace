@@ -32,6 +32,7 @@ from paw_backend.connections import (
     QuotaPeriod,
     UsagePurpose,
 )
+from paw_backend.connections.report import UsageRange
 from paw_backend.connections.store import ConnectionStore
 from paw_backend.connections.validation import (
     validate_bool,
@@ -235,6 +236,17 @@ CASES: dict[str, tuple[dict[str, Any], dict[str, list[Any]]]] = {
             "limit": NOT_A_LIMIT_OF_PAGE,
             "offset": NOT_AN_OFFSET,
         },
+    ),
+    "usage_report": (
+        {"usage_range": UsageRange.LAST_14, "user_id": USER_ID},
+        {
+            "usage_range": not_a_member("last14"),
+            "user_id": NOT_A_UUID,
+        },
+    ),
+    "workspace_usage_report": (
+        {"usage_range": UsageRange.MONTH},
+        {"usage_range": not_a_member("month")},
     ),
     "execute": (
         {"context": None, "kind": ConnectionKind.CODEX, "request": None},
