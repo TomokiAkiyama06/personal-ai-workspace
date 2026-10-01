@@ -10,6 +10,7 @@ import {
   NotificationProvider,
   type NotificationSource,
   useNotificationOwner,
+  useNotifications,
 } from "./store";
 
 function manualSource() {
@@ -317,6 +318,33 @@ describe("Notification Center", () => {
       at: "2026-09-28T01:00:00Z",
     });
     expect(screen.getByRole("alert")).toHaveTextContent("6 時間成功していません");
+  });
+
+  it("remembers the ids of entries dropped by the 100-entry limit for dedup", () => {
+    // Codex review (#173, P2): a reconnect that replays an event whose entry was
+    // pushed out of the list must not come back as a new unread notification.
+    const { source, emit } = manualSource();
+    function Keys() {
+      const { items } = useNotifications();
+      return <output data-testid="keys">{items.map((item) => item.key).join(",")}</output>;
+    }
+    render(
+      <NotificationProvider source={source}>
+        <Keys />
+      </NotificationProvider>,
+    );
+    for (let i = 0; i <= 100; i++) {
+      emit({ key: `k${i}`, id: `e${i}`, severity: "info", title: `n${i}`, at });
+    }
+    const keys = () => screen.getByTestId("keys").textContent?.split(",") ?? [];
+    expect(keys()).toHaveLength(100);
+    expect(keys()).not.toContain("k0");
+    emit({ key: "k0", id: "e0", severity: "info", title: "n0", at });
+    expect(keys()).not.toContain("k0");
+    expect(keys()[0]).toBe("k100");
+    // A new event of that key is still a new notification.
+    emit({ key: "k0", id: "e0-2", severity: "info", title: "n0", at });
+    expect(keys()[0]).toBe("k0");
   });
 
   it("remembers every id of an entry for dedup", () => {
