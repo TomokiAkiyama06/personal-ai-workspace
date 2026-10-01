@@ -71,6 +71,7 @@ from paw_backend.authz import (
     Authorizer,
     Capability,
     Decision,
+    Policy,
     Principal,
     ProjectRole,
     ProjectState,
@@ -230,8 +231,14 @@ class MemoryBoard:
             raise reject("database", InputProblem.WRONG_TYPE)
         if not callable(getattr(authorizer, "authorize", None)):
             raise reject("authorizer", InputProblem.WRONG_TYPE)
+        # ``can_write`` is decided again without audit; it must use the same
+        # grants as the injected Authorizer, not ``DEFAULT_POLICY``.
+        policy = getattr(authorizer, "policy", None)
+        if not isinstance(policy, Policy):
+            raise reject("authorizer", InputProblem.WRONG_TYPE)
         self._database = database
         self._authorizer = authorizer
+        self._policy = policy
 
     # -- helpers ---------------------------------------------------------------
 
@@ -605,14 +612,15 @@ class MemoryBoard:
 
         return await self._run(work)
 
-    @staticmethod
     async def _can_write(
+        self,
         session: AsyncSession,
         actor: Principal,
         current: MemoryVersionView,
         grants: _Grants,
     ) -> bool:
-        """The policy's answer for an edit of ``current`` (no audit row).
+        """The injected Authorizer's policy's answer for an edit of ``current``
+        (no audit row).
 
         ``MemoryVersioningService`` changes User and Project Memory only; the
         project's role and state are the ones just read from the database.
@@ -624,6 +632,7 @@ class MemoryBoard:
                 Resource.owned_by(
                     current.owner_user_id, RESOURCE_MEMORY, current.memory_id
                 ),
+                policy=self._policy,
             ).allowed
         if current.scope is MemoryScope.PROJECT and current.project_id is not None:
             project = grants.projects.get(current.project_id)
@@ -636,6 +645,7 @@ class MemoryBoard:
                 member,
                 Capability.PROJECT_MEMORY_USE,
                 Resource.project(current.project_id, project.state),
+                policy=self._policy,
             ).allowed
         return False
 

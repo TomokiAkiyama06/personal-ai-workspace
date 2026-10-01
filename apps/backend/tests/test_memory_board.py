@@ -14,7 +14,15 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import text
 
-from paw_backend.authz import Principal, ProjectRole, SystemRole
+from paw_backend.authz import (
+    DEFAULT_POLICY,
+    Authorizer,
+    Capability,
+    Policy,
+    Principal,
+    ProjectRole,
+    SystemRole,
+)
 from paw_backend.db import Database
 from paw_backend.memory import metadata_change_actor
 from paw_backend.memory.board import (
@@ -358,6 +366,43 @@ class HistoryTest(BoardTestCase):
         self.assertFalse(
             (await self.board.history(contributor, memory.memory_id)).can_write
         )
+
+    async def test_can_write_follows_the_injected_policy(self):
+        # can_write must use the policy the injected Authorizer decides with, not
+        # DEFAULT_POLICY: without memory.use / project.memory.use it is false.
+        def without(*capabilities: Capability) -> Policy:
+            return Policy(
+                system_grants={
+                    role: granted - set(capabilities)
+                    for role, granted in DEFAULT_POLICY.system_grants.items()
+                },
+                project_grants={
+                    role: granted - set(capabilities)
+                    for role, granted in DEFAULT_POLICY.project_grants.items()
+                },
+            )
+
+        database = Database(make_settings(database_url=self.database_url()))
+        self.addAsyncCleanup(database.dispose)
+        board = MemoryBoard(
+            database,
+            Authorizer(
+                self.sink,
+                policy=without(Capability.MEMORY_USE, Capability.PROJECT_MEMORY_USE),
+            ),
+        )
+        me = self.user()
+        mine = self.seed("mine", owner=me.user_id, embed=False)
+        project = self.seed_project()
+        contributor = self.member_of(project, ProjectRole.CONTRIBUTOR)
+        rule = self.seed("rule", scope="project", project=project, embed=False)
+
+        self.assertTrue((await self.board.history(me, mine.memory_id)).can_write)
+        self.assertFalse((await board.history(me, mine.memory_id)).can_write)
+        self.assertTrue(
+            (await self.board.history(contributor, rule.memory_id)).can_write
+        )
+        self.assertFalse((await board.history(contributor, rule.memory_id)).can_write)
 
     async def test_repo_and_shared_memories_are_read_only_here(self):
         me = self.user()
