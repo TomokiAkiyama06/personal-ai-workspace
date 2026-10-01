@@ -36,8 +36,10 @@ from paw_backend.compute.host import (
 )
 from paw_backend.compute.limits import (
     DEFAULT_CONTROL_TIMEOUT_SECONDS,
+    DEFAULT_HOST_RESERVE_BYTES,
     DEFAULT_JIT_BUILD_ENV,
     DEFAULT_MIN_HOST_AVAILABLE_BYTES,
+    DEFAULT_RUNTIME_HOST_CAP_BYTES,
     MAX_CONTROL_TIMEOUT_SECONDS,
 )
 from paw_backend.compute.probe import CommandResult, SubprocessRunner
@@ -111,13 +113,13 @@ class HostMemoryGateTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_gpu_runtime_starts_when_enough_memory_is_available(self):
         runner = RecordingRunner()
-        control = self.control(runner, host_memory=available(32 * GIB))
+        control = self.control(runner, host_memory=available(40 * GIB))
         await control.place("main", Placement.LOCAL_GPU)
         self.assertEqual(runner.calls, [("systemctl", "start", "paw-llm-main.service")])
 
     async def test_a_gpu_runtime_is_not_started_when_memory_is_low(self):
         runner = RecordingRunner()
-        control = self.control(runner, host_memory=available(32 * GIB - 1))
+        control = self.control(runner, host_memory=available(40 * GIB - 1))
         with self.assertLogs("paw_backend.compute", level="WARNING") as logs:
             with self.assertRaises(HostMemoryLowError) as raised:
                 await control.place("main", Placement.LOCAL_GPU)
@@ -126,8 +128,8 @@ class HostMemoryGateTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(raised.exception, ModelControlError)
         self.assertEqual(raised.exception.code, "host_memory_low")
         self.assertIn("main", logs.output[0])
-        self.assertIn("32767 MiB", logs.output[0])  # what was available
-        self.assertIn("32768 MiB", logs.output[0])  # the minimum
+        self.assertIn("40959 MiB", logs.output[0])  # what was available
+        self.assertIn("40960 MiB", logs.output[0])  # the minimum
 
     async def test_an_unreadable_meminfo_starts_nothing(self):
         for error in (OSError(), ValueError(), RuntimeError()):
@@ -173,8 +175,13 @@ class HostMemoryGateTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(InvalidComputeArgumentError):
             self.control(RecordingRunner(), host_memory="/proc/meminfo")
 
-    def test_the_default_minimum_is_32_gib(self):
-        self.assertEqual(DEFAULT_MIN_HOST_AVAILABLE_BYTES, 32 * GIB)
+    def test_the_default_minimum_is_the_runtimes_cap_plus_a_host_reserve(self):
+        # Codex review #189: the runtime's unit may use up to its MemoryMax= (32
+        # GiB); the host keeps 8 GiB more for the kernel, the backend and the
+        # desktop, so a start at the boundary does not leave it nothing.
+        self.assertEqual(DEFAULT_RUNTIME_HOST_CAP_BYTES, 32 * GIB)
+        self.assertEqual(DEFAULT_HOST_RESERVE_BYTES, 8 * GIB)
+        self.assertEqual(DEFAULT_MIN_HOST_AVAILABLE_BYTES, 40 * GIB)
 
 
 class JitBuildEnvTest(unittest.TestCase):

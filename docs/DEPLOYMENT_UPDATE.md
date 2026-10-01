@@ -90,16 +90,17 @@ Every start of a model runtime (by the Compute Resource Scheduler or by hand) th
    `CommandModelControl` runs its commands with them; a systemd unit does not inherit the
    backend's environment and sets them with `Environment=`.
 2. **Checks the host's memory first**: no GPU runtime starts while `MemAvailable`
-   (`/proc/meminfo`) is below 32 GiB or cannot be read. `CommandModelControl` then runs no
+   (`/proc/meminfo`) is below 40 GiB or cannot be read. `CommandModelControl` then runs no
    command, logs a warning and fails with `host_memory_low` (the scheduler marks the model
    `FAILED` and tries again after 60 s); the unit's `ExecStartPre` refuses the same for a
    manual start. Unloads and the CPU copies of Embedding / Reranker models are not checked.
-3. **Caps the runtime at that same minimum**: `MemoryMax=32G` on the runtime's unit. The
-   start was allowed because at least 32 GiB were available, so the runtime and its JIT
-   build cannot by themselves exhaust the host; past the cap the kernel reclaims the unit's
-   page cache (the weights it read) and then stops the runtime only. A cap relative to the
-   host's total RAM would not protect the host: other processes may already hold most of
-   it. Raise the cap and the minimum together if a runtime needs more.
+3. **Caps the runtime below that minimum**: `MemoryMax=32G` on the runtime's unit; the
+   40 GiB minimum is this cap plus 8 GiB the host keeps for the kernel, the backend and the
+   desktop. So the runtime and its JIT build cannot by themselves exhaust the host; past
+   the cap the kernel reclaims the unit's page cache (the weights it read) and then stops
+   the runtime only. A cap relative to the host's total RAM would not protect the host
+   (other processes may already hold most of it), nor would a minimum equal to the cap.
+   Raise the cap and the minimum together if a runtime needs more.
 4. **Waits up to 900 s for the load** (Decision 0039 2: the longest measured first load
    from the HDD was 412 s): the scheduler's load timeout and the unit's `TimeoutStartSec`.
 

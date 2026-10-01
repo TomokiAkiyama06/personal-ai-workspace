@@ -82,11 +82,19 @@ DEFAULT_MEMORY_OUTPUT_TOKENS = 2_048
 DEFAULT_NODE_WAIT_SECONDS = 600.0  # a node waits this long for local capacity
 
 # -- the host (issue #182, Decision 0039, 4; the values: Decision 0072, Proposed)
-# A GPU runtime is not started while the host's ``MemAvailable`` is below this:
-# its first load may build JIT kernels (FlashInfer) with several GiB of host RAM
-# per compiler process. On 2026-09-30 an unbounded build (27 ``cicc``, about
-# 75 GiB) exhausted the host's memory and the machine rebooted.
-DEFAULT_MIN_HOST_AVAILABLE_BYTES = 32 * GIB
+# A GPU runtime's first load may build JIT kernels (FlashInfer) with several GiB
+# of host RAM per compiler process. On 2026-09-30 an unbounded build (27
+# ``cicc``, about 75 GiB) exhausted the host's memory and the machine rebooted.
+# The runtime's unit is capped at this (``MemoryMax=``, the example unit) ...
+DEFAULT_RUNTIME_HOST_CAP_BYTES = 32 * GIB
+# ... the host keeps this much more for the kernel, the backend and the desktop
+# (the benchmark's watchdog floor) ...
+DEFAULT_HOST_RESERVE_BYTES = 8 * GIB
+# ... so a GPU runtime is not started while ``MemAvailable`` is below their sum
+# (Codex review #189: a minimum equal to the cap left the host no reserve).
+DEFAULT_MIN_HOST_AVAILABLE_BYTES = (
+    DEFAULT_RUNTIME_HOST_CAP_BYTES + DEFAULT_HOST_RESERVE_BYTES
+)
 # What the model commands run with: at most 4 JIT build jobs (each ``cicc`` took
 # up to 4.4 GiB) and one ``nvcc`` thread per FlashInfer job.
 DEFAULT_JIT_BUILD_ENV = MappingProxyType(

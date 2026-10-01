@@ -11,14 +11,16 @@
 # So this unit
 #   - caps the JIT build (MAX_JOBS, FLASHINFER_NVCC_THREADS: a unit does not
 #     inherit the backend's environment, so they are set here),
-#   - refuses to start below 32 GiB MemAvailable (ExecStartPre; the backend checks
-#     the same before it runs "systemctl start", this also covers a manual start),
-#   - never uses more than that minimum (MemoryMax=32G): the start was allowed
-#     because at least 32 GiB were free, so the runtime and its JIT build
-#     cannot by themselves push the host out of memory; past the cap the kernel
-#     reclaims this unit's page cache, then stops this unit only. A cap relative
-#     to the host's total RAM would not do this (the other processes may
-#     already hold most of it when the runtime starts; Codex review #189).
+#   - never uses more than 32 GiB (MemoryMax=32G): past the cap the kernel
+#     reclaims this unit's page cache, then stops this unit only,
+#   - refuses to start below 40 GiB MemAvailable, the cap plus 8 GiB the host
+#     keeps for the kernel, the backend and the desktop (ExecStartPre; the
+#     backend checks the same before it runs "systemctl start", this also
+#     covers a manual start). So the runtime and its JIT build cannot by
+#     themselves push the host out of memory. A cap relative to the host's total
+#     RAM would not do this (other processes may already hold most of it when
+#     the runtime starts), nor would a minimum equal to the cap (no reserve
+#     left; Codex review #189).
 #
 # pip CUDA wheels (CUDA_HOME is site-packages/nvidia/cu13 of the runtime's venv):
 # the JIT links with -L$CUDA_HOME/lib64 -lcudart (and -lcublas / -lcublasLt),
@@ -58,8 +60,8 @@ Environment=FLASHINFER_WORKSPACE_BASE=/srv/paw-llm/cache
 # Only when the pip nvcc is newer than the pip CUDA headers ("CUDA compiler and
 # CUDA toolkit headers are incompatible" from FlashInfer's bundled CCCL):
 # Environment=FLASHINFER_EXTRA_CUDAFLAGS=-DCCCL_DISABLE_CTK_COMPATIBILITY_CHECK
-# 32 GiB = 33554432 kB; "$$" is a literal "$" for systemd.
-ExecStartPre=/usr/bin/awk '/^MemAvailable:/ { found = 1; exit !($$2 >= 33554432) } END { if (!found) exit 1 }' /proc/meminfo
+# 40 GiB = 41943040 kB; "$$" is a literal "$" for systemd.
+ExecStartPre=/usr/bin/awk '/^MemAvailable:/ { found = 1; exit !($$2 >= 41943040) } END { if (!found) exit 1 }' /proc/meminfo
 ExecStart=/opt/paw/runtime-venv/bin/vllm serve /srv/models/main --served-model-name main --host 127.0.0.1 --port 18080
 # "systemctl start" returns when the server answers (the scheduler's load is
 # done then). 900 s: the longest measured first load from the HDD was 412 s
@@ -67,8 +69,8 @@ ExecStart=/opt/paw/runtime-venv/bin/vllm serve /srv/models/main --served-model-n
 ExecStartPost=/bin/sh -c 'until /usr/bin/curl -sf http://127.0.0.1:18080/health >/dev/null; do sleep 2; done'
 TimeoutStartSec=900
 TimeoutStopSec=90
-# The same value as the ExecStartPre minimum (and the backend's
-# min_host_available_bytes): raise both together if the runtime needs more.
+# The ExecStartPre minimum (and the backend's min_host_available_bytes) is this
+# plus 8 GiB: raise them together if the runtime needs more.
 MemoryMax=32G
 NoNewPrivileges=true
 PrivateTmp=true

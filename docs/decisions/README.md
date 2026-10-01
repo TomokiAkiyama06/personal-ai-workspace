@@ -69,7 +69,7 @@
 | [0061](0061-restore-skipped-repository-memories.md) | Restore で飛ばした Repository（名前・既定の Branch の Credential を伏せ字にしたもの）の Repo 単位の記憶を戻さず、Dry run と Apply の手作業の手順に一覧で出し、Audit の `reason` に件数を足す（Decision 0054 の 9・12 の該当点を Supersede。Issue #171） | Approved |
 | [0062](0062-integration-push-fixed-form-no-options.md) | Integration Gate の Push の固定の形を `push --quiet --no-follow-tags --no-recurse-submodules --no-signed -- <URL> <commit>:refs/heads/paw/...` にし、SSH の Wrapper もこの形だけを受け付ける（Checkout の `push.followTags` / `push.recurseSubmodules` / `push.gpgSign` を打ち消す。Decision 0052 の 3・9 の形だけを Supersede。Issue #90） | Approved |
 | [0065](0065-manual-supersedes-undo.md) | 手動の `supersedes` を取り消すときは、古い記憶を有効に戻さず、その最後の内容で新しい版を作る（案 B。Decision 0034 の 8 が委ねた点。Issue #49 / #186） | Approved |
-| [0072](0072-runtime-jit-host-memory-guard.md) | Model の Runtime の起動で JIT ビルドの並列数を `MAX_JOBS=4` / `FLASHINFER_NVCC_THREADS=1` に絞り、GPU の Runtime の起動前にホストの `MemAvailable` が 32 GiB 以上あることを確かめ（足りない・読めないときは起動せず警告）、Run 中は Unit の `MemoryMax=` で抑え、Model の操作の上限の検証の上限を 1,800 秒にする（Decision 0039 の 4 の値。Issue #182） | Proposed |
+| [0072](0072-runtime-jit-host-memory-guard.md) | Model の Runtime の起動で JIT ビルドの並列数を `MAX_JOBS=4` / `FLASHINFER_NVCC_THREADS=1` に絞り、GPU の Runtime の起動前にホストの `MemAvailable` が 40 GiB 以上あることを確かめ（足りない・読めないときは起動せず警告）、Run 中は Unit の `MemoryMax=32G` で抑え、Model の操作の上限の検証の上限を 1,800 秒にする（Decision 0039 の 4 の値。Issue #182） | Proposed |
 
 運用は [AGENTS.md](../../AGENTS.md) の「仕様変更」に従います。
 

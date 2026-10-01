@@ -4191,7 +4191,7 @@ runtime = HybridRuntime(
 
 2026-09-30 に、vLLM の最初の Load が `ninja` の既定の並列数で FlashInfer の JIT を走らせ（`cicc` 27 個、約 75 GiB）、ホストの RAM が尽きてマシンが再起動しました。[Decision 0039](../../docs/decisions/0039-compute-scheduler-calibration.md) の 4（Approved）に従い、値は [Decision 0072](../../docs/decisions/0072-runtime-jit-host-memory-guard.md)（**Proposed**）の推奨どおりです。
 
-- `CommandModelControl` は GPU の Runtime を起動する（`gpu` の Command）前に `MemAvailable` を読み、`min_host_available_bytes`（既定 32 GiB。0 で確認しない）未満、または読めないときは何も実行せず、WARNING（Deployment 名と MiB の値）を出して `HostMemoryLowError`（`host_memory_low`。`ModelControlError` の一種）で失敗します。Scheduler はほかの失敗した Load と同じく `FAILED` にし、60 秒後に再試行します。Unload と CPU の Copy は確かめません。
+- `CommandModelControl` は GPU の Runtime を起動する（`gpu` の Command）前に `MemAvailable` を読み、`min_host_available_bytes`（既定 40 GiB = Runtime の Unit の `MemoryMax=32G` + ホストに残す 8 GiB。0 で確認しない）未満、または読めないときは何も実行せず、WARNING（Deployment 名と MiB の値）を出して `HostMemoryLowError`（`host_memory_low`。`ModelControlError` の一種）で失敗します。Scheduler はほかの失敗した Load と同じく `FAILED` にし、60 秒後に再試行します。Unload と CPU の Copy は確かめません。
 - Command は `MAX_JOBS=4` / `FLASHINFER_NVCC_THREADS=1` つきで実行します（`SubprocessRunner(extra_env=...)`。Backend 自身の環境は渡しません）。systemd の Unit はこれを継がないので、Unit に `Environment=` で書きます。例は [`deploy/systemd/paw-llm-main.service`](deploy/systemd/paw-llm-main.service)（`ExecStartPre` の同じ確認、`MemoryMax=`、pip の CUDA wheel の `libcudart` / `libcublas` のリンクの手順）で、手順は [`docs/DEPLOYMENT_UPDATE.md`](../../docs/DEPLOYMENT_UPDATE.md) の「Model runtime start」です。
 - Load / Unload の 1 Command の上限は既定 900 秒（Decision 0039 の 2。HDD からの最初の Load が 412 秒）で、`timeout=` は 1,800 秒まで設定できます（Probe の Command は 600 秒まで）。
 

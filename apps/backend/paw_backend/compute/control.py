@@ -17,7 +17,7 @@ processes the probe sees are the workspace's.
 
 The host's memory (issue #182, Decision 0039, 4; the values: Decision 0072,
 Proposed): before it starts a GPU runtime it reads the host's ``MemAvailable``
-and starts nothing below ``min_host_available_bytes`` (32 GiB) or when it cannot
+and starts nothing below ``min_host_available_bytes`` (40 GiB) or when it cannot
 be read (:class:`HostMemoryLowError`, logged as a warning). Its commands run
 with ``MAX_JOBS`` / ``FLASHINFER_NVCC_THREADS`` capped (``DEFAULT_JIT_BUILD_ENV``)
 for a command that starts the runtime itself; a systemd unit does not inherit
