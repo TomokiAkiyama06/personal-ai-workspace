@@ -69,7 +69,7 @@
 | [0061](0061-restore-skipped-repository-memories.md) | Restore で飛ばした Repository（名前・既定の Branch の Credential を伏せ字にしたもの）の Repo 単位の記憶を戻さず、Dry run と Apply の手作業の手順に一覧で出し、Audit の `reason` に件数を足す（Decision 0054 の 9・12 の該当点を Supersede。Issue #171） | Approved |
 | [0062](0062-integration-push-fixed-form-no-options.md) | Integration Gate の Push の固定の形を `push --quiet --no-follow-tags --no-recurse-submodules --no-signed -- <URL> <commit>:refs/heads/paw/...` にし、SSH の Wrapper もこの形だけを受け付ける（Checkout の `push.followTags` / `push.recurseSubmodules` / `push.gpgSign` を打ち消す。Decision 0052 の 3・9 の形だけを Supersede。Issue #90） | Approved |
 | [0065](0065-manual-supersedes-undo.md) | 手動の `supersedes` を取り消すときは、古い記憶を有効に戻さず、その最後の内容で新しい版を作る（案 B。Decision 0034 の 8 が委ねた点。Issue #49 / #186） | Approved |
-| [0066](0066-project-http-api.md) | Project / Repository / Member の HTTP API の方針（Route は Service と同じ Capability を保存済みの Project の Resource で Guard し Member でない・存在しない Project は同じ 403、自分の一覧の Guard は `account.read`、一覧は 3 つの状態を 1 回で・Paging なし、詳細は 1 回の `GET` で Member の表示名は `login_name`・招待は Manager にだけ、Repository の登録は Request の中で・GitHub に作るのは `gh_runner` を渡したときだけ、Error の対応、Step-up なし、招待と User の検索は後続（推奨: `login_name` の正確な入力）。Issue #184） | Proposed |
+| [0066](0066-project-http-api.md) | Project / Repository / Member の HTTP API の方針（Route は Service と同じ Capability を保存済みの Project の Resource で Guard し Member でない・存在しない Project は同じ 403、自分の一覧の Guard は `account.read`、一覧は 3 つの状態を 1 回で・Paging なし、詳細は 1 回の `GET` で Member の表示名は `login_name`・招待は Manager にだけ、Repository の登録は Request の中で・GitHub に作るのは `gh_runner` を渡したときだけ、Error の対応、Step-up なし、招待と User の検索は後続（推奨: `login_name` の正確な入力）。Issue #184） | Approved |
 
 運用は [AGENTS.md](../../AGENTS.md) の「仕様変更」に従います。
 

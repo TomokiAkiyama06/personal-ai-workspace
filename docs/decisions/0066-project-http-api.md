@@ -1,6 +1,7 @@
 # Project / Repository / Member の HTTP API の方針（Route の Guard、自分の一覧の Guard と形、詳細の組み立てと表示名、Repository の登録を Request の中で行う、Error の対応、Step-up、この PR に入れない操作と招待のための User の検索）
 
-- Status: Proposed
+- Status: Approved
+- Approval: 2026-10-01、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで直接回答して承認（判断点1〜8、すべて推奨どおり。末尾の「承認時の決定」）
 - Date: 2026-10-01
 - Scope: Issue [#184](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/184)（UI #47・PR #176 の接続先）。`paw_backend/api/v1/projects.py`（`/api/v1/projects/*`、`/api/v1/admin/projects`）、`paw_backend/app.py`（`app.state.projects` / `app.state.repositories`、`create_app(gh_runner=...)`）、`ProjectService.list_members_named` / `list_invites_named`（`projects/store.login_names_of_members`）、`apps/web/src/projects/api.ts`。Migration はない
 - Supersedes: なし。[Decision 0004](0004-rbac-capability-and-audit-policy.md)（RBAC と Audit）、[Decision 0008](0008-project-membership-and-lifecycle-policy.md) / [Decision 0022](0022-project-lifecycle-capabilities.md)（Project の Membership と Lifecycle）、[Decision 0017](0017-repository-registration-policy.md)（Repository の登録）、[Decision 0044](0044-web-app-serving-and-session.md)（Web App と Session、CSRF）はどれも書き換えない
@@ -106,3 +107,7 @@ Message は Service の固定の文（閉じた語彙だけで作られ、入力
 6. 6 の Error の対応でよいか（推奨: はい）。
 7. 削除の開始と役割の変更に Step-up を求めないか（推奨: 求めない）。
 8. 招待は User の検索を作らず、`login_name` の正確な入力で行うか（推奨: はい。8 の残りの操作は後続の PR）。
+
+## 承認時の決定（2026-10-01）
+
+Human は、作業 Session で判断が必要な点について推奨つきの説明を受け、直接回答して承認した（判断点1〜8、すべて推奨どおり）。
