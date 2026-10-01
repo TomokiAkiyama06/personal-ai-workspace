@@ -604,24 +604,48 @@ async def list_pull_requests(
         items = await views.list_pull_requests(
             session, principal, projects, policy, limit=limit
         )
-    return PullRequestListOut(
-        pull_requests=[
-            PullRequestOut(
-                id=str(item.id),
-                number=item.number,
-                url=item.url,
-                state=item.state.value,
-                title=item.task_title,
-                task_id=item.task_id,
-                task_title=item.task_title,
-                repository=item.repository,
-                branch=item.branch,
-                base=item.base,
-                review=item.review.value,
-                evaluation=item.evaluation.value,
-                merge_ready=item.merge_ready,
-                updated_at=item.updated_at,
-            )
-            for item in items
-        ]
+    return PullRequestListOut(pull_requests=[_pull_request(item) for item in items])
+
+
+@router.get(
+    "/pull-requests/{record_id}",
+    response_model=PullRequestOut,
+    summary="One pull request record of a readable project and repository",
+)
+async def get_pull_request(
+    request: Request, principal: _LIST, record_id: int
+) -> PullRequestOut:
+    """The record the PR screen opens when the bounded list does not hold it. A
+    record of another project, of a repository the principal may not read, or
+    none at all are not found alike (Decision 0067, 2)."""
+    _execution(request)
+    database: Database = request.app.state.database
+    policy = _policy(request)
+    async with database.session() as session, session.begin():
+        await _read_only(session)
+        projects = await views.readable_projects(session, principal, policy)
+        items = await views.list_pull_requests(
+            session, principal, projects, policy, limit=1, record_id=record_id
+        )
+    if not items:
+        raise ApiError(404, "pull_request_not_found", "Pull request not found")
+    return _pull_request(items[0])
+
+
+def _pull_request(item: views.PullRequestItem) -> PullRequestOut:
+    return PullRequestOut(
+        id=str(item.id),
+        number=item.number,
+        url=item.url,
+        state=item.state.value,
+        title=item.task_title,
+        task_id=item.task_id,
+        task_title=item.task_title,
+        repository=item.repository,
+        branch=item.branch,
+        base=item.base,
+        review=item.review.value,
+        evaluation=item.evaluation.value,
+        merge_ready=item.merge_ready,
+        updated_at=item.updated_at,
     )

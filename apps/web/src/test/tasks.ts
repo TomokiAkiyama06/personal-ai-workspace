@@ -286,6 +286,11 @@ export function fakeTaskSource(
     async listPullRequests() {
       return pullRequests;
     },
+    async getPullRequest(id) {
+      const pr = pullRequests.find((entry) => entry.id === id);
+      if (!pr) throw new ApiError(404, "pull_request_not_found", "not found");
+      return pr;
+    },
   };
   return { source, calls };
 }

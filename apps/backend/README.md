@@ -4437,6 +4437,7 @@ PAW-062 の画面（`/agents`、`/pulls`、Web の `src/tasks/apiSource.ts`）�
 | `GET /api/v1/tasks/{task_id}` | Task の Project の `project.read` | `restore` の Task、Working Set と今の Attempt での Branch / Worktree / Review / Evaluation / PR、今の Attempt の DAG と Node の試行（Placement・Agent・Model・Error の種類）、今の Step とそのツール呼び出し、予算（Preset と 6 項目） |
 | `POST /api/v1/tasks/{task_id}/controls` | Task の Project の `project.task.run`（Audit 必須） | `{"command", "expected_version", "reason"?, "agent"?, "model"?}`。遷移表が判定（409 `illegal_transition`）、Version が違えば 409 `task_conflict`、Stop Now の理由なしは 422。Resume / Retry / Restart は作成者だけ（403 `task_creator_only`）で、同じ Transaction で Queue へ戻す。応答は操作後の Task |
 | `GET /api/v1/pull-requests` | `tasks.list` | 読める Project の Task が記録した PR と、Backend の判定の `merge_ready`。Merge の経路はない |
+| `GET /api/v1/pull-requests/{record_id}` | `tasks.list` | PR の記録 1 件（一覧の上限の外の記録を PR 画面で開く）。他 Project・読めない Repository・ない記録は同じ `404 pull_request_not_found` |
 
 - 一覧の Project は Session の Membership から、Project ごとに Policy で `project.read` を判定します。Repository は、その ACL で `project.read` があるものだけを出し、ない Repository は名前も PR も出しません。
 - 存在しない Task と、読めない Project の Task はどちらも 403 です（Guard が区別しない）。

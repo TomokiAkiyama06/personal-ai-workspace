@@ -265,4 +265,9 @@ export const apiTaskSource: TaskSource = {
     const body = await apiRequest<{ pull_requests: PullRequestWire[] }>("GET", "/pull-requests");
     return body.pull_requests.map(pullRequest);
   },
+  async getPullRequest(id: string): Promise<PullRequestRecord> {
+    return pullRequest(
+      await apiRequest<PullRequestWire>("GET", `/pull-requests/${encodeURIComponent(id)}`),
+    );
+  },
 };

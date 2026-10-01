@@ -17,6 +17,8 @@ export interface TaskSource {
   /** Send an operator control; resolves with the task as the Backend left it. */
   control(id: string, command: ControlCommand, options: ControlOptions): Promise<TaskDetail>;
   listPullRequests(): Promise<readonly PullRequestRecord[]>;
+  /** One record by its id: the PR screen opens one the bounded list does not hold. */
+  getPullRequest(id: string): Promise<PullRequestRecord>;
 }
 
 const TaskSourceContext = createContext<TaskSource | null>(null);

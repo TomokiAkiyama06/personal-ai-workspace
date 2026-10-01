@@ -404,12 +404,21 @@ async def list_pull_requests(
     policy: Policy,
     *,
     limit: int,
+    record_id: int | None = None,
 ) -> list[PullRequestItem]:
     """The pull requests the tasks of ``projects`` recorded (newest first, at most
-    ``limit``), of the repositories the principal may read."""
+    ``limit``), of the repositories the principal may read; only the record
+    ``record_id`` when it is given (the PR screen opens one the list does not
+    hold)."""
     if not projects:
         return []
     columns = TaskAttemptRepositoryRow
+    recorded = [
+        columns.pr_number.is_not(None),
+        TaskRow.project_id.in_(list(projects)),
+    ]
+    if record_id is not None:
+        recorded.append(columns.id == record_id)
     # The repository ACL is a policy decision, not SQL: decide it for every
     # (project, repository) pair that has a record first, so that the limit
     # counts readable records only.
@@ -417,10 +426,7 @@ async def list_pull_requests(
         await session.execute(
             select(TaskRow.project_id, columns.repository_id)
             .join(TaskRow, TaskRow.id == columns.task_id)
-            .where(
-                columns.pr_number.is_not(None),
-                TaskRow.project_id.in_(list(projects)),
-            )
+            .where(*recorded)
             .distinct()
         )
     ).all()
@@ -456,7 +462,7 @@ async def list_pull_requests(
             )
             .join(TaskRow, TaskRow.id == columns.task_id)
             .where(
-                columns.pr_number.is_not(None),
+                *recorded,
                 tuple_(TaskRow.project_id, columns.repository_id).in_(readable),
             )
             .order_by(columns.updated_at.desc(), columns.id.desc())

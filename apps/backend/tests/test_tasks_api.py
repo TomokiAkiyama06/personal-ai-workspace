@@ -659,6 +659,50 @@ class TasksApiTest(PostgresRepositoryTestCase):
         items = response.json()["pull_requests"]
         self.assertEqual([item["task_id"] for item in items], [str(readable)])
 
+    async def test_one_pull_request_by_its_id_beyond_the_list(self):
+        # The PR screen opens a record the bounded list does not hold (Codex P2
+        # on #196).
+        older = await self.completed_task_with_pull_request(title="Older")
+        await self.completed_task_with_pull_request(title="Newer")
+        self.as_creator(ProjectRole.VIEWER)
+        listed = (await self.client.get("/api/v1/pull-requests?limit=1")).json()
+        self.assertEqual(
+            [item["task_title"] for item in listed["pull_requests"]], ["Newer"]
+        )
+        record_id = (await self.client.get(f"/api/v1/tasks/{older}")).json()[
+            "repositories"
+        ][0]["pull_request"]["id"]
+
+        response = await self.client.get(f"/api/v1/pull-requests/{record_id}")
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["id"], record_id)
+        self.assertEqual(body["task_id"], str(older))
+        self.assertEqual(body["task_title"], "Older")
+        self.assertTrue(body["merge_ready"])
+
+    async def test_an_unreadable_or_missing_pull_request_is_not_found_alike(self):
+        hidden = await self.completed_task_with_pull_request(
+            repository=self.hidden_repo
+        )
+        foreign = await self.completed_task_with_pull_request(
+            project=self.other_project, repository=self.other_repo
+        )
+        ids = [
+            self.rows(
+                "SELECT id FROM task_attempt_repositories WHERE task_id = :t", t=task
+            )[0]["id"]
+            for task in (hidden, foreign)
+        ]
+        self.sign_in(uuid.uuid4(), {self.project: ProjectRole.VIEWER})
+        for record_id in (*ids, max(ids) + 1000):
+            response = await self.client.get(f"/api/v1/pull-requests/{record_id}")
+            self.assertEqual(response.status_code, 404)
+            self.assertEqual(response.json()["error"]["code"], "pull_request_not_found")
+        response = await self.client.get("/api/v1/pull-requests/not-a-number")
+        self.assertEqual(response.status_code, 422)
+
     async def test_a_merged_or_superseded_pull_request_is_not_merge_ready(self):
         task_id = await self.completed_task_with_pull_request()
         await self.tasks.update_attempt(

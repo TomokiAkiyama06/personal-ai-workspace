@@ -219,6 +219,30 @@ describe("apiTaskSource", () => {
     expect(pr).toMatchObject({ id: "17", taskId: TASK, branch: "", mergeReady: true });
   });
 
+  it("reads one pull request by its record id", async () => {
+    const { calls } = mockApi({
+      "GET /pull-requests/17": reply(200, {
+        id: "17",
+        number: 7,
+        url: "https://github.com/acme/web-app/pull/7",
+        state: "open",
+        title: "Fix login",
+        task_id: TASK,
+        task_title: "Fix login",
+        repository: "web-app",
+        branch: "paw/x/1/_integration",
+        base: "main",
+        review: "approved",
+        evaluation: "passed",
+        merge_ready: true,
+        updated_at: "2026-10-01T09:05:00Z",
+      }),
+    });
+    const pr = await apiTaskSource.getPullRequest("17");
+    expect(pr).toMatchObject({ id: "17", number: 7, mergeReady: true });
+    expect(calls).toHaveLength(1);
+  });
+
   it("computes what is left of the budget", () => {
     expect(remainingPercent([{ consumed: 0, limit: null }])).toBeUndefined();
     expect(remainingPercent([{ consumed: 80, limit: 50 }])).toBe(0);
