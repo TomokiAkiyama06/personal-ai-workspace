@@ -223,11 +223,14 @@ def _run(arguments, err, protected_homes, clock) -> int:
             _say(err, f"{', '.join(missing)} not set: the backup needs both.")
             return EXIT_ENVIRONMENT
         result = asyncio.run(_backup(settings, homes, clock))
-    except asyncio.CancelledError:
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        # SIGTERM (``_cancel_on_sigterm``) or Ctrl-C (``asyncio.run`` cancels the
+        # run, then raises ``KeyboardInterrupt``): a message, not a traceback.
         _say(
             err,
-            "FAILED: the backup was terminated (SIGTERM) before it finished. It "
-            "was recorded as recovery.backup.failed if the database accepted it.",
+            "FAILED: the backup was terminated (SIGTERM or Ctrl-C) before it "
+            "finished. It was recorded as recovery.backup.failed if the database "
+            "accepted it.",
         )
         return EXIT_FAILED
     except RecoveryBusyError:
@@ -363,12 +366,13 @@ def _restore(settings: Settings, apply: bool, homes, clock, err) -> int:
     )
     try:
         result = asyncio.run(_restore_run(owner, apply, homes, clock))
-    except asyncio.CancelledError:
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        # SIGTERM or Ctrl-C (see ``_run``): a message, not a traceback.
         _say(
             err,
-            "FAILED: the restore was terminated (SIGTERM) before it finished; "
-            "its transaction, if any, was rolled back. It was recorded as "
-            "recovery.restore.failed if the database accepted it.",
+            "FAILED: the restore was terminated (SIGTERM or Ctrl-C) before it "
+            "finished; its transaction, if any, was rolled back. It was recorded "
+            "as recovery.restore.failed if the database accepted it.",
         )
         return EXIT_FAILED
     except RecoveryBusyError:
