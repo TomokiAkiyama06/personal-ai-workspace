@@ -25,7 +25,7 @@ from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from paw_backend.authz import Capability, Principal, ProjectState, RepoAcl, Resource
@@ -410,6 +410,31 @@ async def list_pull_requests(
     if not projects:
         return []
     columns = TaskAttemptRepositoryRow
+    # The repository ACL is a policy decision, not SQL: decide it for every
+    # (project, repository) pair that has a record first, so that the limit
+    # counts readable records only.
+    pairs = (
+        await session.execute(
+            select(TaskRow.project_id, columns.repository_id)
+            .join(TaskRow, TaskRow.id == columns.task_id)
+            .where(
+                columns.pr_number.is_not(None),
+                TaskRow.project_id.in_(list(projects)),
+            )
+            .distinct()
+        )
+    ).all()
+    found = await repositories(session, {pair.repository_id for pair in pairs})
+    readable = [
+        (pair.project_id, pair.repository_id)
+        for pair in pairs
+        if (repository := found.get(pair.repository_id)) is not None
+        and may_read_repository(
+            principal, projects[pair.project_id], repository, policy
+        )
+    ]
+    if not readable:
+        return []
     rows = (
         await session.execute(
             select(
@@ -432,21 +457,15 @@ async def list_pull_requests(
             .join(TaskRow, TaskRow.id == columns.task_id)
             .where(
                 columns.pr_number.is_not(None),
-                TaskRow.project_id.in_(list(projects)),
+                tuple_(TaskRow.project_id, columns.repository_id).in_(readable),
             )
             .order_by(columns.updated_at.desc(), columns.id.desc())
             .limit(limit)
         )
     ).all()
-    found = await repositories(session, {row.repository_id for row in rows})
     items = []
     for row in rows:
-        project = projects[row.project_id]
-        repository = found.get(row.repository_id)
-        if repository is None or not may_read_repository(
-            principal, project, repository, policy
-        ):
-            continue
+        repository = found[row.repository_id]
         items.append(
             PullRequestItem(
                 id=row.id,

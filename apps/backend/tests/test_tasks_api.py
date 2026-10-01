@@ -646,6 +646,19 @@ class TasksApiTest(PostgresRepositoryTestCase):
         detail = (await self.client.get(f"/api/v1/tasks/{done}")).json()
         self.assertEqual(detail["repositories"][0]["pull_request"]["id"], ready["id"])
 
+    async def test_the_limit_counts_readable_pull_requests_only(self):
+        # A newer record of a repository the person may not read must not take
+        # the place of an older readable one (Codex P2 on #196).
+        readable = await self.completed_task_with_pull_request()
+        await self.completed_task_with_pull_request(repository=self.hidden_repo)
+        self.sign_in(uuid.uuid4(), {self.project: ProjectRole.VIEWER})
+
+        response = await self.client.get("/api/v1/pull-requests?limit=1")
+
+        self.assertEqual(response.status_code, 200)
+        items = response.json()["pull_requests"]
+        self.assertEqual([item["task_id"] for item in items], [str(readable)])
+
     async def test_a_merged_or_superseded_pull_request_is_not_merge_ready(self):
         task_id = await self.completed_task_with_pull_request()
         await self.tasks.update_attempt(
