@@ -27,12 +27,6 @@ PUBLIC_ROUTES = {
     ("GET", "/api/v1/health"),
     ("GET", "/api/v1/health/ready"),
     ("GET", "/api/v1/openapi.json"),
-    # Unauthenticated while they carry system events only (see
-    # apps/backend/README.md). Sessions exist now (PAW-022): the Issue that adds
-    # the first non-public event must guard them with require_capability and
-    # remove them from this list.
-    ("GET", "/api/v1/events/stream"),
-    (WEBSOCKET, "/api/v1/events/ws"),
     # PAW-022. Signing in cannot need a session. The route is rate limited per
     # account and per source (progressive backoff, ``paw_backend.auth.throttle``),
     # answers every failure alike (no user enumeration), and audits a known

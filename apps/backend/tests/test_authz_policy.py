@@ -60,6 +60,9 @@ USER_CAPS = {
     "system_health.summary.read",
     # Issue #185 (Decision 0067): the lists of the Task / PR screens.
     "tasks.list",
+    # Issue #188 (Decision 0070): one's own Notification Center.
+    "notification.read",
+    "notification.manage",
 }
 ADMIN_CAPS = USER_CAPS | {
     "shared_memory.manage",
@@ -202,6 +205,9 @@ NON_DELEGABLE_CAPS = {
     "admin.system_health.view",
     # Issue #185 (Decision 0067): the screens' lists; an agent reads its own task.
     "tasks.list",
+    # Issue #188 (Decision 0070): a person reads and marks their own notifications.
+    "notification.read",
+    "notification.manage",
 }
 # The only capabilities whose *allowed* decisions are not persisted.
 READ_ONLY_CAPS = {
@@ -214,6 +220,8 @@ READ_ONLY_CAPS = {
     "admin.system_health.view",
     # Issue #185 (Decision 0067): each item is decided by project.read.
     "tasks.list",
+    # Issue #188 (Decision 0070): one's own notifications, codes only.
+    "notification.read",
 }
 
 

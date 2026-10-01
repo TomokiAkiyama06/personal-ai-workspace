@@ -18,7 +18,7 @@ Personal AI Workspace の Web UI です。
 | login / passkey / device management | サインイン（Brand Panel とシステム状態、ユーザー名・パスワード（表示切替）・この端末を信頼する。429 は待ち時間を表示）、Passkey の Gate（`enrollment_required` は登録、`assertion_required` は確認）、設定 › 端末とセッション（信頼済み端末・個別 / 他のすべての端末からサインアウト、新しい端末を追加の QR / リンクと残り時間、承認待ちの端末を確認コードの入力と Passkey の Step-up で承認・拒否、Passkey の一覧・この端末に追加・削除）、新しい端末の `/pair#<token>`（端末名を入れて続ける、承認待ちは確認コードを表示して完了を待つ。拒否・期限切れの `invalid_token` で終える） |
 | responsive layout | Design の 3 段階: 1280px 以上は Sidebar（252px）と Header の検索、768–1279px は Icon Rail（78px、短い Label）、768px 未満は Drawer（320px）と下部 Tab（チャット / タスク / メモリ / 通知 / 設定）、通知は全画面。Theme はシステム / ライト / ダーク（User Menu・言語と外観・サインイン画面。`localStorage` に保存）。Font は IBM Plex Sans JP / IBM Plex Mono を Build に同梱 |
 | Notification Center shell | Header の Bell（未読数）、Non-modal の Dropdown（未読 N・すべて既読・通知設定・すべて / 未読 / 重要 / タスクの絞り込み・同種の通知をまとめて件数表示・すべての通知を見る / 通知ルール）、スマートフォンでは `/notifications` の全画面、ERROR / CRITICAL の Non-modal Banner。通知の Data は `NotificationSource` で受ける（Decision 0044 の 11） |
-| Notification Center（[PAW-065](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/51)） | INFO / WARNING / ERROR / CRITICAL。重複排除（同じ `id` の通知は数えない。既読のままにする）と集約（同じ `key` の別の通知を 1 件にまとめ、件数と最初 / 最新の時刻を出し、最新の Severity へ昇格する）。通知ごとの操作（タスクを開く・対応するなど）は**画面への Link だけ**で、操作そのものは遷移先の画面の Permission / Step-up に従う（NOTIFICATION_POLICY §6）。今ある API から作る通知は、承認待ちの新しい端末（`GET /api/v1/auth/pairing/pending` を 30 秒ごとと画面へ戻ったときに読む。「確認する」は 端末とセッション を開き、そこで確認コードと Passkey の Step-up で承認する。承認待ちでなくなれば消える）。通知はこの Browser の Tab の中だけにあり、サインアウトと別のアカウントのサインインで消える。スマートフォンの `/notifications` は MobileNotifications のとおり、Header に戻る / すべて既読、未読の件数つきの Chip、Card の一覧 |
+| Notification Center（[PAW-065](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/51)） | INFO / WARNING / ERROR / CRITICAL。重複排除（同じ `id` の通知は数えない。既読のままにする）と集約（同じ `key` の別の通知を 1 件にまとめ、件数と最初 / 最新の時刻を出し、最新の Severity へ昇格する）。通知ごとの操作（タスクを開く・対応するなど）は**画面への Link だけ**で、操作そのものは遷移先の画面の Permission / Step-up に従う（NOTIFICATION_POLICY §6）。今ある API から作る通知は、承認待ちの新しい端末（`GET /api/v1/auth/pairing/pending` を 30 秒ごとと画面へ戻ったときに読む。「確認する」は 端末とセッション を開き、そこで確認コードと Passkey の Step-up で承認する。承認待ちでなくなれば消える）。Backend に保存された通知（System Health の変化など）は [通知の API](#通知の-apiissue-188) で読み、既読を端末をまたいで保つ。承認待ちの端末の通知はこの Browser の Tab の中だけ。どちらもサインアウトと別のアカウントのサインインで画面から消える。スマートフォンの `/notifications` は MobileNotifications のとおり、Header に戻る / すべて既読、未読の件数つきの Chip、Card の一覧 |
 | メモリ（[PAW-063](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/49)） | Design の Memory Board の 3 ペイン（スコープの Tree / メモリ一覧 / 詳細）。詳細は本文・履歴・ソース・詳細の Tab、履歴は GitLens 風の Graph（自分の版を 1 本の Lane、Relation でつながる他のメモリを右の Lane）と選択中の版（変更者・理由・関係・鮮度、現在の版との差分）。過去の版の復元は、その内容で新しい Active の版を作る（Decision 0034）。編集は開始時の版番号を送り、`memory_version_conflict` なら「編集中に別の更新がありました」と差分を出して、最新の版の上で保存し直せる。1280px 未満はスコープを Select に、768px 未満は一覧 → 詳細の 2 階層。Data は `MemorySource`（`src/memory/source.tsx`）で受け、本番は `/api/v1/memory`（Issue #186、Decision 0068）の Client（`src/memory/apiSource.ts`）を `main.tsx` で渡す。Source がないとき（Test）は「まだ表示できない」ことを表示する |
 
 Navigation は Design の Roles のとおりです: 新しいチャット、チャット、プロジェクト、エージェント / タスク、メモリ、プルリクエスト、区切り、管理（Owner / Admin だけ。役割の Badge つき）、設定。User Menu はプロフィール・設定・端末とセッション（承認待ち N）・使用状況・キーボードショートカット・ヘルプ・テーマ・サインアウト・Version。設定は「ワークスペースへ戻る」の Header と、アカウント /（Owner / Admin は）ワークスペースの Sidebar です。後続の Issue の画面は Placeholder です。
@@ -67,13 +67,15 @@ apps/web/
 
 Test は各 Module の隣の `*.test.ts(x)` です。
 
-### 通知の API（未実装）
+### 通知の API（Issue #188）
 
-Backend に通知の API はまだありません。次がそろったら `NotificationSource` を 1 つ足して接続します（Design の ApiContract の案。形は Backend の Issue で決めます）。
+`src/notifications/serverNotifications.ts` が、アカウントに保存された通知（`GET /api/v1/notifications`）を Notification Center に入れます。一覧は、認証つきの Event の Stream（`/api/v1/events/stream`）の `notification.changed`（内容はなく、読み直しの合図）、Stream の（再）接続、画面へ戻ったとき、Stream がつながっていない間の 60 秒ごとの Poll で読み直します。一覧から消えた通知（他の端末で非表示・解決・Role の変更）はここでも消えます。
 
-- `GET /api/v1/notifications`（Severity・未読・Cursor で絞り込み。Role ごとの配信は Backend が決める）、`POST /api/v1/notifications/read`、`POST /api/v1/notifications/{id}/dismiss`（既読・非表示を端末をまたいで保つ）
-- 認証つきの Event の配信（今の `/api/v1/events/*` は認証がなく System Event だけ）
-- 通知の元になる状態の API: Task の状態と `needs_human`、Tool の承認待ち、Backup / System Health（`GET /api/v1/health/summary` の案）
+- 通知は Code と数値なので、ここで i18n の Catalog から文にします（`system_health.component_changed` は「Backup に異常があります」など。知らない `kind` は Code のまま出す）。操作は画面への Link だけ（System Health は「詳細を見る」で `/admin`）
+- 既読（項目を開く・Banner を閉じる）と「すべて既読」は `POST /api/v1/notifications/read` で Backend にも送り、端末をまたいで保ちます。他の端末で既読になった通知は、ここでも既読で Banner を出しません
+- `POST /api/v1/notifications/{id}/dismiss`（一覧から非表示）は Backend にありますが、Design に一覧から消す操作がないため、まだ使いません
+- 承認待ちの端末の通知は、これまでどおりこの Tab の中だけです（保存は後続）
+- まだない通知の元: Task の状態と `needs_human`、Tool の承認待ち。Header の「Backup 異常」の Chip（`GET /api/v1/system/health/summary`）も後続です
 
 ## 開発
 

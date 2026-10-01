@@ -103,6 +103,11 @@ class Settings(BaseSettings):
     event_heartbeat_seconds: float = Field(default=15.0, gt=0)
     event_queue_size: int = Field(default=100, ge=1)
     event_max_subscribers: int = Field(default=100, ge=1)
+    # An open stream checks its session again this often (issue #188, Decision
+    # 0070): it ends once the session is signed out, revoked or expired, and a
+    # role change applies to the notification events it receives. The check
+    # does not move the session's idle expiry (an open stream is not activity).
+    event_session_check_seconds: float = Field(default=60.0, ge=1, le=3600)
 
     # Initial Owner setup / recovery tokens (PAW-021). A token is single-use and
     # expires after this many seconds; a token that was tried this many times

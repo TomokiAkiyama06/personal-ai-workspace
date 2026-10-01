@@ -9,6 +9,7 @@ from paw_backend.api.v1 import (
     events,
     health,
     memory,
+    notifications,
     passkeys,
     projects,
     system_health,
@@ -28,3 +29,4 @@ router.include_router(tasks.router)
 router.include_router(memory.router)
 router.include_router(projects.router)
 router.include_router(usage.router)
+router.include_router(notifications.router)

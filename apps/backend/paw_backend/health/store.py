@@ -21,20 +21,31 @@ two Backend processes line up, and a sample is never placed in the future.
   events and the agent incidents (Decision 0071) older than the retention
   period. At most ``MAX_ROLLUP_ROWS`` rows per statement.
 * :meth:`HealthStore.series` and :meth:`HealthStore.events`: the reads of the API.
+
+With ``notify=True`` (the application, issue #188, Decision 0070 Approved) a
+recorded change is also a stored notification for the System Health audience
+(``admin.system_health.view``: the Owner and the Admins), in the same transaction
+(so once, whichever process records it): ``system_health.component_changed``
+with the key ``system_health:<component>``, the severity of the change, and its
+component, status, previous severity and reason codes. A component's first event
+at ``info`` (a fresh start) is not one. ``on_notified`` is called after the
+commit (the application publishes the ``notification.changed`` hint), and the
+roll-up also purges the notifications past their retention.
 """
 
 import asyncio
 import math
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from paw_backend.authz.capabilities import Capability
 from paw_backend.db import Database
-from paw_backend.health.domain import ComponentHealth
+from paw_backend.health.domain import ComponentHealth, Severity
 from paw_backend.health.limits import (
     CHECK_TIMEOUT_SECONDS,
     HOURLY_RESOLUTION,
@@ -44,6 +55,12 @@ from paw_backend.health.limits import (
     TIERS,
 )
 from paw_backend.health.models import MAX_REASONS_CHARS
+from paw_backend.notifications import store as notifications
+from paw_backend.notifications.domain import (
+    PARAM_LIST_MAX_ITEMS,
+    Category,
+    NewNotification,
+)
 
 _METRIC_NAME = re.compile(METRIC_NAME_PATTERN)
 # ``date_bin``'s origin: any fixed instant on a whole hour.
@@ -81,6 +98,7 @@ class RollupResult:
     purged_samples: int
     purged_events: int
     purged_incidents: int = 0
+    purged_notifications: int = 0
 
 
 _ADD_SAMPLES = f"""
@@ -186,7 +204,7 @@ LEFT JOIN LATERAL (
 ) AS last ON true
 WHERE last.severity IS DISTINCT FROM :severity
   AND (last.occurred_at IS NULL OR change.at >= last.occurred_at)
-RETURNING id
+RETURNING id, previous_severity
 """
 
 _SERIES = f"""
@@ -208,11 +226,29 @@ LIMIT %(limit)s
 """
 
 
+# Who receives the System Health notifications (Decision 0059 3: the detail is
+# the Owner's and the Admins').
+NOTIFICATION_AUDIENCE = Capability.ADMIN_SYSTEM_HEALTH_VIEW
+NOTIFICATION_KIND = "system_health.component_changed"
+
+
+def notification_key(component: str) -> str:
+    return f"system_health:{component}"
+
+
 class HealthStore:
-    def __init__(self, database: Database) -> None:
+    def __init__(
+        self,
+        database: Database,
+        *,
+        notify: bool = False,
+        on_notified: Callable[[], None] | None = None,
+    ) -> None:
         if not isinstance(database, Database):
             raise TypeError("database must be a Database")
         self._database = database
+        self._notify = bool(notify)
+        self._on_notified = on_notified
 
     async def add_samples(
         self, values: Mapping[str, float], *, interval_seconds: int
@@ -259,23 +295,38 @@ class HealthStore:
             await session.execute(
                 text("SELECT pg_advisory_xact_lock(:key)"), {"key": _EVENTS_LOCK_KEY}
             )
-            recorded = 0
+            recorded = notified = 0
             for health in components:
-                rows = await session.execute(
-                    text(_RECORD_CHANGE),
-                    {
-                        "component": health.component.value,
-                        "severity": health.severity.value,
-                        "status": health.status.value,
-                        "reasons": _reasons(health.reasons),
-                        "occurred_at": occurred_at,
-                    },
-                )
-                recorded += len(rows.fetchall())
-            return recorded
+                reasons = _reasons(health.reasons)
+                rows = (
+                    await session.execute(
+                        text(_RECORD_CHANGE),
+                        {
+                            "component": health.component.value,
+                            "severity": health.severity.value,
+                            "status": health.status.value,
+                            "reasons": reasons,
+                            "occurred_at": occurred_at,
+                        },
+                    )
+                ).all()
+                recorded += len(rows)
+                for row in rows:
+                    if self._notify and (
+                        row.previous_severity is not None
+                        or health.severity is not Severity.INFO
+                    ):
+                        await notifications.add_in(
+                            session, _notification(health, reasons, row)
+                        )
+                        notified += 1
+            return recorded, notified
 
         async with asyncio.timeout(WRITE_TIMEOUT_SECONDS):
-            return await self._database.run_abortable(work)
+            recorded, notified = await self._database.run_abortable(work)
+        if notified and self._on_notified is not None:
+            self._on_notified()
+        return recorded
 
     async def roll_up(self, *, retention_days: int) -> RollupResult:
         """Move old rows to the next resolution; purge what is past retention."""
@@ -295,7 +346,25 @@ class HealthStore:
         purged_incidents = await self._repeat(
             _PURGE_INCIDENTS, {"days": retention_days}
         )
-        return RollupResult(moved, purged_samples, purged_events, purged_incidents)
+        purged_notifications = 0
+        if self._notify:
+            for _ in range(_MAX_BATCHES):
+
+                async def purge(session: AsyncSession) -> int:
+                    return await notifications.purge_in(session)
+
+                async with asyncio.timeout(WRITE_TIMEOUT_SECONDS):
+                    count = await self._database.run_abortable(purge)
+                purged_notifications += count
+                if count < notifications.MAX_PURGE_ROWS:
+                    break
+        return RollupResult(
+            moved,
+            purged_samples,
+            purged_events,
+            purged_incidents=purged_incidents,
+            purged_notifications=purged_notifications,
+        )
 
     async def _repeat(self, sql: str, params: dict[str, int]) -> int:
         total = 0
@@ -381,3 +450,20 @@ __all__ = [
     "RollupResult",
     "SeriesPoint",
 ]
+
+
+def _notification(health: ComponentHealth, reasons: str, row) -> NewNotification:
+    component = health.component.value
+    return NewNotification(
+        key=notification_key(component),
+        kind=NOTIFICATION_KIND,
+        severity=health.severity.value,
+        category=Category.SYSTEM,
+        audience_capability=NOTIFICATION_AUDIENCE,
+        params={
+            "component": component,
+            "status": health.status.value,
+            "previous_severity": row.previous_severity,
+            "reasons": [r for r in reasons.split(",") if r][:PARAM_LIST_MAX_ITEMS],
+        },
+    )

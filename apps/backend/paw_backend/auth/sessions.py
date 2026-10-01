@@ -325,13 +325,14 @@ class SessionStore:
         return IssuedSession(token, _record(row))
 
     async def authenticate(
-        self, session: AsyncSession, token: object
+        self, session: AsyncSession, token: object, *, touch: bool = True
     ) -> AuthenticatedSession | None:
         """The valid session of ``token`` (and its active user), or ``None``.
 
         Also moves the session's idle expiry forward, at most once per touch
-        interval. A token that has not the exact shape of a session id is
-        ``None`` without a query.
+        interval, unless ``touch`` is false (an open event stream checking that
+        its session is still valid is not activity, issue #188). A token that
+        has not the exact shape of a session id is ``None`` without a query.
         """
         _session(session)
         parsed = parse_session_token(token)
@@ -355,6 +356,14 @@ class SessionStore:
         if row is None:
             return None
         record = _record(row)
+        if not touch:
+            return AuthenticatedSession(
+                record=record,
+                login_name=row.login_name,
+                system_role=SystemRole(row.system_role),
+                checked_at=row.checked_at,
+                token_hash=token_hash,
+            )
         touched = (
             await session.execute(
                 text(

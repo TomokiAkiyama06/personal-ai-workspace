@@ -8,13 +8,16 @@
 // time (aggregation); the newest one sets the severity, so a repeated failure can
 // escalate the entry. A source resolves a key when its condition is over.
 //
-// The Backend has no notification API yet (no store of notifications, read state
-// or authorized event stream): notifications live in this browser tab only. A
-// source (the future event stream) is plugged in through `NotificationSource`;
-// watchers of existing APIs (pendingApprovals.ts) push through `useNotifications`.
+// The Backend's stored notifications (GET /api/v1/notifications, issue #188) are
+// pushed by serverNotifications.ts with their read state (`read`, `remote`); marking
+// such an entry read here also marks it on the Backend (`NotificationRemote`), so
+// the state follows the account across devices. Watchers of other APIs
+// (pendingApprovals.ts) push tab-local notifications through `useNotifications`;
+// a source can also be plugged in through `NotificationSource`.
 import {
   createContext,
   type ReactNode,
+  type SetStateAction,
   useCallback,
   useContext,
   useEffect,
@@ -49,6 +52,20 @@ export interface IncomingNotification {
    * state-changing request by itself.
    */
   actions?: readonly NotificationAction[];
+  /** The Backend's read state of this event (a stored notification). */
+  read?: boolean;
+  /** A stored notification: reading it is sent to the Backend. */
+  remote?: boolean;
+}
+
+/**
+ * Sends the read state of stored notifications to the Backend. Each resolves
+ * with the account's unread total after the change; a rejection puts the entry
+ * back to unread (the Backend still has it unread).
+ */
+export interface NotificationRemote {
+  markRead: (ids: string[]) => Promise<number>;
+  markAllRead: () => Promise<number>;
 }
 
 export interface NotificationAction {
@@ -110,6 +127,13 @@ interface NotificationValue {
   dismiss: (key: string) => void;
   /** Forget everything (another account signed in on this browser). */
   clear: () => void;
+  /** Where marking stored notifications read is sent (`null`: nowhere). */
+  setRemote: (remote: NotificationRemote | null) => void;
+  /**
+   * The Backend's unread total of the stored notifications (the list holds the
+   * newest only): the badge counts it instead of the stored entries shown.
+   */
+  setRemoteUnread: (total: number | null) => void;
 }
 
 const NotificationContext = createContext<NotificationValue | null>(null);
@@ -183,12 +207,21 @@ export function mergeNotification(
   incoming: IncomingNotification,
 ): NotificationItem[] {
   const existing = items.find((item) => item.key === incoming.key);
-  // Dedup: the same event again changes nothing (it stays read if it was read).
-  if (existing && incoming.id !== undefined && existing.ids.includes(incoming.id)) return items;
+  // A stored notification that is already read (on this or another device) is
+  // read here and raises no banner.
+  const read = incoming.read === true;
+  // Dedup: the same event again changes nothing (it stays read if it was read),
+  // except that the Backend now says the entry's latest event was read.
+  if (existing && incoming.id !== undefined && existing.ids.includes(incoming.id)) {
+    if (!read || existing.read || existing.ids[0] !== incoming.id) return items;
+    return items.map((item) =>
+      item === existing ? { ...existing, read: true, dismissed: true } : item,
+    );
+  }
   const ids = incoming.id === undefined ? [] : [incoming.id];
   if (!existing) {
-    const created = { ...incoming, count: 1, firstAt: incoming.at, ids, read: false };
-    return [{ ...created, dismissed: false }, ...items].slice(0, MAX_ITEMS);
+    const created = { ...incoming, count: 1, firstAt: incoming.at, ids, read };
+    return [{ ...created, dismissed: read }, ...items].slice(0, MAX_ITEMS);
   }
   const newer = Date.parse(incoming.at) >= Date.parse(existing.at);
   if (!newer) {
@@ -210,8 +243,8 @@ export function mergeNotification(
     count: existing.count + 1,
     firstAt: earlier(existing.firstAt, incoming.at),
     ids: [...ids, ...existing.ids],
-    read: false,
-    dismissed: false,
+    read,
+    dismissed: read,
   };
   const rest = items.filter((item) => item.key !== incoming.key);
   return [merged, ...rest].slice(0, MAX_ITEMS);
@@ -233,6 +266,67 @@ export function NotificationProvider({
       return next === current.items ? current : { ...current, items: next };
     });
   }, []);
+  // The current items for the handlers below, which send requests (never from
+  // inside a state update, which React may run twice).
+  const latest = useRef(items);
+  latest.current = items;
+  const remote = useRef<NotificationRemote | null>(null);
+  const setRemote = useCallback((value: NotificationRemote | null) => {
+    remote.current = value;
+  }, []);
+  const [remoteUnread, setRemoteUnreadState] = useState<number | null>(null);
+  // Every change of the total (a list, an optimistic read, an account clear)
+  // starts a new generation; a write's answer sets the total only while its
+  // generation is the newest, so an older answer arriving late never overwrites
+  // a newer total.
+  const unreadGeneration = useRef(0);
+  // The generation of the last account clear.
+  const cleared = useRef(0);
+  const changeRemoteUnread = useCallback((total: SetStateAction<number | null>) => {
+    unreadGeneration.current += 1;
+    setRemoteUnreadState(total);
+    return unreadGeneration.current;
+  }, []);
+  const setRemoteUnread = useCallback(
+    (total: number | null) => {
+      changeRemoteUnread(total);
+    },
+    [changeRemoteUnread],
+  );
+  // A write's outcome: the Backend's total after it, or (it failed) the entries
+  // are unread again, as on the Backend, and the total is the one before the
+  // optimistic change, until the next list. A newer total stays.
+  const settle = useCallback(
+    (write: Promise<number>, generation: number, keys: Set<string>, before: number | null) => {
+      const current = () => unreadGeneration.current === generation;
+      write.then(
+        (total) => {
+          if (current()) setRemoteUnreadState(total);
+        },
+        () => {
+          if (generation <= cleared.current) return;
+          setItems((items) =>
+            items.map((item) => (keys.has(item.key) ? { ...item, read: false } : item)),
+          );
+          if (current()) setRemoteUnreadState(before);
+        },
+      );
+    },
+    [setItems],
+  );
+  const sendRead = useCallback(
+    (key: string) => {
+      const item = latest.current.find((entry) => entry.key === key);
+      const target = remote.current;
+      if (!item?.remote || item.read || item.ids.length === 0 || !target) return;
+      const before = remoteUnread;
+      const generation = changeRemoteUnread((total) =>
+        total === null ? null : Math.max(0, total - item.ids.length),
+      );
+      settle(target.markRead(item.ids), generation, new Set([key]), before);
+    },
+    [remoteUnread, changeRemoteUnread, settle],
+  );
   const push = useCallback((incoming: IncomingNotification) => {
     setState((current) => pushNotification(current, incoming));
   }, []);
@@ -244,33 +338,48 @@ export function NotificationProvider({
   }, []);
   const markRead = useCallback(
     (key: string) => {
+      sendRead(key);
       setItems((current) =>
         current.map((item) => (item.key === key && !item.read ? { ...item, read: true } : item)),
       );
     },
-    [setItems],
+    [sendRead, setItems],
   );
   const markAllRead = useCallback(() => {
+    const target = remote.current;
+    if (target && (remoteUnread ?? 0) + latest.current.filter((i) => i.remote && !i.read).length) {
+      const keys = new Set(
+        latest.current.filter((item) => item.remote && !item.read).map((item) => item.key),
+      );
+      const before = remoteUnread;
+      settle(target.markAllRead(), changeRemoteUnread(0), keys, before);
+    }
     setItems((current) => current.map((item) => ({ ...item, read: true })));
-  }, [setItems]);
+  }, [remoteUnread, changeRemoteUnread, settle, setItems]);
   const dismiss = useCallback(
     (key: string) => {
+      // Closing the banner reads the entry (it stays in the list).
+      sendRead(key);
       setItems((current) =>
         current.map((item) => (item.key === key ? { ...item, dismissed: true, read: true } : item)),
       );
     },
-    [setItems],
+    [sendRead, setItems],
   );
   const clear = useCallback(() => {
     setState((current) =>
       current.items.length === 0 && current.evicted.size === 0 ? current : EMPTY,
     );
-  }, []);
+    // Writes sent for the previous account change nothing when they answer.
+    cleared.current = changeRemoteUnread(null);
+  }, [changeRemoteUnread]);
   useEffect(() => source?.subscribe(push, resolve), [source, push, resolve]);
   const value = useMemo(
     () => ({
       items,
-      unread: items.filter((item) => !item.read).length,
+      unread:
+        items.filter((item) => !item.read && !item.remote).length +
+        (remoteUnread ?? items.filter((item) => !item.read && item.remote).length),
       push,
       resolve,
       resolveMatching,
@@ -278,8 +387,22 @@ export function NotificationProvider({
       markAllRead,
       dismiss,
       clear,
+      setRemote,
+      setRemoteUnread,
     }),
-    [items, push, resolve, resolveMatching, markRead, markAllRead, dismiss, clear],
+    [
+      items,
+      remoteUnread,
+      push,
+      resolve,
+      resolveMatching,
+      markRead,
+      markAllRead,
+      dismiss,
+      clear,
+      setRemote,
+      setRemoteUnread,
+    ],
   );
   return <NotificationContext.Provider value={value}>{children}</NotificationContext.Provider>;
 }

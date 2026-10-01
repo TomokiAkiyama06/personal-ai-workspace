@@ -2,6 +2,7 @@ import { useSession } from "./auth/session";
 import { type MessageKey, useI18n } from "./i18n";
 import { MemoryPage } from "./memory/MemoryPage";
 import { NotificationsPage } from "./notifications/NotificationCenter";
+import { ServerNotifications } from "./notifications/serverNotifications";
 import { useNotificationOwner } from "./notifications/store";
 import { AdminPage } from "./pages/AdminPage";
 import { LoginPage } from "./pages/LoginPage";
@@ -79,12 +80,20 @@ export function App() {
       return <LoginPage />;
     case "signed_in":
       if (state.data.auth && state.data.auth.passkey.gate !== "open") return <PasskeyGatePage />;
-      // Settings is a screen of its own (the design's 「ワークスペースへ戻る」 header).
-      if (path === "/settings" || path.startsWith("/settings/")) return <SettingsPage />;
+      // The stored notifications stay connected on every screen, Settings too
+      // (it shows the banners); the same position keeps it mounted across both.
       return (
-        <AppShell>
-          <SignedInPage />
-        </AppShell>
+        <>
+          <ServerNotifications />
+          {/* Settings is a screen of its own (the design's 「ワークスペースへ戻る」 header). */}
+          {path === "/settings" || path.startsWith("/settings/") ? (
+            <SettingsPage />
+          ) : (
+            <AppShell>
+              <SignedInPage />
+            </AppShell>
+          )}
+        </>
       );
   }
 }

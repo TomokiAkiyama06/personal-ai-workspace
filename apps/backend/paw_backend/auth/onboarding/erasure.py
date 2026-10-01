@@ -48,7 +48,9 @@ What one erasure does (ONE transaction per user)
    consolidation keys, the Shared Memory candidates the user proposed that were
    not approved (``pending`` / ``rejected``: each holds a copy of the memory it
    came from) (Private Memory); the per-user connection quotas (personal
-   settings); the project memberships (the account can never come back).
+   settings); the project memberships (the account can never come back); the
+   notifications addressed to the user and their read / dismissed state of every
+   notification (issue #188).
 4. Verifies, in the same transaction, that no row of those tables is left for the
    user; otherwise the transaction is rolled back (``verification_failed``).
 5. Only when the operator confirmed that the copies OUTSIDE the database are erased
@@ -157,6 +159,8 @@ PERSONAL_TABLES: tuple[tuple[str, str], ...] = (
     ("memory_consolidation_keys", "owner_user_id"),
     ("connection_quotas", "user_id"),
     ("project_members", "user_id"),
+    ("notification_receipts", "user_id"),
+    ("notifications", "recipient_user_id"),
 )
 
 

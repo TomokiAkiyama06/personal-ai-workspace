@@ -79,6 +79,13 @@ class Capability(StrEnum):
     # answer is of a project the person may read (``project.read``, decided per
     # project and per repository). Any human role; read-only; never an Agent's.
     TASKS_LIST = "tasks.list"
+    # A person's own Notification Center (issue #188, Decision 0070 Approved):
+    # reading their notifications and the event stream (``notification.read``,
+    # read-only), marking them read and dismissing them (``notification.manage``).
+    # Which notifications a person receives is decided by the store (their own,
+    # and the audiences their role holds). Any human role; never an Agent's.
+    NOTIFICATION_READ = "notification.read"
+    NOTIFICATION_MANAGE = "notification.manage"
     # Admin (and Owner): "Admin-only" in docs/SECURITY_RBAC_AUDIT.md.
     ADMIN_USERS_MANAGE = "admin.users.manage"
     ADMIN_USAGE_VIEW = "admin.usage.view"
@@ -213,6 +220,11 @@ CAPABILITIES: MappingProxyType[Capability, CapabilityInfo] = MappingProxyType(
         # The lists of the Task / PR screens (Decision 0067): on the read-only
         # allowlist; not delegable (an agent reads a task through its own scope).
         C.TASKS_LIST: _info(Scope.SYSTEM, delegable=False, read_only=True),
+        # A person's own notifications (Decision 0070): no agent needs them.
+        # Reading is on the read-only allowlist (the list is the person's own and
+        # holds codes only); read / dismissed changes only their own view.
+        C.NOTIFICATION_READ: _info(Scope.SYSTEM, delegable=False, read_only=True),
+        C.NOTIFICATION_MANAGE: _info(Scope.SYSTEM, delegable=False),
         C.SHARED_MEMORY_READ: _info(Scope.SYSTEM, delegable=True, read_only=True),
         C.SHARED_MEMORY_MANAGE: _info(Scope.SYSTEM, delegable=False),
         C.SHARED_MEMORY_CREATE: _info(Scope.SYSTEM, delegable=False),

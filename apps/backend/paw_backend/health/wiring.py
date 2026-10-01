@@ -14,6 +14,7 @@ from paw_backend.authz.retention.audit import RUN_RESOURCE_KIND, RetentionAction
 from paw_backend.compute.probe import GpuProbe
 from paw_backend.config import Settings
 from paw_backend.db import Database
+from paw_backend.events import EventBus, notification_changed
 from paw_backend.health import limits
 from paw_backend.health.domain import Component
 from paw_backend.health.monitor import HealthMonitor
@@ -30,7 +31,7 @@ from paw_backend.health.sources import (
     ScheduledJobSource,
     TaskQueueSource,
 )
-from paw_backend.health.store import HealthStore
+from paw_backend.health.store import NOTIFICATION_AUDIENCE, HealthStore
 from paw_backend.memory.projection.audit import RESOURCE_KIND as PROJECTION_KIND
 from paw_backend.memory.projection.audit import ProjectionAction
 from paw_backend.recovery.audit import BACKUP_RESOURCE_KIND, RecoveryAction
@@ -78,6 +79,7 @@ def build_system_health(
     compute: ComputeStatusProvider | None = None,
     full_gpu: FullGpuStatusProvider | None = None,
     probe: GpuProbe | None = None,
+    event_bus: EventBus | None = None,
 ) -> SystemHealth:
     compute_source = ComputeSource(compute, full_gpu, probe=probe)
     reaper_source = ReaperSource()
@@ -92,7 +94,18 @@ def build_system_health(
     if database.configured:
         sources += [ScheduledJobSource(database, job) for job in SCHEDULED_JOBS]
     sampling = database.configured
-    store = HealthStore(database) if database.configured else None
+    store = None
+    if database.configured:
+        # A severity change is also a stored notification for the System Health
+        # audience (issue #188, Decision 0070), announced on the event bus.
+        on_notified = None
+        if event_bus is not None:
+            bus = event_bus
+
+            def on_notified() -> None:
+                bus.publish(notification_changed(capability=NOTIFICATION_AUDIENCE))
+
+        store = HealthStore(database, notify=True, on_notified=on_notified)
     monitor = HealthMonitor(
         sources,
         store=store,

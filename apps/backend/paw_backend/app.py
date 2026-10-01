@@ -36,6 +36,7 @@ from paw_backend.middleware import (
     RequestIdMiddleware,
     SecurityHeadersMiddleware,
 )
+from paw_backend.notifications import NotificationStore
 from paw_backend.orchestrator.composition import TaskExecution, build_task_execution
 from paw_backend.orchestrator.config import OrchestratorConfig
 from paw_backend.orchestrator.connection_reaper import build_connection_reaper
@@ -343,6 +344,14 @@ def create_app(
         database,
         compute=None if compute_services is None else compute_services.scheduler,
         probe=probe,
+        event_bus=event_bus,
+    )
+    # A person's Notification Center (issue #188): ``/api/v1/notifications``
+    # answers 503 without a database.
+    app.state.notifications = (
+        NotificationStore(database, timeout_seconds=settings.database_timeout_seconds)
+        if database.configured
+        else None
     )
 
     register_error_handlers(app)

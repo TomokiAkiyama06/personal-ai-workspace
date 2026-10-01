@@ -119,6 +119,9 @@ _USER = frozenset(
         # The lists of the Task / PR screens, filtered by project.read (Decision
         # 0067, Approved).
         C.TASKS_LIST,
+        # One's own Notification Center (Decision 0070).
+        C.NOTIFICATION_READ,
+        C.NOTIFICATION_MANAGE,
     }
 )
 _ADMIN_ONLY = frozenset(
