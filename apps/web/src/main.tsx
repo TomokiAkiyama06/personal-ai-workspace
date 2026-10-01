@@ -6,6 +6,8 @@ import { I18nProvider } from "./i18n";
 import { NotificationProvider } from "./notifications/store";
 import { RouterProvider } from "./router";
 import { ThemeProvider } from "./theme";
+import { apiUsageSource } from "./usage/api";
+import { UsageSourceProvider } from "./usage/model";
 // IBM Plex Sans JP / IBM Plex Mono (the design's fonts), bundled into the build's
 // assets so the page's CSP can stay font-src 'self' (no font CDN).
 import "@fontsource/ibm-plex-sans-jp/400.css";
@@ -24,7 +26,9 @@ if (root) {
           <RouterProvider>
             <SessionProvider>
               <NotificationProvider>
-                <App />
+                <UsageSourceProvider source={apiUsageSource}>
+                  <App />
+                </UsageSourceProvider>
               </NotificationProvider>
             </SessionProvider>
           </RouterProvider>

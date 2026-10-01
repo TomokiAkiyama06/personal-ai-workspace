@@ -231,6 +231,7 @@ Endpoint は `/api/v1` 以下です。OpenAPI Schema は `/api/v1/openapi.json` 
 | `/api/v1/system/health`、`/metrics/{name}`、`/events` | 全 Component の状態・時系列・Severity の変化（Owner / Admin） |
 | `/api/v1/auth/invitations/*`、`/api/v1/auth/users/*`、`/api/v1/auth/pairing/*` | 招待、User の削除・復元、端末の Pairing（13 個の Endpoint。うち 3 個が公開）。[User Invite / Device Pairing / Lifecycle](#user-invite--device-pairing--lifecycle) |
 | `/api/v1/admin/compute/full-gpu` | Kaggle / Full GPU Mode の状態・開始・終了（`GET` / `POST` / `DELETE`、`admin.compute.full_gpu`。Scheduler がない構成は 503）。[Application への組み込み](#application-への組み込みissue-165decision-0058proposed) |
+| `/api/v1/usage`、`/api/v1/quotas/me`、`/api/v1/users/{id}/quotas*`、`/api/v1/admin/users` | 使用状況の集計、Quota の閲覧と変更（Passkey Step-up）、User の一覧。[使用状況と Quota の HTTP API](#使用状況と-quota-の-http-apiissue-187decision-0069proposed) |
 
 Readiness は 200 または 503 で、Body の形は同じです。
 
@@ -2076,8 +2077,25 @@ CHECK 制約が、状態と終了・時間・Token・失敗の種類の対応（
 - Adapter の答えは 1,000,000 文字までです（Credential の Redact の上限 `tools.credentials.MAX_TEXT_CHARS` と同じ）。**返す文の長さで判定します**: Adapter が返した長さ、Credential の値の置き換え（短い Credential は `[REDACTED]` になり長くなる）の後、形のわかる Credential の Redact（`token=abcdef` が `token=[REDACTED]` になるように**長くなりうる**）の後の、どれかが上限を超える答えは、途中で切らずに `invalid_response` の失敗にします（`redact_text` は長い文を切って印を付けるだけなので、黙って短くなった答え、上限を超えて長くなった答えを成功として返さないため）。
 - 答えを返せない失敗（`invalid_response`）でも、Adapter が返した Token 数が有効なら、使用量の行・Token の Quota・Task の Budget が数えます（Provider は消費しているため）。入力と出力の Token 数は、答えの本文とも互いにも**別々に**検査し、有効な数は保存し（もう一方が無効でも数える）、有効でない数（負、上限超、bool、非整数）は保存しません（NULL）。どちらかが無効なら、答えは `invalid_response` です。
 - Prompt の中身は検査しません（Credential の混入や Privacy の Filter は Orchestrator と Tool Broker の責務）。
-- 使用量の保存期間、集計、Admin の Graph は未実装。専用の Capability（#82）と、Credential の差し替え・削除への Step-up（PAW-023 の後）は、Decision 0016 で承認された後続の Issue です（今は `admin.config.manage` の通常の認可だけ）。
+- 使用量の保存期間は未定。集計と HTTP の経路は Issue #187（下の節）。専用の Capability（#82）と、Credential の差し替え・削除への Step-up（PAW-023 の後）は、Decision 0016 で承認された後続の Issue です（今は `admin.config.manage` の通常の認可だけ）。
 - Health Check を動かす Scheduler と、状態の変化の Owner への通知は Orchestrator / 通知の Issue です。
+
+### 使用状況と Quota の HTTP API（Issue #187、Decision 0069（Proposed））
+
+`paw_backend/api/v1/usage.py`。`create_app` が Database のある構成で HTTP 用の `ConnectionService` を作ります（`app.state.connections`。Adapter なし、Secret は解決しない `NoSecretStore`。`connections/wiring.py`）。Database がない構成は 503 です。
+
+| Endpoint | 認可 | 内容 |
+| --- | --- | --- |
+| `GET /api/v1/usage?scope=self\|workspace&range=last14\|last30\|month` | `self`: `agent.use`、`workspace`: `admin.usage.view` | 合計（Task・Token・前の期間の Task）、日別 × 種類、種類別、用途別、Quota。`workspace` は User 別（Task・Token・Quota）も。Local・GPU 時間・Escalation は `null`（記録なし） |
+| `GET /api/v1/quotas/me` | `agent.use` | 自分の Quota と現在の Window の使用量 |
+| `GET /api/v1/users/{id}/quotas` | 自分: `agent.use`、他の User: `admin.usage.view` | 同上。存在しない User は 404（見てよい人にだけ。それ以外は 403） |
+| `PUT /api/v1/users/{id}/quotas/{kind}/{metric}/{period}` | `admin.quota.manage` + **Passkey Step-up** | Body `{"limit": 整数 \| "unlimited"}`。Owner の Quota は Owner だけ |
+| `DELETE` 同上 | 同上 | 1 つの上限を消す（未設定は無制限）。無ければ 404 |
+| `GET /api/v1/admin/users` | `admin.users.manage` | 削除済みでない User（ID・Login 名・Role・状態・作成日時）。`/api/v1/users` そのものは、初回 Setup の URL として推測される Path なので 404 のまま（`tests/test_owner_no_web_path.py`） |
+
+- 集計（`connections/report.py`、`ConnectionStore.usage_report`）は `connection_usage` だけを 1 つの Transaction・Database の 1 つの時刻で読みます。「Task」は期間内に呼び出しのある Task の数、「Token」は期間内に始まった呼び出しの入力 + 出力です。期間は Quota と同じ時間帯（既定 `Asia/Tokyo`）の暦日で、`month` の前の期間は前月の同じ日までです。
+- Quota の変更は、Capability → Session の Passkey Step-up（`AuthService.require_passkey_step_up`、変更の直前の別 Transaction）→ Service の認可と Owner の規則、の順に確かめます。Step-up の拒否は `connection.quota.set` / `.remove` の Deny（reason `step_up_required` / `step_up_method_insufficient`）として Audit に残します。
+- Test: `tests/test_connections_report.py`（期間と集計、認可）、`tests/test_usage_api.py`（HTTP、Step-up、認可の否定）。
 
 ### Test
 

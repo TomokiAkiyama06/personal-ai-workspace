@@ -310,6 +310,7 @@ class PostgresConnectionTestCase(unittest.IsolatedAsyncioTestCase):
         output_tokens: int | None = None,
         duration_ms: int = 0,
         status: str = "succeeded",
+        purpose: str = "coding",
     ) -> uuid.UUID:
         """A usage row: settled by default (``tokens`` are input tokens, ``None`` =
         unknown), or ``status="in_flight"`` (no end, duration or tokens yet)."""
@@ -323,13 +324,14 @@ class PostgresConnectionTestCase(unittest.IsolatedAsyncioTestCase):
                     " output_tokens, started_at, finished_at, duration_ms) VALUES"
                     " (:id, :u, :t,"
                     " (SELECT project_id FROM tasks WHERE id = :t), :k, 'seeded',"
-                    " 'coding', :status, :failure, :tokens, :out, :start, :finish, :ms)"
+                    " :purpose, :status, :failure, :tokens, :out, :start, :finish, :ms)"
                 ),
                 {
                     "id": usage_id,
                     "u": user_id,
                     "t": task_id,
                     "k": kind.value,
+                    "purpose": purpose,
                     "status": status,
                     "failure": "internal_error" if status == "failed" else None,
                     "tokens": None if in_flight else tokens,
