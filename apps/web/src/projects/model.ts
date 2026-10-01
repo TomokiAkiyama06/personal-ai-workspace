@@ -1,11 +1,11 @@
 // What the プロジェクト screen shows (PAW-061; the PAW-060 design canvas, Projects).
 //
-// The Backend has the project, repository and membership services (PAW-026 /
-// PAW-027: paw_backend/projects, paw_backend/repositories) but no HTTP routes for
-// them yet. As with the Notification Center (Decision 0044, 11), the screen is
-// built against `ProjectsSource`; without one (today) it shows that projects are
-// not available. The fields follow the Backend's records (Project, Member,
-// Repository and its RepoAcl), so that a source is a thin mapping of the routes.
+// The screen is built against `ProjectsSource`; the production app gives it the
+// Backend's project routes (api.ts, issue #184: paw_backend/api/v1/projects.py over
+// ProjectService / RepositoryService), and without a source it shows that
+// projects are not available. The fields are the routes' answers (the Backend's
+// records Project, Member, Repository and its RepoAcl), so the source is a thin
+// mapping. A repository whose ACL override closes it for the user is not listed.
 //
 // The role only chooses what to SHOW; the Backend decides every permission.
 
@@ -78,8 +78,17 @@ export type RepositoryRegistration =
 /** The lifecycle operations of ProjectService (the purge is the Backend's job). */
 export type LifecycleAction = "archive" | "unarchive" | "begin_deletion" | "restore";
 
+/**
+ * The user's projects. The Backend lists at most 1000 projects of each status
+ * (Decision 0066, 3); `truncated` says that more exist than `projects` holds.
+ */
+export interface ProjectListing {
+  projects: ProjectSummary[];
+  truncated: boolean;
+}
+
 export interface ProjectsSource {
-  list(): Promise<ProjectSummary[]>;
+  list(): Promise<ProjectListing>;
   detail(projectId: string): Promise<ProjectDetail>;
   create(input: { name: string; description: string | null }): Promise<{ id: string }>;
   /** `confirmName` (the project's exact name) is required by `begin_deletion`. */

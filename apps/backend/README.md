@@ -1557,7 +1557,7 @@ Migration `0124`（Revision ID は Issue の番号で、Decision 0024 と紛れ�
 
 - **実行中の Task の停止**（`paw_backend/orchestrator/user_sweep.py`）: Backend の中の定期の Loop（`PAW_USER_TASK_STOP_INTERVAL_SECONDS`、既定 60 秒、0 で止める、10〜3600）が、`pending_deletion`（と `deleted`）の User が作った Active な Task と、その Task の Active な Queue Entry を探し、PAW-032 の **Cancel**（`Actor.policy()`、理由 `User deletion started`）とその Entry の Cancel を 1 つの Transaction で行います。その Transaction は User の行を `FOR SHARE` で Lock するので、復元（`FOR NO KEY UPDATE`）と直列になり、復元の後の Task は止めません。状態から探すので（Outbox の Table はない）、削除と競って後から現れた Task も次の周期で止まります。共有 Project の中の、その User の Task も止めます。1 つ止めるたびに `auth.user.task_stop` を Best Effort で書きます。形は Project の削除の停止（`ProjectTaskStopper` / `ProjectTaskStopLoop`）と同じです。
 - **新しい実行・外部の認証**: 削除の Transaction がすでに全 Session を失効し、`SessionPrincipalProvider` は `active` でない User を匿名にし、`DatabasePrincipalDirectory`（Agent の委任）は `active` 以外を解決しません。GitHub（`gh auth`）・SSH の鍵は DB になく、各 User の Linux Account の中にあります。Backend がその Account として `git` / `gh` を動かす経路（`LoginNameAccountDirectory`）は `active` の User だけを引くので、削除の時点で使えなくなります。鍵そのものの失効（`authorized_keys` の行の削除、`gh auth logout`）は配備側の作業で、この Backend は User の HOME に触れません（Decision 0043 の 4）。
-  - **鍵の失効は必須の作業として追跡します**（Codex P1、PR #142）。削除の Transaction が `auth.user.credentials` / deny `credentials_pending`（Actor つき）を書き、`user-erasure-run` は**削除の初日から**（30 日を待たずに）毎回、確認のない `pending_deletion` の User ごとに deny `credentials_pending` を書いて `ACTION REQUIRED: user <id> (credentials_pending)` を出し、終了コード 3 で終わります（`OnFailure=` の通知で Owner に届く）。運用者は、その User の `gh auth logout`（GitHub の Token の失効）、`authorized_keys` の Backend の鍵の行と `/etc/paw/ssh-keys/<user>.key` の削除（または Linux Account の Lock）を行ってから `user-erasure-run --credentials-revoked <user id>` を実行します（User の行を Lock して allow `credentials_revoked`、Actor なし）。確認は、その削除の開始より後のものだけが数えます（復元して再び削除すれば、もう一度要ります）。`--copies-erased` で `deleted` になった User は対象から外れます。Timer は 1 日 1 回なので、削除の直後に手で実行してください。
+  - **鍵の失効は必須の作業として追跡します**（Codex P1、PR #142）。削除の Transaction が `auth.user.credentials` / deny `credentials_pending`（Actor つき）を書き、`user-erasure-run` は**削除の初日から**（30 日を待たずに）毎回、確認のない `pending_deletion` の User ごとに deny `credentials_pending` を書いて `ACTION REQUIRED: user <id> (credentials_pending)` を出し、終了コード 3 で終わります（`OnFailure=` の通知で Owner に届く）。運用者は、その User の `gh auth logout`（GitHub の Token の失効）、`authorized_keys` の Backend の鍵の行と `/etc/paw/ssh-keys/<user>.key` の削除（または Linux Account の Lock）を行ってから `user-erasure-run --credentials-revoked <user id>` を実行します（User の行を Lock して allow `credentials_revoked`、Actor なし）。確認は、その削除の開始より後のものだけが数えます（復元して再び削除すれば、もう一度要ります）。`--copies-erased` で `deleted` になった User は対象から外れます。一覧にない ID（知らない ID、確認済み、復元・消去された User）を `--credentials-revoked` に渡すと、何も記録せずに ID ごとに `NOTHING TO CONFIRM: user <id>` を出します（終了コードは変えません）。Timer は 1 日 1 回なので、削除の直後に手で実行してください。
 - **30 日後の消去**（`paw_backend/auth/onboarding/erasure.py`、`python -m paw_backend.cli user-erasure-run`）: systemd の Timer（[`deploy/systemd/paw-user-erasure.*`](deploy/systemd/)、`OnCalendar=daily`）が 1 日 1 回、Table の Owner（`PAW_MIGRATION_DATABASE_URL`）で動かします。対象は `pending_deletion` になってから 720 時間以上経った User（復元が `retention_expired` で拒否されるのとちょうど同じ User。Owner は対象外）です。User ごとに 1 つの Transaction で、User の行を Lock し（`lock_timeout` 5 秒）、次を行います。
   - Active な Task / Queue Entry が残っていれば拒否（`tasks_active`）。管理下の Checkout（`repository_checkouts`。User の Linux Account の中の Clone）が残っていれば拒否（`checkouts_remaining`）。運用者が Directory を消してから `--checkouts-removed <user id>` を付けて実行すると、その行を消して（`checkouts_released`）続けます。
   - 個人データを消す: Password の Hash、Passkey とその Challenge、Session、Pairing、招待、Setup / Reset の Token（認証情報）、本人の Conversation（Message、Session State、Journal も。これを出典にした Memory の Source は `source_deleted_at` を付けて参照が外れる）、`user` Scope の Memory の Version と Version が残らない Memory、Consolidation の Key、本人が提案して承認されなかった Shared Memory の候補（`shared_memory_candidates` の `pending`・`rejected`。候補は出典の Memory の本文の複製を持つ）（Private Memory）、`connection_quotas`（個人設定）、Project の Membership。
@@ -3206,7 +3206,7 @@ DB を使わない Test（`records`、`validation`、`rules`、`store_validation
 [PAW-026](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/23)（Revision `0026`）で実装しました。設計は [要件](../../REQUIREMENTS.md)の「Project roles and membership」「Project lifecycle」「New Project defaults」と
 [Decision 0004](../../docs/decisions/0004-rbac-capability-and-audit-policy.md)（承認済み）に従い、要件が決めていない選択は [Decision 0008（承認済み）](../../docs/decisions/0008-project-membership-and-lifecycle-policy.md)にまとめています。
 **Decision 0008 は 2026-09-25 に Human が承認しました。** 招待の期限（14 日）、Member と招待の合計（200）、Project 名と説明の長さ（1〜100 文字、2,000 文字）は暫定値として承認されました。Project 名と説明の長さは DB の CHECK 制約にも書かれているため、変えるには新しい Migration と `models.py` の変更が要ります（`limits.py` の定数だけでは足りません）。Member と招待の合計は `limits.MAX_MEMBERS_PER_PROJECT` で、招待の期限は `domain.invite_expiry` で決まり、どちらも Migration は要りません（詳しくは Decision 0008 の「背景」）。
-**HTTP の Endpoint はありません**（Session は PAW-022）。`ProjectService` は、認証済みの `Principal` を受け取り、`Authorizer` で判定します。
+HTTP の API は Issue [#184](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/184) で足しました（[HTTP の API](#http-の-apiissue-184decision-0066-proposed)）。`ProjectService` は、認証済みの `Principal` を受け取り、`Authorizer` で判定します。
 作成・招待への応答・退出の Capability（`project.create`、`project.invitation.respond`、`project.leave`）は [Decision 0022（Approved、2026-09-26。0008 の 5 を置き換え、0004 を拡張する）](../../docs/decisions/0022-project-lifecycle-capabilities.md) に従った、Issue [#82](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/82) の実装です（[認可と Audit](#認可と-audit)）。
 
 | ファイル | 内容 |
@@ -3418,7 +3418,7 @@ Method の全ての引数を、DB にも Authorizer にも触れる前に検証�
 
 #### HTTP の Endpoint
 
-**ありません（Service までです）。** `api/v1/` にある Router は `health` と `events` だけで、他の管理系の Capability（Shared Memory の管理など）も HTTP の Endpoint を持たず、認証（PAW-022）が無いので `require_capability` の Route は 401 しか返せません。Route を足すときは `Depends(require_capability(Capability.ADMIN_PROJECTS_MANAGE))` を付けて `list_all_projects` を呼びます（Route の Test は `tests/test_authz_routes.py` の一覧が強制します）。
+`GET /api/v1/admin/projects?status=&limit=&cursor=`（Issue #184。`require_capability(Capability.ADMIN_PROJECTS_MANAGE)` の Guard の後に `list_all_projects` を呼ぶ）。Guard の判定も Audit に 1 行残るので、1 回の呼び出しで `admin.projects.manage` の行は 2 つになります（Decision 0066 の 1、Proposed）。応答は `{projects: [{id, name, status, created_at, deletion_scheduled_at}], next_cursor}` です。
 
 #### 制限と未確認の点
 
@@ -3432,6 +3432,28 @@ Method の全ての引数を、DB にも Authorizer にも触れる前に検証�
 `tests/test_projects_admin_cursor.py`（Cursor の符号化と、敵対的な入力の表・乱数の Fuzz。DB なし）、`test_projects_admin_access.py`（Actor・引数の表・拒否・Audit の Fail-closed。DB URL のない `Database` で「DB を読まない」ことを確かめる）、
 `test_projects_admin_list.py`（実 PostgreSQL: 全 Project、状態、削除待ちの期限、Deleted の除外、Keyset の安定（ページの間の挿入・削除・状態変更・同時に走る Writer）、Audit の行）、`test_projects_admin_grants.py`（Application の Role で上の Test を全て実行し、`projects` の 5 列の `SELECT` だけを持つ Role でも一覧が動くこと）です。
 実装の変異 23 個（並びの向き、`id` の向き、行値比較の等号、`id` を落とす、Deleted を含める、Filter の無視、`limit + 1` の先読み、Cursor を先読みの行から作る、認可を外す、別の Capability、Filter を Audit に残さない、Cursor の Filter・正規形・長さ・時刻の範囲・型・先頭の 0・大文字の UUID の検証を緩める、`deleted` の Filter、`status` の大文字小文字、`limit` の検証、認可の前の引数の検証の順序、`description` を SELECT に足す）を、すべて Test が検出しました。
+
+### HTTP の API（Issue #184、Decision 0066 Proposed）
+
+`paw_backend/api/v1/projects.py`。Web の プロジェクト の画面（PAW-061、`apps/web/src/projects/api.ts`）が使います。振る舞いは `ProjectService` と `RepositoryService` にあり、Route は変換と、画面の一覧・詳細の組み立てだけをします。`create_app` は Database があるとき `app.state.projects` / `app.state.repositories` を作ります（ないときは 503 `projects_unavailable`）。
+
+| Route | Guard（Capability） | Service |
+| --- | --- | --- |
+| `GET /projects` | `account.read` | `list_projects`（Active・Archived・自分が Manager の Pending deletion。状態ごとに最大 1000 件、超えたら `truncated`）と、Project ごとの `list_repositories` の名前 |
+| `POST /projects` | `project.create` | `create_project` |
+| `GET /projects/{id}` | `project.read` | `get_project`、`list_repositories`、`list_members_named`、Manager には `list_invites_named` |
+| `GET /projects/{id}/repositories`、`/members` | `project.read` | 同上の一部 |
+| `POST /projects/{id}/archive`・`unarchive`・`begin-deletion`（`{confirm_name}`）・`restore` | `project.lifecycle.manage` | 同名の Method |
+| `PUT /projects/{id}/members/{user_id}/role`（`{role}`） | `project.members.manage` | `change_role` |
+| `POST /projects/{id}/repositories`（`source` で 4 通り） | `project.repo.add` | `register_existing` / `clone_from_github` / `create_local` / `create_github` |
+| `GET /admin/projects` | `admin.projects.manage` | `list_all_projects` |
+
+- **Guard**: Project の Route の Resource は、URL の ID と保存済みの Project の行の状態から作ります（`_project_of`）。Member でない User・存在しない Project・Deleted・形の正しくない ID は、どれも同じ 403 `forbidden` です（存在を教えません）。Service も自分の Transaction で同じ Capability を判定するので、`REQUIRED` の操作は Audit が 2 行になります（Decision 0058 の 3 と同じ形）。
+- **表示名**: `list_members_named` / `list_invites_named` は `list_members` / `list_invites` と同じ認可・並びで、その Project に Membership の行がある User の `login_name` だけを同じ Transaction で読みます（`store.login_names_of_members`）。招待は Session の Role が Manager のときだけ読みます（`project.members.manage` は `REQUIRED` なので、開くたびに Audit が 1 行残ります）。
+- **Repository の登録**は Request の中で git を動かします（Clone は Policy の Timeout、既定 900 秒まで）。git は `create_app(git_runner=...)`、GitHub に作る経路と Private の Clone は `create_app(gh_runner=...)` を渡したときだけ使えます（ないと 503 `github_unavailable`）。
+- **Error** は Service の型から固定の `code` と Message に変えます（Decision 0066 の 6 の表。Message に入力・Path・git の出力は入りません）。
+- 入れていない操作（招待と User の検索、招待への応答、退出、Member の削除、名前・説明の変更、ACL の変更、作業コピー）は Decision 0066 の 8 です。
+- Test: `tests/test_projects_http.py`（実 PostgreSQL。一覧・詳細・ACL Override・招待の見え方、Member でない User と存在しない Project の 403 と何も漏れないこと、Viewer / Contributor の拒否、Lifecycle、Admin の復元と一覧の Paging、役割の変更と最後の Manager、登録の 4 通りの変換と Error）。
 
 ### 同時実行
 
@@ -3782,7 +3804,7 @@ python -m paw_backend.cli recovery-restore --apply  # 1 Transaction で書く
 
 - 元の確認: Marker、Clean な Work Tree、`HEAD` が Remote-tracking Branch と同じ（最後に Push された状態。`not_latest`）、`recovery_format_version` がこの Code の読める版、全 File の Checksum（列挙外の File も拒否）、Record の Key と型、削除中の User の個人データがないこと。先の確認: DB がこの Release の Head、Backup の Schema がこの Release の鎖にあること、対象の Table がすべて空であること（`target_not_empty`）。拒否は `recovery.restore.refused` の Audit の行（終了コード 1）だけで、Workspace のデータは書きません。
 - Checkout の Lock は確認から書き込みと Audit の記録が終わるまで持ち続けるので、その間に Backup が Checkout を書き換えたり Push したりしません。
-- Restore は確かめた Commit の Object から File を読みます（Work Tree は読まない）。`--apply` は対象の Table を Lock して空であることを確かめ直し、User・Quota・Project・Member・Repository・Remote・Memory・Version・Relation・Source（`conversation` を除く）と `recovery.restore.applied` を同じ Transaction で書きます。失敗は Rollback（`recovery.restore.failed`、終了コード 3）。Ctrl-C・SIGTERM で打ち切られた Restore も、結果をまだ記録していなければ `recovery.restore.failed`（`CancelledError`）を記録してから終わります（記録の最中なら記録を終えてから。終了コード 3）。
+- Restore は確かめた Commit の Object から File を読みます（Work Tree は読まない）。`--apply` は対象の Table を Lock して空であることを確かめ直し、User・Quota・Project・Member・Repository・Remote・Memory・Version・Relation・Source（`conversation` を除く）と `recovery.restore.applied` を同じ Transaction で書きます。失敗は Rollback（`recovery.restore.failed`、終了コード 3）。Ctrl-C・SIGTERM で打ち切られた Restore も、結果をまだ記録していなければ `recovery.restore.failed`（`CancelledError`）を記録してから終わります（記録の最中なら記録を終えてから。終了コード 3）。Commit の最中に打ち切られると、Commit が済んでいて `recovery.restore.applied` の後に `recovery.restore.failed` が残ることがあります。そのため打ち切られたときの表示は「Rollback した」とは言い切らず、まず `audit_events` に `recovery.restore.applied` があるかを確かめるよう求めます。
 - 戻さないもの（表示する手作業）: Credential（Owner は `sudo python -m paw_backend.cli owner-recover --confirm-owner-recovery`、他の Account は Decision 0032 の Reset）、Auth Policy（Owner が設定画面で Step-up して設定し直す）、Shared Connection（再登録）、Checkout（Clone し直し、各 User が `gh auth login`）、Task（Summary だけ）、`conversation` の Source、Audit。Restore の後に `memory-projection-run` を実行します。
 - **飛ばした Repository の Repo 単位の記憶**（[Decision 0061](../../docs/decisions/0061-restore-skipped-repository-memories.md)、**Proposed**）: 名前・既定の Branch の Credential を伏せ字にしたため戻さない Repository を指す `repo` Scope の Version を 1 つでも持つ記憶は、全体（すべての Version・Source・Relation。戻す記憶との間の Relation を含む）を戻しません。登録し直した Repository は新しい ID になり、古い `repo_id` の記憶には誰も届かないためです。Dry run と `--apply` の両方で、手作業の手順に Repository ごとに 1 行（伏せ字の名前、Backup の上の Repository の ID、記憶の件数と ID、Version・Relation・Source の件数）を表示します。**出力を保存し**、Repository を登録し直した後に、必要な記憶を Backup の `memory-records/<記憶の ID>.json` から新しい Repository の下に作り直してください（自動では付け直しません）。Audit の `recovery.restore.planned` / `applied` の `reason` には、Repository を飛ばしたときだけ `skipped_repos=N held_memories=N held_versions=N held_relations=N held_sources=N` を足します（`memories=` などは戻す件数）。Backup の外の削除記録の確認は、Backup に削除記録がなくても毎回表示します（最後の Push の後に始まった削除はどの記録にもないため）。Dry run の Audit の行を書けなければ、Dry run は失敗です（終了コード 3）。
 

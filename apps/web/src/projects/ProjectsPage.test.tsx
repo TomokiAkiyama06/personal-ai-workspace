@@ -83,6 +83,22 @@ describe("ProjectsPage", () => {
     ]);
   });
 
+  it("says that the list is incomplete when the Backend truncated it", async () => {
+    renderProjects("/projects", fakeProjectsSource({ truncated: true }));
+    const list = await screen.findByRole("complementary", { name: "プロジェクトの一覧" });
+    expect(await within(list).findByText("ExampleProject")).toBeInTheDocument();
+    expect(within(list).getByRole("status")).toHaveTextContent(
+      "件数が多いため、一部のプロジェクトだけを表示しています。",
+    );
+  });
+
+  it("says nothing about an incomplete list when the Backend listed everything", async () => {
+    renderProjects("/projects", fakeProjectsSource());
+    const list = await screen.findByRole("complementary", { name: "プロジェクトの一覧" });
+    expect(await within(list).findByText("ExampleProject")).toBeInTheDocument();
+    expect(within(list).queryByText(/一部のプロジェクトだけを表示/)).not.toBeInTheDocument();
+  });
+
   it("shows a project's repositories with their ACL override and its members' access", async () => {
     const source = fakeProjectsSource();
     renderProjects("/projects/p-example", source);
@@ -258,7 +274,7 @@ describe("ProjectsPage", () => {
         : project,
     );
     source.lifecycle.mockImplementationOnce(async () => {
-      source.list.mockResolvedValue(pending);
+      source.list.mockResolvedValue({ projects: pending, truncated: false });
     });
     renderProjects("/projects/p-example", source);
     const user = userEvent.setup();

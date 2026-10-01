@@ -7,11 +7,15 @@ systemd's ``OnFailure=`` watches. The database cases are skipped unless
 only, and the systemd unit files are read as text (nothing is installed).
 """
 
+import asyncio
 import configparser
 import io
+import os
+import signal
 import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest import mock
 
 from sqlalchemy import text
 
@@ -70,6 +74,72 @@ class ArgumentTest(unittest.TestCase):
         )
         self.assertEqual(cli.EXIT_ENVIRONMENT, code)
         self.assertIn("PAW_RECOVERY_REPOSITORY_DIR", err)
+
+
+class Interrupted:
+    """A restorer or backup runner whose run is interrupted by ``signum`` sent to
+    this process (as systemd's stop or a Ctrl-C would)."""
+
+    signum = signal.SIGTERM
+
+    def __init__(self, *arguments, **options) -> None:
+        pass
+
+    async def run(self, **options):
+        os.kill(os.getpid(), self.signum)
+        await asyncio.sleep(10)
+        raise AssertionError("the signal did not interrupt the run")
+
+
+class Interrupt(Interrupted):
+    signum = signal.SIGINT
+
+
+class InterruptionTest(unittest.TestCase):
+    """A terminated or interrupted command ends with exit code 3 and a message,
+    never a traceback (Claude's review of PR #160, issue #90). The runs are fakes:
+    no database is reached."""
+
+    environment = {
+        "PAW_DATABASE_URL": "postgresql://u@h/db",
+        "PAW_MIGRATION_DATABASE_URL": "postgresql://u@h/db",
+        "PAW_RECOVERY_REPOSITORY_DIR": "/nonexistent/recovery",
+        "PAW_MEMORY_PROJECTION_DIR": "/nonexistent/projection",
+    }
+
+    def restore(self, runner, argv=("recovery-restore", "--apply")):
+        with mock.patch.object(cli, "RecoveryRestorer", runner):
+            return run(list(argv), **self.environment)
+
+    def backup(self, runner):
+        with mock.patch.object(cli, "RecoveryBackupRunner", runner):
+            return run(["recovery-backup-run"], **self.environment)
+
+    def test_sigterm_ends_a_restore_with_exit_code_3(self) -> None:
+        code, out, err = self.restore(Interrupted)
+        self.assertEqual(cli.EXIT_FAILED, code)
+        self.assertEqual("", out)
+        self.assertIn("the restore was terminated", err)
+
+    def test_ctrl_c_ends_a_restore_with_exit_code_3(self) -> None:
+        code, _, err = self.restore(Interrupt)
+        self.assertEqual(cli.EXIT_FAILED, code)
+        self.assertIn("the restore was terminated", err)
+
+    def test_sigterm_and_ctrl_c_end_a_backup_with_exit_code_3(self) -> None:
+        for runner in (Interrupted, Interrupt):
+            with self.subTest(runner.signum.name):
+                code, _, err = self.backup(runner)
+                self.assertEqual(cli.EXIT_FAILED, code)
+                self.assertIn("the backup was terminated", err)
+
+    def test_a_terminated_apply_does_not_claim_a_rollback(self) -> None:
+        # Claude's review of PR #160: a cancellation while the transaction
+        # commits may leave the restore applied (recovery.restore.applied, then
+        # recovery.restore.failed): the message must not say it rolled back.
+        _, _, err = self.restore(Interrupted)
+        self.assertNotIn("was rolled back.", err)
+        self.assertIn("recovery.restore.applied", err)
 
 
 @requires_postgres

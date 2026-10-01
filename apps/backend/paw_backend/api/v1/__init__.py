@@ -10,6 +10,7 @@ from paw_backend.api.v1 import (
     health,
     memory,
     passkeys,
+    projects,
     system_health,
     usage,
 )
@@ -23,4 +24,5 @@ router.include_router(accounts.router)
 router.include_router(system_health.router)
 router.include_router(compute.router)
 router.include_router(memory.router)
+router.include_router(projects.router)
 router.include_router(usage.router)
