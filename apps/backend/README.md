@@ -93,7 +93,7 @@ apps/backend/
 │  └─ api/
 │     ├─ deps.py           # FastAPI Dependency
 │     └─ v1/               # /api/v1 の Router（health、events、auth、passkeys、accounts、system_health）
-├─ deploy/systemd/         # Audit の保存期間・退避（Issue #117）、Memory Markdown Projection（PAW-045）、Recovery Repository の Backup（PAW-047）の定期実行の Unit File の例
+├─ deploy/systemd/         # Audit の保存期間・退避（Issue #117）、Memory Markdown Projection（PAW-045）、Recovery Repository の Backup（PAW-047）の定期実行の Unit File の例、Main の LLM の Runtime の Unit の例（Issue #182）
 ├─ deploy/ssh-git-wrapper/ # SshGitRunner の Forced Command の Wrapper と配備の手順（Issue #134）
 └─ tests/                  # unittest
 ```
@@ -4064,7 +4064,8 @@ completed（Merge Ready。Human が Merge を判断する）/ 通らなければ
 | `accounting.py` | Actual / Reserved の VRAM と Safety Headroom の勘定（純粋関数） |
 | `concurrency.py` | KV Cache の Token による Admission と、Context 長に応じた並列数（純粋関数） |
 | `config.py` | `DeploymentSpec`（Model の Footprint: Weight + KV Cache Pool + Runtime Buffer + Workspace）、`ComputeConfig` |
-| `control.py` | `ModelControl` の Protocol と、Admin が設定した Command を実行する `CommandModelControl` |
+| `control.py` | `ModelControl` の Protocol と、Admin が設定した Command を実行する `CommandModelControl`（GPU の Runtime の起動前にホストの `MemAvailable` を確かめる。Issue #182） |
+| `host.py` | ホストの `MemAvailable`（`/proc/meminfo`）の読み取り（Issue #182） |
 | `scheduler.py` | `ComputeScheduler`: Admission と待ち行列、縮退と常駐、Exclusive |
 | `runtimes.py` | `HybridRuntime`（Orchestrator の Runtime。Local / Cloud）、`ScheduledMemoryWorker`、`PlacedEmbedder` |
 | `wiring.py` | Application への組み込み（Issue #165）: `ComputeSetup`、`LocalRuntime`、VRAM の警告の Sink `RecentVramWarnings`、HTTP の経路が使う `FullGpuController` |
@@ -4186,6 +4187,14 @@ runtime = HybridRuntime(
 - **起動時**: 前のプロセスが Hold した Task は、Main の状態が `gpu` であることに加えて、GPU にあるという肯定的な証拠があってから再開します。証拠とは、最後の読み取りで Main の Process が GPU に見えたこと、またはその後にこの Scheduler が Main を GPU に置いたことです（`DeploymentStatus.observed_on_gpu` が `True`）。設定の `initial=gpu` だけでは再開しません。Process を尋ねられないときも再開しません。Scheduler は、状態が `gpu` なのに Runtime が「Process はない」と答えた Model を `unloaded` に改め（WARNING。Lease がある間は改めない）、常駐させる Model は空きがあれば Load し直します（Decision 0055 の 7）。
 - UI（Design Canvas に従う）は別の Issue です。
 
+### Model の Runtime の起動（ホストのメモリと JIT のビルド。Issue #182）
+
+2026-09-30 に、vLLM の最初の Load が `ninja` の既定の並列数で FlashInfer の JIT を走らせ（`cicc` 27 個、約 75 GiB）、ホストの RAM が尽きてマシンが再起動しました。[Decision 0039](../../docs/decisions/0039-compute-scheduler-calibration.md) の 4（Approved）に従い、値は [Decision 0072](../../docs/decisions/0072-runtime-jit-host-memory-guard.md)（**Proposed**）の推奨どおりです。
+
+- `CommandModelControl` は GPU の Runtime を起動する（`gpu` の Command）前に `MemAvailable` を読み、`min_host_available_bytes`（既定 32 GiB。0 で確認しない）未満、または読めないときは何も実行せず、WARNING（Deployment 名と MiB の値）を出して `HostMemoryLowError`（`host_memory_low`。`ModelControlError` の一種）で失敗します。Scheduler はほかの失敗した Load と同じく `FAILED` にし、60 秒後に再試行します。Unload と CPU の Copy は確かめません。
+- Command は `MAX_JOBS=4` / `FLASHINFER_NVCC_THREADS=1` つきで実行します（`SubprocessRunner(extra_env=...)`。Backend 自身の環境は渡しません）。systemd の Unit はこれを継がないので、Unit に `Environment=` で書きます。例は [`deploy/systemd/paw-llm-main.service`](deploy/systemd/paw-llm-main.service)（`ExecStartPre` の同じ確認、`MemoryMax=`、pip の CUDA wheel の `libcudart` / `libcublas` のリンクの手順）で、手順は [`docs/DEPLOYMENT_UPDATE.md`](../../docs/DEPLOYMENT_UPDATE.md) の「Model runtime start」です。
+- Load / Unload の 1 Command の上限は既定 900 秒（Decision 0039 の 2。HDD からの最初の Load が 412 秒）で、`timeout=` は 1,800 秒まで設定できます（Probe の Command は 600 秒まで）。
+
 ### 確認用の Command（読み取りだけ）
 
 ```bash
@@ -4209,7 +4218,7 @@ python -m paw_backend.cli compute-status --headroom-min-mib 8192 --headroom-frac
 
 ### Test
 
-`apps/backend/tests/test_compute_*.py` と `compute_support.py`（Fake の Probe と Fake の `ModelControl`。Fake の Model を GPU に置くと Fake の Probe の使用量が増え、Unload すると減ります）。DB を使うのは `test_compute_full_gpu_holds.py` と `test_compute_app_holds.py`（`PAW_TEST_DATABASE_URL` がないと Skip）だけです。`test_compute_probe.py`（2 つの Command の固定、GPU を変える Option がないこと、Parse）、`test_compute_accounting.py`（勘定と KV の純粋関数、ランダムな Property Test）、`test_compute_config.py`（設定の検査と `CommandModelControl`。Runner は記録するだけで何も実行しません）、`test_compute_scheduler.py`（Admission・Class・待ち行列・Probe の鮮度・Hybrid）、`test_compute_relief.py`（縮退の各段・Drain・復帰・常駐）、`test_compute_exclusive.py`、`test_compute_free_vram.py`（Decision 0042: 空き VRAM による延期、二重に数えないこと、追い越し、警告と頻度、Exclusive の待ち）、`test_compute_runtimes.py`（`HybridRuntime`・`ScheduledMemoryWorker`・`PlacedEmbedder`）、`test_compute_cli.py`、`test_compute_full_gpu.py`（Full GPU Mode: 認可と Audit、Hold と Drain、Preempt、Unload と確認、終了後の Reload と再開。Task の保存は Fake）、`test_compute_full_gpu_holds.py`（実 PostgreSQL の `PostgresTaskHolds`: Hold、Hold した Task の見分け、再開と Queue、End to End）。`test_compute_app.py`（Issue #165: Lifespan での起動と停止、Database がない構成、`local_runtimes` の配線、警告の Sink、HTTP の経路の認可・非同期の開始・取りやめ・失敗・Body の検査、終了時に開始を取りやめて Model を戻すことと、その待ちの上限）、`test_compute_app_holds.py`（実 PostgreSQL: HTTP で始めて Task が Hold され、終えて再開する）。時間は注入した Clock で動かします。
+`apps/backend/tests/test_compute_*.py` と `compute_support.py`（Fake の Probe と Fake の `ModelControl`。Fake の Model を GPU に置くと Fake の Probe の使用量が増え、Unload すると減ります）。DB を使うのは `test_compute_full_gpu_holds.py` と `test_compute_app_holds.py`（`PAW_TEST_DATABASE_URL` がないと Skip）だけです。`test_compute_probe.py`（2 つの Command の固定、GPU を変える Option がないこと、Parse）、`test_compute_accounting.py`（勘定と KV の純粋関数、ランダムな Property Test）、`test_compute_config.py`（設定の検査と `CommandModelControl`。Runner は記録するだけで何も実行しません）、`test_compute_host.py`（Issue #182: `MemAvailable` の読み取り、足りない・読めないときに起動しないこと、JIT の環境変数、Load の上限 900 秒と検証の上限）、`test_compute_scheduler.py`（Admission・Class・待ち行列・Probe の鮮度・Hybrid）、`test_compute_relief.py`（縮退の各段・Drain・復帰・常駐）、`test_compute_exclusive.py`、`test_compute_free_vram.py`（Decision 0042: 空き VRAM による延期、二重に数えないこと、追い越し、警告と頻度、Exclusive の待ち）、`test_compute_runtimes.py`（`HybridRuntime`・`ScheduledMemoryWorker`・`PlacedEmbedder`）、`test_compute_cli.py`、`test_compute_full_gpu.py`（Full GPU Mode: 認可と Audit、Hold と Drain、Preempt、Unload と確認、終了後の Reload と再開。Task の保存は Fake）、`test_compute_full_gpu_holds.py`（実 PostgreSQL の `PostgresTaskHolds`: Hold、Hold した Task の見分け、再開と Queue、End to End）。`test_compute_app.py`（Issue #165: Lifespan での起動と停止、Database がない構成、`local_runtimes` の配線、警告の Sink、HTTP の経路の認可・非同期の開始・取りやめ・失敗・Body の検査、終了時に開始を取りやめて Model を戻すことと、その待ちの上限）、`test_compute_app_holds.py`（実 PostgreSQL: HTTP で始めて Task が Hold され、終えて再開する）。時間は注入した Clock で動かします。
 実 GPU を読む Test は `RealProbeTest` の 1 つだけで、`PAW_TEST_REAL_GPU_PROBE=1` のときだけ動き（CI では Skip）、2 つの読み取りの Query だけを実行します。
 
 ## System Health / Observability
