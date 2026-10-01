@@ -29,6 +29,17 @@ def make_settings(**overrides) -> Settings:
 WEBSOCKET_URL = "ws://localhost/api/v1/events/ws"
 
 
+def signed_in(app: FastAPI, who=None) -> FastAPI:
+    """``app`` with every request authenticated as ``who`` (default: a User).
+
+    The event stream needs a session (``notification.read``, issue #188); its
+    allowed decisions are not audited, so no audit sink is needed."""
+    from .authz_support import StaticProvider, principal
+
+    app.state.principal_provider = StaticProvider(principal() if who is None else who)
+    return app
+
+
 def make_client(app: FastAPI, **kwargs) -> TestClient:
     """A TestClient that talks to ``localhost``, a Host the default settings allow."""
     kwargs.setdefault("base_url", "http://localhost")

@@ -18,7 +18,7 @@ from paw_backend.server import (
     main,
 )
 
-from .support import FakeDatabase, make_settings, paw_environment
+from .support import FakeDatabase, make_settings, paw_environment, signed_in
 
 
 class BuildServerConfigTest(unittest.TestCase):
@@ -93,7 +93,9 @@ class ShutdownWithOpenStreamTest(unittest.TestCase):
             event_heartbeat_seconds=0.05,
             log_level="warning",
         )
-        config = build_server_config(settings, create_app(settings, database=database))
+        # The stream needs a session (issue #188).
+        app = signed_in(create_app(settings, database=database))
+        config = build_server_config(settings, app)
         # Uvicorn logs the streams it has to cancel at the deadline as errors.
         # That is the expected outcome here, so keep it out of the test output.
         config.log_config = None

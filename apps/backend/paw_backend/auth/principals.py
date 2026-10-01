@@ -115,11 +115,27 @@ class SessionPrincipalProvider:
         context = await self.authenticate(connection)
         return None if context is None else context.principal
 
-    async def _resolve(
-        self, connection: HTTPConnection, token: str
-    ) -> AuthContext | None:
+    async def revalidate(self, connection: HTTPConnection) -> Principal | None:
+        """The principal of the connection's session as stored NOW, or ``None``.
+
+        For a long-lived connection (an event stream, issue #188) that checks
+        again that its session is still valid: no cache, and the session's idle
+        expiry is not moved. A restricted session (Passkey gate not open) is
+        ``None`` here. Raises ``AuthUnavailableError`` when the database does
+        not answer (the caller ends the connection: fail closed)."""
+        token = parse_session_token(connection.cookies.get(SESSION_COOKIE_NAME))
+        if not token:
+            return None
+        context = await self._lookup(token, touch=False)
+        if context is None:
+            return None
+        if context.session.record.passkey_gate is not PasskeyGate.OPEN:
+            return None
+        return context.principal
+
+    async def _lookup(self, token: str, *, touch: bool) -> AuthContext | None:
         async def work(session: AsyncSession) -> AuthContext | None:
-            found = await self._sessions.authenticate(session, token)
+            found = await self._sessions.authenticate(session, token, touch=touch)
             if found is None:
                 return None
             roles = await project_store.roles_of(session, found.record.user_id)
@@ -127,8 +143,13 @@ class SessionPrincipalProvider:
                 found, Principal(found.record.user_id, found.system_role, roles)
             )
 
+        return await run(self._database, work, self._timeout)
+
+    async def _resolve(
+        self, connection: HTTPConnection, token: str
+    ) -> AuthContext | None:
         try:
-            return await run(self._database, work, self._timeout)
+            return await self._lookup(token, touch=True)
         except AuthUnavailableError:
             if connection.scope["type"] == "websocket":
                 raise WebSocketException(status.WS_1013_TRY_AGAIN_LATER) from None

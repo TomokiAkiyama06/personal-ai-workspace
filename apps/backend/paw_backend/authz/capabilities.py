@@ -74,6 +74,13 @@ class Capability(StrEnum):
     # and whether Codex / Claude are available (PAW-066, Decision 0059
     # Proposed). Any human role; read-only; never an Agent's.
     SYSTEM_HEALTH_SUMMARY_READ = "system_health.summary.read"
+    # A person's own Notification Center (issue #188, Decision 0070 Proposed):
+    # reading their notifications and the event stream (``notification.read``,
+    # read-only), marking them read and dismissing them (``notification.manage``).
+    # Which notifications a person receives is decided by the store (their own,
+    # and the audiences their role holds). Any human role; never an Agent's.
+    NOTIFICATION_READ = "notification.read"
+    NOTIFICATION_MANAGE = "notification.manage"
     # Admin (and Owner): "Admin-only" in docs/SECURITY_RBAC_AUDIT.md.
     ADMIN_USERS_MANAGE = "admin.users.manage"
     ADMIN_USAGE_VIEW = "admin.usage.view"
@@ -205,6 +212,11 @@ CAPABILITIES: MappingProxyType[Capability, CapabilityInfo] = MappingProxyType(
         C.SYSTEM_HEALTH_SUMMARY_READ: _info(
             Scope.SYSTEM, delegable=False, read_only=True
         ),
+        # A person's own notifications (Decision 0070): no agent needs them.
+        # Reading is on the read-only allowlist (the list is the person's own and
+        # holds codes only); read / dismissed changes only their own view.
+        C.NOTIFICATION_READ: _info(Scope.SYSTEM, delegable=False, read_only=True),
+        C.NOTIFICATION_MANAGE: _info(Scope.SYSTEM, delegable=False),
         C.SHARED_MEMORY_READ: _info(Scope.SYSTEM, delegable=True, read_only=True),
         C.SHARED_MEMORY_MANAGE: _info(Scope.SYSTEM, delegable=False),
         C.SHARED_MEMORY_CREATE: _info(Scope.SYSTEM, delegable=False),

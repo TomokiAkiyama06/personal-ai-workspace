@@ -116,6 +116,9 @@ _USER = frozenset(
         C.ACCOUNT_MANAGE,
         # The compact System Health state (Decision 0059).
         C.SYSTEM_HEALTH_SUMMARY_READ,
+        # One's own Notification Center (Decision 0070).
+        C.NOTIFICATION_READ,
+        C.NOTIFICATION_MANAGE,
     }
 )
 _ADMIN_ONLY = frozenset(

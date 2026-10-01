@@ -8,6 +8,7 @@ from paw_backend.api.v1 import (
     compute,
     events,
     health,
+    notifications,
     passkeys,
     system_health,
 )
@@ -20,3 +21,4 @@ router.include_router(passkeys.router)
 router.include_router(accounts.router)
 router.include_router(system_health.router)
 router.include_router(compute.router)
+router.include_router(notifications.router)

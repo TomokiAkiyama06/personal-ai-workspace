@@ -1,11 +1,20 @@
 """In-process event bus behind the SSE and WebSocket endpoints.
 
-Scope of this skeleton: only system events exist (``system.connected`` and
-``system.heartbeat``). They carry no user, project or task data. Later issues
-add event types together with the authorization they need.
+The event types: the system events (``system.connected`` and
+``system.heartbeat``, for everybody connected) and ``notification.changed``
+(issue #188, Decision 0070 Proposed): the notifications of its audience changed,
+so a client reads ``GET /api/v1/notifications`` again. It carries no content
+(``data`` is empty): what a user may read is decided by that authorized read,
+never by the stream.
+
+An event with an ``audience`` reaches only the subscriptions whose viewer is in
+it: one of its user ids, or a role that holds its capability now (the viewer's
+audiences, from ``notifications.audience_capabilities``). A subscription without
+a viewer receives the system events only. The audience is never sent.
 
 The bus is process-local. Events are neither persisted nor replayed, so a
-client that reconnects only sees events published after it subscribed.
+client that reconnects only sees events published after it subscribed (a
+Notification Center reads its list again on every connect).
 """
 
 import asyncio
@@ -13,10 +22,11 @@ import contextlib
 import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -26,6 +36,16 @@ logger = logging.getLogger(__name__)
 class EventType(StrEnum):
     SYSTEM_CONNECTED = "system.connected"
     SYSTEM_HEARTBEAT = "system.heartbeat"
+    NOTIFICATION_CHANGED = "notification.changed"
+
+
+class EventAudience(BaseModel):
+    """Who receives an event: these users, and the holders of ``capability``."""
+
+    model_config = ConfigDict(frozen=True)
+
+    user_ids: frozenset[UUID] = frozenset()
+    capability: str | None = None
 
 
 class Event(BaseModel):
@@ -37,13 +57,47 @@ class Event(BaseModel):
     type: EventType
     occurred_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     data: dict[str, Any] = Field(default_factory=dict)
+    # Routing only, never serialized: ``None`` is everybody connected.
+    audience: EventAudience | None = Field(default=None, exclude=True)
+
+
+def notification_changed(
+    *, user_ids: frozenset[UUID] = frozenset(), capability: str | None = None
+) -> Event:
+    """The content-free hint that the notifications of an audience changed."""
+    if not user_ids and capability is None:
+        raise ValueError("a notification event needs an audience")
+    return Event(
+        type=EventType.NOTIFICATION_CHANGED,
+        audience=EventAudience(user_ids=frozenset(user_ids), capability=capability),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class Viewer:
+    """Who a subscription delivers to: a user and the audiences their role holds."""
+
+    user_id: UUID
+    audiences: frozenset[str]
 
 
 class Subscription:
     """A bounded queue of events for one connected client."""
 
-    def __init__(self, queue_size: int) -> None:
+    def __init__(self, queue_size: int, viewer: Viewer | None = None) -> None:
         self._queue: asyncio.Queue[Event] = asyncio.Queue(maxsize=queue_size)
+        self.viewer = viewer
+
+    def accepts(self, event: Event) -> bool:
+        audience = event.audience
+        if audience is None:
+            return True
+        viewer = self.viewer
+        if viewer is None:
+            return False
+        return viewer.user_id in audience.user_ids or (
+            audience.capability is not None and audience.capability in viewer.audiences
+        )
 
     def put(self, event: Event) -> None:
         """Enqueue without blocking; a slow client loses its oldest event."""
@@ -73,11 +127,11 @@ class Reservation:
         self._subscription: Subscription | None = None
         self._released = False
 
-    def attach(self) -> Subscription:
+    def attach(self, viewer: Viewer | None = None) -> Subscription:
         if self._released:
             raise RuntimeError("the reservation was released")
         if self._subscription is None:
-            self._subscription = Subscription(self._bus._queue_size)
+            self._subscription = Subscription(self._bus._queue_size, viewer)
             self._bus._subscriptions.add(self._subscription)
         return self._subscription
 
@@ -124,7 +178,8 @@ class EventBus:
 
     def publish(self, event: Event) -> None:
         for subscription in tuple(self._subscriptions):
-            subscription.put(event)
+            if subscription.accepts(event):
+                subscription.put(event)
 
     def reserve(self) -> Reservation:
         """Claim a slot; raises ``EventBusFull`` at the cap. Never awaits."""
@@ -134,11 +189,11 @@ class EventBus:
         return Reservation(self)
 
     @contextmanager
-    def subscribe(self) -> Iterator[Subscription]:
+    def subscribe(self, viewer: Viewer | None = None) -> Iterator[Subscription]:
         """Reserve a slot and attach to it; raises ``EventBusFull`` at the cap."""
         reservation = self.reserve()
         try:
-            yield reservation.attach()
+            yield reservation.attach(viewer)
         finally:
             reservation.release()
 
