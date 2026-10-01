@@ -1,10 +1,10 @@
 # 使用状況 / Quota の HTTP API の方針（集計の数え方と期間、Workspace の User の行、認可、Quota の変更の Passkey Step-up、User の一覧）
 
-- Status: Proposed
+- Status: Approved
 - Date: 2026-10-01
 - Scope: Issue [#187](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/187)（UI #50・PR #175 の接続先）の `apps/backend/paw_backend/api/v1/usage.py`、`connections/report.py`（集計の Read Model）、`ConnectionService.usage_report` / `workspace_usage_report`、`auth/user_directory.py`（User の一覧）、`AuthService.require_passkey_step_up`、`apps/web/src/usage/api.ts`（本番の `UsageSource`）
 - Supersedes: なし。[Decision 0016](0016-shared-connection-adapter-policy.md)（Approved）の Quota の規則（未設定は無制限、期間は Asia/Tokyo の暦、指標と単位、認可）に従い、HTTP の経路と集計だけを足す（書き換えない）
-- Approval: なし（Human の判断待ち）
+- Approval: 2026-10-01、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで直接回答して承認（判断点1〜8、すべて推奨どおり。末尾の「承認時の決定」）
 
 ## 背景
 
@@ -81,3 +81,7 @@ Quota の意味・期間・指標・認可は Decision 0016（Approved）が決�
 
 - 集計は呼び出しの表を期間で走査する（Workspace 全体では `user_id` の Index を使えない）。小規模の前提。大きくなったら日別の集計表を足す。
 - Step-up の確認と Quota の書き込みが別の Transaction（5 を参照）。
+
+## 承認時の決定（2026-10-01）
+
+Human は、作業 Session で判断が必要な点について推奨つきの説明を受け、直接回答して承認した（判断点1〜8、すべて推奨どおり）。
