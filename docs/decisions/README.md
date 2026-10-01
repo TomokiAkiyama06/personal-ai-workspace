@@ -69,7 +69,7 @@
 | [0061](0061-restore-skipped-repository-memories.md) | Restore で飛ばした Repository（名前・既定の Branch の Credential を伏せ字にしたもの）の Repo 単位の記憶を戻さず、Dry run と Apply の手作業の手順に一覧で出し、Audit の `reason` に件数を足す（Decision 0054 の 9・12 の該当点を Supersede。Issue #171） | Approved |
 | [0062](0062-integration-push-fixed-form-no-options.md) | Integration Gate の Push の固定の形を `push --quiet --no-follow-tags --no-recurse-submodules --no-signed -- <URL> <commit>:refs/heads/paw/...` にし、SSH の Wrapper もこの形だけを受け付ける（Checkout の `push.followTags` / `push.recurseSubmodules` / `push.gpgSign` を打ち消す。Decision 0052 の 3・9 の形だけを Supersede。Issue #90） | Approved |
 | [0065](0065-manual-supersedes-undo.md) | 手動の `supersedes` を取り消すときは、古い記憶を有効に戻さず、その最後の内容で新しい版を作る（案 B。Decision 0034 の 8 が委ねた点。Issue #49 / #186） | Approved |
-| [0068](0068-memory-http-api.md) | Memory 画面の HTTP API（`/api/v1/memory/*`）の方針: 読み取りは新しい `MemoryBoard`（Retrieval と同じ読める範囲、User Scope は `memory.read`）、一覧と件数は今の版で数え Shared は `active` だけ、一覧は 500 件で `truncated`、検索は題・本文・出典の部分一致、履歴は両端が読める辺だけ、`can_write` は Audit なしの Policy の判定、`actor_name` は Login 名、手動の `supersedes` の取り消しは別の Issue（Issue #186） | Proposed |
+| [0068](0068-memory-http-api.md) | Memory 画面の HTTP API（`/api/v1/memory/*`）の方針: 読み取りは新しい `MemoryBoard`（Retrieval と同じ読める範囲、User Scope は `memory.read`）、一覧と件数は今の版で数え Shared は `active` だけ、一覧は 500 件で `truncated`、検索は題・本文・出典の部分一致、履歴は両端が読める辺だけ、`can_write` は Audit なしの Policy の判定、`actor_name` は Login 名、手動の `supersedes` の取り消しは別の Issue（Issue #186） | Approved |
 
 運用は [AGENTS.md](../../AGENTS.md) の「仕様変更」に従います。
 

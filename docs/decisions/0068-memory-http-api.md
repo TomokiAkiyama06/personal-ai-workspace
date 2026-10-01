@@ -1,6 +1,7 @@
 # Memory 画面の HTTP API の方針（読み取りモデル、件数と一覧の意味、検索と上限、履歴に出す範囲、書き込める判定、変更者の名前）
 
-- Status: Proposed
+- Status: Approved
+- Approval: 2026-10-01、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで直接回答して承認（判断点1〜12、すべて推奨どおり。末尾の「承認時の決定」）
 - Date: 2026-10-01
 - Scope: Issue [#186](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/186)（Memory の HTTP API。UI #49・PR #178 の `MemorySource` の接続先）の `apps/backend/paw_backend/memory/board/`（読み取りモデル `MemoryBoard`）、`apps/backend/paw_backend/api/v1/memory.py`（`/api/v1/memory/*`）、`apps/web/src/memory/apiSource.ts`
 - Supersedes: なし。[Decision 0024](0024-memory-read-capability.md)・[0034](0034-memory-versioning-freshness.md)・[0045](0045-memory-edit-sources.md)・[0065](0065-manual-supersedes-undo.md)（いずれも Approved）を変えない
@@ -145,3 +146,7 @@ Decision 0065（案 B）の取り消しは、置き換えられた古い Memory 
 10. `actor_name` に Login 名を使い、削除済みの User と Agent は `null` にすること（10）。推奨: 承認。
 11. 編集・復元に Step-up を求めず、理由を任意にすること（11）。推奨: 承認。
 12. 手動の `supersedes` の取り消しを別の Issue（Domain の変更つき）で作ること、とその Issue の選択の推奨（12）。推奨: 承認。
+
+## 承認時の決定（2026-10-01）
+
+Human は、作業 Session で判断が必要な点について推奨つきの説明を受け、直接回答して承認した（判断点1〜12、すべて推奨どおり）。
