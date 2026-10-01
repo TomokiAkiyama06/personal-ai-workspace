@@ -1,6 +1,6 @@
 # Deployment / Update / Rollback
 
-更新日: 2026-09-20
+更新日: 2026-10-01
 Status: [FIXED DIRECTION]
 
 ## Principles
@@ -39,6 +39,7 @@ Status: [FIXED DIRECTION]
 - Migration compatibility
 - Current / target version
 - Runtime dependency readiness
+- Host available memory before a model runtime starts (see "Model runtime start")
 
 ## Database migration gate
 
@@ -75,6 +76,51 @@ the compatible known-good application. Before resuming writes, verify database/a
 and compatibility and apply the latest User deletion state so restored backups cannot resurrect
 erased private data. If restoration or this validation fails, keep the system in maintenance mode
 and notify Owner/Admin instead of resuming Queue/Tasks.
+
+## Model runtime start
+
+Issue #182, [Decision 0039](decisions/0039-compute-scheduler-calibration.md) 4 (Approved);
+the values are [Decision 0072](decisions/0072-runtime-jit-host-memory-guard.md) (Approved).
+On 2026-09-30 a vLLM first load built FlashInfer JIT kernels with `ninja`'s default
+parallelism (CPU count + 2): 27 `cicc` processes took about 75 GiB of host RAM, the host
+ran out of memory, desktop processes were killed and the machine rebooted.
+Every start of a model runtime (by the Compute Resource Scheduler or by hand) therefore:
+
+1. **Caps the JIT build**: `MAX_JOBS=4` and `FLASHINFER_NVCC_THREADS=1`.
+   `CommandModelControl` runs its commands with them; a systemd unit does not inherit the
+   backend's environment and sets them with `Environment=`.
+2. **Checks the host's memory first**: no GPU runtime starts while `MemAvailable`
+   (`/proc/meminfo`) is below 40 GiB or cannot be read. `CommandModelControl` then runs no
+   command, logs a warning and fails with `host_memory_low` (the scheduler marks the model
+   `FAILED` and tries again after 60 s); the unit's `ExecStartPre` refuses the same for a
+   manual start. Unloads and the CPU copies of Embedding / Reranker models are not checked.
+3. **Caps the runtime below that minimum**: `MemoryMax=32G` on the runtime's unit; the
+   40 GiB minimum is this cap plus 8 GiB the host keeps for the kernel, the backend and the
+   desktop. So the runtime and its JIT build cannot by themselves exhaust the host; past
+   the cap the kernel reclaims the unit's page cache (the weights it read) and then stops
+   the runtime only. A cap relative to the host's total RAM would not protect the host
+   (other processes may already hold most of it), nor would a minimum equal to the cap.
+   Raise the cap and the minimum together if a runtime needs more.
+4. **Waits up to 900 s for the load** (Decision 0039 2: the longest measured first load
+   from the HDD was 412 s): the scheduler's load timeout and the unit's `TimeoutStartSec`.
+
+pip CUDA wheels (`CUDA_HOME` = `site-packages/nvidia/cu13` of the runtime's venv):
+
+- The JIT links with `-L$CUDA_HOME/lib64 -lcudart` (and `-lcublas`, `-lcublasLt`), but the
+  wheel only ships `lib/libcudart.so.13` etc. (no `lib64`, no unversioned `.so`), so the
+  link fails with `ld: cannot find -lcudart`. Create a directory of unversioned symlinks
+  outside the venv (do not modify the venv) and put it on `LIBRARY_PATH`.
+- When the pip `nvcc` is newer than the pip CUDA headers, FlashInfer's bundled CCCL refuses
+  to compile ("CUDA compiler and CUDA toolkit headers are incompatible"); set
+  `FLASHINFER_EXTRA_CUDAFLAGS=-DCCCL_DISABLE_CTK_COMPATIBILITY_CHECK` for that runtime.
+
+[`apps/backend/deploy/systemd/paw-llm-main.service`](../apps/backend/deploy/systemd/paw-llm-main.service)
+is an example unit with all of the above.
+
+Model footprint (Decision 0039 1): give each `DeploymentSpec` a footprint (`gpu_bytes`,
+the sum of its four parts) of the benchmark's measured peak, not
+`gpu-memory-utilization` × the GPU: `max(GPU memory used during the run − used before
+the load) + 2 GiB`. vLLM exceeded its `gpu-memory-utilization` budget by up to 8.4 GiB.
 
 ## Open implementation choice
 

@@ -1,0 +1,76 @@
+# Example: the main LLM's vLLM runtime of the Personal AI Workspace, started and
+# stopped by the Compute Resource Scheduler through CommandModelControl
+# (PAW-036): gpu = ("systemctl", "start", "paw-llm-main.service"), unload =
+# ("systemctl", "stop", "paw-llm-main.service"), pids = ("cat",
+# "/sys/fs/cgroup/system.slice/paw-llm-main.service/cgroup.procs").
+#
+# Host memory (issue #182, Decision 0039 4; the values: Decision 0072,
+# Approved). On 2026-09-30 vLLM's first load built FlashInfer JIT kernels with
+# ninja's default parallelism (CPU count + 2): 27 cicc processes took about
+# 75 GiB of host RAM, the kernel ran out of memory and the machine rebooted.
+# So this unit
+#   - caps the JIT build (MAX_JOBS, FLASHINFER_NVCC_THREADS: a unit does not
+#     inherit the backend's environment, so they are set here),
+#   - never uses more than 32 GiB (MemoryMax=32G): past the cap the kernel
+#     reclaims this unit's page cache, then stops this unit only,
+#   - refuses to start below 40 GiB MemAvailable, the cap plus 8 GiB the host
+#     keeps for the kernel, the backend and the desktop (ExecStartPre; the
+#     backend checks the same before it runs "systemctl start", this also
+#     covers a manual start). So the runtime and its JIT build cannot by
+#     themselves push the host out of memory. A cap relative to the host's total
+#     RAM would not do this (other processes may already hold most of it when
+#     the runtime starts), nor would a minimum equal to the cap (no reserve
+#     left; Codex review #189).
+#
+# pip CUDA wheels (CUDA_HOME is site-packages/nvidia/cu13 of the runtime's venv):
+# the JIT links with -L$CUDA_HOME/lib64 -lcudart (and -lcublas / -lcublasLt),
+# but the wheel only has lib/libcudart.so.13 (no lib64, no unversioned .so):
+# "ld: cannot find -lcudart". Make a directory of unversioned symlinks, outside
+# the venv (the venv is not modified), and put it on LIBRARY_PATH:
+#   install -d -m 0755 /opt/paw/cudalib
+#   for lib in cudart cublas cublasLt; do
+#     ln -s /opt/paw/runtime-venv/lib/python3.12/site-packages/nvidia/cu13/lib/lib$lib.so.13 \
+#       /opt/paw/cudalib/lib$lib.so
+#   done
+# See docs/DEPLOYMENT_UPDATE.md ("Model runtime start").
+#
+# User: a dedicated OS user (here paw-llm) that owns the model store's caches,
+# not the backend's user; the backend's user may only start / stop this unit
+# (for example a polkit rule limited to this unit name).
+#
+# Install (as root), adjusting the paths, the model and the port:
+#   cp paw-llm-main.service /etc/systemd/system/
+#   systemctl daemon-reload
+# Do not enable it: the scheduler starts it.
+
+[Unit]
+Description=Personal AI Workspace main LLM runtime (vLLM)
+After=network-online.target
+
+[Service]
+Type=simple
+User=paw-llm
+Environment=MAX_JOBS=4
+Environment=FLASHINFER_NVCC_THREADS=1
+Environment=CUDA_HOME=/opt/paw/runtime-venv/lib/python3.12/site-packages/nvidia/cu13
+Environment=LIBRARY_PATH=/opt/paw/cudalib
+Environment=XDG_CACHE_HOME=/srv/paw-llm/cache
+Environment=VLLM_CACHE_ROOT=/srv/paw-llm/cache/vllm
+Environment=FLASHINFER_WORKSPACE_BASE=/srv/paw-llm/cache
+# Only when the pip nvcc is newer than the pip CUDA headers ("CUDA compiler and
+# CUDA toolkit headers are incompatible" from FlashInfer's bundled CCCL):
+# Environment=FLASHINFER_EXTRA_CUDAFLAGS=-DCCCL_DISABLE_CTK_COMPATIBILITY_CHECK
+# 40 GiB = 41943040 kB; "$$" is a literal "$" for systemd.
+ExecStartPre=/usr/bin/awk '/^MemAvailable:/ { found = 1; exit !($$2 >= 41943040) } END { if (!found) exit 1 }' /proc/meminfo
+ExecStart=/opt/paw/runtime-venv/bin/vllm serve /srv/models/main --served-model-name main --host 127.0.0.1 --port 18080
+# "systemctl start" returns when the server answers (the scheduler's load is
+# done then). 900 s: the longest measured first load from the HDD was 412 s
+# (Decision 0039 2), the same as the scheduler's load timeout.
+ExecStartPost=/bin/sh -c 'until /usr/bin/curl -sf http://127.0.0.1:18080/health >/dev/null; do sleep 2; done'
+TimeoutStartSec=900
+TimeoutStopSec=90
+# The ExecStartPre minimum (and the backend's min_host_available_bytes) is this
+# plus 8 GiB: raise them together if the runtime needs more.
+MemoryMax=32G
+NoNewPrivileges=true
+PrivateTmp=true
