@@ -1485,10 +1485,13 @@ class ComputeScheduler:
                 drain_deadline = (
                     deadline if drain_seconds is None else drain_started + drain_seconds
                 )
-                await self._drain(drain_deadline)
+                drained = await self._drain(drain_deadline)
                 async with self._control_lock:
                     await self._sample()
-                    if self._clock.monotonic() > drain_deadline:
+                    # Without running local GPU work nothing was waited for: a
+                    # limit of no time (``drain_seconds=0`` on an idle GPU) is
+                    # not passed by the reading itself (Codex review #168).
+                    if drained and self._clock.monotonic() > drain_deadline:
                         # The reading ended after the caller's limit: nothing
                         # is unloaded. When it shows that another workload took
                         # the VRAM meanwhile, the job gave up waiting for it:
@@ -1575,11 +1578,11 @@ class ComputeScheduler:
             )
         )
 
-    async def _drain(self, deadline: float) -> None:
+    async def _drain(self, deadline: float) -> bool:
         """Wait for the running local GPU work to end (``DRAIN_TIMEOUT`` at the
-        deadline)."""
+        deadline). ``False``: there was none (nothing was waited for)."""
         if not self._local_gpu_leases():
-            return
+            return False
         self._drained = asyncio.Event()
         waiter = asyncio.ensure_future(self._drained.wait())
         try:
@@ -1591,6 +1594,7 @@ class ComputeScheduler:
             self._drained = None
         if not drained:
             raise ExclusiveUnavailableError(ExclusiveFailure.DRAIN_TIMEOUT)
+        return True
 
     async def _empty_gpu(self) -> tuple[_Deployment, ...]:
         """Move every model off the GPU; the ones it moved."""

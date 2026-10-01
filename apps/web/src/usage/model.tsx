@@ -1,7 +1,7 @@
 // The usage / quota screen's data (PAW-064, the design's Usage board; Decision
-// 0016 for the quota rules). The Backend records usage and enforces quotas in its
-// ConnectionService, but has no HTTP route for them yet: the screen takes its data
-// through `UsageSource`, and without one it shows that usage is not available.
+// 0016 for the quota rules). The screen takes its data through `UsageSource`:
+// the app plugs in `apiUsageSource` (GET /api/v1/usage, issue #187, `./api.ts`);
+// without a source it shows that usage is not available.
 //
 // Privacy (docs/REQUIREMENTS.md, Decision 0016 §6): a report carries counts, closed
 // purpose categories, IDs and login names only. It has no prompt, answer, chat or
@@ -116,7 +116,7 @@ export function UsageSourceProvider({
   return <UsageSourceContext.Provider value={source}>{children}</UsageSourceContext.Provider>;
 }
 
-/** The connected source, or null: the Backend has no usage API yet. */
+/** The connected source, or null (none plugged in: usage is not available). */
 export function useUsageSource(): UsageSource | null {
   return useContext(UsageSourceContext);
 }

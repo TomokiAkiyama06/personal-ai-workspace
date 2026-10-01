@@ -14,16 +14,35 @@ refused. Commands run without a shell (the argv is a tuple of strings), with a
 timeout, and what they print is never logged or put in an error. The scheduler
 never gives it a pid to act on: it only ever reads pids, to know which of the
 processes the probe sees are the workspace's.
+
+The host's memory (issue #182, Decision 0039, 4; the values: Decision 0072,
+Approved): before it starts a GPU runtime it reads the host's ``MemAvailable``
+and starts nothing below ``min_host_available_bytes`` (40 GiB) or when it cannot
+be read (:class:`HostMemoryLowError`, logged as a warning). Its commands run
+with ``MAX_JOBS`` / ``FLASHINFER_NVCC_THREADS`` capped (``DEFAULT_JIT_BUILD_ENV``)
+for a command that starts the runtime itself; a systemd unit does not inherit
+them and sets them itself (``docs/DEPLOYMENT_UPDATE.md``).
 """
 
-from collections.abc import Mapping
+import logging
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Protocol
 
-from paw_backend.compute.config import check_name
+from paw_backend.compute.config import check_int, check_name
 from paw_backend.compute.domain import Placement
-from paw_backend.compute.errors import InvalidComputeArgumentError, ModelControlError
-from paw_backend.compute.limits import DEFAULT_CONTROL_TIMEOUT_SECONDS
+from paw_backend.compute.errors import (
+    HostMemoryLowError,
+    InvalidComputeArgumentError,
+    ModelControlError,
+)
+from paw_backend.compute.host import read_mem_available_bytes
+from paw_backend.compute.limits import (
+    DEFAULT_CONTROL_TIMEOUT_SECONDS,
+    DEFAULT_JIT_BUILD_ENV,
+    DEFAULT_MIN_HOST_AVAILABLE_BYTES,
+    MAX_CONTROL_TIMEOUT_SECONDS,
+)
 from paw_backend.compute.probe import (
     CommandResult,
     CommandRunner,
@@ -32,7 +51,11 @@ from paw_backend.compute.probe import (
 )
 from paw_backend.tools.interfaces import require_async_method
 
+logger = logging.getLogger("paw_backend.compute")
+
 _MAX_PIDS = 1_024
+_MAX_HOST_BYTES = 1 << 50
+_MIB = 1024**2
 
 
 class ModelControl(Protocol):
@@ -106,6 +129,8 @@ class CommandModelControl:
         *,
         runner: CommandRunner | None = None,
         timeout: float = DEFAULT_CONTROL_TIMEOUT_SECONDS,
+        min_host_available_bytes: int = DEFAULT_MIN_HOST_AVAILABLE_BYTES,
+        host_memory: Callable[[], int] = read_mem_available_bytes,
     ) -> None:
         if not isinstance(commands, Mapping):
             raise InvalidComputeArgumentError("commands")
@@ -114,8 +139,22 @@ class CommandModelControl:
             if not isinstance(entry, DeploymentCommands):
                 raise InvalidComputeArgumentError("commands")
         self._commands = dict(commands)
-        self._timeout = check_timeout(timeout)
-        self._runner = runner if runner is not None else SubprocessRunner()
+        self._timeout = check_timeout(timeout, maximum=MAX_CONTROL_TIMEOUT_SECONDS)
+        # 0: no minimum (``MemAvailable`` is then not read).
+        self._min_host_bytes = check_int(
+            "min_host_available_bytes",
+            min_host_available_bytes,
+            minimum=0,
+            maximum=_MAX_HOST_BYTES,
+        )
+        if not callable(host_memory):
+            raise InvalidComputeArgumentError("host_memory")
+        self._host_memory = host_memory
+        self._runner = (
+            runner
+            if runner is not None
+            else SubprocessRunner(extra_env=DEFAULT_JIT_BUILD_ENV)
+        )
 
     def _command(self, deployment: str, action: str) -> tuple[str, ...]:
         entry = self._commands.get(deployment)
@@ -133,9 +172,47 @@ class CommandModelControl:
             raise ModelControlError()
         return result.stdout
 
+    def _check_host_memory(self, deployment: str) -> None:
+        """Before a GPU runtime starts: enough ``MemAvailable`` for its JIT
+        builds and its own host memory, or nothing is started."""
+        if not self._min_host_bytes:
+            return
+        try:
+            available = self._host_memory()
+        except Exception as error:
+            logger.warning(
+                "Deployment %s not started: the host's available memory "
+                "could not be read (%s)",
+                deployment,
+                type(error).__name__,
+            )
+            raise HostMemoryLowError() from None
+        if (
+            isinstance(available, bool)
+            or not isinstance(available, int)
+            or not 0 <= available <= _MAX_HOST_BYTES
+        ):
+            logger.warning(
+                "Deployment %s not started: the host's available memory "
+                "could not be read",
+                deployment,
+            )
+            raise HostMemoryLowError()
+        if available < self._min_host_bytes:
+            logger.warning(
+                "Deployment %s not started: the host has %d MiB available, "
+                "below the minimum of %d MiB",
+                deployment,
+                available // _MIB,
+                self._min_host_bytes // _MIB,
+            )
+            raise HostMemoryLowError()
+
     async def place(self, deployment: str, placement: Placement) -> None:
         if placement is Placement.LOCAL_GPU:
-            await self._run(self._command(deployment, "gpu"))
+            argv = self._command(deployment, "gpu")
+            self._check_host_memory(deployment)
+            await self._run(argv)
         elif placement is Placement.LOCAL_CPU:
             await self._run(self._command(deployment, "cpu"))
         else:

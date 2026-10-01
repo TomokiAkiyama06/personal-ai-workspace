@@ -254,7 +254,7 @@ def _run(arguments: argparse.Namespace, err: TextIO | None) -> int:
     except (SQLAlchemyError, OSError, TimeoutError) as error:
         _say(err, f"Database error ({type(error).__name__}): {_DATABASE_HINT}")
         return EXIT_ENVIRONMENT
-    return _show(report, err)
+    return _show(report, err, arguments.credentials_revoked)
 
 
 async def _erase(
@@ -289,9 +289,23 @@ def _cancel_on_sigterm():
         loop.remove_signal_handler(signal.SIGTERM)
 
 
-def _show(report: ErasureRunReport, err: TextIO | None) -> int:
+def _show(report: ErasureRunReport, err: TextIO | None, credentials_revoked=()) -> int:
     erased = report.count(ErasureOutcome.ERASED)
     revoked = sum(result.ok for result in report.credentials)
+    # A confirmation for a user the run did not list (unknown, confirmed
+    # already, restored or erased) records nothing: say so rather than let a
+    # mistyped id pass for a confirmation (Claude's review of PR #142). Not a
+    # failure: nothing is left to confirm for that id.
+    checked = {result.user_id for result in report.credentials}
+    for user_id in dict.fromkeys(credentials_revoked or ()):
+        if user_id not in checked:
+            _say(
+                err,
+                f"NOTHING TO CONFIRM: user {user_id} (--credentials-revoked) is "
+                "not pending deletion with unconfirmed credentials (unknown, "
+                "confirmed already, restored or erased); nothing was recorded "
+                "for it.",
+            )
     for result in report.credentials:
         if result.outcome is CredentialsOutcome.PENDING:
             _say(

@@ -48,6 +48,17 @@ class ModelControlError(ComputeError):
         super().__init__("Model control action failed")
 
 
+class HostMemoryLowError(ModelControlError):
+    """A GPU runtime was not started: the host's available memory was below the
+    minimum, or could not be read (issue #182, Decision 0039, 4). The scheduler
+    treats it like any failed load (``FAILED``, tried again later)."""
+
+    code = "host_memory_low"
+
+    def __init__(self) -> None:
+        ComputeError.__init__(self, "Host memory is too low to start a model runtime")
+
+
 class ComputeUnavailableError(ComputeError):
     """No capacity was granted in time. ``reason`` is the last refusal."""
 

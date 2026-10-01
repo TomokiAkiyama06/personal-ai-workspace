@@ -7,7 +7,9 @@ revisions 0026, 0040 and 0071 already give (INSERT of memories, versions and
 relations; UPDATE of ``status`` and ``stale_since``; the history row the trigger
 writes; SELECT of projects and memberships; SELECT and INSERT of
 ``memory_sources`` for the copied sources and the derivation lookup of Decision
-0045). These tests run the service and job
+0045). The Memory Board (issue #186) reads with SELECT only: versions, relations,
+sources, projects, memberships, repositories and users' login names. These tests
+run the service, job and board
 test classes unchanged as that role, and check that the role still cannot rewrite
 a version or drop the new index.
 
@@ -25,6 +27,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError
 
 from . import (
+    test_memory_board,
     test_memory_edit_sources,
     test_memory_freshness,
     test_memory_versioning_races,
@@ -111,6 +114,12 @@ for _cls in (
     test_memory_freshness.ExpiryAndSessionTest,
     test_memory_edit_sources.EditCopiesSourcesTest,
     test_memory_edit_sources.DerivationTest,
+    # The Memory Board's reads (issue #186): users' names, repositories and
+    # sources, as the application role.
+    test_memory_board.ScopeTreeTest,
+    test_memory_board.ListTest,
+    test_memory_board.HistoryTest,
+    test_memory_board.SourcesTest,
 ):
     globals()[f"{_cls.__name__}AsAppRole"] = _as(_cls)
 # The loop variable must not be collected as a test class itself.
