@@ -15,6 +15,7 @@ import {
   NotificationBell,
 } from "../notifications/NotificationCenter";
 import { usePendingApprovalNotifications } from "../notifications/pendingApprovals";
+import { useServerNotifications } from "../notifications/serverNotifications";
 import { useNotifications } from "../notifications/store";
 import { Link, useRouter } from "../router";
 import { useTheme } from "../theme";
@@ -291,6 +292,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   // MobileNotifications: the full-screen list has 戻る and すべて既読 in the header.
   const phoneNotifications = useMediaQuery(PHONE_QUERY) && path === "/notifications";
   usePendingApprovalNotifications();
+  useServerNotifications();
 
   useEffect(() => {
     if (!navOpen) return;

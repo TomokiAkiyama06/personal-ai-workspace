@@ -8,10 +8,12 @@
 // time (aggregation); the newest one sets the severity, so a repeated failure can
 // escalate the entry. A source resolves a key when its condition is over.
 //
-// The Backend has no notification API yet (no store of notifications, read state
-// or authorized event stream): notifications live in this browser tab only. A
-// source (the future event stream) is plugged in through `NotificationSource`;
-// watchers of existing APIs (pendingApprovals.ts) push through `useNotifications`.
+// The Backend's stored notifications (GET /api/v1/notifications, issue #188) are
+// pushed by serverNotifications.ts with their read state (`read`, `remote`); marking
+// such an entry read here also marks it on the Backend (`NotificationRemote`), so
+// the state follows the account across devices. Watchers of other APIs
+// (pendingApprovals.ts) push tab-local notifications through `useNotifications`;
+// a source can also be plugged in through `NotificationSource`.
 import {
   createContext,
   type ReactNode,
@@ -49,6 +51,16 @@ export interface IncomingNotification {
    * state-changing request by itself.
    */
   actions?: readonly NotificationAction[];
+  /** The Backend's read state of this event (a stored notification). */
+  read?: boolean;
+  /** A stored notification: reading it is sent to the Backend. */
+  remote?: boolean;
+}
+
+/** Sends the read state of stored notifications to the Backend. */
+export interface NotificationRemote {
+  markRead: (ids: string[]) => void;
+  markAllRead: () => void;
 }
 
 export interface NotificationAction {
@@ -110,6 +122,8 @@ interface NotificationValue {
   dismiss: (key: string) => void;
   /** Forget everything (another account signed in on this browser). */
   clear: () => void;
+  /** Where marking stored notifications read is sent (`null`: nowhere). */
+  setRemote: (remote: NotificationRemote | null) => void;
 }
 
 const NotificationContext = createContext<NotificationValue | null>(null);
@@ -124,12 +138,21 @@ export function mergeNotification(
   incoming: IncomingNotification,
 ): NotificationItem[] {
   const existing = items.find((item) => item.key === incoming.key);
-  // Dedup: the same event again changes nothing (it stays read if it was read).
-  if (existing && incoming.id !== undefined && existing.ids.includes(incoming.id)) return items;
+  // A stored notification that is already read (on this or another device) is
+  // read here and raises no banner.
+  const read = incoming.read === true;
+  // Dedup: the same event again changes nothing (it stays read if it was read),
+  // except that the Backend now says the entry's latest event was read.
+  if (existing && incoming.id !== undefined && existing.ids.includes(incoming.id)) {
+    if (!read || existing.read || existing.ids[0] !== incoming.id) return items;
+    return items.map((item) =>
+      item === existing ? { ...existing, read: true, dismissed: true } : item,
+    );
+  }
   const ids = incoming.id === undefined ? [] : [incoming.id];
   if (!existing) {
-    const created = { ...incoming, count: 1, firstAt: incoming.at, ids, read: false };
-    return [{ ...created, dismissed: false }, ...items].slice(0, MAX_ITEMS);
+    const created = { ...incoming, count: 1, firstAt: incoming.at, ids, read };
+    return [{ ...created, dismissed: read }, ...items].slice(0, MAX_ITEMS);
   }
   const newer = Date.parse(incoming.at) >= Date.parse(existing.at);
   if (!newer) {
@@ -151,8 +174,8 @@ export function mergeNotification(
     count: existing.count + 1,
     firstAt: earlier(existing.firstAt, incoming.at),
     ids: [...ids, ...existing.ids],
-    read: false,
-    dismissed: false,
+    read,
+    dismissed: read,
   };
   const rest = items.filter((item) => item.key !== incoming.key);
   return [merged, ...rest].slice(0, MAX_ITEMS);
@@ -166,6 +189,18 @@ export function NotificationProvider({
   children: ReactNode;
 }) {
   const [items, setItems] = useState<NotificationItem[]>([]);
+  // The current items for the handlers below, which send requests (never from
+  // inside a state update, which React may run twice).
+  const latest = useRef(items);
+  latest.current = items;
+  const remote = useRef<NotificationRemote | null>(null);
+  const setRemote = useCallback((value: NotificationRemote | null) => {
+    remote.current = value;
+  }, []);
+  const sendRead = useCallback((key: string) => {
+    const item = latest.current.find((entry) => entry.key === key);
+    if (item?.remote && !item.read && item.ids.length > 0) remote.current?.markRead(item.ids);
+  }, []);
   const push = useCallback((incoming: IncomingNotification) => {
     setItems((current) => mergeNotification(current, incoming));
   }, []);
@@ -181,19 +216,29 @@ export function NotificationProvider({
       current.some((item) => test(item.key)) ? current.filter((item) => !test(item.key)) : current,
     );
   }, []);
-  const markRead = useCallback((key: string) => {
-    setItems((current) =>
-      current.map((item) => (item.key === key && !item.read ? { ...item, read: true } : item)),
-    );
-  }, []);
+  const markRead = useCallback(
+    (key: string) => {
+      sendRead(key);
+      setItems((current) =>
+        current.map((item) => (item.key === key && !item.read ? { ...item, read: true } : item)),
+      );
+    },
+    [sendRead],
+  );
   const markAllRead = useCallback(() => {
+    if (latest.current.some((item) => item.remote && !item.read)) remote.current?.markAllRead();
     setItems((current) => current.map((item) => ({ ...item, read: true })));
   }, []);
-  const dismiss = useCallback((key: string) => {
-    setItems((current) =>
-      current.map((item) => (item.key === key ? { ...item, dismissed: true, read: true } : item)),
-    );
-  }, []);
+  const dismiss = useCallback(
+    (key: string) => {
+      // Closing the banner reads the entry (it stays in the list).
+      sendRead(key);
+      setItems((current) =>
+        current.map((item) => (item.key === key ? { ...item, dismissed: true, read: true } : item)),
+      );
+    },
+    [sendRead],
+  );
   const clear = useCallback(() => {
     setItems((current) => (current.length === 0 ? current : []));
   }, []);
@@ -209,8 +254,9 @@ export function NotificationProvider({
       markAllRead,
       dismiss,
       clear,
+      setRemote,
     }),
-    [items, push, resolve, resolveMatching, markRead, markAllRead, dismiss, clear],
+    [items, push, resolve, resolveMatching, markRead, markAllRead, dismiss, clear, setRemote],
   );
   return <NotificationContext.Provider value={value}>{children}</NotificationContext.Provider>;
 }
