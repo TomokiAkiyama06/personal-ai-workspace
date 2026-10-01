@@ -104,16 +104,23 @@ function TasksView({ source }: { source: TaskSource }) {
   }, [source]);
   useEffect(reload, [reload]);
   // A background read (polling, after a control): a failure keeps the last list.
+  // A control's answer moves `controls` on: a read that started before it (a
+  // poll in flight) must not put the card back (Codex review #174).
+  const controls = useRef(0);
   const refreshList = useCallback(() => {
+    const started = controls.current;
     source
       .listTasks()
-      .then((data) => setList({ status: "ready", data }))
+      .then((data) => {
+        if (controls.current === started) setList({ status: "ready", data });
+      })
       .catch(() => {});
   }, [source]);
   // The task a control answered with replaces its card at once (the list's own
   // read may fail), then the list is read again.
   const applyControl = useCallback(
     (updated: TaskDetail) => {
+      controls.current += 1;
       setList((current) =>
         current.status === "ready"
           ? {
