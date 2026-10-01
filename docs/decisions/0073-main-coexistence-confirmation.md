@@ -20,7 +20,7 @@ Decision 0040 は Main を Qwen3.6-27B-FP8 にすることを、次の条件つ�
 | KAT-Coder-V2.5-Dev-FP8（同時に動かす、Load 時の量子化） | 13 / 14 / 13 | 14 | 13 |
 
 - 同時に動かした Qwen3.6-27B-FP8 の GPU 全体の Peak は 86.1 GiB（Main 59.7・Memory Worker 13.6・Embedding + Reranker 13.1 GiB）。Headroom（4.8 GiB）を足して 90.9 GiB で、GPU（95.6 GiB）に収まり、OOM はなかった。
-- 一方、0039 の 1 の Footprint（Process ごとのピーク + 2 GiB）で数えると 61.7 + 15.6 + 15.1 = 92.4 GiB、Headroom を足して 97.2 GiB で、**Scheduler の予約の勘定では 3 つを同時に置けない**（1.6 GiB 不足）。
+- 一方、0039 の 1 の Footprint（Process ごとのピーク + 2 GiB）で数えると 61.7 + 15.6 + 15.1 = 92.4 GiB。さらに 0037 の 3 では、`IF_ROOM` の Model（Memory Worker）を Load するとき、Load 後に Headroom のほかにもう 1 つ `restore_margin_bytes`（既定は Headroom と同じ 4.8 GiB）が残ることを求める（`apps/backend/paw_backend/compute/scheduler.py` の `_fill`）。合計 92.4 + 4.8 + 4.8 = 102.0 GiB で、**Scheduler の予約の勘定では 3 つを同時に置けない**（GPU の 95.6 GiB に対して 6.4 GiB 不足。Footprint の合計は 86.0 GiB 以下にする必要がある）。
 - KAT の FP8 版は、FP8 の Weight が手元になく Download していないため、BF16 の Weight を vLLM が Load 時に量子化した。Load の途中に Main だけで 94.9 GiB（約 16 秒）を使う。
 
 次の 3 点は承認済みの Decision が決めていない。
@@ -33,11 +33,11 @@ Decision 0040 は Main を Qwen3.6-27B-FP8 にすることを、次の条件つ�
 - 単独の KAT も 14 / 13 / 13 と同じ幅で揺れる。Sampling は温度 0 ではなく、1 Task の差は 1 回の Run の揺れの範囲。
 - 条件を「Resolved@3 と平均が単独と同じ範囲（1 Task 以内）」と読む。
 
-### 2. 共存時は Main の `gpu-memory-utilization` を 0.61 から 0.58 に下げ、Footprint をその値で与える
+### 2. 共存時は Main の `gpu-memory-utilization` を 0.61 から 0.53 に下げ、Footprint をその値で与える
 
-- 0.03 × 95.6 GiB ≈ 2.9 GiB を Main の KV Pool から減らす（28.9 → 約 26 GiB、約 408k token）。この Run の KV の使用の最大は 51.5%（約 15 GiB、約 234k token）で、減らしても 1.7 倍が残る。
-- 見込みの Footprint は Main 58.8・Memory Worker 15.6・Embedding + Reranker 15.1 GiB（合計 89.5 GiB）。Headroom を足して 94.3 GiB で、GPU に 1.3 GiB の余裕が残る。
-- これは Run の実測からの見積もりなので、0.58 で同時に動かす Run を 1 回行い、Footprint をその実測（ピーク + 2 GiB）で確かめてから Deployment の設定に入れる（別の Issue）。
+- 0.08 × 95.6 GiB ≈ 7.6 GiB を Main の KV Pool から減らす（28.9 → 約 21.3 GiB、約 335k token）。この Run の KV の使用の最大は 51.5%（約 15 GiB、約 234k token）で、減らしても 1.4 倍が残る。
+- Main の予算を超える分（0.61 で 1.4 GiB）が変わらないとみなすと、見込みの Footprint は Main 54.1・Memory Worker 15.6・Embedding + Reranker 15.1 GiB（合計 84.8 GiB）。Headroom と `restore_margin_bytes`（4.8 GiB ずつ）を足して 94.4 GiB で、GPU に 1.2 GiB の余裕が残る。
+- これは Run の実測からの見積もりなので、0.53 で同時に動かす Run を 1 回行い、Resolved が下がらないことと Footprint（ピーク + 2 GiB）を確かめてから Deployment の設定に入れる（別の Issue）。
 
 ### 3. KAT-Coder-V2.5-Dev は次点のまま、Load 時の FP8 量子化は Deployment に使わない
 
@@ -50,17 +50,18 @@ Decision 0040 は Main を Qwen3.6-27B-FP8 にすることを、次の条件つ�
 - **2 を Memory Worker の KV を 4 GiB から 2 GiB にして解く**: 2 GiB 減るが、16k context × 4 seqs（約 64k token）を収められなくなる。Memory Worker の KV の使用の最大は 3.2% だったが、並列の上限を下げることになる。
 - **2 を Embedding / Reranker を CPU に置いて解く**（0037 の縮退の 3 段目を常態にする）: GPU に 15 GiB 空くが、Retrieval の Latency は測っていない（今回の p95 は GPU で 448 ms）。
 - **2 を 0039 の Margin（+ 2 GiB）を小さくして解く**: 0039（Approved）の変更になるため、ここでは採らない。
+- **2 を `restore_margin_bytes` を小さくして解く**（`ComputeConfig` の設定で変えられる）: Main の KV を減らさずに済むが、0037 の 3 が防ぐ Pressure と復帰の往復が起きやすくなる。0 にしても 92.4 + 4.8 = 97.2 GiB で収まらず、Main の割り当ても減らす必要がある。
 
 ## リスク
 
-- 2 の 0.58 は実測していない。予算を超える分（0039 の 1）が変わらないとみなした見積もり。
+- 2 の 0.53 は実測していない。KV Pool が小さくなるため、Context の長い Task が 4 並列で重なると KV が足りなくなる可能性がある（この Run の最大は 0.61 の Pool の 51.5%）。予算を超える分（0039 の 1）が変わらないとみなした見積もり。
 - 3 回 × 24 Task で、上位の差は 1 Task 以内。Historical の 10 Task はどの Run でも解けず、Model の差を測れていない。
 - 同時に動かすと Main は約 1.4 倍遅くなる（24 Task に 43〜45 分）。Interactive の応答の速さへの影響は測っていない。
 
 ## 決めてほしいこと
 
 1. **採用条件を「Resolved@3 と平均が単独と同じ範囲」と読み、Qwen3.6-27B-FP8 の採用を確定する**（1）か。推奨: はい（MODEL_CANDIDATES.md への追記は別の PR）。
-2. **共存時の Main の `gpu-memory-utilization` を 0.58 にし、その設定で同時に動かす Run を 1 回行ってから Footprint を与える**（2）か。推奨: はい。
+2. **共存時の Main の `gpu-memory-utilization` を 0.53 にし、その設定で同時に動かす Run を 1 回行ってから Footprint を与える**（2）か。推奨: はい。
 3. **KAT は次点のまま、Load 時の FP8 量子化は Deployment に使わない**（3）か。推奨: はい。
 
 ## 承認後の扱い
