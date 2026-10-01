@@ -1,5 +1,6 @@
 import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useEffect } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "../i18n";
 import { RouterProvider } from "../router";
@@ -10,6 +11,7 @@ import {
   NotificationProvider,
   type NotificationSource,
   useNotificationOwner,
+  useNotifications,
 } from "./store";
 
 function manualSource() {
@@ -385,6 +387,45 @@ describe("Notification Center", () => {
     rerender(view("u-1"));
     expect(screen.getByRole("button", { name: "通知 1 件未読" })).toBeInTheDocument();
     rerender(view("u-2"));
+    expect(screen.getByRole("button", { name: "通知" })).toBeInTheDocument();
+  });
+
+  it("a read sent for the previous account changes nothing when it answers", async () => {
+    let refuse: (() => void) | null = null;
+    function Remote({ userId }: { userId: string }) {
+      useNotificationOwner(userId);
+      const { setRemote, setRemoteUnread } = useNotifications();
+      useEffect(() => {
+        setRemote({
+          markRead: () =>
+            new Promise<number>((_, reject) => {
+              refuse = () => reject(new Error("503"));
+            }),
+          markAllRead: () => Promise.resolve(0),
+        });
+        if (userId === "u-1") setRemoteUnread(1);
+      }, [userId, setRemote, setRemoteUnread]);
+      return null;
+    }
+    const { source, emit } = manualSource();
+    const view = (userId: string) => (
+      <I18nProvider>
+        <RouterProvider>
+          <NotificationProvider source={source}>
+            <Remote userId={userId} />
+            <NotificationBell />
+            <NotificationBanners />
+          </NotificationProvider>
+        </RouterProvider>
+      </I18nProvider>
+    );
+    const { rerender } = render(view("u-1"));
+    emit({ key: "a", id: "n-1", severity: "error", title: "失敗", at, remote: true });
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "バナーを閉じる" }));
+    rerender(view("u-2"));
+    expect(screen.getByRole("button", { name: "通知" })).toBeInTheDocument();
+    await act(async () => refuse?.());
     expect(screen.getByRole("button", { name: "通知" })).toBeInTheDocument();
   });
 });

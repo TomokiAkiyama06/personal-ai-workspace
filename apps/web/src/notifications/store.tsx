@@ -17,6 +17,7 @@
 import {
   createContext,
   type ReactNode,
+  type SetStateAction,
   useCallback,
   useContext,
   useEffect,
@@ -206,25 +207,58 @@ export function NotificationProvider({
   const setRemote = useCallback((value: NotificationRemote | null) => {
     remote.current = value;
   }, []);
-  const [remoteUnread, setRemoteUnread] = useState<number | null>(null);
-  // A failed write: the entries are unread again (as on the Backend), and the
-  // total is the one before the optimistic change, until the next list.
-  const restore = useCallback((keys: Set<string>, total: number | null) => {
-    setItems((current) =>
-      current.map((item) => (keys.has(item.key) ? { ...item, read: false } : item)),
-    );
-    setRemoteUnread(total);
+  const [remoteUnread, setRemoteUnreadState] = useState<number | null>(null);
+  // Every change of the total (a list, an optimistic read, an account clear)
+  // starts a new generation; a write's answer sets the total only while its
+  // generation is the newest, so an older answer arriving late never overwrites
+  // a newer total.
+  const unreadGeneration = useRef(0);
+  // The generation of the last account clear.
+  const cleared = useRef(0);
+  const changeRemoteUnread = useCallback((total: SetStateAction<number | null>) => {
+    unreadGeneration.current += 1;
+    setRemoteUnreadState(total);
+    return unreadGeneration.current;
   }, []);
+  const setRemoteUnread = useCallback(
+    (total: number | null) => {
+      changeRemoteUnread(total);
+    },
+    [changeRemoteUnread],
+  );
+  // A write's outcome: the Backend's total after it, or (it failed) the entries
+  // are unread again, as on the Backend, and the total is the one before the
+  // optimistic change, until the next list. A newer total stays.
+  const settle = useCallback(
+    (write: Promise<number>, generation: number, keys: Set<string>, before: number | null) => {
+      const current = () => unreadGeneration.current === generation;
+      write.then(
+        (total) => {
+          if (current()) setRemoteUnreadState(total);
+        },
+        () => {
+          if (generation <= cleared.current) return;
+          setItems((items) =>
+            items.map((item) => (keys.has(item.key) ? { ...item, read: false } : item)),
+          );
+          if (current()) setRemoteUnreadState(before);
+        },
+      );
+    },
+    [],
+  );
   const sendRead = useCallback(
     (key: string) => {
       const item = latest.current.find((entry) => entry.key === key);
       const target = remote.current;
       if (!item?.remote || item.read || item.ids.length === 0 || !target) return;
       const before = remoteUnread;
-      setRemoteUnread((total) => (total === null ? null : Math.max(0, total - item.ids.length)));
-      target.markRead(item.ids).then(setRemoteUnread, () => restore(new Set([key]), before));
+      const generation = changeRemoteUnread((total) =>
+        total === null ? null : Math.max(0, total - item.ids.length),
+      );
+      settle(target.markRead(item.ids), generation, new Set([key]), before);
     },
-    [remoteUnread, restore],
+    [remoteUnread, changeRemoteUnread, settle],
   );
   const push = useCallback((incoming: IncomingNotification) => {
     setItems((current) => mergeNotification(current, incoming));
@@ -257,11 +291,10 @@ export function NotificationProvider({
         latest.current.filter((item) => item.remote && !item.read).map((item) => item.key),
       );
       const before = remoteUnread;
-      setRemoteUnread(0);
-      target.markAllRead().then(setRemoteUnread, () => restore(keys, before));
+      settle(target.markAllRead(), changeRemoteUnread(0), keys, before);
     }
     setItems((current) => current.map((item) => ({ ...item, read: true })));
-  }, [remoteUnread, restore]);
+  }, [remoteUnread, changeRemoteUnread, settle]);
   const dismiss = useCallback(
     (key: string) => {
       // Closing the banner reads the entry (it stays in the list).
@@ -274,8 +307,9 @@ export function NotificationProvider({
   );
   const clear = useCallback(() => {
     setItems((current) => (current.length === 0 ? current : []));
-    setRemoteUnread(null);
-  }, []);
+    // Writes sent for the previous account change nothing when they answer.
+    cleared.current = changeRemoteUnread(null);
+  }, [changeRemoteUnread]);
   useEffect(() => source?.subscribe(push, resolve), [source, push, resolve]);
   const value = useMemo(
     () => ({
@@ -304,6 +338,7 @@ export function NotificationProvider({
       dismiss,
       clear,
       setRemote,
+      setRemoteUnread,
     ],
   );
   return <NotificationContext.Provider value={value}>{children}</NotificationContext.Provider>;

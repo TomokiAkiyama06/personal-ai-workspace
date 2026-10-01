@@ -193,6 +193,35 @@ describe("stored notifications in the Notification Center", () => {
     expect(await screen.findByRole("button", { name: "通知 1 件未読" })).toBeInTheDocument();
   });
 
+  it("an earlier read answering last does not overwrite the newer unread total", async () => {
+    const { fetchMock } = mockApi({
+      "GET /auth/session": reply(200, session()),
+      "GET /notifications": reply(200, { notifications: [stored()], unread: 2 }),
+      // In the order the answers are released: the later "all" first, then the
+      // earlier read with the total it saw before "all".
+      "POST /notifications/read": [
+        reply(200, { updated: 1, unread: 0 }),
+        reply(200, { updated: 1, unread: 1 }),
+      ],
+    });
+    const held: Array<() => void> = [];
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init: RequestInit = {}) => {
+      if (init.method === "POST") await new Promise<void>((release) => held.push(release));
+      return fetchMock(input, init);
+    });
+    renderApp("/");
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "バナーを閉じる" }));
+    await user.click(screen.getByRole("button", { name: "通知 1 件未読" }));
+    await user.click(screen.getByRole("button", { name: "すべて既読" }));
+    await waitFor(() => expect(held).toHaveLength(2));
+    await act(async () => held[1]?.());
+    await act(async () => held[0]?.());
+    await waitFor(() => expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(4));
+    expect(await screen.findByRole("button", { name: "通知" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /件未読/ })).not.toBeInTheDocument();
+  });
+
   it("stays connected on the settings screens", async () => {
     mockApi({
       "GET /auth/session": reply(200, session()),
