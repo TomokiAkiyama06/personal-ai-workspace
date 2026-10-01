@@ -75,6 +75,13 @@ class RoundTripTest(ReleaseTestCase):
     """Down and up again; never down over a release (the append-only history
     would keep an event the code before 0129 cannot read)."""
 
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        # Each test starts without tasks: a release recorded by another test
+        # (append-only, so only TRUNCATE removes it) would refuse every downgrade
+        # and hide the path without one.
+        await self.owner_sql("TRUNCATE tasks CASCADE")
+
     async def asyncTearDown(self):
         await asyncio.to_thread(migrate)
         await super().asyncTearDown()
@@ -122,10 +129,8 @@ class RoundTripTest(ReleaseTestCase):
             "SELECT count(*) FROM task_events "
             "WHERE command = 'release_repository_write'"
         )
-        if released:  # another test of the same database recorded one
-            with self.assertRaises(DBAPIError):
-                await asyncio.to_thread(migrate, previous_revision(), downgrade=True)
-            return
+        # The path without a release is the one this test is about.
+        self.assertEqual(released, 0)
         await asyncio.to_thread(migrate, previous_revision(), downgrade=True)
         self.assertTrue(await self.validated())
         await asyncio.to_thread(migrate)

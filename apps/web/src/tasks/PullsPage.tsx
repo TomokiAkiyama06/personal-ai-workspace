@@ -89,8 +89,29 @@ function PullsView({ source }: { source: TaskSource }) {
     }, REFRESH_MS);
     return () => window.clearInterval(timer);
   }, [loaded, source]);
+  // A selected record the bounded list does not hold (an older one a task links
+  // to) is read by its id; a refused or missing one is not shown.
+  const listed = !loaded || !selectedId || all.some((pr) => pr.id === selectedId);
+  const [single, setSingle] = useState<PullRequestRecord | null>(null);
+  useEffect(() => {
+    if (listed || !selectedId) return;
+    let current = true;
+    source
+      .getPullRequest(selectedId)
+      .then((pr) => {
+        if (current) setSingle(pr);
+      })
+      .catch(() => {
+        if (current) setSingle(null);
+      });
+    return () => {
+      current = false;
+    };
+  }, [listed, selectedId, source]);
   const visible = all.filter((pr) => matches(pr, filter));
-  const shown = all.find((pr) => pr.id === (selectedId ?? visible[0]?.id)) ?? null;
+  const shown =
+    all.find((pr) => pr.id === (selectedId ?? visible[0]?.id)) ??
+    (single !== null && single.id === selectedId ? single : null);
 
   return (
     <div className={selectedId ? "tasks-screen has-selection" : "tasks-screen"}>

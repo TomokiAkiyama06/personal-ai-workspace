@@ -884,6 +884,35 @@ class AuthService:
             )
             raise InvalidCredentialsError from None
 
+    async def require_passkey_step_up(
+        self, actor: Principal, session_id: uuid.UUID
+    ) -> None:
+        """Refuse unless ``session_id`` (the actor's own session) has a Passkey
+        step-up inside the policy's window.
+
+        For a sensitive operation of another module that has no transaction of
+        this module's to check it in (a quota change over HTTP, issue #187,
+        Decision 0069): the check is its own transaction, run just before the
+        operation. ``StepUpRequiredError`` / ``StepUpMethodInsufficientError`` as
+        ``require_passkey_step_up_in``; the caller audits the refusal.
+        """
+        if not isinstance(actor, Principal):
+            raise InvalidAuthInputError("actor")
+        if not isinstance(session_id, uuid.UUID):
+            raise InvalidAuthInputError("session_id")
+
+        async def work(session: AsyncSession) -> None:
+            policy = await self._policy.get_in(session)
+            await require_passkey_step_up_in(
+                session,
+                session_id=session_id,
+                user_id=actor.user_id,
+                window_minutes=policy.stepup_window_minutes,
+                now=self._audit.now(),
+            )
+
+        await run(self._database, work, self._timeout)
+
     async def _check_current_password(
         self,
         auth: AuthenticatedSession,

@@ -104,16 +104,23 @@ function TasksView({ source }: { source: TaskSource }) {
   }, [source]);
   useEffect(reload, [reload]);
   // A background read (polling, after a control): a failure keeps the last list.
+  // A control's answer moves `controls` on: a read that started before it (a
+  // poll in flight) must not put the card back (Codex review #174).
+  const controls = useRef(0);
   const refreshList = useCallback(() => {
+    const started = controls.current;
     source
       .listTasks()
-      .then((data) => setList({ status: "ready", data }))
+      .then((data) => {
+        if (controls.current === started) setList({ status: "ready", data });
+      })
       .catch(() => {});
   }, [source]);
   // The task a control answered with replaces its card at once (the list's own
   // read may fail), then the list is read again.
   const applyControl = useCallback(
     (updated: TaskDetail) => {
+      controls.current += 1;
       setList((current) =>
         current.status === "ready"
           ? {
@@ -294,7 +301,7 @@ function TaskDetailView({
   id: string;
   onChanged: (task: TaskDetail) => void;
 }) {
-  const { t } = useI18n();
+  const { t, formatTime } = useI18n();
   const [load, setLoad] = useState<Load<TaskDetail>>({ status: "loading" });
   const [pending, setPending] = useState<ControlCommand | null>(null);
   const [controlError, setControlError] = useState<string | null>(null);
@@ -337,7 +344,12 @@ function TaskDetailView({
   useEffect(() => {
     if (form && task && !ACCEPTED_CONTROLS[task.state].includes(form)) setForm(null);
   }, [form, task]);
-  const polling = task !== null && isUnsettled(task.state) && pending === null;
+  // A failed or cancelled task is read again too: another tab or user may retry
+  // or restart it (Codex review #174). Only a completed task is final.
+  const polling =
+    task !== null &&
+    (isUnsettled(task.state) || ACCEPTED_CONTROLS[task.state].length > 0) &&
+    pending === null;
   useEffect(() => {
     if (!polling) return;
     const timer = window.setInterval(refresh, REFRESH_MS);
@@ -356,7 +368,9 @@ function TaskDetailView({
       <div className="stack">
         <BackLink />
         <p className="form-error" role="alert">
-          {isApiError(load.error, "not_found") ? t("tasks.notFound") : errorMessage(t, load.error)}
+          {isApiError(load.error, "not_found", "task_not_found")
+            ? t("tasks.notFound")
+            : errorMessage(t, load.error)}
         </p>
         <button type="button" className="secondary small-button" onClick={fetchTask}>
           {t("app.retry")}
@@ -489,6 +503,25 @@ function TaskDetailView({
           </Link>
         ))}
       </dl>
+
+      {data.currentStep?.toolCalls && data.currentStep.toolCalls.length > 0 && (
+        <section className="stack-xs step-tools" aria-labelledby="step-tools-title">
+          <span id="step-tools-title" className="section-label">
+            {t("tasks.node.toolCalls")} · {data.currentStep.name}
+          </span>
+          <ul className="plain-list">
+            {data.currentStep.toolCalls.map((call) => (
+              <li key={call.id} className="attempt-row">
+                <span className="mono">{call.name}</span>
+                <span className={`attempt-state status-${call.status}`}>
+                  {t(`tasks.tool.${call.status}`)}
+                </span>
+                <span className="mono muted push-right">{formatTime(call.startedAt)}</span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
 
       <section className="task-card-panel dag-panel" aria-labelledby="dag-title">
         <div className="panel-head">

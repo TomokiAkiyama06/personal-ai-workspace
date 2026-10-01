@@ -17,9 +17,9 @@ two Backend processes line up, and a sample is never placed in the future.
 * :meth:`HealthStore.roll_up`: moves the rows older than a tier's age into the
   next resolution (``DELETE ... RETURNING`` feeding ``INSERT ... ON CONFLICT DO
   UPDATE`` in one statement: a row is moved once and counted once, even when
-  two processes roll up at the same time), then purges the hourly rows and the
-  events older than the retention period. At most ``MAX_ROLLUP_ROWS`` rows per
-  statement.
+  two processes roll up at the same time), then purges the hourly rows, the
+  events and the agent incidents (Decision 0071) older than the retention
+  period. At most ``MAX_ROLLUP_ROWS`` rows per statement.
 * :meth:`HealthStore.series` and :meth:`HealthStore.events`: the reads of the API.
 
 With ``notify=True`` (the application, issue #188, Decision 0070 Approved) a
@@ -97,6 +97,7 @@ class RollupResult:
     moved: dict[int, int]  # rows moved out of each resolution
     purged_samples: int
     purged_events: int
+    purged_incidents: int = 0
     purged_notifications: int = 0
 
 
@@ -172,6 +173,19 @@ WITH doomed AS (
     LIMIT :limit
 ), gone AS (
     DELETE FROM health_events WHERE id IN (SELECT id FROM doomed) RETURNING 1
+)
+SELECT count(*) FROM gone
+"""
+
+# The agent incidents (Decision 0071, Proposed) are kept as long as the events.
+_PURGE_INCIDENTS = """
+WITH doomed AS (
+    SELECT id FROM agent_incidents
+    WHERE occurred_at < now() - make_interval(days => :days)
+    ORDER BY occurred_at
+    LIMIT :limit
+), gone AS (
+    DELETE FROM agent_incidents WHERE id IN (SELECT id FROM doomed) RETURNING 1
 )
 SELECT count(*) FROM gone
 """
@@ -329,6 +343,9 @@ class HealthStore:
             )
         purged_samples = await self._repeat(_PURGE_SAMPLES, {"days": retention_days})
         purged_events = await self._repeat(_PURGE_EVENTS, {"days": retention_days})
+        purged_incidents = await self._repeat(
+            _PURGE_INCIDENTS, {"days": retention_days}
+        )
         purged_notifications = 0
         if self._notify:
             for _ in range(_MAX_BATCHES):
@@ -341,7 +358,13 @@ class HealthStore:
                 purged_notifications += count
                 if count < notifications.MAX_PURGE_ROWS:
                     break
-        return RollupResult(moved, purged_samples, purged_events, purged_notifications)
+        return RollupResult(
+            moved,
+            purged_samples,
+            purged_events,
+            purged_incidents=purged_incidents,
+            purged_notifications=purged_notifications,
+        )
 
     async def _repeat(self, sql: str, params: dict[str, int]) -> int:
         total = 0

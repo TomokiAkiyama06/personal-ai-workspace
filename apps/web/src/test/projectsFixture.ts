@@ -106,12 +106,17 @@ export function exampleDetail(overrides: Partial<ProjectDetail> = {}): ProjectDe
 
 /** A source answering from the fixtures; every method is a spy. */
 export function fakeProjectsSource(
-  options: { summaries?: ProjectSummary[]; details?: Record<string, ProjectDetail> } = {},
+  options: {
+    summaries?: ProjectSummary[];
+    details?: Record<string, ProjectDetail>;
+    /** The Backend's `truncated`: more projects exist than the list holds. */
+    truncated?: boolean;
+  } = {},
 ) {
   const summaries = options.summaries ?? SUMMARIES;
   const details = options.details ?? { "p-example": exampleDetail() };
   const source = {
-    list: vi.fn(async () => summaries),
+    list: vi.fn(async () => ({ projects: summaries, truncated: options.truncated ?? false })),
     detail: vi.fn(async (id: string) => {
       const detail = details[id];
       if (!detail) throw new Error(`no detail for ${id}`);

@@ -269,6 +269,11 @@ export function MemoryDetail({
   // someone else changed meanwhile.
   const [touched, setTouched] = useState<ReadonlySet<Field>>(() => new Set());
   const [conflict, setConflict] = useState<MemoryVersion | null>(null);
+  // The newest version number this pane learned of (a conflict's winner, its own
+  // write), kept apart from the notice: closing the notice while the history's
+  // reload is pending or failed must not send the next restore from a stale
+  // version (Codex review #178).
+  const [newest, setNewest] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
@@ -313,6 +318,7 @@ export function MemoryDetail({
     draft === null;
 
   const reloadAfterWrite = (written: MemoryVersion) => {
+    setNewest(written.version_number);
     setSelected(written.version_id);
     history.reload();
     onChanged();
@@ -347,6 +353,7 @@ export function MemoryDetail({
     onChanged();
     if (!top) return;
     setConflict(top);
+    setNewest(top.version_number);
     setBase(top.version_number);
     if (pending) {
       // A field the editor did not touch follows the version that won.
@@ -400,11 +407,8 @@ export function MemoryDetail({
     setNotice(null);
     try {
       // After a conflict, the version that won is the one to build on, even
-      // before the pane's reload brings it in.
-      const expected =
-        conflict && conflict.version_number > current.version_number
-          ? conflict.version_number
-          : current.version_number;
+      // before the pane's reload brings it in (and after its notice is closed).
+      const expected = Math.max(current.version_number, newest ?? current.version_number);
       const written = await source.restore(memoryId, expected, version.version_number);
       setConflict(null);
       setNotice(

@@ -25,6 +25,7 @@ from paw_backend.compute.wiring import (
     build_compute,
 )
 from paw_backend.config import Settings
+from paw_backend.connections.wiring import build_connection_service
 from paw_backend.db import Database
 from paw_backend.errors import ERROR_RESPONSES, register_error_handlers
 from paw_backend.events import EventBus, publish_heartbeats
@@ -43,8 +44,14 @@ from paw_backend.orchestrator.freshness_loop import build_freshness_loop
 from paw_backend.orchestrator.project_sweep import build_project_stop_loop
 from paw_backend.orchestrator.runtime import AgentRuntime
 from paw_backend.orchestrator.user_sweep import build_user_stop_loop
-from paw_backend.projects import ProjectStateGate
+from paw_backend.projects import ProjectService, ProjectStateGate
+from paw_backend.repositories import (
+    RepositoryPolicy,
+    RepositoryService,
+    SubprocessGitRunner,
+)
 from paw_backend.repositories.git import GitRunner
+from paw_backend.repositories.github_connection import GhRunner
 from paw_backend.research.scratch import ScratchJanitor, ScratchStore
 from paw_backend.web import WebAppMiddleware
 
@@ -62,6 +69,7 @@ def create_app(
     git_runner: GitRunner | None = None,
     compute: ComputeSetup | None = None,
     local_runtimes: Mapping[str, LocalRuntime] | None = None,
+    gh_runner: GhRunner | None = None,
 ) -> FastAPI:
     """Build the FastAPI application.
 
@@ -85,6 +93,13 @@ def create_app(
     ``orchestrator_config``) are the orchestrator runtimes on a local model; the
     composition wraps them in a ``HybridRuntime`` on that scheduler. Without
     ``compute`` there is no scheduler and the routes answer 503.
+
+    With a database, the project and repository services of the HTTP routes
+    (issue #184, ``api/v1/projects.py``) are ``app.state.projects`` and
+    ``app.state.repositories``; the repository service runs git through
+    ``git_runner`` (as above) and creates GitHub repositories through ``gh_runner``
+    (``SubprocessGhRunner``; without one, creating a GitHub repository answers
+    ``github_unavailable``). Without a database both are ``None`` (503).
 
     System Health (PAW-066) is ``app.state.system_health``: its monitor serves
     ``/api/v1/system/health*`` and, with a database, samples the metrics in the
@@ -300,6 +315,28 @@ def create_app(
     elif local_runtimes is not None:
         raise TypeError("local_runtimes need a database")
     app.state.task_execution = task_execution
+    # The project / repository services of the HTTP routes (issue #184).
+    app.state.projects = None
+    app.state.repositories = None
+    if database.configured:
+        app.state.projects = ProjectService(database, app.state.authorizer)
+        app.state.repositories = RepositoryService.from_policy(
+            database,
+            app.state.authorizer,
+            git_runner if git_runner is not None else SubprocessGitRunner(),
+            RepositoryPolicy.from_settings(settings),
+            gh_runner=gh_runner,
+        )
+    elif gh_runner is not None:
+        raise TypeError("gh_runner needs a database")
+    # The quota / usage routes' connection service (issue #187): with a database.
+    app.state.connections = (
+        build_connection_service(
+            settings, database, app.state.authorizer, auth.audit_sink
+        )
+        if database.configured
+        else None
+    )
     app.state.compute = compute_services
     probe = NvidiaSmiProbe() if settings.health_gpu_probe and compute is None else None
     app.state.system_health = build_system_health(

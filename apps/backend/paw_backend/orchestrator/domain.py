@@ -85,6 +85,14 @@ class NextStep(StrEnum):
     HOLD = "hold"  # keep the node ready: the task waits for a human
 
 
+class IncidentKind(StrEnum):
+    """An agent incident that System Health counts (Decision 0071, Proposed):
+    one row of ``agent_incidents`` each, never aggregated."""
+
+    OUT_OF_MEMORY = "out_of_memory"  # an attempt failed with an OOM class
+    ESCALATION = "escalation"  # a failed node moved to the next agent
+
+
 class RunOutcome(StrEnum):
     """What one ``Orchestrator.run_entry`` did with the entry it was given."""
 

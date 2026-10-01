@@ -74,6 +74,11 @@ class Capability(StrEnum):
     # and whether Codex / Claude are available (PAW-066, Decision 0059
     # Proposed). Any human role; read-only; never an Agent's.
     SYSTEM_HEALTH_SUMMARY_READ = "system_health.summary.read"
+    # The lists of the Task / PR screens (issue #185, Decision 0067 Approved):
+    # only that the person may ask for them. Every task and pull request in the
+    # answer is of a project the person may read (``project.read``, decided per
+    # project and per repository). Any human role; read-only; never an Agent's.
+    TASKS_LIST = "tasks.list"
     # A person's own Notification Center (issue #188, Decision 0070 Approved):
     # reading their notifications and the event stream (``notification.read``,
     # read-only), marking them read and dismissing them (``notification.manage``).
@@ -212,6 +217,9 @@ CAPABILITIES: MappingProxyType[Capability, CapabilityInfo] = MappingProxyType(
         C.SYSTEM_HEALTH_SUMMARY_READ: _info(
             Scope.SYSTEM, delegable=False, read_only=True
         ),
+        # The lists of the Task / PR screens (Decision 0067): on the read-only
+        # allowlist; not delegable (an agent reads a task through its own scope).
+        C.TASKS_LIST: _info(Scope.SYSTEM, delegable=False, read_only=True),
         # A person's own notifications (Decision 0070): no agent needs them.
         # Reading is on the read-only allowlist (the list is the person's own and
         # holds codes only); read / dismissed changes only their own view.

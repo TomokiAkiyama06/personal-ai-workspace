@@ -168,7 +168,11 @@ describe("Tasks page", () => {
     expect(within(detail).getByText("試行 1")).toBeInTheDocument();
     expect(within(detail).getByText("test_failure")).toBeInTheDocument();
     expect(within(detail).getByText(/Codex · 高 · Cloud/)).toBeInTheDocument();
-    expect(within(detail).getByText("apply_patch")).toBeInTheDocument();
+    // Tool calls belong to the task's current step, not to a node.
+    expect(within(detail).queryByText("apply_patch")).not.toBeInTheDocument();
+    const tools = screen.getByRole("region", { name: /ツール呼び出し · 実装/ });
+    expect(within(tools).getByText("apply_patch")).toBeInTheDocument();
+    expect(within(tools).getByText("read_file")).toBeInTheDocument();
     await user.click(within(detail).getByRole("button", { name: "ノードの詳細を閉じる" }));
     expect(screen.queryByRole("region", { name: "実装" })).not.toBeInTheDocument();
   });
@@ -420,6 +424,73 @@ describe("Tasks page", () => {
       );
       await act(async () => resolveStale(stale));
       expect(detail.querySelector(".task-title-block .state-pill")).toHaveTextContent("一時停止中");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("ignores a list read that was in flight when a control answered", async () => {
+    // Codex review (#174, P2): a poll of the list that started before Pause and
+    // answers after it must not put the card back, even when the read after the
+    // control fails.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const { source } = fakeTaskSource();
+      renderTasks(`/agents/${TASK_203}`, source);
+      const list = await screen.findByRole("navigation", { name: "タスクの一覧" });
+      await screen.findByRole("article", { name: "認証セッションの修正" });
+      const stale = structuredClone(await source.listTasks());
+      let resolveStale: (data: typeof stale) => void = () => {};
+      let calls = 0;
+      source.listTasks = () => {
+        calls += 1;
+        if (calls === 1) {
+          return new Promise((resolve) => {
+            resolveStale = resolve;
+          });
+        }
+        return Promise.reject(new ApiError(503, "service_unavailable", "x"));
+      };
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(calls).toBe(1);
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      await user.click(screen.getByRole("button", { name: "一時停止" }));
+      const card = within(list).getByRole("link", { name: /認証セッションの修正/ });
+      await waitFor(() => expect(card).toHaveTextContent("一時停止中"));
+      await act(async () => resolveStale(stale));
+      expect(card).toHaveTextContent("一時停止中");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reads a failed or cancelled task again (another user may retry or restart it)", async () => {
+    // Codex review (#174, P2): the detail of a task that can be re-opened is
+    // not final.
+    const tasks = sampleTasks();
+    const failed = tasks.find((task) => task.id === TASK_205);
+    if (failed) {
+      failed.state = "failed";
+      failed.waitReason = null;
+    }
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const { source } = fakeTaskSource(tasks);
+      renderTasks(`/agents/${TASK_205}`, source);
+      const detail = await screen.findByRole("article", { name: "メモリ整理ジョブ" });
+      await waitFor(() =>
+        expect(detail.querySelector(".task-title-block .state-pill")).toHaveTextContent("失敗"),
+      );
+      if (failed) {
+        failed.state = "queued";
+        failed.version = 4;
+      }
+      await vi.advanceTimersByTimeAsync(5000);
+      await waitFor(() =>
+        expect(detail.querySelector(".task-title-block .state-pill")).toHaveTextContent(
+          "キュー待ち",
+        ),
+      );
     } finally {
       vi.useRealTimers();
     }

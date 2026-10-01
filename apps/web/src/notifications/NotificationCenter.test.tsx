@@ -321,6 +321,65 @@ describe("Notification Center", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("6 時間成功していません");
   });
 
+  it("remembers the ids of entries dropped by the 100-entry limit for dedup", () => {
+    // Codex review (#173, P2): a reconnect that replays an event whose entry was
+    // pushed out of the list must not come back as a new unread notification.
+    const { source, emit } = manualSource();
+    function Keys() {
+      const { items } = useNotifications();
+      return <output data-testid="keys">{items.map((item) => item.key).join(",")}</output>;
+    }
+    render(
+      <NotificationProvider source={source}>
+        <Keys />
+      </NotificationProvider>,
+    );
+    for (let i = 0; i <= 100; i++) {
+      emit({ key: `k${i}`, id: `e${i}`, severity: "info", title: `n${i}`, at });
+    }
+    const keys = () => screen.getByTestId("keys").textContent?.split(",") ?? [];
+    expect(keys()).toHaveLength(100);
+    expect(keys()).not.toContain("k0");
+    emit({ key: "k0", id: "e0", severity: "info", title: "n0", at });
+    expect(keys()).not.toContain("k0");
+    expect(keys()[0]).toBe("k100");
+    // A new event of that key is still a new notification.
+    emit({ key: "k0", id: "e0-2", severity: "info", title: "n0", at });
+    expect(keys()[0]).toBe("k0");
+    // The id is remembered with its key: another key may use the same id.
+    emit({ key: "other", id: "e1", severity: "info", title: "o", at });
+    expect(keys()[0]).toBe("other");
+  });
+
+  it("forgets the dropped ids of a key when it is resolved", () => {
+    // Codex review (#194, P2): resolving forgets the key's ids, also those of an
+    // entry the 100-entry limit already pushed out (its condition may come back).
+    const { source, emit, resolve } = manualSource();
+    let resolveMatching: (test: (key: string) => boolean) => void = () => {};
+    function Keys() {
+      const value = useNotifications();
+      resolveMatching = value.resolveMatching;
+      return <output data-testid="keys">{value.items.map((item) => item.key).join(",")}</output>;
+    }
+    render(
+      <NotificationProvider source={source}>
+        <Keys />
+      </NotificationProvider>,
+    );
+    for (let i = 0; i <= 101; i++) {
+      emit({ key: `k${i}`, id: `e${i}`, severity: "info", title: `n${i}`, at });
+    }
+    const keys = () => screen.getByTestId("keys").textContent?.split(",") ?? [];
+    expect(keys()).not.toContain("k0");
+    expect(keys()).not.toContain("k1");
+    resolve("k0");
+    emit({ key: "k0", id: "e0", severity: "info", title: "n0", at });
+    expect(keys()[0]).toBe("k0");
+    act(() => resolveMatching((key) => key === "k1"));
+    emit({ key: "k1", id: "e1", severity: "info", title: "n1", at });
+    expect(keys()[0]).toBe("k1");
+  });
+
   it("remembers every id of an entry for dedup", () => {
     let items = [] as ReturnType<typeof mergeNotification>;
     for (let i = 0; i < 80; i++) {

@@ -4,7 +4,7 @@ See ``apps/backend/README.md`` ("Project CRUD / Membership / Lifecycle") and
 Decision 0008 (Approved 2026-09-25). The service performs authorization through
 ``paw_backend.authz.Authorizer``, and creating a project, answering an
 invitation and leaving one are audited capabilities too (Decision 0022,
-Approved 2026-09-26); there is no HTTP endpoint yet.
+Approved 2026-09-26). The HTTP routes are ``paw_backend.api.v1.projects`` (Issue #184).
 ``ProjectTaskStopper`` carries out the "stop the project's tasks" request that
 ``ProjectService.begin_deletion`` records (Decision 0008, section 8); the
 orchestrator (PAW-034) calls it. ``ProjectStateGate`` is the Project state gate that
@@ -43,6 +43,7 @@ from paw_backend.projects.records import (
     LifecycleAction,
     Member,
     MemberStatus,
+    NamedMember,
     PendingInvite,
     Project,
     ProjectStatus,
@@ -75,6 +76,7 @@ __all__ = [
     "MemberLimitError",
     "MemberNotFoundError",
     "MemberStatus",
+    "NamedMember",
     "NoManagerError",
     "PendingInvite",
     "Project",

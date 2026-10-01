@@ -58,6 +58,8 @@ USER_CAPS = {
     "account.manage",
     # Issue #52 (Decision 0059): the compact System Health state.
     "system_health.summary.read",
+    # Issue #185 (Decision 0067): the lists of the Task / PR screens.
+    "tasks.list",
     # Issue #188 (Decision 0070): one's own Notification Center.
     "notification.read",
     "notification.manage",
@@ -201,6 +203,8 @@ NON_DELEGABLE_CAPS = {
     # Issue #52 (Decision 0059): no agent needs to watch the system.
     "system_health.summary.read",
     "admin.system_health.view",
+    # Issue #185 (Decision 0067): the screens' lists; an agent reads its own task.
+    "tasks.list",
     # Issue #188 (Decision 0070): a person reads and marks their own notifications.
     "notification.read",
     "notification.manage",
@@ -214,6 +218,8 @@ READ_ONLY_CAPS = {
     # Issue #52 (Decision 0059): operational data, no user content.
     "system_health.summary.read",
     "admin.system_health.view",
+    # Issue #185 (Decision 0067): each item is decided by project.read.
+    "tasks.list",
     # Issue #188 (Decision 0070): one's own notifications, codes only.
     "notification.read",
 }

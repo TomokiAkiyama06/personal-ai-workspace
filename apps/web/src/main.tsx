@@ -3,9 +3,15 @@ import { createRoot } from "react-dom/client";
 import { App } from "./App";
 import { SessionProvider } from "./auth/session";
 import { I18nProvider } from "./i18n";
+import { apiMemorySource } from "./memory/apiSource";
+import { MemorySourceProvider } from "./memory/source";
 import { NotificationProvider } from "./notifications/store";
 import { RouterProvider } from "./router";
+import { apiTaskSource } from "./tasks/apiSource";
+import { TaskSourceProvider } from "./tasks/source";
 import { ThemeProvider } from "./theme";
+import { apiUsageSource } from "./usage/api";
+import { UsageSourceProvider } from "./usage/model";
 // IBM Plex Sans JP / IBM Plex Mono (the design's fonts), bundled into the build's
 // assets so the page's CSP can stay font-src 'self' (no font CDN).
 import "@fontsource/ibm-plex-sans-jp/400.css";
@@ -24,7 +30,13 @@ if (root) {
           <RouterProvider>
             <SessionProvider>
               <NotificationProvider>
-                <App />
+                <MemorySourceProvider source={apiMemorySource}>
+                  <UsageSourceProvider source={apiUsageSource}>
+                    <TaskSourceProvider source={apiTaskSource}>
+                      <App />
+                    </TaskSourceProvider>
+                  </UsageSourceProvider>
+                </MemorySourceProvider>
               </NotificationProvider>
             </SessionProvider>
           </RouterProvider>
