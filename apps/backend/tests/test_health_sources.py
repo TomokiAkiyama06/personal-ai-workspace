@@ -265,30 +265,33 @@ class StaticScheduler:
 
 
 TASK_ROW = (1, 2, 3, 1, 1, 1, 0, 1, 7, 1)
+NO_INCIDENTS = (0, 0, 0, 0)
 NO_EVENTS = (0, 2, 0)  # failures in the last hour / day, retries in the last hour
 
 
 class TaskQueueSourceTest(unittest.IsolatedAsyncioTestCase):
     async def test_counts_and_failures(self):
-        database = RowsDatabase([TASK_ROW], [NO_EVENTS], [(0,)])
+        database = RowsDatabase([TASK_ROW], [NO_EVENTS], [(0,)], [NO_INCIDENTS])
         health = await TaskQueueSource(database).check()
         self.assertIs(health.severity, Severity.INFO)
         self.assertEqual(health.metrics["queued"], 1)
         self.assertEqual(health.metrics["waiting_resource"], 1)
         self.assertEqual(health.metrics["failed_last_day"], 2)
         self.assertEqual(health.metrics["completed_last_day"], 7)
-        one = RowsDatabase([TASK_ROW], [(1, 2, 0)], [(0,)])
+        one = RowsDatabase([TASK_ROW], [(1, 2, 0)], [(0,)], [NO_INCIDENTS])
         health = await TaskQueueSource(one).check()
         self.assertIs(health.severity, Severity.WARNING)
         self.assertEqual(health.metrics["failed_last_hour"], 1)
         many = (limits.TASK_FAILURES_ERROR, limits.TASK_FAILURES_ERROR, 0)
-        health = await TaskQueueSource(RowsDatabase([TASK_ROW], [many], [(0,)])).check()
+        health = await TaskQueueSource(
+            RowsDatabase([TASK_ROW], [many], [(0,)], [NO_INCIDENTS])
+        ).check()
         self.assertIs(health.severity, Severity.ERROR)
         self.assertEqual(health.reasons, ("task_failures",))
 
     async def test_retries_and_loops(self):
         # A loop never fails its task: it shows by itself (Codex P1 on PR #170).
-        database = RowsDatabase([TASK_ROW], [(0, 0, 2)], [(1,)])
+        database = RowsDatabase([TASK_ROW], [(0, 0, 2)], [(1,)], [NO_INCIDENTS])
         health = await TaskQueueSource(database, loop_threshold=4).check()
         self.assertIs(health.severity, Severity.WARNING)
         self.assertEqual(health.reasons, ("loops_detected", "task_retries"))
@@ -297,11 +300,50 @@ class TaskQueueSourceTest(unittest.IsolatedAsyncioTestCase):
             (2, 1),
         )
         self.assertEqual(database.calls[2][1], {"threshold": 4})
-        loops = RowsDatabase([TASK_ROW], [NO_EVENTS], [(limits.TASK_LOOPS_ERROR,)])
+        loops = RowsDatabase(
+            [TASK_ROW], [NO_EVENTS], [(limits.TASK_LOOPS_ERROR,)], [NO_INCIDENTS]
+        )
         health = await TaskQueueSource(loops).check()
         self.assertEqual(
             (health.severity, health.reasons), (Severity.ERROR, ("loops_detected",))
         )
+
+    async def test_out_of_memory_failures_and_escalations(self):
+        # Decision 0071: one OOM or an escalation in the last hour is a warning,
+        # AGENT_OOM_ERROR OOMs an error; escalations never are by themselves.
+        database = RowsDatabase([TASK_ROW], [NO_EVENTS], [(0,)], [(1, 4, 2, 5)])
+        health = await TaskQueueSource(database).check()
+        self.assertIs(health.severity, Severity.WARNING)
+        self.assertEqual(health.reasons, ("agent_out_of_memory", "agent_escalations"))
+        self.assertEqual(
+            [
+                health.metrics[name]
+                for name in (
+                    "oom_last_hour",
+                    "oom_last_day",
+                    "escalations_last_hour",
+                    "escalations_last_day",
+                )
+            ],
+            [1, 4, 2, 5],
+        )
+        many = (limits.AGENT_OOM_ERROR, limits.AGENT_OOM_ERROR, 0, 0)
+        database = RowsDatabase([TASK_ROW], [NO_EVENTS], [(0,)], [many])
+        health = await TaskQueueSource(database).check()
+        self.assertEqual(
+            (health.severity, health.reasons),
+            (Severity.ERROR, ("agent_out_of_memory",)),
+        )
+        escalations = (0, 0, 100, 100)
+        database = RowsDatabase([TASK_ROW], [NO_EVENTS], [(0,)], [escalations])
+        health = await TaskQueueSource(database).check()
+        self.assertEqual(
+            (health.severity, health.reasons),
+            (Severity.WARNING, ("agent_escalations",)),
+        )
+        # Nothing in the last day: quiet.
+        database = RowsDatabase([TASK_ROW], [NO_EVENTS], [(0,)], [NO_INCIDENTS])
+        self.assertIs((await TaskQueueSource(database).check()).severity, Severity.INFO)
 
 
 class MemoryWorkerSourceTest(unittest.IsolatedAsyncioTestCase):
@@ -483,7 +525,7 @@ class MetricNamesTest(unittest.IsolatedAsyncioTestCase):
             await ComputeSource(scheduler, StaticScheduler(full)).check(),
             await ComputeSource(probe=FakeProbe()).check(),
             await TaskQueueSource(
-                RowsDatabase([TASK_ROW], [NO_EVENTS], [(0,)])
+                RowsDatabase([TASK_ROW], [NO_EVENTS], [(0,)], [NO_INCIDENTS])
             ).check(),
             await MemoryWorkerSource(RowsDatabase([(1, 0, 1.0, 0, 0)], [(0,)])).check(),
             await ConnectionSource(

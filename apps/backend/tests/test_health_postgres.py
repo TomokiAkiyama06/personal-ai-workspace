@@ -58,7 +58,7 @@ class HealthPostgresTest(unittest.IsolatedAsyncioTestCase):
                 text(
                     "TRUNCATE health_metric_samples, health_events, connection_usage,"
                     " shared_connections, loop_failure_signatures, task_events,"
-                    " tasks CASCADE"
+                    " agent_incidents, tasks CASCADE"
                 )
             )
 
@@ -158,11 +158,20 @@ class HealthPostgresTest(unittest.IsolatedAsyncioTestCase):
             " VALUES (now() - interval '500 days', 'database', 'info', 'ok'),"
             " (now(), 'database', 'warning', 'degraded')"
         )
+        # The agent incidents are kept as long as the events (Decision 0071).
+        self.insert_incident("out_of_memory", "500 days")
+        self.insert_incident("escalation", "399 days")
 
         result = await self.store.roll_up(retention_days=400)
 
         self.assertEqual(result.moved, {0: 2, 60: 2, 300: 1})
-        self.assertEqual((result.purged_samples, result.purged_events), (1, 1))
+        self.assertEqual(
+            (result.purged_samples, result.purged_events, result.purged_incidents),
+            (1, 1, 1),
+        )
+        self.assertEqual(
+            self.sql("SELECT kind FROM agent_incidents"), [("escalation",)]
+        )
         rows = {(r[1], r[2]): r[3:] for r in self.rows()}
         self.assertEqual(rows[(60, old)], (4, 10.0, 0.5, 5.0))
         self.assertEqual(rows[(0, recent)], (1, 9.0, 9.0, 9.0))
@@ -344,6 +353,56 @@ class HealthPostgresTest(unittest.IsolatedAsyncioTestCase):
         result = await TaskQueueSource(self.database).check()
         self.assertEqual(result.metrics["loops_last_hour"], 1)
 
+    def insert_incident(self, kind: str, age: str) -> None:
+        self.sql(
+            "INSERT INTO agent_incidents (kind, occurred_at)"
+            f" VALUES (:k, now() - interval '{age}')",
+            k=kind,
+        )
+
+    async def test_agent_incidents_are_counted(self):
+        # Decision 0071: the agents' out-of-memory failures and escalations of
+        # the last hour and day (one row each in agent_incidents).
+        for kind, age in (
+            ("out_of_memory", "5 minutes"),
+            ("out_of_memory", "3 hours"),
+            ("out_of_memory", "2 days"),
+            ("escalation", "10 minutes"),
+            ("escalation", "20 minutes"),
+            ("escalation", "23 hours"),
+        ):
+            self.insert_incident(kind, age)
+        result = await TaskQueueSource(self.database).check()
+        metrics = result.metrics
+        self.assertEqual(
+            (metrics["oom_last_hour"], metrics["oom_last_day"]),
+            (1, 2),
+        )
+        self.assertEqual(
+            (metrics["escalations_last_hour"], metrics["escalations_last_day"]),
+            (2, 3),
+        )
+        self.assertIs(result.severity, Severity.WARNING)
+        self.assertEqual(result.reasons, ("agent_out_of_memory", "agent_escalations"))
+
+    async def test_repeated_out_of_memory_failures_are_an_error(self):
+        # "OOM連発": AGENT_OOM_ERROR in the last hour (two are a warning).
+        for count, severity in ((2, Severity.WARNING), (3, Severity.ERROR)):
+            with self.subTest(count=count):
+                self.clean()
+                for _ in range(count):
+                    self.insert_incident("out_of_memory", "1 minute")
+                result = await TaskQueueSource(self.database).check()
+                self.assertIs(result.severity, severity)
+                self.assertEqual(result.reasons, ("agent_out_of_memory",))
+
+    async def test_escalations_alone_are_never_an_error(self):
+        for _ in range(20):
+            self.insert_incident("escalation", "1 minute")
+        result = await TaskQueueSource(self.database).check()
+        self.assertEqual(result.metrics["escalations_last_hour"], 20)
+        self.assertIs(result.severity, Severity.WARNING)
+
     async def test_a_late_event_keeps_the_time_it_was_seen(self):
         seen = datetime(2026, 9, 30, 3, 0, tzinfo=UTC)
         await self.store.record_changes(
@@ -484,7 +543,7 @@ class HealthPostgresTest(unittest.IsolatedAsyncioTestCase):
     def test_the_task_counts_use_the_partial_indexes(self):
         # The sample runs every 10-30 seconds: it must not read every task that
         # ever ended, nor every task event (Codex P2 on PR #170).
-        from paw_backend.health.sources import _TASK_EVENTS, _TASKS
+        from paw_backend.health.sources import _INCIDENTS, _TASK_EVENTS, _TASKS
 
         with self.engine.begin() as connection:
             connection.execute(text("SET LOCAL enable_seqscan = off"))
@@ -492,12 +551,13 @@ class HealthPostgresTest(unittest.IsolatedAsyncioTestCase):
                 sql: "\n".join(
                     row[0] for row in connection.execute(text(f"EXPLAIN {sql}"))
                 )
-                for sql in (_TASKS, _TASK_EVENTS)
+                for sql in (_TASKS, _TASK_EVENTS, _INCIDENTS)
             }
         # With sequential scans off, one is planned only when no index serves.
         for plan in plans.values():
             self.assertNotIn("Seq Scan", plan)
         self.assertIn("ix_task_events_retry_fail_created_at", plans[_TASK_EVENTS])
+        self.assertIn("ix_agent_incidents_occurred_at", plans[_INCIDENTS])
 
     def test_the_in_flight_index_is_partial(self):
         ((definition,),) = self.sql(

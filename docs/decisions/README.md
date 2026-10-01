@@ -69,6 +69,8 @@
 | [0061](0061-restore-skipped-repository-memories.md) | Restore で飛ばした Repository（名前・既定の Branch の Credential を伏せ字にしたもの）の Repo 単位の記憶を戻さず、Dry run と Apply の手作業の手順に一覧で出し、Audit の `reason` に件数を足す（Decision 0054 の 9・12 の該当点を Supersede。Issue #171） | Approved |
 | [0062](0062-integration-push-fixed-form-no-options.md) | Integration Gate の Push の固定の形を `push --quiet --no-follow-tags --no-recurse-submodules --no-signed -- <URL> <commit>:refs/heads/paw/...` にし、SSH の Wrapper もこの形だけを受け付ける（Checkout の `push.followTags` / `push.recurseSubmodules` / `push.gpgSign` を打ち消す。Decision 0052 の 3・9 の形だけを Supersede。Issue #90） | Approved |
 | [0065](0065-manual-supersedes-undo.md) | 手動の `supersedes` を取り消すときは、古い記憶を有効に戻さず、その最後の内容で新しい版を作る（案 B。Decision 0034 の 8 が委ねた点。Issue #49 / #186） | Approved |
+| [0071](0071-agent-oom-and-escalation-records.md) | Agent の OOM は Runtime が `AgentOutOfMemory`（Runtime が名乗れる閉じた Error Class に追加。`MemoryError` も OOM）で報告し、OOM と Escalation を `agent_incidents` に 1 件 1 行で残して System Health の `task_queue` で数える（OOM 1 件 `WARNING`・3 件 `ERROR`、Escalation は `WARNING`。Issue #183、Decision 0059 の後続） | Approved |
+| [0069](0069-usage-quota-http-api.md) | 使用状況 / Quota の HTTP API の方針（集計は Codex / Claude の呼び出しだけで Local・GPU 時間・Escalation は記録なし（`null`）、期間は Asia/Tokyo の暦日と前の期間の取り方、Workspace の User の行、新しい Capability なし: 自分は `agent.use`・全体と他の User は `admin.usage.view`・User の一覧は `GET /api/v1/admin/users`（`admin.users.manage`）、Quota の変更は Passkey Step-up を直前の別 Transaction で確認、Migration なし。Issue #187） | Approved |
 
 運用は [AGENTS.md](../../AGENTS.md) の「仕様変更」に従います。
 

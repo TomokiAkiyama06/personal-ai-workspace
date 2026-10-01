@@ -25,6 +25,10 @@ TASK_FAILURES_ERROR = 5
 # Tasks in a detected loop (repeated failures) in the last hour: one is a
 # warning, this many an error. A retry is always a warning.
 TASK_LOOPS_ERROR = 3
+# Agents that ran out of memory in the last hour (Decision 0071, Proposed): one is
+# a warning, this many an error (the requirements' "OOM連発"). An escalation in
+# the last hour is always a warning, never an error by itself.
+AGENT_OOM_ERROR = 3
 
 # Shared connections: failed calls in the last hour are a warning when there
 # are at least this many and they are at least half of the calls.
