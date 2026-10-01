@@ -3,7 +3,7 @@
 - Status: Proposed
 - Date: 2026-10-02
 - Scope: Issue [#180](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/180)（[Decision 0040](0040-main-coding-model-selection.md) の 1〜3 の確認 Run）。根拠は [PAW-017 の報告](../benchmarks/paw-017-main-coding-2026-09.md) の 6
-- Supersedes: なし。[Decision 0037](0037-gpu-compute-scheduler.md)・[Decision 0039](0039-compute-scheduler-calibration.md)・[Decision 0040](0040-main-coding-model-selection.md)（いずれも Approved）は書き換えない
+- Supersedes: [Decision 0040](0040-main-coding-model-selection.md) のうち、3 の 1 つ目の「Resolved が今回（14/24）より下がらないこと」と、決めてほしいこと 1 の推奨の「3 の確認 Run で Resolved が下がらず」の採用条件の部分だけ（この Decision の 1 の読み方で置き換える）。0040 のほかの点（Peak + Headroom が GPU に収まる条件、Resolved@3 を測ること、2・4〜6）は変えない。[Decision 0037](0037-gpu-compute-scheduler.md)・[Decision 0039](0039-compute-scheduler-calibration.md) は変えない（2 はその規則に従って割り当てを決める）
 
 ## 背景
 
@@ -28,6 +28,8 @@ Decision 0040 は Main を Qwen3.6-27B-FP8 にすることを、次の条件つ�
 ## 提案
 
 ### 1. 採用条件は「満たした」と読み、Qwen3.6-27B-FP8 の採用を確定する
+
+- 0040 の 3 の「Resolved が 14/24 より下がらないこと」を、1 回ごとの値ではなく下の読み方に置き換える（0040 の該当部分を `Supersedes` する）。
 
 - 同時に動かした Run の 1 回（run2）が 13/24 だった。落ちた spec-02 は同じ構成の他の 2 回と単独の 3 回では解けており、`submit` した Patch が Hidden acceptance に落ちたもの（Context の不足でも Error でもない）。Resolved@3 は 14/24 で、単独と同じ Task の集合。
 - 単独の KAT も 14 / 13 / 13 と同じ幅で揺れる。Sampling は温度 0 ではなく、1 Task の差は 1 回の Run の揺れの範囲。
