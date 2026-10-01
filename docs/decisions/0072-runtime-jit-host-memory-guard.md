@@ -35,7 +35,9 @@ Workspace の Backend が Model の Runtime を起動するのは `CommandModelC
 ### 4. Run 中の監視は Backend に作らず、Unit の `MemoryMax=` で抑える
 
 - ベンチマークの Script は 5 秒ごとに `MemAvailable` を見て自分の Server を止めた。Backend で同じことをすると、Backend が Runtime の Process に Signal を送ることになり、Decision 0037 の「Scheduler は pid を読むだけで、Signal を送らない」に反する。
-- 代わりに、Runtime の Unit に `MemoryMax=` を付け、メモリが尽きたら Kernel がその Unit の中だけで OOM を起こすようにする（Desktop やほかの User の Process を巻き込まない）。推奨値は「ホストの RAM − 16 GiB」（121 GiB のこの Server では `MemoryMax=104G`）。
+- 代わりに、Runtime の Unit に `MemoryMax=` を付け、2 の起動の最小値と同じ **32 GiB**（`MemoryMax=32G`）にする。起動は 32 GiB 以上空いているときだけなので、Runtime と JIT のビルドだけではホストの RAM を使い切れない。上限を超えそうになると Kernel はまずその Unit の Page cache（読んだ Weight）を回収し、それでも足りなければその Unit の中だけで OOM を起こす（Desktop やほかの User の Process を巻き込まない）。
+- 「ホストの RAM − 16 GiB」のような全体からの値は採らない。起動の時点でほかの Process が RAM の大半を使っていれば、Runtime が上限に届く前にホスト全体が尽きる（PR #189 の Codex review）。
+- Runtime がもっと要るときは、`MemoryMax=` と 2 の最小値（Unit の `ExecStartPre` と Backend の `min_host_available_bytes`）を一緒に上げる。
 
 ### 5. Model の操作の上限の検証の上限を 1,800 秒にする（Probe は 600 秒のまま）
 
@@ -55,15 +57,15 @@ Workspace の Backend が Model の Runtime を起動するのは `CommandModelC
 ## リスク
 
 - 32 GiB は 121 GiB のこの Server での値で、RAM の小さい Machine では GPU の Runtime が起動できなくなる。そのときは Admin が `min_host_available_bytes` を下げる（JIT の Cache があれば必要な RAM は小さい）。
-- `MemAvailable` は確認の瞬間の値で、起動の後にほかの Process が使えば足りなくなる。4 の `MemoryMax=` がその場合の上限になる。
-- `MemoryMax=` の値が小さすぎると、Weight の Load（Page cache も Unit に数えられる。ただし回収できる）や JIT が遅くなる、または Runtime が OOM で止まる。止まった Runtime は Scheduler が `unloaded` と見て、また Load する。
+- `MemAvailable` は確認の瞬間の値で、起動の後にほかの Process が使えば足りなくなる。4 の `MemoryMax=` は Runtime の分を抑えるだけで、ほかの Process の増加は防げない（そのときはホスト全体の OOM になりうる）。
+- 32 GiB は vLLM の Process 自身のホストの使用（Weight の読み込みの一時領域、CUDA Graph の準備など）を実測していない値。足りなければ Weight の Load（Page cache も Unit に数えられる。ただし回収できる）や JIT が遅くなる、または Runtime が OOM で止まる。止まった Runtime は Scheduler が `unloaded` と見て、また Load する。採用 Model の確認 Run（Decision 0040）で Unit の `MemoryPeak` を記録して見直す。
 
 ## 決めてほしいこと
 
 1. **JIT ビルドの並列数の既定を `MAX_JOBS=4`、`FLASHINFER_NVCC_THREADS=1` にし、Backend の Model の Command と Runtime の Unit の両方に付ける**（1）でよいか。推奨: はい。
 2. **GPU の Runtime を起動する前に、ホストの `MemAvailable` が 32 GiB 以上あることを確かめ、足りない・読めないときは起動せず警告して `FAILED` にする**（2）でよいか。推奨: はい。
 3. **確かめるのは GPU の Runtime の起動だけで、Unload と CPU の Copy は確かめない**（3）でよいか。推奨: はい。
-4. **Run 中の監視は Backend に作らず、Runtime の Unit に `MemoryMax=`（ホストの RAM − 16 GiB）を付ける**（4）でよいか。推奨: はい。
+4. **Run 中の監視は Backend に作らず、Runtime の Unit に起動の最小値と同じ `MemoryMax=32G` を付ける**（4）でよいか。推奨: はい。
 5. **Model の操作の上限の設定の検証の上限を 1,800 秒にし、Probe は 600 秒のままにする**（5）でよいか。推奨: はい。
 
 ## 承認後の扱い

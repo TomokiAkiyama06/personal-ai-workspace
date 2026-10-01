@@ -94,9 +94,12 @@ Every start of a model runtime (by the Compute Resource Scheduler or by hand) th
    command, logs a warning and fails with `host_memory_low` (the scheduler marks the model
    `FAILED` and tries again after 60 s); the unit's `ExecStartPre` refuses the same for a
    manual start. Unloads and the CPU copies of Embedding / Reranker models are not checked.
-3. **Keeps an out-of-memory inside the runtime's unit**: `MemoryMax=` of the host's RAM
-   minus 16 GiB (104G on the 121 GiB server), so the kernel stops the runtime instead of
-   unrelated processes.
+3. **Caps the runtime at that same minimum**: `MemoryMax=32G` on the runtime's unit. The
+   start was allowed because at least 32 GiB were available, so the runtime and its JIT
+   build cannot by themselves exhaust the host; past the cap the kernel reclaims the unit's
+   page cache (the weights it read) and then stops the runtime only. A cap relative to the
+   host's total RAM would not protect the host: other processes may already hold most of
+   it. Raise the cap and the minimum together if a runtime needs more.
 4. **Waits up to 900 s for the load** (Decision 0039 2: the longest measured first load
    from the HDD was 412 s): the scheduler's load timeout and the unit's `TimeoutStartSec`.
 

@@ -13,8 +13,12 @@
 #     inherit the backend's environment, so they are set here),
 #   - refuses to start below 32 GiB MemAvailable (ExecStartPre; the backend checks
 #     the same before it runs "systemctl start", this also covers a manual start),
-#   - keeps an out-of-memory inside this unit (MemoryMax=: the host's RAM minus
-#     16 GiB; 104G on the 121 GiB server).
+#   - never uses more than that minimum (MemoryMax=32G): the start was allowed
+#     because at least 32 GiB were free, so the runtime and its JIT build
+#     cannot by themselves push the host out of memory; past the cap the kernel
+#     reclaims this unit's page cache, then stops this unit only. A cap relative
+#     to the host's total RAM would not do this (the other processes may
+#     already hold most of it when the runtime starts; Codex review #189).
 #
 # pip CUDA wheels (CUDA_HOME is site-packages/nvidia/cu13 of the runtime's venv):
 # the JIT links with -L$CUDA_HOME/lib64 -lcudart (and -lcublas / -lcublasLt),
@@ -63,6 +67,8 @@ ExecStart=/opt/paw/runtime-venv/bin/vllm serve /srv/models/main --served-model-n
 ExecStartPost=/bin/sh -c 'until /usr/bin/curl -sf http://127.0.0.1:18080/health >/dev/null; do sleep 2; done'
 TimeoutStartSec=900
 TimeoutStopSec=90
-MemoryMax=104G
+# The same value as the ExecStartPre minimum (and the backend's
+# min_host_available_bytes): raise both together if the runtime needs more.
+MemoryMax=32G
 NoNewPrivileges=true
 PrivateTmp=true
