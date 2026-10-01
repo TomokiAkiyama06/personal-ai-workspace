@@ -15,10 +15,10 @@ Only ``Principal.user_id`` and ``Principal.system_role`` are taken from the call
 
 Authorization of each method:
 
-* ``get_project``, ``list_members``: ``project.read`` (Archived is readable;
-  the policy refuses a Pending deletion project);
-* ``list_invites``, ``invite_member``, ``remove_member``, ``change_role``:
-  ``project.members.manage``;
+* ``get_project``, ``list_members``, ``list_members_named``: ``project.read``
+  (Archived is readable; the policy refuses a Pending deletion project);
+* ``list_invites``, ``list_invites_named``, ``invite_member``, ``remove_member``,
+  ``change_role``: ``project.members.manage``;
 * ``rename_project``, ``set_description``: ``project.settings.manage``;
 * ``archive``, ``unarchive``, ``begin_deletion``, ``restore``:
   ``project.lifecycle.manage`` (a Manager, and Owner / Admin without being a
@@ -221,6 +221,7 @@ from paw_backend.projects.records import (
     LifecycleAction,
     Member,
     MemberStatus,
+    NamedMember,
     PendingInvite,
     Project,
     ProjectStatus,
@@ -858,6 +859,48 @@ class ProjectService:
             )
             invites = await store.list_open_invites(session, project_id, now)
         return tuple(invites)
+
+    async def list_members_named(
+        self, actor: Principal, project_id: uuid.UUID
+    ) -> tuple[NamedMember, ...]:
+        """``list_members`` with each member's login name (``project.read``).
+
+        The same authorization and order as ``list_members``, in one transaction;
+        the names are read only for the rows just listed (issue #184: the member
+        list of the Web App shows who a member is).
+        """
+        principal = self._actor(actor)
+        project_id = validate_uuid("project_id", project_id)
+        async with self._transaction() as session:
+            await self._guarded(
+                session, principal, Capability.PROJECT_READ, project_id, lock=False
+            )
+            members = await store.list_active_members(session, project_id)
+            names = await store.login_names_of_members(
+                session, project_id, [m.user_id for m in members]
+            )
+        return tuple(NamedMember(m, names.get(m.user_id, "")) for m in members)
+
+    async def list_invites_named(
+        self, actor: Principal, project_id: uuid.UUID
+    ) -> tuple[NamedMember, ...]:
+        """``list_invites`` with each invitee's login name (members.manage)."""
+        principal = self._actor(actor)
+        project_id = validate_uuid("project_id", project_id)
+        now = self._now()
+        async with self._transaction() as session:
+            await self._guarded(
+                session,
+                principal,
+                Capability.PROJECT_MEMBERS_MANAGE,
+                project_id,
+                lock=False,
+            )
+            invites = await store.list_open_invites(session, project_id, now)
+            names = await store.login_names_of_members(
+                session, project_id, [m.user_id for m in invites]
+            )
+        return tuple(NamedMember(m, names.get(m.user_id, "")) for m in invites)
 
     async def list_my_invites(self, actor: Principal) -> tuple[PendingInvite, ...]:
         """The open invitations addressed to the actor (self service), oldest first."""

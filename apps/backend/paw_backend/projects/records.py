@@ -162,6 +162,18 @@ class Member:
 
 
 @dataclass(frozen=True, slots=True)
+class NamedMember:
+    """A membership row with the user's login name (the HTTP member list, #184).
+
+    ``login_name`` is what the workspace shows for the user (``users.login_name``),
+    never anything private of that user.
+    """
+
+    member: Member
+    login_name: str
+
+
+@dataclass(frozen=True, slots=True)
 class PendingInvite:
     """An open invitation as its invitee sees it (``list_my_invites``)."""
 
