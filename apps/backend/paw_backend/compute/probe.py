@@ -24,7 +24,8 @@ or a log.
 import asyncio
 import contextlib
 import os
-from collections.abc import Sequence
+import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -115,19 +116,51 @@ class CommandRunner(Protocol):
         ...
 
 
+_ENV_NAME = re.compile(r"[A-Z_][A-Z0-9_]{0,63}")
+_RUNNER_ENV = frozenset({"PATH", "LC_ALL"})
+
+
+def _extra_env(value: object) -> dict[str, str]:
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping) or len(value) > 32:
+        raise InvalidComputeArgumentError("extra_env")
+    for name, setting in value.items():
+        if (
+            not isinstance(name, str)
+            or _ENV_NAME.fullmatch(name) is None
+            or name in _RUNNER_ENV
+            or not isinstance(setting, str)
+            or "\x00" in setting
+            or len(setting) > 1_024
+        ):
+            raise InvalidComputeArgumentError("extra_env")
+    return dict(value)
+
+
 class SubprocessRunner:
     """Runs a command without a shell, with a minimal environment, stdin closed
-    and stderr discarded, and stops it (only it) when it outlives the timeout."""
+    and stderr discarded, and stops it (only it) when it outlives the timeout.
+
+    ``extra_env``: variables added to that environment (not ``PATH`` /
+    ``LC_ALL``), such as the JIT build caps the model commands run with (issue
+    #182). The backend's own environment is never passed on."""
+
+    def __init__(self, *, extra_env: Mapping[str, str] | None = None) -> None:
+        self.extra_env = _extra_env(extra_env)
 
     async def run(
         self, argv: Sequence[str], *, timeout_seconds: float
     ) -> CommandResult:
+        env = dict(self.extra_env)
+        env["PATH"] = os.environ.get("PATH", "/usr/bin:/bin")
+        env["LC_ALL"] = "C"
         process = await asyncio.create_subprocess_exec(
             *argv,
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
-            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LC_ALL": "C"},
+            env=env,
         )
         try:
             async with asyncio.timeout(timeout_seconds):
@@ -156,11 +189,16 @@ class SubprocessRunner:
         return CommandResult(process.returncode, stdout.decode("utf-8", "replace"))
 
 
-def check_timeout(value: object, parameter: str = "timeout") -> float:
+def check_timeout(
+    value: object,
+    parameter: str = "timeout",
+    *,
+    maximum: float = MAX_COMMAND_TIMEOUT_SECONDS,
+) -> float:
     if (
         isinstance(value, bool)
         or not isinstance(value, int | float)
-        or not 0 < value <= MAX_COMMAND_TIMEOUT_SECONDS
+        or not 0 < value <= maximum
     ):
         raise InvalidComputeArgumentError(parameter)
     return float(value)
