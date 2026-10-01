@@ -2,7 +2,7 @@
 Decision 0070 Approved).
 
 Revision ID: 0188
-Revises: 0066
+Revises: 0183
 Create Date: 2026-10-01
 
 * ``notifications``: one row per notification: the aggregation key, the kind and
@@ -34,7 +34,7 @@ from sqlalchemy.dialects import postgresql
 from paw_backend.db_roles import grant_app_privileges
 
 revision: str = "0188"
-down_revision: str | Sequence[str] | None = "0066"
+down_revision: str | Sequence[str] | None = "0183"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
