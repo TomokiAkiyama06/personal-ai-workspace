@@ -40,7 +40,7 @@ Decision 0040 は Main を Qwen3.6-27B-FP8 にすることを、次の条件つ�
 - 0.10 × 95.6 GiB ≈ 9.6 GiB を Main の KV Pool から減らす（28.9 → 約 19.3 GiB、約 303k token）。この Run の KV の使用の最大は 51.5%（約 15 GiB、約 234k token）。Scheduler が Coding の Request に予約を許すのは Pool の 0.90（`kv_safety`）× 0.95（Coding の上限）で約 259k token なので、余裕は約 1.1 倍しかない。足りないときは Scheduler が新しい Request を待たせる（Admission。0037 の 4）ので OOM にはならないが、4 並列の Agent が待つ時間が増えうる。
 - Main の予算を超える分（0.61 で 1.4 GiB）が変わらないとみなすと、見込みの Footprint は Main 52.2・Memory Worker 15.6・Embedding と Reranker 計 17.1 GiB（合計 84.9 GiB）。Headroom と `restore_margin_bytes`（4.8 GiB ずつ）を足して 94.5 GiB で、GPU に 1.1 GiB の余裕が残る。
 - 確認 Run は Scheduler の Admission（`kv_safety` と Class の上限）を通した構成で行い、待ちの時間も記録する。待ちが多ければ、0.51 ではなく Memory Worker の KV を減らす・Embedding / Reranker を CPU に置く（代替案）を組み合わせる。
-- これは Run の実測からの見積もりで、Embedding と Reranker を別々の Process で測ってもいない。0.51 で、Embedding と Reranker を Scheduler と同じく別々の Runtime にして同時に動かす Run を 1 回行い、Resolved が下がらないことと、4 つの Deployment それぞれの Footprint（ピーク + 2 GiB）を確かめてから Deployment の設定に入れる（別の Issue）。
+- これは Run の実測からの見積もりで、Embedding と Reranker を別々の Process で測ってもいない。0.51 で、Embedding と Reranker を Scheduler と同じく別々の Runtime にして同時に動かす Run を 3 回行い、1 の読み方（Resolved@3 と平均が単独と同じ範囲）で Resolved が下がらないことと、4 つの Deployment それぞれの Footprint（ピーク + 2 GiB）を確かめてから Deployment の設定に入れる（別の Issue）。
 
 ### 3. KAT-Coder-V2.5-Dev は次点のまま、Load 時の FP8 量子化は Deployment に使わない
 
@@ -65,7 +65,7 @@ Decision 0040 は Main を Qwen3.6-27B-FP8 にすることを、次の条件つ�
 ## 決めてほしいこと
 
 1. **採用条件を「Resolved@3 と平均が単独と同じ範囲」と読み、Qwen3.6-27B-FP8 の採用を確定する**（1）か。推奨: はい（MODEL_CANDIDATES.md への追記は別の PR）。
-2. **共存時の Main の `gpu-memory-utilization` を 0.51 にし、その設定で（Embedding と Reranker を別々の Runtime にして）同時に動かす Run を 1 回行ってから Footprint を与える**（2）か。推奨: はい。
+2. **共存時の Main の `gpu-memory-utilization` を 0.51 にし、その設定で（Embedding と Reranker を別々の Runtime にして）同時に動かす Run を 3 回行ってから Footprint を与える**（2）か。推奨: はい。
 3. **KAT は次点のまま、Load 時の FP8 量子化は Deployment に使わない**（3）か。推奨: はい。
 
 ## 承認後の扱い

@@ -172,7 +172,7 @@
 | KAT-Coder-V2.5-Dev-FP8（同時に動かす、Load 時の量子化） | 13 | 14 | 13 | 13.3 | 14 | 13 | - |
 
 - 数字は 24 Task のうち解けた数。Resolved@3 は [BENCHMARK_EVALUATOR.md](../BENCHMARK_EVALUATOR.md) と paw-seed-v1 の `resolved_at_n` の定義どおり「最初の 3 回のいずれかで解けた Task」。「3 回とも解けた Task」は Run の揺れを見るための別の指標（安定性）で、Resolved@3 ではない。
-- **全構成・全 Run で結果が変わった Task は 2 つだけ**: spec-01-result-summary（KAT は単独・FP8 とも 3 回中 1 回）と spec-02-task-semantic-validation（Qwen3.6-27B-FP8 を同時に動かした run2 だけ失敗）。ほかの 13 Task（Injected Bug 7・Spec 5・hist-08）はすべての Run で解け、残りの Historical 10 Task はどの Run でも解けなかった。
+- **全構成・全 Run で結果が変わった Task は 2 つだけ**: spec-01-result-summary（KAT は単独・FP8 とも 3 回中 1 回）と spec-02-task-semantic-validation（Qwen3.6-27B-FP8 を同時に動かした run2 だけ失敗）。ほかの 12 Task（Injected Bug 7・Spec 4・hist-08）はすべての Run で解け、残りの Historical 10 Task はどの Run でも解けなかった。
 - 同時に動かした Qwen3.6-27B-FP8 の run2 の spec-02 の失敗は、`submit` で終えた Patch が Hidden acceptance に落ちたもの（24 step、最大 Prompt 24k token。Context の不足でも Error でもない）。
 - Harness の Error と LLM の Error は Qwen3.6-27B-FP8 では全 Run で 0。
 
