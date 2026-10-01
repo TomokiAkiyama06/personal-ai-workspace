@@ -64,6 +64,7 @@ from paw_backend.authz import AgentGrant, Capability, GrantEscalationError
 from paw_backend.orchestrator.config import Clock, OrchestratorConfig, SystemClock
 from paw_backend.orchestrator.domain import (
     DagState,
+    IncidentKind,
     NextStep,
     NodeRole,
     NodeState,
@@ -73,6 +74,7 @@ from paw_backend.orchestrator.errors import (
     GRANT_ESCALATION,
     INVALID_OUTCOME,
     NODE_TIMEOUT,
+    OUT_OF_MEMORY_CLASSES,
     DagAlreadyExistsError,
     DagStateError,
     InvalidOrchestratorArgumentError,
@@ -2195,6 +2197,15 @@ class Orchestrator:
                         f"Plan accepted: {len(accepted.nodes)} nodes",
                     )
                     return dag
+            if format_error_class(failure) in OUT_OF_MEMORY_CLASSES:
+                # A node's is written with its failure (``fail_node``); the
+                # planner has no node, so its own (Decision 0071).
+                try:
+                    await self._store.record_incident(IncidentKind.OUT_OF_MEMORY)
+                except Exception as error:
+                    logger.error(
+                        "Recording an incident failed (%s)", error_class_of(error)
+                    )
             try:
                 await self._loops.record_failure(
                     task_id,

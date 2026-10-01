@@ -18,6 +18,7 @@ from paw_backend.db import Database
 from paw_backend.orchestrator import (
     DagStore,
     ExecutionPlacement,
+    IncidentKind,
     NextStep,
     NodeBudgetHandle,
     NodeOutcome,
@@ -277,6 +278,10 @@ class StoreArgumentTest(unittest.IsolatedAsyncioTestCase):
                     "key": not_text(),
                     "error_class": not_text(),
                 },
+            ),
+            "record_incident": (
+                {"kind": IncidentKind.OUT_OF_MEMORY},
+                {"kind": [None, "", "oom", "Escalation", 1, CANARY, object()]},
             ),
             "interrupt": (
                 {"dag_id": DAG, "epoch": 1},

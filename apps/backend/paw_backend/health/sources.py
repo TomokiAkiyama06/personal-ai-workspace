@@ -11,7 +11,8 @@ The thresholds are ``limits.py`` (Decision 0059, Proposed).
   read-only GPU probe (``nvidia-smi --query-*``) alone; else ``not_configured``.
   It never loads or unloads a model and never starts anything but the probe.
 * :class:`TaskQueueSource`: tasks by state, failures (events) of the last
-  hour / day, retries and detected loops of the last hour.
+  hour / day, retries and detected loops of the last hour, and the agents' out
+  of memory failures and escalations of the last hour / day (Decision 0071).
 * :class:`MemoryWorkerSource`: the Memory consolidation queue (pending, deferred
   for an unreachable worker, expired leases, dead letters).
 * :class:`ConnectionSource`: the shared Codex / Claude connections (status,
@@ -425,14 +426,30 @@ SELECT count(DISTINCT task_id) FROM (
 ) AS repeated
 """
 
+# The agent incidents (Decision 0071, Proposed) of the last hour and day:
+# ``ix_agent_incidents_occurred_at``.
+_INCIDENTS = """
+SELECT
+    count(*) FILTER (WHERE kind = 'out_of_memory'
+                     AND occurred_at >= now() - interval '1 hour'),
+    count(*) FILTER (WHERE kind = 'out_of_memory'),
+    count(*) FILTER (WHERE kind = 'escalation'
+                     AND occurred_at >= now() - interval '1 hour'),
+    count(*) FILTER (WHERE kind = 'escalation')
+FROM agent_incidents
+WHERE occurred_at >= now() - interval '24 hours'
+"""
+
 
 class TaskQueueSource:
     """Every user's tasks, counted (no id, title or project), with the retries
-    and the detected loops of the last hour.
+    and the detected loops of the last hour and the agents' out-of-memory
+    failures and escalations (Decision 0071).
 
-    A failure, a retry or a loop in the last hour is a warning (the Notification
-    Policy's "単発の軽微なfailure、retry"); ``TASK_FAILURES_ERROR`` failures or
-    ``TASK_LOOPS_ERROR`` loops an error."""
+    A failure, a retry, a loop, an out-of-memory failure or an escalation in the
+    last hour is a warning (the Notification Policy's "単発の軽微なfailure、
+    retry"); ``TASK_FAILURES_ERROR`` failures, ``TASK_LOOPS_ERROR`` loops or
+    ``AGENT_OOM_ERROR`` out-of-memory failures an error ("OOM連発")."""
 
     component = Component.TASK_QUEUE
     max_age_seconds = limits.REPORT_MAX_AGE_SECONDS
@@ -455,6 +472,9 @@ class TaskQueueSource:
         ((loops,),) = await self._database.fetch_abortable(
             _LOOPS, {"threshold": self._loop_threshold}, timeout_seconds=timeout
         )
+        (
+            (oom, oom_day, escalations, escalations_day),
+        ) = await self._database.fetch_abortable(_INCIDENTS, timeout_seconds=timeout)
         metrics = {
             name: int(value) for name, value in zip(_TASK_COLUMNS, row, strict=True)
         }
@@ -462,11 +482,17 @@ class TaskQueueSource:
         metrics["failed_last_day"] = int(failed_day)
         metrics["retries_last_hour"] = int(retries)
         metrics["loops_last_hour"] = int(loops)
+        metrics["oom_last_hour"] = int(oom)
+        metrics["oom_last_day"] = int(oom_day)
+        metrics["escalations_last_hour"] = int(escalations)
+        metrics["escalations_last_day"] = int(escalations_day)
         reasons = []
         severities = [Severity.INFO]
         for count, reason, error_at in (
             (int(failed), "task_failures", limits.TASK_FAILURES_ERROR),
             (int(loops), "loops_detected", limits.TASK_LOOPS_ERROR),
+            (int(oom), "agent_out_of_memory", limits.AGENT_OOM_ERROR),
+            (int(escalations), "agent_escalations", None),
             (int(retries), "task_retries", None),
         ):
             if not count:

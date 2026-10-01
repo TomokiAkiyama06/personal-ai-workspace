@@ -325,7 +325,7 @@ class PostgresOrchestratorTestCase(PostgresTaskTestCase):
         # use the unprivileged application role (test_orchestrator_grants).
         await self.owner_sql(
             "TRUNCATE " + ", ".join(TABLES) + ", queue_entries, budget_usages,"
-            " loop_failure_signatures"
+            " loop_failure_signatures, agent_incidents"
         )
         self.store = DagStore(self.database)
 
@@ -376,6 +376,11 @@ class PostgresOrchestratorTestCase(PostgresTaskTestCase):
             await harness.orchestrator.submit_plan(task_id, plan)
         await harness.orchestrator.enqueue_task(task_id, preset=preset)
         return task_id
+
+    async def incidents(self) -> list[str]:
+        """The kinds of the agent incidents recorded so far, oldest first."""
+        rows = await self.rows("SELECT kind FROM agent_incidents ORDER BY id")
+        return [row["kind"] for row in rows]
 
     async def states_of(self, task_id, attempt: int = 1) -> dict[str, str]:
         dag = await self.store.get(task_id, attempt)
