@@ -36,6 +36,7 @@ from . import (
     test_connections_execute,
     test_connections_quota_admin,
     test_connections_quota_enforcement,
+    test_connections_report,
     test_connections_result_limit,
     test_connections_settlement_cancel,
 )
@@ -174,6 +175,7 @@ for _module in (
     test_connections_quota_admin,
     test_connections_execute,
     test_connections_quota_enforcement,
+    test_connections_report,
     test_connections_concurrency,
     test_connections_result_limit,
     test_connections_settlement_cancel,

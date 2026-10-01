@@ -308,8 +308,14 @@ class Database:
         work: Callable[[psycopg.AsyncConnection], Awaitable[T]],
         *,
         timeout_seconds: float | None = None,
+        snapshot: bool = False,
     ) -> T:
         """Run ``work(connection)`` as ONE transaction that never outlives its limit.
+
+        ``snapshot=True`` makes it a read-only ``REPEATABLE READ`` transaction:
+        every statement of ``work`` sees the same snapshot (a report assembled
+        from several reads, issue #187). Set before the transaction's first
+        statement, as PostgreSQL requires.
 
         For a write that needs several statements in one transaction (a lock,
         then a read, then the change) and must still fail closed on time: it has
@@ -361,6 +367,10 @@ class Database:
 
         async def transaction(connection: psycopg.AsyncConnection, deadline: float):
             async with connection.transaction():
+                if snapshot:
+                    await connection.execute(
+                        "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
+                    )
                 server_limit = max(0.0, deadline - loop.time()) + _SERVER_GRACE_SECONDS
                 milliseconds = str(max(1, round(server_limit * 1000)))
                 await connection.execute(
