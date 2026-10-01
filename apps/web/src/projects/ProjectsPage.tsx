@@ -22,6 +22,7 @@ import {
   PROJECT_NAME_MAX,
   PROJECT_ROLES,
   type ProjectDetail,
+  type ProjectListing,
   type ProjectMember,
   type ProjectRepository,
   type ProjectRole,
@@ -1145,7 +1146,7 @@ function ConnectedProjects({ source }: { source: ProjectsSource }) {
   const { t } = useI18n();
   const { path, navigate } = useRouter();
   const selectedId = selectedProjectId(path);
-  const [load, setLoad] = useState<Load<ProjectSummary[]>>({ status: "loading" });
+  const [load, setLoad] = useState<Load<ProjectListing>>({ status: "loading" });
   const [reloads, setReloads] = useState(0);
   // Which read of the list `load` answers: a project is read only once the latest
   // read answered (the previous list stays shown meanwhile).
@@ -1174,7 +1175,7 @@ function ConnectedProjects({ source }: { source: ProjectsSource }) {
   }, [source, reloads, t]);
 
   const reloadList = useCallback(() => setReloads((value) => value + 1), []);
-  const projects = load.status === "ready" ? load.data : [];
+  const projects = load.status === "ready" ? load.data.projects : [];
   const summary = projects.find((project) => project.id === selectedId);
 
   return (
@@ -1214,6 +1215,11 @@ function ConnectedProjects({ source }: { source: ProjectsSource }) {
             </div>
           )}
           {load.status === "ready" && <ProjectList projects={projects} selectedId={selectedId} />}
+          {load.status === "ready" && load.data.truncated && (
+            <p className="muted small" role="status">
+              {t("projects.truncated")}
+            </p>
+          )}
           <ArchiveNote />
         </aside>
         <section className="projects-detail">

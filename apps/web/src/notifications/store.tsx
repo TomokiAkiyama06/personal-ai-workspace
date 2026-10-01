@@ -114,6 +114,65 @@ interface NotificationValue {
 
 const NotificationContext = createContext<NotificationValue | null>(null);
 const MAX_ITEMS = 100;
+// The ids of the entries the MAX_ITEMS limit pushed out, still deduplicated (a
+// replay of their events is not new). Bounded too: the oldest are forgotten.
+const MAX_EVICTED_IDS = 10_000;
+
+interface NotificationState {
+  items: NotificationItem[];
+  /**
+   * The events of entries dropped by the MAX_ITEMS limit (not of resolved ones),
+   * as `evictedEvent(key, id)`: an id is only unique within its key.
+   */
+  evicted: ReadonlySet<string>;
+}
+
+const EMPTY: NotificationState = { items: [], evicted: new Set() };
+
+function evictedEvent(key: string, id: string): string {
+  return JSON.stringify([key, id]);
+}
+
+/**
+ * `mergeNotification` that also deduplicates the events of entries the 100-entry
+ * limit pushed out (Codex review #173): the list is capped, the ids seen are not
+ * forgotten with it. A resolved entry's ids are forgotten (its condition may
+ * come back).
+ */
+function pushNotification(
+  state: NotificationState,
+  incoming: IncomingNotification,
+): NotificationState {
+  if (incoming.id !== undefined && state.evicted.has(evictedEvent(incoming.key, incoming.id))) {
+    return state;
+  }
+  const items = mergeNotification(state.items, incoming);
+  if (items === state.items) return state;
+  const kept = new Set(items.map((item) => item.key));
+  const dropped = state.items
+    .filter((item) => !kept.has(item.key))
+    .flatMap((item) => item.ids.map((id) => evictedEvent(item.key, id)));
+  if (dropped.length === 0) return { ...state, items };
+  const evicted = [...state.evicted, ...dropped];
+  return { items, evicted: new Set(evicted.slice(-MAX_EVICTED_IDS)) };
+}
+
+/**
+ * The condition of the keys passing `test` is over: their entries go away and
+ * their ids are forgotten, also those of entries the limit already pushed out
+ * (Codex review #194), so the condition coming back is a new notification.
+ */
+function resolveKeys(state: NotificationState, test: (key: string) => boolean): NotificationState {
+  const items = state.items.some((item) => test(item.key))
+    ? state.items.filter((item) => !test(item.key))
+    : state.items;
+  const remembered = [...state.evicted].filter((event) => {
+    const [key] = JSON.parse(event) as [string, string];
+    return !test(key);
+  });
+  const evicted = remembered.length === state.evicted.size ? state.evicted : new Set(remembered);
+  return items === state.items && evicted === state.evicted ? state : { items, evicted };
+}
 
 function earlier(a: string, b: string): string {
   return Date.parse(b) < Date.parse(a) ? b : a;
@@ -165,37 +224,47 @@ export function NotificationProvider({
   source?: NotificationSource;
   children: ReactNode;
 }) {
-  const [items, setItems] = useState<NotificationItem[]>([]);
+  const [state, setState] = useState<NotificationState>(EMPTY);
+  const items = state.items;
+  // Every change but a push, a resolve and a clear is to the list only.
+  const setItems = useCallback((change: (current: NotificationItem[]) => NotificationItem[]) => {
+    setState((current) => {
+      const next = change(current.items);
+      return next === current.items ? current : { ...current, items: next };
+    });
+  }, []);
   const push = useCallback((incoming: IncomingNotification) => {
-    setItems((current) => mergeNotification(current, incoming));
+    setState((current) => pushNotification(current, incoming));
   }, []);
   const resolve = useCallback((key: string) => {
-    setItems((current) =>
-      current.some((item) => item.key === key)
-        ? current.filter((item) => item.key !== key)
-        : current,
-    );
+    setState((current) => resolveKeys(current, (candidate) => candidate === key));
   }, []);
   const resolveMatching = useCallback((test: (key: string) => boolean) => {
-    setItems((current) =>
-      current.some((item) => test(item.key)) ? current.filter((item) => !test(item.key)) : current,
-    );
+    setState((current) => resolveKeys(current, test));
   }, []);
-  const markRead = useCallback((key: string) => {
-    setItems((current) =>
-      current.map((item) => (item.key === key && !item.read ? { ...item, read: true } : item)),
-    );
-  }, []);
+  const markRead = useCallback(
+    (key: string) => {
+      setItems((current) =>
+        current.map((item) => (item.key === key && !item.read ? { ...item, read: true } : item)),
+      );
+    },
+    [setItems],
+  );
   const markAllRead = useCallback(() => {
     setItems((current) => current.map((item) => ({ ...item, read: true })));
-  }, []);
-  const dismiss = useCallback((key: string) => {
-    setItems((current) =>
-      current.map((item) => (item.key === key ? { ...item, dismissed: true, read: true } : item)),
-    );
-  }, []);
+  }, [setItems]);
+  const dismiss = useCallback(
+    (key: string) => {
+      setItems((current) =>
+        current.map((item) => (item.key === key ? { ...item, dismissed: true, read: true } : item)),
+      );
+    },
+    [setItems],
+  );
   const clear = useCallback(() => {
-    setItems((current) => (current.length === 0 ? current : []));
+    setState((current) =>
+      current.items.length === 0 && current.evicted.size === 0 ? current : EMPTY,
+    );
   }, []);
   useEffect(() => source?.subscribe(push, resolve), [source, push, resolve]);
   const value = useMemo(

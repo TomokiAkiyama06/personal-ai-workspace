@@ -969,6 +969,43 @@ class ExclusiveFreeVramTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.scheduler.status().mode, SchedulerMode.NORMAL)
         await running.release()
 
+    async def test_a_zero_drain_time_starts_on_an_idle_gpu(self):
+        # Codex review (#168, P2): with no local GPU work there is nothing to
+        # drain, so ``drain_seconds=0`` (and ``wait_seconds=0``) is not a limit
+        # the reading after the (empty) drain can pass: every reading takes time.
+        read = self.probe.sample
+
+        async def slow_sample():
+            sample = await read()
+            self.clock._now += 0.05
+            return sample
+
+        self.probe.sample = slow_sample
+        lease = await self.scheduler.acquire(
+            ComputeRequest(EX, vram_bytes=80 * GIB), wait_seconds=0, drain_seconds=0
+        )
+        self.assertEqual(self.scheduler.status().mode, SchedulerMode.EXCLUSIVE)
+        await lease.release()
+
+    async def test_a_zero_drain_time_still_refuses_running_work(self):
+        # Work that is running is not drained in no time: the drain gives up.
+        running = (await self.scheduler.try_acquire(coding())).lease
+        job = asyncio.create_task(
+            self.scheduler.acquire(
+                ComputeRequest(EX, vram_bytes=80 * GIB),
+                wait_seconds=0,
+                drain_seconds=0,
+            )
+        )
+        await settle()
+        await self.clock.advance(0)  # the drain's timer (of no time) runs out
+        with self.assertRaises(ExclusiveUnavailableError) as raised:
+            await job
+        self.assertEqual(raised.exception.failure, ExclusiveFailure.DRAIN_TIMEOUT)
+        self.assertEqual(self.control.actions, [])
+        self.assertEqual(self.scheduler.status().mode, SchedulerMode.NORMAL)
+        await running.release()
+
     async def test_drain_seconds_is_checked(self):
         with self.assertRaises(InvalidComputeArgumentError):
             await self.scheduler.acquire(
