@@ -460,6 +460,38 @@ describe("Tasks page", () => {
     }
   });
 
+  it("reads a failed or cancelled task again (another user may retry or restart it)", async () => {
+    // Codex review (#174, P2): the detail of a task that can be re-opened is
+    // not final.
+    const tasks = sampleTasks();
+    const failed = tasks.find((task) => task.id === TASK_205);
+    if (failed) {
+      failed.state = "failed";
+      failed.waitReason = null;
+    }
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const { source } = fakeTaskSource(tasks);
+      renderTasks(`/agents/${TASK_205}`, source);
+      const detail = await screen.findByRole("article", { name: "メモリ整理ジョブ" });
+      await waitFor(() =>
+        expect(detail.querySelector(".task-title-block .state-pill")).toHaveTextContent("失敗"),
+      );
+      if (failed) {
+        failed.state = "queued";
+        failed.version = 4;
+      }
+      await vi.advanceTimersByTimeAsync(5000);
+      await waitFor(() =>
+        expect(detail.querySelector(".task-title-block .state-pill")).toHaveTextContent(
+          "キュー待ち",
+        ),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("offers Retry and Restart for a failed task and nothing for a completed one", async () => {
     const tasks = sampleTasks();
     const failed = tasks.find((task) => task.id === TASK_205);

@@ -344,7 +344,12 @@ function TaskDetailView({
   useEffect(() => {
     if (form && task && !ACCEPTED_CONTROLS[task.state].includes(form)) setForm(null);
   }, [form, task]);
-  const polling = task !== null && isUnsettled(task.state) && pending === null;
+  // A failed or cancelled task is read again too: another tab or user may retry
+  // or restart it (Codex review #174). Only a completed task is final.
+  const polling =
+    task !== null &&
+    (isUnsettled(task.state) || ACCEPTED_CONTROLS[task.state].length > 0) &&
+    pending === null;
   useEffect(() => {
     if (!polling) return;
     const timer = window.setInterval(refresh, REFRESH_MS);
