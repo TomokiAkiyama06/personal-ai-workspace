@@ -811,7 +811,7 @@ Table は加えて `recorded_at`（Database の時計。INSERT 時に Trigger �
 | Mode | 対象 | 記録 | Audit を書けないとき |
 | --- | --- | --- | --- |
 | `REQUIRED`（既定） | 上記以外のすべて（副作用のある操作、管理系、`admin.audit.view` / `admin.usage.view` も含む） | 許可も拒否も記録する | **許可を拒否に変える**（`audit_unavailable`、HTTP 503）。拒否は拒否のまま |
-| `DENIED_ONLY` | 読み取り専用の許可リスト（`project.read`、`shared_memory.read`、`account.read`、`memory.read`、System Health の `system_health.summary.read` と `admin.system_health.view`（Decision 0059、Proposed））だけ | 拒否だけを Best Effort で記録し、許可した読み取りは記録しない | 読み取りは止めない |
+| `DENIED_ONLY` | 読み取り専用の許可リスト（`project.read`、`shared_memory.read`、`account.read`、`memory.read`、System Health の `system_health.summary.read` と `admin.system_health.view`（Decision 0059、Proposed）、Task / PR の一覧の `tasks.list`（Decision 0067、Approved））だけ | 拒否だけを Best Effort で記録し、許可した読み取りは記録しない | 読み取りは止めない |
 
 - **認証されていない Request の拒否は Database に書きません。** 誰でも作れる行になり、Table は削除できないためです。
   代わりに `INFO` の Log（Reason、Action、Resource の種類、`correlation_id`、`client_request_id`。例外の文は含めない）に出します。
@@ -4512,6 +4512,25 @@ Implementation Backlog の受け入れ条件 3 つは、上のとおり実装で
 - `gh auth status` の JSON がホストごとに複数の Active でない Account を持つ場合、`active: true` の 1 件だけを見ます（`gh` 自身が Host ごとに Active な Account を高々 1 つに保つ前提）。
 - `gh repo create` の出力を、GitHub の URL として `parse_github_source` でもう一度検証していますが、これは `create_local` / `create_github` の既存の契約（`check_created_repository`）をそのまま踏襲したもので、この PR 独自の検証ではありません。
 - Admin が他の User の接続状態を一覧で見る画面・API はありません（`GitHubConnectionService.status` は 1 User ずつです）。
+
+## Task / DAG / 操作 / PR の記録の HTTP API（Issue #185）
+
+PAW-062 の画面（`/agents`、`/pulls`、Web の `src/tasks/apiSource.ts`）の接続先です。`paw_backend/api/v1/tasks.py` が経路、`paw_backend/api/v1/task_views.py` が一覧と見える範囲の読み取りで、状態・遷移・予算・DAG は既存の `TaskService`・`DagStore`・`BudgetTracker` が返すものをそのまま出します。方針は [Decision 0067](../../docs/decisions/0067-task-pr-http-api.md)（**Approved**）です。
+
+| Endpoint | Capability | 内容 |
+| --- | --- | --- |
+| `GET /api/v1/tasks` | `tasks.list`（User・Admin・Owner。委任不可、読み取り専用） | 読める Project の Task（更新の新しい順、`limit` 1〜200、既定 100）。状態・待機理由・Priority（最後の Queue Entry）・Card の Repository・最後の Start の時刻 |
+| `GET /api/v1/tasks/{task_id}` | Task の Project の `project.read` | `restore` の Task、Working Set と今の Attempt での Branch / Worktree / Review / Evaluation / PR、今の Attempt の DAG と Node の試行（Placement・Agent・Model・Error の種類）、今の Step とそのツール呼び出し、予算（Preset と 6 項目） |
+| `POST /api/v1/tasks/{task_id}/controls` | Task の Project の `project.task.run`（Audit 必須） | `{"command", "expected_version", "reason"?, "agent"?, "model"?}`。遷移表が判定（409 `illegal_transition`）、Version が違えば 409 `task_conflict`、Stop Now の理由なしは 422。Resume / Retry / Restart は作成者だけ（403 `task_creator_only`）で、同じ Transaction で Queue へ戻す。応答は操作後の Task |
+| `GET /api/v1/pull-requests` | `tasks.list` | 読める Project の Task が記録した PR と、Backend の判定の `merge_ready`。Merge の経路はない |
+| `GET /api/v1/pull-requests/{record_id}` | `tasks.list` | PR の記録 1 件（一覧の上限の外の記録を PR 画面で開く）。他 Project・読めない Repository・ない記録は同じ `404 pull_request_not_found` |
+
+- 一覧の Project は Session の Membership から、Project ごとに Policy で `project.read` を判定します。Repository は、その ACL で `project.read` があるものだけを出し、ない Repository は名前も PR も出しません。
+- 存在しない Task と、読めない Project の Task はどちらも 403 です（Guard が区別しない）。
+- Task の入力、Log、Node の Goal / 結果、Event の詳細は返しません。
+- 未実装: 一覧の並列の上限 / VRAM、PR 画面・モバイルの Board（変更ファイル、Review の要約、Audit の行、Tool の承認、Diff）。Decision 0067 の 6・7。
+
+Test: `tests/test_tasks_api.py`（PostgreSQL。見える範囲、ACL、操作の権限、Version、遷移表、Queue、Merge Ready）。
 
 ## 依存 Package
 

@@ -7,6 +7,8 @@ import { apiMemorySource } from "./memory/apiSource";
 import { MemorySourceProvider } from "./memory/source";
 import { NotificationProvider } from "./notifications/store";
 import { RouterProvider } from "./router";
+import { apiTaskSource } from "./tasks/apiSource";
+import { TaskSourceProvider } from "./tasks/source";
 import { ThemeProvider } from "./theme";
 import { apiUsageSource } from "./usage/api";
 import { UsageSourceProvider } from "./usage/model";
@@ -30,7 +32,9 @@ if (root) {
               <NotificationProvider>
                 <MemorySourceProvider source={apiMemorySource}>
                   <UsageSourceProvider source={apiUsageSource}>
-                    <App />
+                    <TaskSourceProvider source={apiTaskSource}>
+                      <App />
+                    </TaskSourceProvider>
                   </UsageSourceProvider>
                 </MemorySourceProvider>
               </NotificationProvider>

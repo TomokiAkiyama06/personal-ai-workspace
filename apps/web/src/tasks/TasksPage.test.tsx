@@ -168,7 +168,11 @@ describe("Tasks page", () => {
     expect(within(detail).getByText("試行 1")).toBeInTheDocument();
     expect(within(detail).getByText("test_failure")).toBeInTheDocument();
     expect(within(detail).getByText(/Codex · 高 · Cloud/)).toBeInTheDocument();
-    expect(within(detail).getByText("apply_patch")).toBeInTheDocument();
+    // Tool calls belong to the task's current step, not to a node.
+    expect(within(detail).queryByText("apply_patch")).not.toBeInTheDocument();
+    const tools = screen.getByRole("region", { name: /ツール呼び出し · 実装/ });
+    expect(within(tools).getByText("apply_patch")).toBeInTheDocument();
+    expect(within(tools).getByText("read_file")).toBeInTheDocument();
     await user.click(within(detail).getByRole("button", { name: "ノードの詳細を閉じる" }));
     expect(screen.queryByRole("region", { name: "実装" })).not.toBeInTheDocument();
   });

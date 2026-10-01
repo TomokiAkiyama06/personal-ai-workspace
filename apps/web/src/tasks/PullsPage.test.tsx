@@ -111,6 +111,18 @@ describe("Pull requests page", () => {
     }
   });
 
+  it("reads a selected pull request the list does not hold by its id", async () => {
+    const [older, ...newer] = samplePullRequests();
+    if (!older) throw new Error("no sample");
+    const { source } = fakeTaskSource(undefined, newer);
+    const getOne = vi.spyOn(source, "getPullRequest").mockResolvedValue(older);
+    renderPulls(`/pulls/${older.id}`, source);
+    expect(await screen.findByRole("heading", { name: older.title, level: 2 })).toBeInTheDocument();
+    expect(getOne).toHaveBeenCalledWith(older.id);
+    const list = screen.getByRole("navigation", { name: "プルリクエストの一覧" });
+    expect(within(list).queryByText(older.title)).not.toBeInTheDocument();
+  });
+
   it("does not crash on a malformed escape in the path", async () => {
     const { source } = fakeTaskSource();
     renderPulls("/pulls/%", source);

@@ -3,9 +3,9 @@
 // the Backend owns every state and decides every command. The Web App only
 // shows them and sends the operator's control; it never derives a state itself.
 //
-// The Backend has no HTTP route for tasks yet: the screens receive their data
-// through `TaskSource` (source.tsx), and without one they show the unavailable
-// state.
+// The screens receive their data through `TaskSource` (source.tsx); the app
+// plugs in the Backend's /api/v1 task routes (apiSource.ts, issue #185), and
+// without a source they show the unavailable state.
 
 /** tasks/domain.py `TaskState`. */
 export type TaskState =
@@ -166,8 +166,6 @@ export interface DagNode {
   model?: string;
   /** Oldest first. */
   attempts: readonly NodeAttempt[];
-  /** The tool calls of the node's running step, oldest first. */
-  toolCalls?: readonly ToolCall[];
 }
 
 export interface TaskDetail extends TaskSummary {
@@ -178,7 +176,11 @@ export interface TaskDetail extends TaskSummary {
   model: string | null;
   attempt: number;
   retryCount: number;
-  currentStep: { name: string; startedAt: string } | null;
+  /**
+   * The step that runs now with its tool calls (oldest first). A tool call
+   * belongs to the task's step, not to a DAG node (the Backend records no link).
+   */
+  currentStep: { name: string; startedAt: string; toolCalls?: readonly ToolCall[] } | null;
   budget?: { preset: BudgetPreset; remainingPercent?: number };
   repositories: readonly TaskRepository[];
   /** The nodes of the current DAG in the orchestrator's order; null before planning. */
