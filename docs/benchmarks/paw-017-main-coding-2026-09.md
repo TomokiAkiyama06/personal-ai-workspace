@@ -1,7 +1,7 @@
 # PAW-017 Main Coding Model 比較 Run の報告（2026-09）
 
 - Issue: [#14](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/14)（PAW-017）
-- 実施: 2026-09-28（8 Model）と 2026-09-30（09-28 に起動できなかった 4 Model の再開）
+- 実施: 2026-09-28（8 Model）と 2026-09-30（09-28 に起動できなかった 4 Model の再開）。Decision 0040 の確認 Run（同時に動かす構成と Resolved@3）は 2026-10-01（[#180](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/180)、6）
 - Dataset: paw-seed-v1（[Decision 0041](../decisions/0041-seed-benchmark-dataset.md)、24 Task: Historical 11 / Spec 6 / Injected Bug 7）
 - 判断の提案: [Decision 0040](../decisions/0040-main-coding-model-selection.md)（採用 Model）、[Decision 0039](../decisions/0039-compute-scheduler-calibration.md)（Scheduler の暫定値の較正）。どちらも Proposed
 - 生の結果（Trace・Patch・Server の Log・VRAM の記録）は Repository に入れない（Hidden check の内容を含むため。Decision 0041 の 4）。Server の `/data/results/paw-bench-2026-09-28` と `/data/results/paw-bench-2026-09-30` にある
@@ -128,8 +128,8 @@
 ## 4. 測っていないこと
 
 - **Human correction time**（Issue の受け入れ条件 3、Decision 0041 の 10 の測り方）。人が Patch を直す時間は、この Run では測っていない。Decision 0040 の判断点 5。
-- Resolved@N（同じ Model の複数回の Run）、Multi-Repo Task、Review 指摘の修正、並列 Agent 数を変えたときの性能。
-- Memory Worker / Embedding / Reranker と同じ GPU に置いたときの Main の性能（上の VRAM は別々の Run の値）。
+- Resolved@N（同じ Model の複数回の Run。上位 3 つは 6 で 3 回ずつ測った）、Multi-Repo Task、Review 指摘の修正、並列 Agent 数を変えたときの性能。
+- Memory Worker / Embedding / Reranker と同じ GPU に置いたときの Main の性能（上の VRAM は別々の Run の値。6 で測った）。
 
 ## 5. Run で起きた問題と直したこと（Harness / 環境。Repository の Code ではない）
 
@@ -143,3 +143,69 @@
 | 09-30 15:22 | 全体 | 再起動で `/tmp` が消え、Harness の venv を失った | Harness の venv を `/tmp` に置いていた | 同じ Pin（CI の requirements）の venv を `/data/results` の下に作り直した。Golden の確認で Evaluator の結果が同じことを確かめた |
 
 再起動は、この Run が Host の RAM を使い切ったことが原因である（他の User の Process は止めていないが、Desktop の Session は OOM Killer に止められた）。Scheduler（Decision 0037）は VRAM しか見ないので、Runtime の JIT の RAM は Deployment の設定で防ぐ必要がある（Decision 0039 の判断点 4）。
+
+## 6. 確認 Run（2026-10-01、Issue #180）
+
+[Decision 0040](../decisions/0040-main-coding-model-selection.md)（Approved）の 1〜3 の条件を確かめる Run。
+
+- Issue: [#180](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/180)。生の結果は Server の `/data/results/paw-bench-2026-10-01`
+- **条件は 1 と同じ**（Harness・Prompt・Tool・上限・Evaluator・固定した seed の snapshot `1d0f683`・vLLM 0.30.0）。違いは次のとおり:
+  - Weight はすべて NVMe に Stage してから Load した（Decision 0040 の 6）。
+  - JIT の並列数の上限（`MAX_JOBS=4`、`FLASHINFER_NVCC_THREADS=1`）と Host の空き RAM の確認（起動前に 32 GiB 以上、Run 中に 8 GiB を下回れば自分の Process group だけを止める）を、すべての起動に付けた（5 の 09-30 の再起動の対処）。Run 中に Watchdog が止めたことはなく、各 Run の開始時の空き RAM は 95 GiB 以上だった。
+  - 各起動の前に GPU に他の Process がないことを確かめた。Run 中の GPU にいたのは、この Run の Process だけだった。
+- **同時に動かす構成**（Decision 0037 の Load 順: Main → Memory Worker → Embedding / Reranker）:
+  - Main: vLLM、`--gpu-memory-utilization 0.61`、ほかは 1 と同じ引数
+  - Memory Worker: Qwen3.5-4B（vLLM、KV 4 GiB、16k context、4 seqs、`json_schema`。PAW-018 の Run と同じ設定）
+  - Embedding / Reranker: Qwen3-Embedding-0.6B + Qwen3-Reranker-4B（1 つの Process の torch、CUDA。PAW-019 の Run で Recall の最もよかった組み合わせ）
+  - Memory Worker と Retrieval は Run の間ずっと Benchmark の Dataset で負荷をかけ続けた（Idle で置いただけではない）。
+- **KAT の FP8 版**: FP8 の Weight は手元になく、Download はしていない。BF16 の Weight を vLLM が Load の時に FP8 に量子化した（`--quantization fp8`、`--moe-backend triton`）。配布されている FP8 の Weight とは同じでない。
+- 3 回とも同じ Server を起動したまま続けて走らせた。Sampling は 1 と同じく各 Model の既定（温度 0 ではない）。
+
+### Resolved（3 回）
+
+| 構成 | run1 | run2 | run3 | 平均 | **Resolved@3**（1 回でも解けた Task） | 3 回とも解けた Task（安定性） | 09-28 / 09-30 の 1 回 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Qwen3.6-27B-FP8（単独） | 14 | 14 | 14 | 14.0 | 14 | 14 | 14 |
+| KAT-Coder-V2.5-Dev（単独、BF16） | 14 | 13 | 13 | 13.3 | 14 | 13 | 14 |
+| Qwen3.8-27B-FP8（単独） | 14 | 14 | 14 | 14.0 | 14 | 14 | 14 |
+| **Qwen3.6-27B-FP8（同時に動かす）** | 14 | 13 | 14 | 13.7 | 14 | 13 | - |
+| KAT-Coder-V2.5-Dev-FP8（同時に動かす、Load 時の量子化） | 13 | 14 | 13 | 13.3 | 14 | 13 | - |
+
+- 数字は 24 Task のうち解けた数。Resolved@3 は [BENCHMARK_EVALUATOR.md](../BENCHMARK_EVALUATOR.md) と paw-seed-v1 の `resolved_at_n` の定義どおり「最初の 3 回のいずれかで解けた Task」。「3 回とも解けた Task」は Run の揺れを見るための別の指標（安定性）で、Resolved@3 ではない。
+- **全構成・全 Run で結果が変わった Task は 2 つだけ**: spec-01-result-summary（KAT は単独・FP8 とも 3 回中 1 回）と spec-02-task-semantic-validation（Qwen3.6-27B-FP8 を同時に動かした run2 だけ失敗）。ほかの 12 Task（Injected Bug 7・Spec 4・hist-08）はすべての Run で解け、残りの Historical 10 Task はどの Run でも解けなかった。
+- 同時に動かした Qwen3.6-27B-FP8 の run2 の spec-02 の失敗は、`submit` で終えた Patch が Hidden acceptance に落ちたもの（24 step、最大 Prompt 24k token。Context の不足でも Error でもない）。
+- Harness の Error と LLM の Error は Qwen3.6-27B-FP8 では全 Run で 0。
+
+### 振る舞いと速さ
+
+| 構成 | 24 Task の所要（run1 / run2 / run3、分） | 出力 token（run ごと） | submit で終了 | 60 step 到達 | Context 不足 | 生成速度（平均 / 最大 tok/s） | KV 使用率の最大 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Qwen3.6-27B-FP8（単独） | 31 / 32 / 32 | 205k / 202k / 204k | 18 / 16 / 17 | 6 / 8 / 7 | 0 | 110 / 163 | 26.6% |
+| KAT-Coder-V2.5-Dev（単独） | 28 / 27 / 50 | 336k / 342k / 367k | 21 / 21 / 20 | 1 / 1 / 1 | 2 / 2 / 2 | 218 / 383 | 32.8% |
+| Qwen3.8-27B-FP8（単独） | 124 / 114 / 114 | 783k / 762k / 759k | 15 / 17 / 16 | 2 / 3 / 4 | 6 / 3 / 4 | 112 / 166 | 45.1% |
+| Qwen3.6-27B-FP8（同時に動かす） | 43 / 43 / 45 | 200k / 201k / 218k | 16 / 17 / 16 | 8 / 7 / 8 | 0 | 79 / 138 | 51.5% |
+| KAT-Coder-V2.5-Dev-FP8（同時に動かす） | 35 / 43 / 31 | 397k / 353k / 330k | 21 / 19 / 21 | 2 / 2 / 1 | 1 / 3 / 2 | 188 / 404 | 28.4% |
+
+- 同時に動かすと Qwen3.6-27B-FP8 は **約 1.4 倍遅くなる**（31〜32 分 → 43〜45 分。生成速度の平均 110 → 79 tok/s）。Memory Worker と Retrieval が同じ GPU の計算を使うため（と考えられる）。出力 token と終わり方はほぼ変わらない。
+- KAT の単独の run3（50 分）は GPU 利用率の平均が 55% と低い（1 Task が 45 分の timeout に達した。原因は確かめていない）。
+
+### VRAM（同時に動かす構成）
+
+| 構成 | GPU 全体の Peak（Run 中） | Main | Memory Worker | Embedding + Reranker | Peak + Safety Headroom（4.8 GiB） | GPU の容量（95.6 GiB）までの残り |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| **Qwen3.6-27B-FP8** | **86.1 GiB** | 59.7 GiB（Weight 27.6・KV Pool 28.9 GiB / 454k token） | 13.6 GiB | 13.1 GiB | 90.9 GiB | 4.7 GiB |
+| KAT-Coder-V2.5-Dev-FP8 | 84.8 GiB（**Load 中は 95.0 GiB**） | 57.9 GiB（Weight 33.4・KV Pool 22.6 GiB / 1,123k token） | 13.6 GiB | 13.1 GiB | 89.6 GiB（Load 中は 99.8 GiB） | 6.0 GiB（Load 中は -4.2 GiB） |
+
+- 1 秒ごとの `nvidia-smi` の値。Main・Memory Worker・Embedding + Reranker は Process ごとの Peak。Safety Headroom は Decision 0037 の 3 の暫定値（4 GiB と GPU の 5% の大きい方）。単独の Run の Peak は Qwen3.6-27B-FP8 が 86.9 GiB、KAT（BF16）が 88.7 GiB、Qwen3.8-27B-FP8 が 85.5 GiB（`gpu-memory-utilization` 0.90 / 0.92）。
+- **Qwen3.6-27B-FP8 は 3 つを同時に置いて Peak + Headroom が GPU に収まった**（OOM なし）。Main の KV Pool は単独の 54.7 GiB から 28.9 GiB に減ったが、Run 中の KV の使用の最大は Pool の 51.5% で、4 並列の Agent には足りた。
+- **KAT の Load 時の FP8 量子化は、Load の途中に GPU をほぼ使い切る**（Main だけで 94.9 GiB、約 16 秒）。BF16 の Weight を一度 GPU に載せてから量子化するため。この Run では Main を最初に Load したので収まったが、Memory Worker や Reranker が先に GPU にいる状態で Main を Load し直すと（Decision 0037 の縮退から戻すときなど）OOM になる。Load 後の常駐（57.9 GiB）は Qwen3.6-27B-FP8 とほぼ同じ。
+- 同時に動かしている間の Memory Worker と Retrieval の結果（Run の時間の平均）: Retrieval は Recall@5 0.985・MRR 0.983・nDCG@5 0.971・失敗した Query 0・Latency p95 448 ms。Memory Worker は Schema の遵守率 0.974・抽出の Recall 0.829・Latency p95 1.46 秒。Main の Load の構成（Qwen3.6 / KAT FP8）で差はない。
+
+### 読み方（確認 Run）
+
+- **Decision 0040 の採用条件**（同時に動かして Resolved が 14/24 より下がらないこと、Peak + Headroom が GPU に収まること）:
+  - VRAM は、実際の使用のピークでは満たした（86.1 + 4.8 = 90.9 GiB ≤ 95.6 GiB、OOM なし）。ただし Decision 0039 の 1 の Footprint（ピーク + 2 GiB）と Scheduler の復帰の Margin で予約を数えると超える（下の Footprint）。
+  - Resolved は 3 回のうち 2 回が 14/24、1 回が 13/24（平均 13.7）。下がった 1 Task（spec-02）は同じ構成の他の 2 回では解けており、単独の KAT も同じ幅（13〜14）で揺れる。同時に動かすことで解けなくなった Task はない（Resolved@3 は 14/24 で、単独と同じ集合）。1 回の Run の揺れの範囲であり、条件は**実質的に満たした**と読める。ただし「1 回も 14 を下回らない」と厳密に読むなら満たしていない。この読み方は Human の判断を求める（[Decision 0073](../decisions/0073-main-coexistence-confirmation.md) の 1）。
+- **Resolved@3 は 5 構成すべてで 14/24**（同じ 14 Task の集合）で、Resolved@3 では差がつかない。差は安定性（3 回とも解けた Task）と速さに出る。Qwen3.6-27B-FP8（単独）は 3 回とも 14/24 で、出力 token が最も少ない。Qwen3.8-27B-FP8 も 3 回とも 14/24 で同じく安定するが、24 Task に 114〜124 分（Qwen3.6-27B-FP8 の約 3.7 倍）と 3.7 倍の出力 token を使い、Context 不足で終わる Task が毎回 3〜6 ある。KAT は 14 / 13 / 13 で spec-01 が揺れる。上位 3 つの差は 1 Task 以内で、Decision 0040 の選択（Qwen3.6-27B-FP8）を変える結果ではない。
+- **KAT の FP8 版**: Load 時の量子化で KV Pool は BF16 の単独と同程度（22.6 GiB）を取れ、Resolved も BF16 と同じ幅（13〜14）。ただし Load の途中の Peak が GPU を使い切るため、Memory Worker などが常駐する中で Load し直せない。次点のままとし、FP8 で配布された Weight（事前に量子化したもの）を使うなら測り直す。
+- **Footprint**（Decision 0039 の 1: Deployment ごとの実測のピーク + 2 GiB）: この Run の設定のままだと Main（`gpu-memory-utilization` 0.61）61.7 GiB・Memory Worker（Qwen3.5-4B、KV 4 GiB）15.6 GiB・Embedding と Reranker 計 17.1 GiB（Scheduler では別々の Deployment なので Margin が 2 つ。この Run は 1 つの Process で 13.1 GiB）で、合計 94.4 GiB。Safety Headroom（4.8 GiB）と、`IF_ROOM` の Memory Worker を Load するときに残す `restore_margin_bytes`（既定は Headroom と同じ 4.8 GiB）を足すと 104.0 GiB で、**GPU の 95.6 GiB を 8.4 GiB 超える**。実際の使用のピーク（86.1 GiB）は収まったが、Scheduler の予約の勘定（Decision 0037 の 3）では同時に置けない。どれかの割り当てを減らす必要があり、[Decision 0073](../decisions/0073-main-coexistence-confirmation.md) の 2 で判断を求める（推奨は Main の `gpu-memory-utilization` を 0.51 に下げる: KV Pool は約 19 GiB・約 303k token。Scheduler が Coding に予約を許すのは 0.90 × 0.95 で約 259k token で、この Run の KV の使用の最大（約 234k token）の約 1.1 倍しか残らない。Embedding と Reranker を別々に測る確認 Run の後に値を与える）。
