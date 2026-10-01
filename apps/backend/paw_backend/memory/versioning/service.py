@@ -405,6 +405,10 @@ def _view(row: Any) -> MemoryVersionView:
     )
 
 
+# The Memory Board read model (``memory/board``) builds its views the same way.
+version_view = _view
+
+
 def _freshness_columns(spec: FreshnessSpec, now: datetime) -> dict[str, Any]:
     """The freshness columns of a new version written at ``now`` from ``spec``."""
     return {
