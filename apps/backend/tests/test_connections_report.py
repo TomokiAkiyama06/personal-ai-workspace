@@ -337,3 +337,33 @@ class UsageReportSnapshotTest(PostgresConnectionTestCase):
         self.assertEqual(quota.used, 1)  # the same snapshot as the totals
         admin = next(user for user in report.users if user.user_id == self.admin)
         self.assertEqual((admin.tasks, admin.quotas[0].used), (1, 1))
+
+    async def test_the_quotas_alone_read_one_snapshot_too(self):
+        # ``quota_status`` (GET /quotas/me, /users/{id}/quotas): a call that
+        # commits between the sums of two quotas is in neither.
+        clock = FakeClock(NOW)
+        service = self.new_service(clock=clock, allow_explicit_clock=True)
+        self.seed_quota(self.user, None, kind=ConnectionKind.CODEX, period="month")
+        self.seed_quota(self.user, None, kind=ConnectionKind.CLAUDE, period="month")
+        task = self.seed_task(self.user)
+        store = service._store
+        original = store._sums
+        late: list[uuid.UUID] = []
+
+        async def sums(connection, user_id, kind, since):
+            result = await original(connection, user_id, kind, since)
+            if not late:  # after the first quota's sums
+                late.append(
+                    self.seed_usage(
+                        self.user, task, kind=ConnectionKind.CLAUDE,
+                        started_at=tokyo(2026, 9, 17, 9),
+                    )
+                )  # fmt: skip
+            return result
+
+        store._sums = sums
+
+        quotas = await service.quota_status(self.principal(self.user), self.user)
+
+        self.assertTrue(late)
+        self.assertEqual([quota.used for quota in quotas], [0, 0])

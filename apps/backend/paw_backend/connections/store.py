@@ -545,17 +545,18 @@ class ConnectionStore:
     ) -> tuple[QuotaUsage, ...]:
         """Every configured quota of the user with what its current window has used.
 
-        One transaction, one instant (the database's): the sums and the windows are
-        those of the same moment. Ordered by kind, metric and period (declaration
-        order).
+        One read-only REPEATABLE READ transaction, one instant (the database's): the
+        sums and the windows are those of the same moment and the same snapshot.
+        Ordered by kind, metric and period (declaration order).
         """
 
         async def work(connection: psycopg.AsyncConnection) -> tuple[QuotaUsage, ...]:
             now = await self._instant(connection)
             return await self._quota_status_in(connection, now, user_id, kind)
 
+        # One snapshot: a call that commits between two quotas' sums is in neither.
         return await self._database.transact_abortable(
-            work, timeout_seconds=self._timeout
+            work, timeout_seconds=self._timeout, snapshot=True
         )
 
     async def _quota_status_in(
