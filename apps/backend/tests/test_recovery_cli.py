@@ -133,6 +133,14 @@ class InterruptionTest(unittest.TestCase):
                 self.assertEqual(cli.EXIT_FAILED, code)
                 self.assertIn("the backup was terminated", err)
 
+    def test_a_terminated_apply_does_not_claim_a_rollback(self) -> None:
+        # Claude's review of PR #160: a cancellation while the transaction
+        # commits may leave the restore applied (recovery.restore.applied, then
+        # recovery.restore.failed): the message must not say it rolled back.
+        _, _, err = self.restore(Interrupted)
+        self.assertNotIn("was rolled back.", err)
+        self.assertIn("recovery.restore.applied", err)
+
 
 @requires_postgres
 class CommandTest(PostgresProjectTestCase):
