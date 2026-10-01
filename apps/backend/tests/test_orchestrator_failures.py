@@ -215,6 +215,43 @@ class RetryTest(PostgresOrchestratorTestCase):
             self.assertNotIn(SECRET, dump, table)
             self.assertNotIn("Bad_Class", dump, table)
 
+    async def test_an_out_of_memory_failure_is_an_incident(self):
+        # Decision 0071: a runtime reports AgentOutOfMemory (a CUDA OOM, a process
+        # killed for memory), or raises MemoryError; each failed attempt is one
+        # out-of-memory incident, written with the failure. Others are none.
+        rt = runtimes(
+            local={
+                "a": [fail("AgentOutOfMemory", "CUDA out of memory"), ok()],
+                "b": [MemoryError(), ok()],
+                "c": [fail("TimeoutError"), ok()],
+            }
+        )
+        h = self.harness(runtimes=rt)
+        task_id = await self.prepare(h, make_plan(*(node(k) for k in "abc")))
+
+        report = await h.orchestrator.run_once("w1")
+
+        self.assertEqual(report.outcome, Out.DAG_SUCCEEDED)
+        dag = await self.store.get(task_id, 1)
+        first = {
+            key: (await self.store.attempts(dag.id, key))[0].error_class
+            for key in "abc"
+        }
+        self.assertEqual(
+            first, {"a": "AgentOutOfMemory", "b": "MemoryError", "c": "TimeoutError"}
+        )
+        self.assertEqual(await self.incidents(), ["out_of_memory"] * 2)
+
+    async def test_an_out_of_memory_failure_that_gives_up_is_an_incident_too(self):
+        rt = runtimes(local={"a": fail("AgentOutOfMemory", retryable=False)})
+        h = self.harness(runtimes=rt)
+        task_id = await self.prepare(h, make_plan(node("a")))
+
+        await h.orchestrator.run_once("w1")
+
+        self.assertEqual(await self.states_of(task_id), {"a": "failed"})
+        self.assertEqual(await self.incidents(), ["out_of_memory"])
+
 
 @requires_postgres
 class EscalationTest(PostgresOrchestratorTestCase):
@@ -276,6 +313,9 @@ class EscalationTest(PostgresOrchestratorTestCase):
             {"a": "ready", "b": "pending", "free": "succeeded"},
         )
         self.assertEqual((dag.node("a").agent_index, dag.node("a").approach), (2, 3))
+        # Two escalations (local to codex, codex to claude), one incident each;
+        # the failures were no out-of-memory ones (Decision 0071).
+        self.assertEqual(await self.incidents(), ["escalation"] * 2)
         # The queue entry was completed; a human unblocking re-queues the task.
         (entry,) = await self.rows("SELECT status FROM queue_entries")
         self.assertEqual(entry["status"], "completed")
@@ -297,6 +337,7 @@ class EscalationTest(PostgresOrchestratorTestCase):
         # The new rung starts its own attempt count.
         self.assertEqual(dag.node("a").rung_attempts, 1)
         self.assertEqual(dag.node("a").attempt_count, 7)
+        self.assertEqual(await self.incidents(), ["escalation"])
 
     async def test_different_failures_never_look_like_a_loop(self):
         # Ten different failures: no alternative, no escalation, just retries until
@@ -594,7 +635,7 @@ class RuntimeErrorClassTest(unittest.TestCase):
 
             __hash__ = str.__hash__
 
-        for name in ("ValueError", "TimeoutError", "AdapterError"):
+        for name in ("ValueError", "TimeoutError", "AdapterError", "AgentOutOfMemory"):
             self.assertEqual(runtime_error_class(name), name)
         for name in (
             "Boom",

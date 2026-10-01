@@ -18,6 +18,12 @@ must present it. After a take-over the node is ready again, a new start raises t
 count, and the report of the old run (which is still executing somewhere) is a
 ``StaleNodeAttemptError``.
 
+**Incidents.** ``fail_node`` also writes the agent incidents of the failure in its
+transaction (Decision 0071, Proposed): ``out_of_memory`` for a failure class of
+``errors.OUT_OF_MEMORY_CLASSES``, ``escalation`` for the step ``escalate``. A
+refused report (a stale epoch or attempt) records neither. ``record_incident``
+writes one for a failure outside a DAG (the planner's).
+
 **Time.** Nothing here decides anything by a clock: timestamps are the database's
 ``now()`` and only describe.
 
@@ -43,10 +49,12 @@ from paw_backend.orchestrator.domain import (
     AttemptState,
     DagState,
     ExecutionPlacement,
+    IncidentKind,
     NextStep,
     NodeState,
 )
 from paw_backend.orchestrator.errors import (
+    OUT_OF_MEMORY_CLASSES,
     DagAlreadyExistsError,
     DagNotFoundError,
     DagStateError,
@@ -62,6 +70,7 @@ from paw_backend.orchestrator.limits import (
     MAX_LADDER_LENGTH,
 )
 from paw_backend.orchestrator.models import (
+    AgentIncidentRow,
     DagEdgeRow,
     DagNodeAttemptRow,
     DagNodeRow,
@@ -737,9 +746,20 @@ class DagStore:
                 error_class=error_class,
                 signature=signature,
             )
+            if error_class in OUT_OF_MEMORY_CLASSES:
+                session.add(AgentIncidentRow(kind=IncidentKind.OUT_OF_MEMORY))
+            if step is NextStep.ESCALATE:
+                session.add(AgentIncidentRow(kind=IncidentKind.ESCALATION))
             locked.settle()
             await session.flush()
             return await _record(session, locked.dag)
+
+    async def record_incident(self, kind: IncidentKind) -> None:
+        """One agent incident outside a node's failure (the planner ran out of
+        memory). Not fenced: the incident happened whatever became of the run."""
+        kind = check_member("kind", kind, IncidentKind)
+        async with self._database.session() as session, session.begin():
+            session.add(AgentIncidentRow(kind=kind))
 
     async def give_up_node(
         self, dag_id: uuid.UUID, epoch: int, key: str, *, error_class: str

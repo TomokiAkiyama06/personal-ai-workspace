@@ -443,6 +443,40 @@ describe("Memory screen", () => {
     expect(screen.queryByText("編集中に別の更新がありました")).not.toBeInTheDocument();
   });
 
+  it("still restores on top of the version that won after its notice is closed", async () => {
+    // Codex review (#178, P2): closing the conflict notice while the pane's
+    // reload is pending must not drop the version the retry builds on.
+    const { source, mergeId } = designSource();
+    renderMemory("/memory/m-merge", source);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("tab", { name: "履歴" }));
+    await user.click(
+      within(screen.getByRole("list", { name: "メモリの履歴グラフ" })).getAllByRole(
+        "button",
+      )[3] as HTMLElement,
+    );
+    source.write(mergeId, { content: "他の人の更新" }, null, { actor_user_id: "u-2" });
+    const history = source.history.bind(source);
+    let reads = 0;
+    source.history = (id) => {
+      reads += 1;
+      return reads === 1 ? history(id) : new Promise(() => {});
+    };
+    await user.click(screen.getByRole("button", { name: "この内容で新しい版を作る" }));
+    const notice = await screen.findByRole("alert");
+    await user.click(within(notice).getByRole("button", { name: "閉じる" }));
+    expect(screen.queryByText("編集中に別の更新がありました")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "この内容で新しい版を作る" }));
+    const restores = source.calls
+      .filter((call) => call.method === "restore")
+      .map((call) => call.args);
+    expect(restores).toEqual([
+      [mergeId, 3, 1],
+      [mergeId, 4, 1],
+    ]);
+    expect(await screen.findByText("v1 の内容で新しい版 v5 を作りました。")).toBeVisible();
+  });
+
   it("says so when the history cannot be read again after a write", async () => {
     const { source } = designSource();
     renderMemory("/memory/m-merge", source);

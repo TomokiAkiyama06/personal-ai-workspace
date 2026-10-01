@@ -18,6 +18,7 @@ from sqlalchemy.exc import DBAPIError
 from paw_backend.orchestrator.domain import (
     AttemptState,
     DagState,
+    IncidentKind,
     NextStep,
     NodeRole,
     NodeState,
@@ -465,6 +466,43 @@ class NodeLifecycleTest(PostgresOrchestratorTestCase):
                 self.assertEqual(
                     (stored.error_class, stored.failure_signature), ("Boom", SIGNATURE)
                 )
+        # The escalation is an incident (Decision 0071); "Boom" is no OOM.
+        self.assertEqual(await self.incidents(), ["escalation"])
+
+    async def test_an_out_of_memory_class_is_an_incident_whatever_the_step(self):
+        dag = await self.taken_dag()
+        cases = [
+            ("AgentOutOfMemory", NextStep.RETRY, {}),
+            ("MemoryError", NextStep.ESCALATE, {"agent_index": 1, "approach": 1}),
+            ("AgentOutOfMemory", NextStep.GIVE_UP, {}),
+        ]
+        for number, (error_class, step, extra) in enumerate(cases, 1):
+            await self.store.start_node(dag.id, 1, "e", max_attempts=6)
+            await self.store.fail_node(
+                dag.id,
+                1,
+                "e",
+                number,
+                error_class=error_class,
+                signature=SIGNATURE,
+                step=step,
+                **extra,
+            )
+        self.assertEqual(
+            await self.incidents(),
+            ["out_of_memory", "out_of_memory", "escalation", "out_of_memory"],
+        )
+
+    async def test_an_incident_is_recorded_on_its_own_only_of_a_known_kind(self):
+        await self.store.record_incident(IncidentKind.OUT_OF_MEMORY)
+        await self.store.record_incident("escalation")  # its exact value
+        for kind in ("OOM", "Escalation", None, 1):
+            with (
+                self.subTest(kind=kind),
+                self.assertRaises(InvalidOrchestratorArgumentError),
+            ):
+                await self.store.record_incident(kind)
+        self.assertEqual(await self.incidents(), ["out_of_memory", "escalation"])
 
     async def test_a_node_that_gives_up_blocks_only_its_dependents(self):
         dag = await self.taken_dag()
@@ -648,6 +686,21 @@ class FencingTest(PostgresOrchestratorTestCase):
         for name, write in writes.items():
             with self.subTest(write=name), self.assertRaises(StaleDagEpochError):
                 await write()
+        # A refused report of an out-of-memory failure that would escalate
+        # records no incident either (Decision 0071).
+        with self.assertRaises(StaleDagEpochError):
+            await self.store.fail_node(
+                dag.id,
+                1,
+                "a",
+                attempt.number,
+                error_class="AgentOutOfMemory",
+                signature=SIGNATURE,
+                step=NextStep.ESCALATE,
+                agent_index=1,
+                approach=1,
+            )
+        self.assertEqual(await self.incidents(), [])
 
         self.assertEqual(await self.store.get_by_id(dag.id), before)
         self.assertEqual(

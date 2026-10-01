@@ -623,6 +623,21 @@ class RestoreCancellationTest(BackupTestCase):
         self.assertEqual([("recovery.restore.failed", "CancelledError")], self.rows)
         self.assert_lock_released()
 
+    async def test_a_refused_restore_records_one_refused_row(self) -> None:
+        # Not interrupted (Claude's review of PR #160): ``run`` returns the
+        # refusal, recorded once, and writes nothing else.
+        (self.clone / "stray.txt").write_text("x\n")  # not clean: refused
+        for apply in (False, True):
+            with self.subTest(apply=apply):
+                self.rows.clear()
+                result = await self.restorer().run(apply=apply)
+                self.assertEqual("not_clean", result.refused)
+                self.assertTrue(result.audited)
+                self.assertFalse(result.applied)
+                self.assertIsNone(result.data)
+                self.assertEqual([("recovery.restore.refused", "not_clean")], self.rows)
+                self.assert_lock_released()
+
     async def test_a_cancellation_while_the_outcome_is_recorded_adds_no_row(
         self,
     ) -> None:

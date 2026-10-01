@@ -121,6 +121,29 @@ class PlannerTest(PostgresOrchestratorTestCase):
         self.assertEqual(len(planner.calls_of("plan")), 1)
         self.assertEqual((await h.tasks.restore(task_id)).state, TaskState.FAILED)
 
+    async def test_a_planner_that_runs_out_of_memory_is_an_incident(self):
+        # The planner has no node: its out-of-memory failures are recorded on
+        # their own (Decision 0071), one per call, and nothing else is.
+        planner = FakeRuntime(
+            "local", script={"plan": [fail("AgentOutOfMemory"), MemoryError()]}
+        )
+        h = self.harness(runtimes={"local": planner})
+        await self.prepare(h)
+
+        report = await h.orchestrator.run_once("w1")
+
+        self.assertEqual(report.outcome, Out.PLAN_FAILED)
+        self.assertEqual(await self.incidents(), ["out_of_memory"] * 2)
+
+    async def test_a_planner_failure_of_another_kind_is_no_incident(self):
+        planner = FakeRuntime("local", script={"plan": [CYCLE, fail("Down")]})
+        h = self.harness(runtimes={"local": planner})
+        await self.prepare(h)
+
+        await h.orchestrator.run_once("w1")
+
+        self.assertEqual(await self.incidents(), [])
+
     async def test_the_second_planning_attempt_is_made_by_the_next_agent(self):
         weak = FakeRuntime("local", script={"plan": CYCLE})
         strong = FakeRuntime("codex", script={"plan": GOOD})

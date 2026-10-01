@@ -15,11 +15,15 @@
   or CPU, or the cloud), on which agent and model, and, for the cloud, the
   fingerprint and size of the content that was sent and the id of its row in
   ``audit_events``. Recorded once (a trigger refuses a change) and never text.
+* ``agent_incidents`` (revision ``0183``, issue #183, Decision 0071 Proposed): an
+  agent ran out of memory or a node was escalated to the next agent, one row
+  each, for System Health. Only the kind and the time: no task, node or agent
+  (the failed attempt itself is in ``agent_dag_node_attempts``).
 
-Every table references ``tasks.id`` (or a node) with a real foreign key. The
-tables deliberately do not start with ``task``: the PAW-032 tests inspect every
-table with that prefix. Enum-like columns are text with CHECK constraints whose
-value lists the migration writes out.
+Every table but ``agent_incidents`` references ``tasks.id`` (or a node) with a
+real foreign key. The tables deliberately do not start with ``task``: the PAW-032
+tests inspect every table with that prefix. Enum-like columns are text with CHECK
+constraints whose value lists the migration writes out.
 """
 
 import uuid
@@ -36,6 +40,7 @@ from sqlalchemy import (
     ForeignKey,
     ForeignKeyConstraint,
     Identity,
+    Index,
     Integer,
     SmallInteger,
     String,
@@ -52,6 +57,7 @@ from paw_backend.orchestrator.domain import (
     AttemptState,
     DagState,
     ExecutionPlacement,
+    IncidentKind,
     NodeRole,
     NodeState,
 )
@@ -74,6 +80,8 @@ TABLE_NAMES = (
     "agent_dag_edges",
     "agent_dag_node_attempts",
 )
+# Revision 0183 (not one of the DAG's tables above).
+INCIDENTS_TABLE = "agent_incidents"
 
 
 def _enum(enum_class: type[StrEnum], length: int = 16) -> Enum:
@@ -359,4 +367,23 @@ class DagNodeAttemptRow(Base):
             "state <> 'failed' OR error_class IS NOT NULL", name="failed_has_class"
         ),
         *placement_checks(),
+    )
+
+
+class AgentIncidentRow(Base):
+    """An agent incident (``IncidentKind``): written in the transaction of the
+    failure that caused it, counted by System Health, purged with its events."""
+
+    __tablename__ = INCIDENTS_TABLE
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    kind: Mapped[IncidentKind] = mapped_column(_enum(IncidentKind))
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+
+    __table_args__ = (
+        _in("kind", IncidentKind, "kind_valid"),
+        # System Health counts the incidents of the last hour / day.
+        Index("ix_agent_incidents_occurred_at", "occurred_at"),
     )

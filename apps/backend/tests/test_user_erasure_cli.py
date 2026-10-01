@@ -310,6 +310,43 @@ class RunCommandTest(ErasureTestCase):
         self.assertEqual(code, cli.EXIT_OK, err)
         self.assertNotIn("ACTION REQUIRED", err)
 
+    async def test_a_revocation_with_nothing_to_confirm_is_reported(self):
+        # Claude's review of PR #142: an id that is not listed (unknown, already
+        # confirmed, restored or erased) was silently ignored; the operator who
+        # mistyped it believed the confirmation was recorded.
+        bob = await self.make_user("bob", status="pending_deletion")
+        await self.execute(
+            "INSERT INTO user_status_changes (id, user_id, old_status, new_status, "
+            "changed_at, changed_by, recorded_at) VALUES (gen_random_uuid(), :u, "
+            "'active', 'pending_deletion', clock_timestamp(), NULL, "
+            "clock_timestamp())",
+            u=bob.id,
+        )
+        unknown = uuid.uuid4()
+
+        code, _, err = await self.owner_run(
+            [
+                "user-erasure-run",
+                "--credentials-revoked",
+                str(bob.id),
+                "--credentials-revoked",
+                str(unknown),
+            ]
+        )
+
+        self.assertEqual(code, cli.EXIT_OK, err)
+        self.assertIn("credentials_revoked=1", err)
+        self.assertIn(f"NOTHING TO CONFIRM: user {unknown}", err)
+        self.assertNotIn(f"NOTHING TO CONFIRM: user {bob.id}", err)
+
+        # Confirmed already: a second confirmation has nothing to record.
+        code, _, err = await self.owner_run(
+            ["user-erasure-run", "--credentials-revoked", str(bob.id)]
+        )
+        self.assertEqual(code, cli.EXIT_OK, err)
+        self.assertIn(f"NOTHING TO CONFIRM: user {bob.id}", err)
+        self.assertIn("credentials_revoked=0", err)
+
     async def test_a_concurrent_run_is_refused(self):
         await self.deleted_long_ago("bob")
         async with UserErasureService(self.database).run_lock():
