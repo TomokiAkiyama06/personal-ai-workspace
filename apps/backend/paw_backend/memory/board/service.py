@@ -243,13 +243,17 @@ class MemoryBoard:
     # -- helpers ---------------------------------------------------------------
 
     async def _run[T](self, work: Any) -> T:
-        """``work(session)`` in one read-only transaction; a database error is
-        ``MemoryDatabaseError`` (detached from the driver's, which carries the
-        bound parameters)."""
+        """``work(session)`` in one read-only ``REPEATABLE READ`` transaction (the
+        grants and the memory rows come from one snapshot: a membership revoked
+        and a memory added after the grants were read stay unseen); a database
+        error is ``MemoryDatabaseError`` (detached from the driver's, which
+        carries the bound parameters)."""
         failure: MemoryDatabaseError | None = None
         try:
             async with self._database.session() as session, session.begin():
-                await session.execute(text("SET TRANSACTION READ ONLY"))
+                await session.execute(
+                    text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+                )
                 return await work(session)
         except StatementError as error:
             sqlstate = getattr(getattr(error, "orig", None), "sqlstate", None)

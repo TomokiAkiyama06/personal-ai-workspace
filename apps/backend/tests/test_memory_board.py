@@ -210,6 +210,34 @@ class ListTest(BoardTestCase):
         self.assertFalse(found.truncated)
         self.assertEqual(found.memories[1].version.version_number, 2)
 
+    async def test_grants_and_rows_come_from_one_snapshot(self):
+        # Between the permission reads and the memory reads, another transaction
+        # removes the reader from the project and adds a project memory: the
+        # list must not show a memory that did not exist when the reader was
+        # allowed (one REPEATABLE READ snapshot for the whole read).
+        me = self.user()
+        project = self.seed_project()
+        self.seed_member(project, me.user_id)
+        self.seed("before", scope="project", project=project, embed=False)
+        grants = self.board._grants
+
+        async def grants_then_change(session, actor):
+            found = await grants(session, actor)
+            with self.engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "DELETE FROM project_members"
+                        " WHERE project_id = :p AND user_id = :u"
+                    ),
+                    {"p": project, "u": me.user_id},
+                )
+            self.seed("after", scope="project", project=project, embed=False)
+            return found
+
+        self.board._grants = grants_then_change
+        found = await self.board.list_memories(me, project_scope(project))
+        self.assertEqual(titles(found), ["before"])
+
     async def test_a_project_or_repository_the_reader_may_not_read_is_not_found(self):
         me = self.user()
         project = self.seed_project()

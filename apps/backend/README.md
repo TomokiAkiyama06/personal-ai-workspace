@@ -3662,7 +3662,8 @@ Service と Job は、Revision `0026` / `0040` / `0071` が与えた権限（`me
 - **読める範囲**は Hybrid Retrieval と同じ決め方です（`user` は本人の Memory への `memory.read`、`project` / `repo` は Database から読んだ Membership・Project の状態・Repository の ACL で `project.read`、`shared` は `shared_memory.read`）。どれも `DENIED_ONLY` なので、許可した読み取りは Audit を書きません。SQL はどの読み取りにも `readable_memory_versions` を入れます。
 - Memory の Scope は今の版の Scope です。一覧と件数は今の版の状態を問いません（画面の Filter が分ける）。Shared は今の版が `active` のものだけです（削除済みは管理者が `SharedMemoryService` で見る）。
 - 履歴の版は、読める版で、かつその Memory の今の版が読めるものだけです（広げる前の Private な版はその公開範囲を読める人だけ、狭めた Memory は Project のメンバーに全版が見えなくなる）。関係は両端が読めるものだけで、読めない辺は Backend にも届きません。
-- `can_write` は表示のための答えで、Audit を書かない Policy の判定（`authz.policy.decide`）です。最終の判定は書き込みのとき `MemoryVersioningService` が行い、Audit に残します。Repo と Shared の Memory はこの API では読むだけです。
+- 1 回の読み取りは `REPEATABLE READ, READ ONLY` の 1 つの Snapshot です。権限の材料（Membership・Project の状態・ACL）と Memory の行が同じ時点の値なので、権限を読んだ後に外された Membership や足された Memory は見えません。
+- `can_write` は表示のための答えで、Audit を書かない、注入された `Authorizer` の Policy での判定（`authz.policy.decide`）です。最終の判定は書き込みのとき `MemoryVersioningService` が行い、Audit に残します。Repo と Shared の Memory はこの API では読むだけです。
 - `actor_name` は人が書いた版の Login 名です（削除済みの User、Agent、System は `null`）。
 - 読めない Memory・Scope は、存在しないものと同じ 404 `memory_not_found` です。衝突は 409 `memory_version_conflict`（何も書かない）、状態の誤りは 409 `memory_state_conflict`、Viewer の編集は 403 `forbidden` です。編集と復元に Step-up は要りません（CSRF は Origin の検査）。
 - 手動の `supersedes` の取り消し（Decision 0065）は作っていません（Decision 0068 の 12。Domain の変更が要るため別の Issue）。
