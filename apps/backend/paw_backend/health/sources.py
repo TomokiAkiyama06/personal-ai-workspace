@@ -37,7 +37,7 @@ from paw_backend.compute.limits import (
     DEFAULT_HEADROOM_MIN_BYTES,
 )
 from paw_backend.compute.probe import GpuProbe
-from paw_backend.compute.scheduler import ComputeStatus
+from paw_backend.compute.scheduler import ComputeStatus, DeploymentStatus
 from paw_backend.connections.domain import ConnectionKind, ConnectionStatus
 from paw_backend.db import Database, DatabaseStatus
 from paw_backend.health import limits
@@ -82,6 +82,16 @@ def _status_of(severity: Severity) -> Status:
 
 def _seconds(value: object) -> float | None:
     return None if value is None else round(float(value), 3)
+
+
+def _on_gpu(deployment: DeploymentStatus) -> bool:
+    """On the GPU by the scheduler's state and, when its processes can be asked,
+    seen there (``observed_on_gpu``: the state alone is not evidence; Codex
+    review #170)."""
+    return (
+        deployment.state is DeploymentState.GPU
+        and deployment.observed_on_gpu is not False
+    )
 
 
 # -- PostgreSQL -------------------------------------------------------------------
@@ -240,6 +250,7 @@ class ComputeSource:
                     "capacity_tokens": deployment.capacity_tokens,
                     "max_sequences": deployment.max_sequences,
                     "observed_kv_fraction": deployment.observed_kv_fraction,
+                    "observed_on_gpu": deployment.observed_on_gpu,
                 }
             )
             if deployment.state is DeploymentState.FAILED:
@@ -247,15 +258,13 @@ class ComputeSource:
                 reasons.append(f"model_failed:{deployment.role.value}")
             elif (
                 deployment.role is ModelRole.MAIN
-                and deployment.state is not DeploymentState.GPU
+                and not _on_gpu(deployment)
                 and status.mode is SchedulerMode.NORMAL
             ):
                 # Kept on the GPU (ResidencyPolicy.ALWAYS) but for an Exclusive job.
                 errors = True
                 reasons.append("main_model_not_resident")
-        metrics["models_on_gpu"] = sum(
-            1 for d in status.deployments if d.state is DeploymentState.GPU
-        )
+        metrics["models_on_gpu"] = sum(1 for d in status.deployments if _on_gpu(d))
         if self._full_gpu is not None:
             full = self._full_gpu.status()
             metrics.update(
