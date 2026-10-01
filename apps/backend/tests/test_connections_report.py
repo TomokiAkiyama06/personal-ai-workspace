@@ -298,3 +298,42 @@ class UsageReportTest(PostgresConnectionTestCase):
 
         self.assertNotIn("seeded", repr(report))  # the model name
         self.assertIsInstance(report.users[0].user_id, uuid.UUID)
+
+
+@requires_postgres
+class UsageReportSnapshotTest(PostgresConnectionTestCase):
+    """The report's statements read one snapshot (Codex review of PR #193): a
+    call that commits while the report is being read is in none of its figures."""
+
+    async def test_a_call_committed_meanwhile_is_not_half_counted(self):
+        clock = FakeClock(NOW)
+        service = self.new_service(clock=clock, allow_explicit_clock=True)
+        self.seed_quota(self.admin, None, metric="requests", period="month")
+        task = self.seed_task(self.admin)
+        self.seed_usage(self.admin, task, started_at=tokyo(2026, 9, 17, 9))
+        store = service._store
+        original = store._quota_status_in
+        late: list[uuid.UUID] = []
+
+        async def quota_status_in(connection, now, user_id, kind):
+            if not late:  # the first user's quotas: the totals are read already
+                other = self.seed_task(self.admin)
+                late.append(
+                    self.seed_usage(
+                        self.admin, other, started_at=tokyo(2026, 9, 17, 10)
+                    )
+                )
+            return await original(connection, now, user_id, kind)
+
+        store._quota_status_in = quota_status_in
+
+        report = await service.workspace_usage_report(
+            self.principal(self.admin), UsageRange.LAST_14
+        )
+
+        self.assertTrue(late)
+        self.assertEqual(report.tasks, 1)
+        (quota,) = report.quotas
+        self.assertEqual(quota.used, 1)  # the same snapshot as the totals
+        admin = next(user for user in report.users if user.user_id == self.admin)
+        self.assertEqual((admin.tasks, admin.quotas[0].used), (1, 1))

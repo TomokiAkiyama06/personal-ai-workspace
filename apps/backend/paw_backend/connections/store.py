@@ -629,8 +629,9 @@ class ConnectionStore:
         """The report of ``user_id`` (``None``: the whole workspace) over
         ``usage_range`` (``connections/report.py``).
 
-        One transaction, one instant (the database's): the period, the sums and
-        the quotas are those of the same moment. ``viewer_id`` is whose quotas a
+        One read-only REPEATABLE READ transaction, one instant (the database's):
+        the period, the sums and the quotas are those of the same moment and the
+        same snapshot. ``viewer_id`` is whose quotas a
         workspace report carries (the user who asked).
         """
 
@@ -743,8 +744,10 @@ class ConnectionStore:
                 None if users is None else tuple(users),
             )
 
+        # One snapshot for every statement (READ COMMITTED would give each its
+        # own: a call that commits meanwhile would be in some figures only).
         return await self._database.transact_abortable(
-            work, timeout_seconds=self._timeout
+            work, timeout_seconds=self._timeout, snapshot=True
         )
 
     async def _sums(
