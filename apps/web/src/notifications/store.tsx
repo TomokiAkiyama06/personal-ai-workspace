@@ -120,11 +120,18 @@ const MAX_EVICTED_IDS = 10_000;
 
 interface NotificationState {
   items: NotificationItem[];
-  /** Ids of entries dropped by the MAX_ITEMS limit (not of resolved ones). */
+  /**
+   * The events of entries dropped by the MAX_ITEMS limit (not of resolved ones),
+   * as `evictedEvent(key, id)`: an id is only unique within its key.
+   */
   evicted: ReadonlySet<string>;
 }
 
 const EMPTY: NotificationState = { items: [], evicted: new Set() };
+
+function evictedEvent(key: string, id: string): string {
+  return JSON.stringify([key, id]);
+}
 
 /**
  * `mergeNotification` that also deduplicates the events of entries the 100-entry
@@ -136,11 +143,15 @@ function pushNotification(
   state: NotificationState,
   incoming: IncomingNotification,
 ): NotificationState {
-  if (incoming.id !== undefined && state.evicted.has(incoming.id)) return state;
+  if (incoming.id !== undefined && state.evicted.has(evictedEvent(incoming.key, incoming.id))) {
+    return state;
+  }
   const items = mergeNotification(state.items, incoming);
   if (items === state.items) return state;
   const kept = new Set(items.map((item) => item.key));
-  const dropped = state.items.filter((item) => !kept.has(item.key)).flatMap((item) => item.ids);
+  const dropped = state.items
+    .filter((item) => !kept.has(item.key))
+    .flatMap((item) => item.ids.map((id) => evictedEvent(item.key, id)));
   if (dropped.length === 0) return { ...state, items };
   const evicted = [...state.evicted, ...dropped];
   return { items, evicted: new Set(evicted.slice(-MAX_EVICTED_IDS)) };

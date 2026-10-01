@@ -345,6 +345,9 @@ describe("Notification Center", () => {
     // A new event of that key is still a new notification.
     emit({ key: "k0", id: "e0-2", severity: "info", title: "n0", at });
     expect(keys()[0]).toBe("k0");
+    // The id is remembered with its key: another key may use the same id.
+    emit({ key: "other", id: "e1", severity: "info", title: "o", at });
+    expect(keys()[0]).toBe("other");
   });
 
   it("remembers every id of an entry for dedup", () => {
