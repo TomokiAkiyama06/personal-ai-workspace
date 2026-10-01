@@ -3,6 +3,8 @@ import { createRoot } from "react-dom/client";
 import { App } from "./App";
 import { SessionProvider } from "./auth/session";
 import { I18nProvider } from "./i18n";
+import { apiMemorySource } from "./memory/apiSource";
+import { MemorySourceProvider } from "./memory/source";
 import { NotificationProvider } from "./notifications/store";
 import { RouterProvider } from "./router";
 import { ThemeProvider } from "./theme";
@@ -26,9 +28,11 @@ if (root) {
           <RouterProvider>
             <SessionProvider>
               <NotificationProvider>
-                <UsageSourceProvider source={apiUsageSource}>
-                  <App />
-                </UsageSourceProvider>
+                <MemorySourceProvider source={apiMemorySource}>
+                  <UsageSourceProvider source={apiUsageSource}>
+                    <App />
+                  </UsageSourceProvider>
+                </MemorySourceProvider>
               </NotificationProvider>
             </SessionProvider>
           </RouterProvider>
