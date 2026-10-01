@@ -62,6 +62,7 @@ from paw_backend.memory.versioning import (
     MemoryVersioningService,
 )
 from paw_backend.memory.versioning import limits as version_limits
+from paw_backend.memory.versioning.records import MemoryVersionView
 from paw_backend.memory.versioning.service import RESOURCE_MEMORY
 
 router = APIRouter(prefix="/memory", tags=["memory"])
@@ -271,6 +272,19 @@ def _versioning(request: Request) -> MemoryVersioningService:
     return MemoryVersioningService(_database(request), request.app.state.authorizer)
 
 
+async def _named(request: Request, written: MemoryVersionView) -> BoardVersion:
+    """The version just written, with its writer's name.
+
+    The version is committed: a failure to read the name must not turn the
+    answer into an error (the client would retry and run into its own version),
+    so the name is then left out.
+    """
+    try:
+        return await _board(request).named(written)
+    except MemoryDatabaseError:
+        return BoardVersion(written, None)
+
+
 @contextmanager
 def _memory_errors() -> Iterator[None]:
     """The service errors as API errors (their messages are fixed strings)."""
@@ -433,8 +447,7 @@ async def edit_memory(
         written = await _versioning(request).edit_memory(
             principal, memory_id, body.expected_version, changes
         )
-        named = await _board(request).named(written)
-    return _version(named)
+    return _version(await _named(request, written))
 
 
 @router.post(
@@ -453,5 +466,4 @@ async def restore_memory(
             body.source_version,
             reason=body.reason,
         )
-        named = await _board(request).named(written)
-    return _version(named)
+    return _version(await _named(request, written))

@@ -11,8 +11,12 @@ HTTP layer: authentication, the answers' shape, the error codes, the audit.
 import json
 import uuid
 from datetime import timedelta
+from unittest.mock import patch
 
 from sqlalchemy import text
+
+from paw_backend.memory.board import MemoryBoard
+from paw_backend.memory.versioning import MemoryDatabaseError
 
 from .auth_http_support import T0, HttpTestCase, requires_postgres
 
@@ -386,6 +390,22 @@ class MemoryHttpTest(HttpTestCase):
         )
         # A write is audited (memory.use is REQUIRED).
         self.assertIn(("memory.use", "allow"), {k[:2] for k in self.audit_summary()})
+
+    def test_a_committed_edit_is_answered_even_if_the_name_cannot_be_read(self):
+        memory_id, _ = self.seed_memory("first")
+
+        async def broken(*_):
+            raise MemoryDatabaseError("08006")
+
+        with patch.object(MemoryBoard, "named", broken):
+            response = self.post(
+                f"/memories/{memory_id}/edit", {"expected_version": 1, "title": "b"}
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(
+            (response.json()["version_number"], response.json()["actor_name"]),
+            (2, None),
+        )
 
     def test_an_edit_on_an_old_version_is_a_conflict(self):
         memory_id, _ = self.seed_memory("first")
