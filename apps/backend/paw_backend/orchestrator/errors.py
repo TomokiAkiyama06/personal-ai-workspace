@@ -231,6 +231,13 @@ _NAMED: dict[int, str] = {
         TaskError,
     )
 }
+# An agent ran out of memory (Decision 0071, Proposed): a runtime reports it with
+# ``NodeOutcome.failed(AGENT_OUT_OF_MEMORY)`` when its model server answers that the
+# GPU memory ran out (a CUDA OOM) or its process was killed for memory (the
+# kernel's OOM killer). Python's own ``MemoryError`` raised by a runtime is an
+# out-of-memory failure as well.
+AGENT_OUT_OF_MEMORY = "AgentOutOfMemory"
+OUT_OF_MEMORY_CLASSES = frozenset({AGENT_OUT_OF_MEMORY, MemoryError.__name__})
 # The names of the failures the orchestrator itself records for a node.
 NODE_TIMEOUT = "NodeTimeout"
 INVALID_OUTCOME = "InvalidNodeOutcome"
@@ -238,12 +245,16 @@ GRANT_ESCALATION = "GrantEscalation"
 
 
 # The failure classes an agent runtime may REPORT (``NodeOutcome.failed``): the
-# fixed names above, nothing else. A runtime's own name is data the adapter chose
-# (it could smuggle text into the records and the task log), so it is recorded
-# as ``ADAPTER_ERROR`` (Decision 0021, section 3: fixed names only; an adapter's
-# own class is ``AdapterError``). The orchestrator's own names (``NodeTimeout``,
-# ``GrantEscalation``, ...) are not in the list: a runtime cannot claim them.
-RUNTIME_ERROR_CLASSES = frozenset(_NAMED.values()) | {ADAPTER_ERROR}
+# fixed names above and ``AGENT_OUT_OF_MEMORY``, nothing else. A runtime's own
+# name is data the adapter chose (it could smuggle text into the records and the
+# task log), so it is recorded as ``ADAPTER_ERROR`` (Decision 0021, section 3:
+# fixed names only; an adapter's own class is ``AdapterError``). The
+# orchestrator's own names (``NodeTimeout``, ``GrantEscalation``, ...) are not in
+# the list: a runtime cannot claim them.
+RUNTIME_ERROR_CLASSES = frozenset(_NAMED.values()) | {
+    ADAPTER_ERROR,
+    AGENT_OUT_OF_MEMORY,
+}
 
 
 def runtime_error_class(name: object) -> str:

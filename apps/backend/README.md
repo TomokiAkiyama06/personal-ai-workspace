@@ -53,7 +53,7 @@ Python 側の Package（`pgvector-python`）は使わず、`paw_backend/memory/v
 apps/backend/
 ├─ pyproject.toml          # 依存（完全一致で固定）と Ruff 設定
 ├─ alembic.ini             # Alembic 設定（DB URL は持たない）
-├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0022 は Password / Session / Login Throttle / 認証 Policy、0023 は Passkey / Passkey の Challenge / Session の Gate、0026 は Project、0027 は Repository 登録・Remote・Checkout、0030 は Shared Connection・Quota・Usage、0031 は Tool Approval、0033 は Queue / Budget / Loop、0034 は DAG Agent Orchestrator（Plan・DAG・Node の試行）、0040 は Memory Schema、0041 は Memory Journal / Consolidation Queue、0042 は Memory の鮮度の Job の Index、0043 は `memory_versions` の全文検索の Index、0046 は Shared Memory Candidate、0050 は Research Scratch、0052 は Evidence / Claim Provenance、0071 は Memory の Status / Stale 状態の変更履歴、0083 は `tasks (project_id, state)` の Index、0085 は Task の Working Set、0087 は外部送信の Audit の `audit_events.details`、0108 は他の Account の Passkey の Reset（`admin_reset`）と 1 回限りの Password 再設定 Token（`password_reset`）とその発行の関数、0124 は招待・端末の Pairing・User の状態の履歴、0133 は Node の試行の Placement（Local / Cloud と Agent・Model）と Cloud の外部送信の Audit の対応、0147 は `memory_versions.content` の長さの上限（20,000 文字）、0154 は承認つきの Pairing の Session の Passkey の登録（`device_pairings.passkey_allowance_ended_at`）、0066 は System Health の時系列・Event と `connection_usage` の実行中の行の部分 Index
+├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0022 は Password / Session / Login Throttle / 認証 Policy、0023 は Passkey / Passkey の Challenge / Session の Gate、0026 は Project、0027 は Repository 登録・Remote・Checkout、0030 は Shared Connection・Quota・Usage、0031 は Tool Approval、0033 は Queue / Budget / Loop、0034 は DAG Agent Orchestrator（Plan・DAG・Node の試行）、0040 は Memory Schema、0041 は Memory Journal / Consolidation Queue、0042 は Memory の鮮度の Job の Index、0043 は `memory_versions` の全文検索の Index、0046 は Shared Memory Candidate、0050 は Research Scratch、0052 は Evidence / Claim Provenance、0071 は Memory の Status / Stale 状態の変更履歴、0083 は `tasks (project_id, state)` の Index、0085 は Task の Working Set、0087 は外部送信の Audit の `audit_events.details`、0108 は他の Account の Passkey の Reset（`admin_reset`）と 1 回限りの Password 再設定 Token（`password_reset`）とその発行の関数、0124 は招待・端末の Pairing・User の状態の履歴、0133 は Node の試行の Placement（Local / Cloud と Agent・Model）と Cloud の外部送信の Audit の対応、0147 は `memory_versions.content` の長さの上限（20,000 文字）、0154 は承認つきの Pairing の Session の Passkey の登録（`device_pairings.passkey_allowance_ended_at`）、0066 は System Health の時系列・Event と `connection_usage` の実行中の行の部分 Index、0183 は System Health が数える Agent の OOM と Escalation（`agent_incidents`）
 ├─ paw_backend/
 │  ├─ app.py               # create_app(settings)
 │  ├─ config.py            # PAW_ 環境変数から読む Settings
@@ -3901,7 +3901,7 @@ Decision 0037 の 14（Approved）は、Cloud（Codex / Claude）へ回した No
 - **`waiting` は穏やかな停止**: 他の誰か（承認、User、Resource）が Task を `waiting` にしたら、Pause と同じく新しい Node を起動せず、走っている Node を終わらせてから Run を終えます（`RunOutcome.WAITING`。Task は `waiting` のまま、Unblock した側が Enqueue します）。終わらせている間に Unblock されたら続けます。Planner の実行中も同じです。
 - **Lease を失った Run と、Entry ごと Cancel された Task**: 削除する Project の Task の停止は Task と Entry を 1 つの Transaction で Cancel するので、Worker は Heartbeat で Lease の喪失として知ります。その DAG を走らせる者はもういないので、Task が `cancelled` なら DAG を Cancel します（自分の `epoch` で Fencing。別の Worker が引き継いでいれば拒否されます）。予期しない Error で Task を失敗にするときは、まず走っていた Node を `ready` に戻します。**戻せなければ Task を失敗にせず、Entry を Claim したまま残し**、Lease が切れた後の引き継ぎ（`acquire`）が戻します（失敗にすると、Restart は新しい DAG を使うため、古い試行が `running` のまま残るため）。Cancel された Task の DAG を閉じる処理は数回やり直します（失敗は Log だけ）。
 - **Node の書き込みは Task の Run でも Fencing します**: `start_node` / `complete_node` / `fail_node` / `give_up_node` / `finalize` は、DAG の行の Lock の後に Task の行を `FOR SHARE` で読み、Task の `attempt` / `retry_count` が DAG を最後に引き継いだ Run と違うか、Task が終わっていれば（`completed` / `failed` / `cancelled`）`StaleRunError` で何も書きません。Epoch だけでは、Task が Fail・Retry（や Restart）された後、新しい Worker が DAG を引き継ぐ前に、古い Worker の結果が書かれて新しい Run に使われてしまうためです。Orchestrator はそれを受けたら書かずに次の `_watch` で Run を閉じます（`NodeWritesAreFencedByTheRunTest`）。
-- **Runtime が報告する失敗の Class は閉じた一覧だけ**: `NodeOutcome.failed` の `error_class` は、`errors.RUNTIME_ERROR_CLASSES`（標準の例外の固定の名前）にあるときだけそのまま記録し、それ以外は `AdapterError` にします（Decision 0021 の 3: 固定の名前だけ、Adapter の独自の Class は `AdapterError`）。Orchestrator 自身の名前（`NodeTimeout` など）は Runtime には名乗らせません。
+- **Runtime が報告する失敗の Class は閉じた一覧だけ**: `NodeOutcome.failed` の `error_class` は、`errors.RUNTIME_ERROR_CLASSES`（標準の例外の固定の名前と、Agent の Memory 不足を表す `AgentOutOfMemory`。Decision 0071、Proposed）にあるときだけそのまま記録し、それ以外は `AdapterError` にします（Decision 0021 の 3: 固定の名前だけ、Adapter の独自の Class は `AdapterError`）。Orchestrator 自身の名前（`NodeTimeout` など）は Runtime には名乗らせません。OOM の失敗と Escalation は `agent_incidents` にも 1 行ずつ残り、System Health の `task_queue` が数えます（[System Health](#agent-の-oom-と-escalation)）。
 - **一部の Repository だけを受け取った Node**: 親の Path Root と Host はそのままなので、除いた Repository は子の `TaskScope.excluded_repositories` に残し、その Worktree の Path と Remote の下の URL は範囲外（`OUT_OF_SCOPE`）にします（fail closed）。孫は親の除外を引き継ぎ、`scope_within` は除外を忘れた Scope を広すぎるとして拒否します。
 - **Planner の Identity**: Planner の Runtime には Node の Key として `plan` を渡しますが、Sub-Agent の ID（`agent_id_of`）と Loop 検知の `step` には `@planner` を使います。Node の Key は英字で始まるので、Plan が `plan` という Node を持っても、Planner と ID や失敗の履歴を共有しません。
 - **Cancel に応じない Runtime**: Timeout・Cancel・Budget の停止で Runtime の Coroutine を Cancel したら、その終わりを待つのは `CANCEL_GRACE_SECONDS`（10 秒。実時間）までです（Node の Task を束ねて待つ側はその 2 倍）。`CancelledError` を握りつぶす Runtime は**見捨て**（Log は件数だけ）、Node は通常どおり（`NodeTimeout` などで）失敗し、DAG の書き込みは `epoch` で Fencing され、Run は終わって Entry と Runtime の Timer も解放されます。見捨てた Coroutine はまだ動いているかもしれないので、試行ごとの `AttemptFence` を閉じ、その後の Tool 呼び出しと Budget の `charge` / `remaining` は `NodeStopped(ABANDONED)` になります（何も記録しません。`remaining` は `charge` と同じく、止まった Run でも `NodeStopped` です）。Orchestrator は試行を待ち終えたら、正常な終わりでも Fence を閉じます（`test_orchestrator_abandon.py`）。
@@ -4242,7 +4242,7 @@ Component ごとに Source が 1 つあり、読むだけです。返すのは N
 | --- | --- |
 | `database` | `SELECT 1` と所要時間。応答しなければ `critical` |
 | `compute` | Compute Scheduler の `status()`（VRAM、Utilization、Lease と待ち、Relief、Model ごとの状態）と Full GPU Mode。`create_app(compute=ComputeSetup(...))` が作る Application の Scheduler（#165、`app.state.compute.scheduler`）を読み、Lifespan が Full GPU Mode を動かしている間はその状態も読む。なければ `PAW_HEALTH_GPU_PROBE` の Probe、どちらもなければ `not_configured` |
-| `task_queue` | 全 User の Task の状態別の数、直近 1 時間・1 日の失敗（`task_events` の `fail`。Retry された Task も失敗ごとに数える）、直近 1 時間の Retry と Loop（同じ失敗の Signature の繰り返し。検知器と同じく保存された Window の中で数え、その最後の失敗が直近 1 時間にあるもの） |
+| `task_queue` | 全 User の Task の状態別の数、直近 1 時間・1 日の失敗（`task_events` の `fail`。Retry された Task も失敗ごとに数える）、直近 1 時間の Retry と Loop（同じ失敗の Signature の繰り返し。検知器と同じく保存された Window の中で数え、その最後の失敗が直近 1 時間にあるもの）、直近 1 時間・1 日の Agent の OOM（`oom_last_hour` / `oom_last_day`）と Escalation（`escalations_last_hour` / `escalations_last_day`）。OOM は 1 件で `warning`、3 件以上で `error`（「OOM連発」）、Escalation は 1 件以上で `warning`（それだけでは `error` にしない）。下の「Agent の OOM と Escalation」 |
 | `memory_worker` | Memory の Consolidation Queue の待ち、Worker に届かず延期された Job（`worker_unavailable`）、期限の切れた Lease、Dead letter（後の 3 つはどれも `WARNING`） |
 | `connections` | Codex / Claude の接続の状態・有効・最後の確認・実行中の呼び出し（Credential と Handle は読まない） |
 | `connection_reaper` | `AbandonedCallReaper.stats`（Cycle の数、片付けた行、連続の失敗、最後の Error の型） |
@@ -4255,6 +4255,15 @@ Check は並行に走り、1 つが 5 秒を超える・例外を出すと、そ
 DB があれば、Lifespan の Loop が `PAW_HEALTH_SAMPLE_INTERVAL_SECONDS` の Interval ごと（最初は起動の 1 Interval 後）に Report を作り、数値と各 Component の Severity の段階（0〜3）を `health_metric_samples` に入れます（DB の時計の枠に揃え、同じ枠には 1 回だけ）。20 Cycle ごとに、24 時間より古い生の行を 1 分、7 日より古い 1 分を 5 分、30 日より古い 5 分を 1 時間の集計（件数・合計・最小・最大）へ移し、`PAW_HEALTH_RETENTION_DAYS` より古い 1 時間の集計と Event を消します。移す行の削除と Merge は 1 文なので、Process が複数でも 1 つの Sample は 1 回だけ数えます。
 
 Component の Severity が前の Event と変わったときだけ `health_events` に 1 行を残します（集約しない。Advisory Lock の中で「最後の Event と違い、それより古くないときだけ」入れる。別の Process が同じ停止とその終わりを先に記録した後に届いた古い変化は捨て、2 度目の停止を作らない）。PostgreSQL に書けなかった間の Report は Process の中に残し（最大 100）、書けるようになってから Report の時刻で順に記録します（PostgreSQL の停止も残る）。
+
+### Agent の OOM と Escalation
+
+Issue [#183](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/183)。方針は [Decision 0071](../../docs/decisions/0071-agent-oom-and-escalation-records.md)（Proposed）です。
+
+- Agent の Runtime（Adapter）は、Model の Server が GPU の Memory 不足（CUDA OOM）を返したとき、または Process が Memory 不足で落とされた（Kernel の OOM Killer）ときに、`NodeOutcome.failed("AgentOutOfMemory")` を返します（`orchestrator.errors.AGENT_OUT_OF_MEMORY`。Runtime が名乗れる閉じた Error Class の一覧に加えた）。Runtime が Python の `MemoryError` を上げた場合も OOM として数えます（`OUT_OF_MEMORY_CLASSES`）。
+- Orchestrator は、Node の失敗を記録する Transaction（`DagStore.fail_node`）の中で、OOM の Class なら `agent_incidents` に `out_of_memory` を、次の手が `escalate` なら `escalation` を 1 行ずつ入れます。古い Epoch・Attempt の報告は拒まれ、何も残しません。Planner（Node がない）の OOM は `DagStore.record_incident` で別に残します（失敗しても Log だけで、Run は止めない）。
+- `agent_incidents` は種類と DB の時刻だけを持ち、Task・Node・Agent・文は持ちません（失敗した試行そのものは `agent_dag_node_attempts` の `error_class` に残る）。集約せず、`PAW_HEALTH_RETENTION_DAYS` を過ぎた行は時系列の Roll-up と一緒に消します。
+- 実際の Runtime の Adapter（vLLM / Codex CLI など）が OOM を見分ける実装は、まだありません（Adapter と同じ Issue で作る）。
 
 ### Endpoint と権限
 
@@ -4271,10 +4280,12 @@ Component の Severity が前の Event と変わったときだけ `health_event
 
 Migration `0066` が `health_metric_samples`（Application の Role に SELECT / INSERT / UPDATE / DELETE）と `health_events`（SELECT / INSERT / DELETE。更新はできない）を作り、`connection_usage (started_at) WHERE status = 'in_flight'` の部分 Index（#52 の Comment。Reaper と `connections` が使う）、`task_events (created_at) WHERE command IN ('retry', 'fail')` の部分 Index と `loop_failure_signatures (created_at)` の Index（`task_queue` の失敗・Retry・Loop）、`tasks (state)` の実行中の Task の部分 Index と `tasks (updated_at)` の完了・取消の Task の部分 Index（`task_queue` の状態別の数。終わって久しい Task を読まない）を加えます。Source が読むのは Application の Role が既に読める Table だけです。
 
+Migration `0183`（Issue #183）が `agent_incidents`（`kind` は `out_of_memory` / `escalation`、`occurred_at`。Application の Role に SELECT / INSERT / DELETE。更新はできない）と `ix_agent_incidents_occurred_at` を作ります。
+
 ### 制限と未確認の点
 
 - 通知（Notification Center、Rule）、SSE / WebSocket の Event、UI は後の Issue です。
-- OOM と Escalation の実行の数はまだありません（記録する場所がない）。
+- OOM を報告する実際の Runtime の Adapter はまだありません（今は Test の Runtime だけが報告する）。
 - `memory_worker` の Dead letter の数は Table を走査します（Index を足していない）。
 - 実 GPU と実際の Timer（Backup、Projection、Audit retention）を使った確認はしていません（Test は Fake と PostgreSQL）。
 
