@@ -163,15 +163,15 @@
 
 ### Resolved（3 回）
 
-| 構成 | run1 | run2 | run3 | 平均 | 3 回とも解けた Task | 1 回でも解けた Task | 09-28 / 09-30 の 1 回 |
+| 構成 | run1 | run2 | run3 | 平均 | **Resolved@3**（1 回でも解けた Task） | 3 回とも解けた Task（安定性） | 09-28 / 09-30 の 1 回 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | Qwen3.6-27B-FP8（単独） | 14 | 14 | 14 | 14.0 | 14 | 14 | 14 |
-| KAT-Coder-V2.5-Dev（単独、BF16） | 14 | 13 | 13 | 13.3 | 13 | 14 | 14 |
+| KAT-Coder-V2.5-Dev（単独、BF16） | 14 | 13 | 13 | 13.3 | 14 | 13 | 14 |
 | Qwen3.8-27B-FP8（単独） | 14 | 14 | 14 | 14.0 | 14 | 14 | 14 |
-| **Qwen3.6-27B-FP8（同時に動かす）** | 14 | 13 | 14 | 13.7 | 13 | 14 | - |
-| KAT-Coder-V2.5-Dev-FP8（同時に動かす、Load 時の量子化） | 13 | 14 | 13 | 13.3 | 13 | 14 | - |
+| **Qwen3.6-27B-FP8（同時に動かす）** | 14 | 13 | 14 | 13.7 | 14 | 13 | - |
+| KAT-Coder-V2.5-Dev-FP8（同時に動かす、Load 時の量子化） | 13 | 14 | 13 | 13.3 | 14 | 13 | - |
 
-- 数字は 24 Task のうち解けた数。「3 回とも解けた Task」は 3 回すべてで解けた Task の数（厳しい側の Resolved@3）、「1 回でも解けた Task」は pass@3 に当たる。
+- 数字は 24 Task のうち解けた数。Resolved@3 は [BENCHMARK_EVALUATOR.md](../BENCHMARK_EVALUATOR.md) と paw-seed-v1 の `resolved_at_n` の定義どおり「最初の 3 回のいずれかで解けた Task」。「3 回とも解けた Task」は Run の揺れを見るための別の指標（安定性）で、Resolved@3 ではない。
 - **全構成・全 Run で結果が変わった Task は 2 つだけ**: spec-01-result-summary（KAT は単独・FP8 とも 3 回中 1 回）と spec-02-task-semantic-validation（Qwen3.6-27B-FP8 を同時に動かした run2 だけ失敗）。ほかの 13 Task（Injected Bug 7・Spec 5・hist-08）はすべての Run で解け、残りの Historical 10 Task はどの Run でも解けなかった。
 - 同時に動かした Qwen3.6-27B-FP8 の run2 の spec-02 の失敗は、`submit` で終えた Patch が Hidden acceptance に落ちたもの（24 step、最大 Prompt 24k token。Context の不足でも Error でもない）。
 - Harness の Error と LLM の Error は Qwen3.6-27B-FP8 では全 Run で 0。
@@ -204,8 +204,8 @@
 ### 読み方（確認 Run）
 
 - **Decision 0040 の採用条件**（同時に動かして Resolved が 14/24 より下がらないこと、Peak + Headroom が GPU に収まること）:
-  - VRAM は満たした（86.1 + 4.8 = 90.9 GiB ≤ 95.6 GiB）。
-  - Resolved は 3 回のうち 2 回が 14/24、1 回が 13/24（平均 13.7）。下がった 1 Task（spec-02）は同じ構成の他の 2 回では解けており、単独の KAT も同じ幅（13〜14）で揺れる。同時に動かすことで解けなくなった Task はない（1 回でも解けた Task は 14 で、単独と同じ集合）。1 回の Run の揺れの範囲であり、条件は**実質的に満たした**と読める。ただし「1 回も 14 を下回らない」と厳密に読むなら満たしていない。この読み方は Human の判断を求める（PR の判断点）。
-- **Resolved@3 の順位**: Qwen3.6-27B-FP8（単独）は 3 回とも 14/24 で、出力 token が最も少ない。Qwen3.8-27B-FP8 は も 3 回とも 14/24 で同じく安定するが、24 Task に 114〜124 分（Qwen3.6-27B-FP8 の約 3.7 倍）と 3.7 倍の出力 token を使い、Context 不足で終わる Task が毎回 3〜6 ある。KAT は 14 / 13 / 13 で spec-01 が揺れる。上位 3 つの差は 1 Task 以内で、Decision 0040 の選択（Qwen3.6-27B-FP8）を変える結果ではない。
+  - VRAM は、実際の使用のピークでは満たした（86.1 + 4.8 = 90.9 GiB ≤ 95.6 GiB、OOM なし）。ただし Decision 0039 の 1 の Footprint（ピーク + 2 GiB）で予約を数えると 1.6 GiB 超える（下の Footprint）。
+  - Resolved は 3 回のうち 2 回が 14/24、1 回が 13/24（平均 13.7）。下がった 1 Task（spec-02）は同じ構成の他の 2 回では解けており、単独の KAT も同じ幅（13〜14）で揺れる。同時に動かすことで解けなくなった Task はない（Resolved@3 は 14/24 で、単独と同じ集合）。1 回の Run の揺れの範囲であり、条件は**実質的に満たした**と読める。ただし「1 回も 14 を下回らない」と厳密に読むなら満たしていない。この読み方は Human の判断を求める（[Decision 0073](../decisions/0073-main-coexistence-confirmation.md) の 1）。
+- **Resolved@3 は 5 構成すべてで 14/24**（同じ 14 Task の集合）で、Resolved@3 では差がつかない。差は安定性（3 回とも解けた Task）と速さに出る。Qwen3.6-27B-FP8（単独）は 3 回とも 14/24 で、出力 token が最も少ない。Qwen3.8-27B-FP8 も 3 回とも 14/24 で同じく安定するが、24 Task に 114〜124 分（Qwen3.6-27B-FP8 の約 3.7 倍）と 3.7 倍の出力 token を使い、Context 不足で終わる Task が毎回 3〜6 ある。KAT は 14 / 13 / 13 で spec-01 が揺れる。上位 3 つの差は 1 Task 以内で、Decision 0040 の選択（Qwen3.6-27B-FP8）を変える結果ではない。
 - **KAT の FP8 版**: Load 時の量子化で KV Pool は BF16 の単独と同程度（22.6 GiB）を取れ、Resolved も BF16 と同じ幅（13〜14）。ただし Load の途中の Peak が GPU を使い切るため、Memory Worker などが常駐する中で Load し直せない。次点のままとし、FP8 で配布された Weight（事前に量子化したもの）を使うなら測り直す。
-- **Footprint の実測**（Decision 0039 の 1 に与える値の根拠）: Qwen3.6-27B-FP8 を `gpu-memory-utilization` 0.61 で 59.7 GiB、Memory Worker（Qwen3.5-4B、KV 4 GiB）13.6 GiB、Embedding + Reranker 13.1 GiB。
+- **Footprint**（Decision 0039 の 1: 実測のピーク + 2 GiB）: この Run の設定のままだと Main（`gpu-memory-utilization` 0.61）61.7 GiB・Memory Worker（Qwen3.5-4B、KV 4 GiB）15.6 GiB・Embedding + Reranker 15.1 GiB で、合計 92.4 GiB。Safety Headroom（4.8 GiB）を足すと 97.2 GiB で **GPU の 95.6 GiB を 1.6 GiB 超える**。実際の使用のピーク（86.1 GiB）は収まったが、Scheduler の予約の勘定（Decision 0037 の 3）では 3 つを同時に置けない。どれかの割り当てを減らす必要があり、[Decision 0073](../decisions/0073-main-coexistence-confirmation.md) の 2 で判断を求める（推奨は Main の `gpu-memory-utilization` を 0.58 に下げる: KV Pool は約 26 GiB で、この Run の KV の使用の最大（約 15 GiB）の 1.7 倍が残る）。
