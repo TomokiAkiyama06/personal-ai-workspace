@@ -46,6 +46,8 @@ export const ja = {
   "projects.filterPlaceholder": "絞り込む",
   "projects.empty": "参加しているプロジェクトはありません。",
   "projects.emptyFiltered": "該当するプロジェクトはありません。",
+  "projects.truncated":
+    "件数が多いため、一部のプロジェクトだけを表示しています。表示されていないプロジェクトがあります。",
   "projects.showArchived": "アーカイブ済みを表示（{count}）",
   "projects.hideArchived": "アーカイブ済みを隠す",
   "projects.note":

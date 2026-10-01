@@ -47,6 +47,7 @@ export const en: Record<MessageKey, string> = {
   "projects.filterPlaceholder": "Filter",
   "projects.empty": "You are not a member of any project.",
   "projects.emptyFiltered": "No matching projects.",
+  "projects.truncated": "There are too many projects to list; only some of them are shown.",
   "projects.showArchived": "Show archived ({count})",
   "projects.hideArchived": "Hide archived",
   "projects.note":

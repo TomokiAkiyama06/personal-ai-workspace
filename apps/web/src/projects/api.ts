@@ -6,8 +6,8 @@ import { apiRequest } from "../api/client";
 import type {
   LifecycleAction,
   ProjectDetail,
+  ProjectListing,
   ProjectRole,
-  ProjectSummary,
   ProjectsSource,
   RepositoryRegistration,
 } from "./model";
@@ -26,11 +26,8 @@ function projectPath(projectId: string): string {
 
 export const projectsApi: ProjectsSource = {
   async list() {
-    const answer = await apiRequest<{ projects: ProjectSummary[]; truncated: boolean }>(
-      "GET",
-      "/projects",
-    );
-    return answer.projects;
+    const answer = await apiRequest<ProjectListing>("GET", "/projects");
+    return { projects: answer.projects, truncated: answer.truncated };
   },
 
   detail(projectId) {

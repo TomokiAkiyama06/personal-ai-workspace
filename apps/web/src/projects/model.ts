@@ -78,8 +78,17 @@ export type RepositoryRegistration =
 /** The lifecycle operations of ProjectService (the purge is the Backend's job). */
 export type LifecycleAction = "archive" | "unarchive" | "begin_deletion" | "restore";
 
+/**
+ * The user's projects. The Backend lists at most 1000 projects of each status
+ * (Decision 0066, 3); `truncated` says that more exist than `projects` holds.
+ */
+export interface ProjectListing {
+  projects: ProjectSummary[];
+  truncated: boolean;
+}
+
 export interface ProjectsSource {
-  list(): Promise<ProjectSummary[]>;
+  list(): Promise<ProjectListing>;
   detail(projectId: string): Promise<ProjectDetail>;
   create(input: { name: string; description: string | null }): Promise<{ id: string }>;
   /** `confirmName` (the project's exact name) is required by `begin_deletion`. */

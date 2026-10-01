@@ -16,12 +16,17 @@ describe("projectsApi", () => {
       "GET /projects": reply(200, { projects: SUMMARIES, truncated: false }),
       "GET /projects/p-example": reply(200, detail),
     });
-    await expect(projectsApi.list()).resolves.toEqual(SUMMARIES);
+    await expect(projectsApi.list()).resolves.toEqual({ projects: SUMMARIES, truncated: false });
     await expect(projectsApi.detail("p-example")).resolves.toEqual(detail);
     expect(calls.map((call) => `${call.method} ${call.path}`)).toEqual([
       "GET /projects",
       "GET /projects/p-example",
     ]);
+  });
+
+  it("keeps the Backend's truncated flag of the list", async () => {
+    mockApi({ "GET /projects": reply(200, { projects: SUMMARIES, truncated: true }) });
+    await expect(projectsApi.list()).resolves.toEqual({ projects: SUMMARIES, truncated: true });
   });
 
   it("creates a project and returns its id", async () => {
