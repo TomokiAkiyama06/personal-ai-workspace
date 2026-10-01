@@ -157,6 +157,23 @@ function pushNotification(
   return { items, evicted: new Set(evicted.slice(-MAX_EVICTED_IDS)) };
 }
 
+/**
+ * The condition of the keys passing `test` is over: their entries go away and
+ * their ids are forgotten, also those of entries the limit already pushed out
+ * (Codex review #194), so the condition coming back is a new notification.
+ */
+function resolveKeys(state: NotificationState, test: (key: string) => boolean): NotificationState {
+  const items = state.items.some((item) => test(item.key))
+    ? state.items.filter((item) => !test(item.key))
+    : state.items;
+  const remembered = [...state.evicted].filter((event) => {
+    const [key] = JSON.parse(event) as [string, string];
+    return !test(key);
+  });
+  const evicted = remembered.length === state.evicted.size ? state.evicted : new Set(remembered);
+  return items === state.items && evicted === state.evicted ? state : { items, evicted };
+}
+
 function earlier(a: string, b: string): string {
   return Date.parse(b) < Date.parse(a) ? b : a;
 }
@@ -209,7 +226,7 @@ export function NotificationProvider({
 }) {
   const [state, setState] = useState<NotificationState>(EMPTY);
   const items = state.items;
-  // Every change but a push and a clear is to the list only.
+  // Every change but a push, a resolve and a clear is to the list only.
   const setItems = useCallback((change: (current: NotificationItem[]) => NotificationItem[]) => {
     setState((current) => {
       const next = change(current.items);
@@ -219,26 +236,12 @@ export function NotificationProvider({
   const push = useCallback((incoming: IncomingNotification) => {
     setState((current) => pushNotification(current, incoming));
   }, []);
-  const resolve = useCallback(
-    (key: string) => {
-      setItems((current) =>
-        current.some((item) => item.key === key)
-          ? current.filter((item) => item.key !== key)
-          : current,
-      );
-    },
-    [setItems],
-  );
-  const resolveMatching = useCallback(
-    (test: (key: string) => boolean) => {
-      setItems((current) =>
-        current.some((item) => test(item.key))
-          ? current.filter((item) => !test(item.key))
-          : current,
-      );
-    },
-    [setItems],
-  );
+  const resolve = useCallback((key: string) => {
+    setState((current) => resolveKeys(current, (candidate) => candidate === key));
+  }, []);
+  const resolveMatching = useCallback((test: (key: string) => boolean) => {
+    setState((current) => resolveKeys(current, test));
+  }, []);
   const markRead = useCallback(
     (key: string) => {
       setItems((current) =>
