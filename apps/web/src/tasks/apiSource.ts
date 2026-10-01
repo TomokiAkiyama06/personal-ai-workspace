@@ -1,5 +1,5 @@
 // The Backend's task API (/api/v1/tasks, /api/v1/pull-requests; issue #185,
-// Decision 0067 Proposed) as the screens' TaskSource. The Backend decides every
+// Decision 0067 Approved) as the screens' TaskSource. The Backend decides every
 // state, permission and Merge Ready; this only renames the fields of its answers
 // (snake_case) to the screens' types.
 import { apiRequest } from "../api/client";

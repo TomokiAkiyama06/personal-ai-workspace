@@ -1,5 +1,5 @@
 """Tasks, their Agent DAG, the operator controls and the pull request records
-over HTTP (issue #185, Decision 0067 Proposed; the screens of PAW-062, #48).
+over HTTP (issue #185, Decision 0067 Approved; the screens of PAW-062, #48).
 
 * ``GET /tasks`` (``tasks.list``, every human role): the latest updated tasks of
   the projects the person may read (``project.read``, decided per project), newest

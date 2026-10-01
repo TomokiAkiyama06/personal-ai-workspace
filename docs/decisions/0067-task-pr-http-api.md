@@ -1,6 +1,7 @@
 # Task / DAG / 操作 / PR の記録の HTTP API の方針（一覧の Capability、見える範囲、操作の権限と Queue、Merge Ready、未実装の Board）
 
-- Status: Proposed
+- Status: Approved
+- Approval: 2026-10-01、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで直接回答して承認（判断点1〜8、すべて推奨どおり。末尾の「承認時の決定」）
 - Date: 2026-10-01
 - Scope: Issue [#185](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/185)（UI #48・PR #174 の接続先）の `apps/backend/paw_backend/api/v1/tasks.py`、`apps/backend/paw_backend/api/v1/task_views.py`、Capability `tasks.list`、`apps/web/src/tasks/apiSource.ts`
 - Supersedes: なし。[Decision 0004](0004-rbac-capability-and-audit-policy.md)（Approved）の Capability 表と読み取り専用の許可リストに 1 つを加える（書き換えない）
@@ -74,3 +75,7 @@ PR の画面とモバイルの Board 用の、変更したファイル・Review 
 承認されたら Status を Approved に改め、承認の内容を記録する。
 方針を変えるときは、この Decision を書き換えず、新しい Decision から `Supersedes` する。
 [REQUIREMENTS.md](../../REQUIREMENTS.md) の原文は書き換えない。
+
+## 承認時の決定（2026-10-01）
+
+Human は、作業 Session で判断が必要な点について推奨つきの説明を受け、直接回答して承認した（判断点1〜8、すべて推奨どおり）。

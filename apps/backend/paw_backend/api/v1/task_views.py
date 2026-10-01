@@ -1,4 +1,4 @@
-"""Reads of the Task / PR screens (issue #185, Decision 0067 Proposed).
+"""Reads of the Task / PR screens (issue #185, Decision 0067 Approved).
 
 What ``/api/v1/tasks`` and ``/api/v1/pull-requests`` show besides
 ``TaskService.restore``, the DAG store and the budget tracker: the lists, the

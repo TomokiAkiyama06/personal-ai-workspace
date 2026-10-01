@@ -809,7 +809,7 @@ Table は加えて `recorded_at`（Database の時計。INSERT 時に Trigger �
 | Mode | 対象 | 記録 | Audit を書けないとき |
 | --- | --- | --- | --- |
 | `REQUIRED`（既定） | 上記以外のすべて（副作用のある操作、管理系、`admin.audit.view` / `admin.usage.view` も含む） | 許可も拒否も記録する | **許可を拒否に変える**（`audit_unavailable`、HTTP 503）。拒否は拒否のまま |
-| `DENIED_ONLY` | 読み取り専用の許可リスト（`project.read`、`shared_memory.read`、`account.read`、`memory.read`、System Health の `system_health.summary.read` と `admin.system_health.view`（Decision 0059、Proposed）、Task / PR の一覧の `tasks.list`（Decision 0067、Proposed））だけ | 拒否だけを Best Effort で記録し、許可した読み取りは記録しない | 読み取りは止めない |
+| `DENIED_ONLY` | 読み取り専用の許可リスト（`project.read`、`shared_memory.read`、`account.read`、`memory.read`、System Health の `system_health.summary.read` と `admin.system_health.view`（Decision 0059、Proposed）、Task / PR の一覧の `tasks.list`（Decision 0067、Approved））だけ | 拒否だけを Best Effort で記録し、許可した読み取りは記録しない | 読み取りは止めない |
 
 - **認証されていない Request の拒否は Database に書きません。** 誰でも作れる行になり、Table は削除できないためです。
   代わりに `INFO` の Log（Reason、Action、Resource の種類、`correlation_id`、`client_request_id`。例外の文は含めない）に出します。
@@ -4429,7 +4429,7 @@ Implementation Backlog の受け入れ条件 3 つは、上のとおり実装で
 
 ## Task / DAG / 操作 / PR の記録の HTTP API（Issue #185）
 
-PAW-062 の画面（`/agents`、`/pulls`、Web の `src/tasks/apiSource.ts`）の接続先です。`paw_backend/api/v1/tasks.py` が経路、`paw_backend/api/v1/task_views.py` が一覧と見える範囲の読み取りで、状態・遷移・予算・DAG は既存の `TaskService`・`DagStore`・`BudgetTracker` が返すものをそのまま出します。方針は [Decision 0067](../../docs/decisions/0067-task-pr-http-api.md)（**Proposed**）です。
+PAW-062 の画面（`/agents`、`/pulls`、Web の `src/tasks/apiSource.ts`）の接続先です。`paw_backend/api/v1/tasks.py` が経路、`paw_backend/api/v1/task_views.py` が一覧と見える範囲の読み取りで、状態・遷移・予算・DAG は既存の `TaskService`・`DagStore`・`BudgetTracker` が返すものをそのまま出します。方針は [Decision 0067](../../docs/decisions/0067-task-pr-http-api.md)（**Approved**）です。
 
 | Endpoint | Capability | 内容 |
 | --- | --- | --- |

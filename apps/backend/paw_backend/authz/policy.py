@@ -117,7 +117,7 @@ _USER = frozenset(
         # The compact System Health state (Decision 0059).
         C.SYSTEM_HEALTH_SUMMARY_READ,
         # The lists of the Task / PR screens, filtered by project.read (Decision
-        # 0067, Proposed).
+        # 0067, Approved).
         C.TASKS_LIST,
     }
 )

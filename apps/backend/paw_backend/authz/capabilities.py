@@ -74,7 +74,7 @@ class Capability(StrEnum):
     # and whether Codex / Claude are available (PAW-066, Decision 0059
     # Proposed). Any human role; read-only; never an Agent's.
     SYSTEM_HEALTH_SUMMARY_READ = "system_health.summary.read"
-    # The lists of the Task / PR screens (issue #185, Decision 0067 Proposed):
+    # The lists of the Task / PR screens (issue #185, Decision 0067 Approved):
     # only that the person may ask for them. Every task and pull request in the
     # answer is of a project the person may read (``project.read``, decided per
     # project and per repository). Any human role; read-only; never an Agent's.

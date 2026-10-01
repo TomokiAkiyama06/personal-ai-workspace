@@ -1,5 +1,5 @@
 """Tasks, DAG, controls and pull request records over HTTP (issue #185, Decision
-0067 Proposed) on PostgreSQL.
+0067 Approved) on PostgreSQL.
 
 The application's own composition (``create_app`` with a database: the task
 service, the queue and the budget tracker of ``app.state.task_execution``, with
