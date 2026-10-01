@@ -32,6 +32,7 @@ from paw_backend.notifications import (
     Category,
     NewNotification,
     NotificationStore,
+    ReadResult,
     add_in,
     audience_capabilities,
     resolve_in,
@@ -160,21 +161,25 @@ class NotificationStoreTest(NotificationsTestCase):
         marked = await self.store.mark_read(
             self.admin.user_id, admin_audiences, [shared, bobs]
         )
-        self.assertEqual(marked, 1)  # Bob's notification is not the admin's
+        # Bob's notification is not the admin's; the count is of the same moment.
+        self.assertEqual(marked, ReadResult(updated=1, unread=0))
         self.assertTrue((await self.page(self.admin)).items[0].read)
         self.assertFalse((await self.page(other_admin)).items[0].read)
         self.assertFalse((await self.page(self.bob)).items[0].read)
         # Marking again changes nothing.
         self.assertEqual(
             await self.store.mark_read(self.admin.user_id, admin_audiences, [shared]),
-            0,
+            ReadResult(updated=0, unread=0),
         )
 
     async def test_mark_all_read(self):
         await self.add(key="k:1", recipient_user_id=self.alice.user_id)
         await self.add(key="k:2", recipient_user_id=self.alice.user_id)
         await self.add(key="k:3", recipient_user_id=self.bob.user_id)
-        self.assertEqual(await self.store.mark_read(self.alice.user_id, (), None), 2)
+        self.assertEqual(
+            await self.store.mark_read(self.alice.user_id, (), None),
+            ReadResult(updated=2, unread=0),
+        )
         self.assertEqual(await self.store.unread(self.alice.user_id, ()), 0)
         self.assertEqual(await self.store.unread(self.bob.user_id, ()), 1)
 

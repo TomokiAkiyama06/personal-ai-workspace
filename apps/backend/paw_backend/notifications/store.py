@@ -13,7 +13,8 @@ it, marking it read or dismissing it behaves as if it did not exist.
 * :meth:`NotificationStore.page`: the newest notifications that are not
   dismissed, and how many are unread in all.
 * :meth:`NotificationStore.mark_read`: the given visible notifications (or every
-  visible one) become read for this user; the others are ignored.
+  visible one) become read for this user; the others are ignored. How many are
+  unread after it is counted in the same transaction.
 * :meth:`NotificationStore.dismiss`: the notification and the earlier ones of its
   key (one entry of the Notification Center) are dismissed (and read) for this
   user. A newer notification of the key is listed again.
@@ -37,6 +38,7 @@ from paw_backend.notifications.domain import (
     Category,
     NewNotification,
     NotificationPage,
+    ReadResult,
     Severity,
     StoredNotification,
     params_json,
@@ -248,9 +250,11 @@ class NotificationStore:
         user_id: uuid.UUID,
         audiences: Sequence[str],
         ids: Sequence[uuid.UUID] | None,
-    ) -> int:
+    ) -> ReadResult:
         """Mark ``ids`` (``None``: every visible notification) read; return how
-        many became read. Ids the user cannot see are ignored."""
+        many became read and how many are unread after it (one transaction: the
+        answer never disagrees with what was saved). Ids the user cannot see are
+        ignored."""
         if ids is not None and len(ids) > MAX_READ_IDS:
             raise ValueError("too many ids")
         params = {
@@ -260,8 +264,14 @@ class NotificationStore:
             "ids": [] if ids is None else list(ids),
         }
 
-        async def work(session: AsyncSession) -> int:
-            return len((await session.execute(text(_MARK_READ), params)).fetchall())
+        async def work(session: AsyncSession) -> ReadResult:
+            updated = len((await session.execute(text(_MARK_READ), params)).fetchall())
+            unread = (
+                await session.execute(
+                    text(_UNREAD), {"user": user_id, "audiences": params["audiences"]}
+                )
+            ).scalar_one()
+            return ReadResult(updated=updated, unread=int(unread))
 
         return await self._run(work)
 

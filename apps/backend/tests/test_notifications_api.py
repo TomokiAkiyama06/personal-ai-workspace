@@ -21,6 +21,7 @@ from paw_backend.notifications import (
     Category,
     NotificationPage,
     NotificationsUnavailableError,
+    ReadResult,
     Severity,
     StoredNotification,
 )
@@ -39,6 +40,7 @@ class FakeStore:
         self.fail = False
         self.updated = 1
         self.found = True
+        self.unread_fails = False
 
     def _call(self, *args):
         if self.fail:
@@ -66,11 +68,13 @@ class FakeStore:
 
     async def unread(self, user_id, audiences):
         self._call("unread", user_id)
+        if self.unread_fails:
+            raise NotificationsUnavailableError
         return 2
 
     async def mark_read(self, user_id, audiences, ids):
         self._call("mark_read", user_id, None if ids is None else tuple(ids))
-        return self.updated
+        return ReadResult(updated=self.updated, unread=2)
 
     async def dismiss(self, user_id, audiences, notification_id):
         self._call("dismiss", user_id, notification_id)
@@ -195,7 +199,20 @@ class WriteTest(unittest.TestCase):
         self.assertEqual(response.json(), {"updated": 1, "unread": 2})
         self.assertEqual(self.store.calls[0], ("mark_read", U1, (N1,)))
         self.client.post("/api/v1/notifications/read", json={"all": True})
-        self.assertEqual(self.store.calls[2], ("mark_read", U1, None))
+        self.assertEqual(self.store.calls[1], ("mark_read", U1, None))
+
+    def test_a_read_that_was_saved_is_answered_and_announced(self):
+        # The read and the unread count come from one transaction: a saved read
+        # is never answered 503 (the Web App would show it unread again) nor
+        # left unannounced to the user's other devices.
+        self.store.unread_fails = True
+        with self.bus.subscribe(Viewer(U1, frozenset())) as mine:
+            response = self.client.post(
+                "/api/v1/notifications/read", json={"ids": [str(N1)]}
+            )
+            self.assertFalse(mine._queue.empty())
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"updated": 1, "unread": 2})
 
     def test_the_body_is_validated(self):
         for body in (

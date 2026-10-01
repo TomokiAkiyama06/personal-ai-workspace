@@ -175,6 +175,14 @@ class NotificationPage:
     unread: int
 
 
+@dataclass(frozen=True, slots=True)
+class ReadResult:
+    # How many notifications became read.
+    updated: int
+    # Every unread notification the user can see after the read (same transaction).
+    unread: int
+
+
 def audience_capabilities(
     principal: Principal, policy: Policy = DEFAULT_POLICY
 ) -> tuple[str, ...]:

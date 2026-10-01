@@ -146,15 +146,14 @@ async def mark_read(
 ) -> MarkReadResponse:
     audiences = _audiences(request, principal)
     try:
-        updated = await store.mark_read(
+        result = await store.mark_read(
             principal.user_id, audiences, None if body.all else body.ids
         )
-        unread = await store.unread(principal.user_id, audiences)
     except NotificationsUnavailableError:
         raise _unavailable() from None
-    if updated:
+    if result.updated:
         _announce(request, principal)
-    return MarkReadResponse(updated=updated, unread=unread)
+    return MarkReadResponse(updated=result.updated, unread=result.unread)
 
 
 @router.post(
