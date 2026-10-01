@@ -92,7 +92,7 @@ apps/backend/
 │  ├─ tools/               # Tool Broker、Capability Policy、Approval（PAW-031）
 │  └─ api/
 │     ├─ deps.py           # FastAPI Dependency
-│     └─ v1/               # /api/v1 の Router（health、events、auth、passkeys、accounts、system_health）
+│     └─ v1/               # /api/v1 の Router（health、events、auth、passkeys、accounts、system_health、compute、memory）
 ├─ deploy/systemd/         # Audit の保存期間・退避（Issue #117）、Memory Markdown Projection（PAW-045）、Recovery Repository の Backup（PAW-047）の定期実行の Unit File の例
 ├─ deploy/ssh-git-wrapper/ # SshGitRunner の Forced Command の Wrapper と配備の手順（Issue #134）
 └─ tests/                  # unittest
@@ -231,6 +231,7 @@ Endpoint は `/api/v1` 以下です。OpenAPI Schema は `/api/v1/openapi.json` 
 | `/api/v1/system/health`、`/metrics/{name}`、`/events` | 全 Component の状態・時系列・Severity の変化（Owner / Admin） |
 | `/api/v1/auth/invitations/*`、`/api/v1/auth/users/*`、`/api/v1/auth/pairing/*` | 招待、User の削除・復元、端末の Pairing（13 個の Endpoint。うち 3 個が公開）。[User Invite / Device Pairing / Lifecycle](#user-invite--device-pairing--lifecycle) |
 | `/api/v1/admin/compute/full-gpu` | Kaggle / Full GPU Mode の状態・開始・終了（`GET` / `POST` / `DELETE`、`admin.compute.full_gpu`。Scheduler がない構成は 503）。[Application への組み込み](#application-への組み込みissue-165decision-0058proposed) |
+| `/api/v1/memory/*` | Memory 画面の Scope の木と件数・一覧（検索）・履歴・出典、編集と復元（`expected_version`、衝突は 409 `memory_version_conflict`）。入口は本人の Memory への `memory.read`。[Memory の HTTP API](#memory-の-http-apiissue-186decision-0068proposed) |
 
 Readiness は 200 または 503 で、Body の形は同じです。
 
@@ -3558,7 +3559,7 @@ Rerank（Reranker Protocol）→ 構造化 Score（confirmed・鮮度・importan
 要件は [REQUIREMENTS.md](../../REQUIREMENTS.md) の「Memory Conflict / Versioning / Retrieval」「Memory Freshness / Revalidate Policy」「Manual Memory Editing / Concurrency」と
 [Memory Architecture](../../docs/MEMORY_ARCHITECTURE.md) の 10・11・15・17 節です。要件が決めていない選択（Relation ごとの意味、誰がどの Scope を変えられるか、手動で書ける鮮度、Stale Candidate・期限・Session 終了の処理）は
 [Decision 0034](../../docs/decisions/0034-memory-versioning-freshness.md)（**Approved、2026-09-28。Human が全点を推奨どおりに承認**）の推奨どおりに実装しました。
-**HTTP の Endpoint も、Job を呼ぶ Scheduler / Event の配線もまだありません**（`end_task` を `TaskService` の Transition Listener に繋ぐのも後続です）（Memory UI の層が `MemoryVersioningService` を、定期 Job と Event の Handler が `FreshnessMaintenance` を呼びます）。
+編集と復元の HTTP の Endpoint は Issue #186 で足しました（[Memory の HTTP API](#memory-の-http-apiissue-186decision-0068proposed)）。廃止・Revalidate・Relation の Endpoint はまだありません。定期 Job と Task の終了の配線は Issue #125（Decision 0047）です。
 
 ### Version（`MemoryVersioningService`）
 
@@ -3625,6 +3626,30 @@ Service と Job は、Revision `0026` / `0040` / `0071` が与えた権限（`me
 `apps/backend/tests/test_memory_versioning_*.py`、`test_memory_freshness*.py`、`test_memory_edit_sources.py`（出典の写しと由来の検索）、`versioning_support.py` です。`test_memory_versioning_rules.py` は DB を使いません。
 それ以外は実 PostgreSQL（`PAW_TEST_DATABASE_URL`）を使い、未設定なら Skip します。時刻は注入した Clock です。
 `test_memory_versioning_grants.py` は Service と Job の Test を非 Superuser の Application の Role で実行し、その Role が Version の本文や `verified_at` を書き換えられず、履歴を消せず、Index を落とせないことを確かめます。
+
+## Memory の HTTP API（Issue #186、Decision 0068、Proposed）
+
+[Issue #186](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/186) で実装しました（`paw_backend/memory/board/`、`api/v1/memory.py`）。Web の Memory 画面（PAW-063）の `MemorySource` の接続先です（`apps/web/src/memory/apiSource.ts`）。
+要件と既存の Decision が決めていない選択（読み取りの置き場所、件数と一覧の意味、一覧の上限、検索、履歴に出す範囲、`can_write`、変更者の名前）は [Decision 0068](../../docs/decisions/0068-memory-http-api.md)（**Proposed**）の推奨どおりに実装しました。Migration はありません。
+
+| Method / Path（`/api/v1/memory` 以下） | 内容 |
+| --- | --- |
+| `GET /scopes` | 読める Scope の木と、各 Scope の Memory の件数（User、Project › Project 共通・Repository、Shared） |
+| `GET /memories?scope=…[&project_id][&repo_id][&q]` | その Scope の各 Memory の今の版（ピン留め・新しい順に最大 500 件、超えたら `truncated`）。`q` は題・本文・出典の `source_ref` の部分一致 |
+| `GET /memories/{id}/history` | 読める版（古い順）、両端が読める関係、関係の先の読める版、`can_write` |
+| `GET /memories/{id}/versions/{n}/sources` | その版の `memory_sources` |
+| `POST /memories/{id}/edit` | `MemoryVersioningService.edit_memory`（`expected_version`、`title` / `content` / `reason`） |
+| `POST /memories/{id}/restore` | `MemoryVersioningService.restore_version`（`expected_version`、`source_version`、`reason`） |
+
+- **読める範囲**は Hybrid Retrieval と同じ決め方です（`user` は本人の Memory への `memory.read`、`project` / `repo` は Database から読んだ Membership・Project の状態・Repository の ACL で `project.read`、`shared` は `shared_memory.read`）。どれも `DENIED_ONLY` なので、許可した読み取りは Audit を書きません。SQL はどの読み取りにも `readable_memory_versions` を入れます。
+- Memory の Scope は今の版の Scope です。一覧と件数は今の版の状態を問いません（画面の Filter が分ける）。Shared は今の版が `active` のものだけです（削除済みは管理者が `SharedMemoryService` で見る）。
+- 履歴の版は、読める版で、かつその Memory の今の版が読めるものだけです（広げる前の Private な版はその公開範囲を読める人だけ、狭めた Memory は Project のメンバーに全版が見えなくなる）。関係は両端が読めるものだけで、読めない辺は Backend にも届きません。
+- `can_write` は表示のための答えで、Audit を書かない Policy の判定（`authz.policy.decide`）です。最終の判定は書き込みのとき `MemoryVersioningService` が行い、Audit に残します。Repo と Shared の Memory はこの API では読むだけです。
+- `actor_name` は人が書いた版の Login 名です（削除済みの User、Agent、System は `null`）。
+- 読めない Memory・Scope は、存在しないものと同じ 404 `memory_not_found` です。衝突は 409 `memory_version_conflict`（何も書かない）、状態の誤りは 409 `memory_state_conflict`、Viewer の編集は 403 `forbidden` です。編集と復元に Step-up は要りません（CSRF は Origin の検査）。
+- 手動の `supersedes` の取り消し（Decision 0065）は作っていません（Decision 0068 の 12。Domain の変更が要るため別の Issue）。
+
+Test は `tests/test_memory_board.py`（読み取りモデル。見えてはいけないもの: 他人の Private Memory、メンバーでない Project、`read` を外した Repository、広げる前の版、読めない辺、削除済みの Shared）、`tests/test_memory_http.py`（Session つきの HTTP。401、応答の形、404・409・422・403、Cross-origin の拒否、Audit）、`test_memory_versioning_grants.py`（読み取りモデルの Test を Application の Role で実行）です。
 
 ## Memory Markdown Projection
 

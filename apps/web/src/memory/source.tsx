@@ -1,10 +1,9 @@
 // Where the Memory screen reads and writes (PAW-063).
 //
-// The Backend has the Memory domain (versions, relations, sources, freshness;
-// PAW-040..046, Decisions 0024 / 0034 / 0045) but no Memory HTTP API yet. Like the
-// Notification Center (Decision 0044, 11), the screen takes its data through this
-// interface and shows the "not available yet" state while no source is plugged in.
-// The API issue adds one source (an `/api/v1` client) and the screen works as is.
+// Like the Notification Center (Decision 0044, 11), the screen takes its data
+// through this interface and shows the "not available yet" state while no source
+// is plugged in. In production main.tsx plugs in `apiMemorySource` (apiSource.ts,
+// the Backend's /api/v1/memory routes, issue #186); the tests plug in a fake.
 //
 // Every call is answered by the Backend's rules, never the screen's: a failure is
 // an `ApiError` with the Backend's code (`memory_version_conflict` when the
