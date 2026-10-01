@@ -1,6 +1,7 @@
 # Agent の OOM と Escalation の記録と System Health での数え方（OOM の見分け方と報告の仕方、Error Class の名前、閾値）
 
-- Status: Proposed
+- Status: Approved
+- Approval: 2026-10-01、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで直接回答して承認（判断点1〜5、すべて推奨どおり。末尾の「承認時の決定」）
 - Date: 2026-10-01
 - Scope: Issue [#183](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/183)（Decision 0059 の 1 の後続）。`apps/backend/paw_backend/orchestrator/`（`errors.AGENT_OUT_OF_MEMORY`・`OUT_OF_MEMORY_CLASSES`、`domain.IncidentKind`、`models.AgentIncidentRow`、`DagStore.fail_node`・`DagStore.record_incident`、Planner の失敗）、`apps/backend/paw_backend/health/`（`TaskQueueSource`、`limits.AGENT_OOM_ERROR`、`HealthStore.roll_up` の Purge）、Migration `0183`（`agent_incidents`）
 - Supersedes: なし。[Decision 0059](0059-system-health-observability.md)（Approved）の 1・2 が後の Issue に委ねた「OOM と Escalation の数」を決める。[Decision 0021](0021-dag-orchestrator-policy.md) の 3（Runtime が名乗れる Error Class は固定の名前だけ）の一覧に 1 つを加える（書き換えない）
@@ -70,3 +71,7 @@ Decision 0059（Approved）の 1 は、OOM と Escalation の実行の数を「�
 承認されたら `Approval` に記録し、Status を Approved に改める。閾値は `apps/backend/paw_backend/health/limits.py` で変えられる。
 方針を変えるときは、この Decision を書き換えず、新しい Decision から `Supersedes` する。
 [REQUIREMENTS.md](../../REQUIREMENTS.md) の原文は書き換えない。
+
+## 承認時の決定（2026-10-01）
+
+Human は、作業 Session で判断が必要な点について推奨つきの説明を受け、直接回答して承認した（判断点1〜5、すべて推奨どおり）。
