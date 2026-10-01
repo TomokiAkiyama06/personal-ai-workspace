@@ -5,7 +5,7 @@
 # "/sys/fs/cgroup/system.slice/paw-llm-main.service/cgroup.procs").
 #
 # Host memory (issue #182, Decision 0039 4; the values: Decision 0072,
-# Proposed). On 2026-09-30 vLLM's first load built FlashInfer JIT kernels with
+# Approved). On 2026-09-30 vLLM's first load built FlashInfer JIT kernels with
 # ninja's default parallelism (CPU count + 2): 27 cicc processes took about
 # 75 GiB of host RAM, the kernel ran out of memory and the machine rebooted.
 # So this unit

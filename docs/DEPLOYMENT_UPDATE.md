@@ -80,7 +80,7 @@ and notify Owner/Admin instead of resuming Queue/Tasks.
 ## Model runtime start
 
 Issue #182, [Decision 0039](decisions/0039-compute-scheduler-calibration.md) 4 (Approved);
-the values are [Decision 0072](decisions/0072-runtime-jit-host-memory-guard.md) (Proposed).
+the values are [Decision 0072](decisions/0072-runtime-jit-host-memory-guard.md) (Approved).
 On 2026-09-30 a vLLM first load built FlashInfer JIT kernels with `ninja`'s default
 parallelism (CPU count + 2): 27 `cicc` processes took about 75 GiB of host RAM, the host
 ran out of memory, desktop processes were killed and the machine rebooted.

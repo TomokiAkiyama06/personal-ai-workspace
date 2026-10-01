@@ -81,7 +81,7 @@ DEFAULT_OUTPUT_TOKENS = 8_192
 DEFAULT_MEMORY_OUTPUT_TOKENS = 2_048
 DEFAULT_NODE_WAIT_SECONDS = 600.0  # a node waits this long for local capacity
 
-# -- the host (issue #182, Decision 0039, 4; the values: Decision 0072, Proposed)
+# -- the host (issue #182, Decision 0039, 4; the values: Decision 0072, Approved)
 # A GPU runtime's first load may build JIT kernels (FlashInfer) with several GiB
 # of host RAM per compiler process. On 2026-09-30 an unbounded build (27
 # ``cicc``, about 75 GiB) exhausted the host's memory and the machine rebooted.

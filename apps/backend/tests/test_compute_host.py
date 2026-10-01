@@ -1,5 +1,5 @@
 """The host's side of starting a model runtime (issue #182, Decision 0039-4;
-the values are Decision 0072, Proposed).
+the values are Decision 0072, Approved).
 
 On 2026-09-30 a FlashInfer JIT build that vLLM started on its first load ran
 ``ninja`` at its default parallelism (CPU count + 2): 27 ``cicc`` processes took

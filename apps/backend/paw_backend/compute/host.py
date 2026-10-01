@@ -4,7 +4,7 @@ Decision 0039, 4 (Approved): the first load of a vLLM runtime may build JIT
 kernels (FlashInfer) on the host, and on 2026-09-30 such a build, at ``ninja``'s
 default parallelism, took about 75 GiB of host RAM and the machine rebooted.
 ``CommandModelControl`` reads ``MemAvailable`` here and does not start a GPU
-runtime below its minimum (the value: Decision 0072, Proposed).
+runtime below its minimum (the value: Decision 0072, Approved).
 
 Only ``/proc/meminfo`` is read; nothing is written, and no process is looked at.
 """
