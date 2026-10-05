@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "task_id": "paw-seed-v2-spec-20-memory-freshness-assessment",
+  "kind": "spec",
+  "repository": {
+    "locator": "paw-dataset://paw-seed-v2/paw-seed-v2-spec-20-memory-freshness-assessment",
+    "starting_commit": "3df6f807a92497ba24366d47259b16e18e8136be"
+  },
+  "issue_text": "# Memory の Version の鮮度を DB なしで判定する（FreshnessState・assess_freshness・summarize_freshness・next_due_at）\n\nMemory の鮮度（REQUIREMENTS.md「Memory Freshness / Revalidate Policy」、MEMORY_ARCHITECTURE.md 11 節、Decision 0034 の 4・5）は、今は定期 Job（`paw_backend.memory.versioning.freshness.FreshnessMaintenance`）が SQL で印を付けるだけです。\nMemory UI や Report が、手元にある Version（`MemoryVersionView`）の鮮度を同じ規則で表示できるように、純粋な関数（DB・時計・global を使わない）を足してください。\n\n## 仕様\n\n### 型（`paw_backend/memory/versioning/records.py`）\n\n- `FreshnessState(StrEnum)`: member と値はこの順です: `ENDED = \"ended\"`、`SESSION_ONLY = \"session_only\"`、`EXPIRED = \"expired\"`、`STALE = \"stale\"`、`DUE = \"due\"`、`OUTDATED = \"outdated\"`、`FRESH = \"fresh\"`。\n- `FreshnessReport`: frozen な dataclass（`slots=True`）で、field は順に `version_id: UUID`、`state: FreshnessState`、`due_at: datetime | None`。\n\n### 判定（新しい module `paw_backend/memory/versioning/assessment.py`）\n\n`assess_freshness(version, now, *, repo_heads=None) -> FreshnessReport`\n\n- `state` は、次の規則を**上から順に**見て最初に当てはまるものです。\n  1. `version.status` が `ACTIVE` でない → `ENDED`\n  2. `freshness_policy` が `SESSION_ONLY` → `SESSION_ONLY`\n  3. `EXPIRING` で、`expires_at` があり `expires_at <= now` → `EXPIRED`（ちょうどその時刻で期限切れ）\n  4. `stale_since` が `None` でない → `STALE`\n  5. `REVALIDATE` で、`verified_at` か `revalidate_after` が `None`、または `verified_at + revalidate_after <= now` → `DUE`（`FreshnessMaintenance.mark_revalidation_due` と同じ条件）\n  6. `REPO_COMMIT` で、`repo_heads` が与えられ、`version.repo_id` があり、key `(version.repo_id, version.branch)` が `repo_heads` にあり、その値（head の commit）が `version.commit_sha` と違う → `OUTDATED`。別の branch（別の key）の head では判定しません（`branch` が `None` の Version は key `(repo_id, None)` です）。\n  7. それ以外 → `FRESH`（`PERMANENT` など）\n- `due_at` は状態に関係なく決まります: `REVALIDATE` は `verified_at + revalidate_after`（どちらかが `None` なら `None`）、`EXPIRING` は `expires_at`、それ以外は `None`。\n- 時刻の比較は instant で行います（`now` が別の time zone でも同じ瞬間なら同じ結果）。\n\n`summarize_freshness(versions, now, *, repo_heads=None) -> dict[FreshnessState, tuple[UUID, ...]]`\n\n- 各 Version を `assess_freshness` と同じ規則で判定し、状態ごとの `version_id` の tuple を返します。\n- key は Version が 1 つ以上ある状態だけで、`FreshnessState` の定義の順に並べます。空の入力は `{}`。\n- 各 tuple の中は、`due_at` の早い順、`due_at` が同じなら `version_id`（`uuid.UUID` の大小）の順で、`due_at` が `None` のものは最後（その中は `version_id` の順）です。\n\n`next_due_at(versions, now, *, repo_heads=None) -> datetime | None`\n\n- 状態が `FRESH` で `due_at` が `None` でない Version の、最も早い `due_at`。なければ `None`（空の入力も `None`）。\n\n### 入力の検査\n\n誤りは `InvalidMemoryInputError`（`paw_backend.memory.versioning.errors`）で、`field` と `problem`（`InputProblem`）を持ちます。検査の順は次のとおりで、最初の誤りを報告します。\n\n- `assess_freshness`: `version` が `MemoryVersionView` でない → `(\"version\", WRONG_TYPE)`。`now` は `None` なら `(\"now\", REQUIRED)`、`datetime` でなければ `(\"now\", WRONG_TYPE)`、time zone がなければ `(\"now\", NAIVE_DATETIME)`。最後に `repo_heads`。\n- `summarize_freshness` / `next_due_at`: `versions` が `list` か `tuple` でない（generator・set・str・`None` など）か、要素に `MemoryVersionView` でないものがある → `(\"versions\", WRONG_TYPE)`。同じ `version_id` が 2 回ある → `(\"versions\", NOT_ALLOWED)`。次に `now`（上と同じ）、最後に `repo_heads`。\n- `repo_heads`: `None` か、`collections.abc.Mapping`（`dict` や `MappingProxyType`）で、key が `(UUID, str | None)` の 2 要素の tuple、値が `str` のもの。それ以外は `(\"repo_heads\", WRONG_TYPE)`。\n- 引数を変更しません。\n\n### 公開\n\n`FreshnessState`・`FreshnessReport`・`assess_freshness`・`summarize_freshness`・`next_due_at` を `paw_backend.memory.versioning` から import できるようにし（`__all__` にも追加）、`apps/backend/README.md` の「Memory Versioning / Freshness」に規則を短く書いてください。\n\n## 作業の条件\n\n- 作業はこのRepositoryのstarting commitから始めます。既存のTestを削除・無効化したり、期待値を不当に緩めたりしてはいけません。\n- 評価はExecutable Evaluatorが行います。公開されたcheck（visible checks）に加えて、候補から見えないHidden checkがあります。\n- Credential・秘密情報をcode・log・commitへ入れないでください（SECURITY.md）。\n",
+  "visible_checks": [
+    {
+      "id": "lint",
+      "type": "lint",
+      "command": [
+        "python",
+        "-m",
+        "ruff",
+        "check",
+        "apps/backend"
+      ]
+    }
+  ],
+  "hidden_checks": [
+    {
+      "id": "hidden-acceptance",
+      "type": "acceptance",
+      "reference_id": "seed-v2-a79e7b165d57"
+    },
+    {
+      "id": "hidden-regression",
+      "type": "regression",
+      "reference_id": "seed-v2-61e0b0e93a34"
+    }
+  ]
+}

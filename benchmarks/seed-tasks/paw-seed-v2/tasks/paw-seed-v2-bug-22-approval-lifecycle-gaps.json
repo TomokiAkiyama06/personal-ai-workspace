@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "task_id": "paw-seed-v2-bug-22-approval-lifecycle-gaps",
+  "kind": "injected_bug",
+  "repository": {
+    "locator": "paw-dataset://paw-seed-v2/paw-seed-v2-bug-22-approval-lifecycle-gaps",
+    "starting_commit": "bb54cf23ccf3de61e5efa058b6bdc391ae4c4907"
+  },
+  "issue_text": "# Tool の承認（Approval）の 3 つの不具合\n\nTool Broker の承認（`paw_backend/tools` の承認まわり。Store は `InMemoryApprovalStore`、運用は `ApprovalService`）で、次の 3 つの報告があります。どれも 1 つずつ別の原因です。原因を調べて直してください。\n\n1. **別の Level の承認が使えてしまう（Security）**\n   `APPROVAL` の Level で承認された要求が、同じ Task・Run・Agent・User・Tool・call hash の呼び出しなら、`STRONG_APPROVAL` が要る呼び出しにも `consume` で使えてしまいます（`ConsumeOutcome.CONSUMED` になる）。逆に `STRONG_APPROVAL` の承認が `APPROVAL` の呼び出しに使えることもあります。\n   承認は、許可された呼び出しの **全ての項目**（Level を含む）が一致するときだけ使えるはずで、Level が違えば `MISMATCH` で、承認は消費されずに残ります（`diagnose_consume` の答えも同じ）。\n\n2. **期限切れの要求が「開いている要求」の上限を埋める**\n   `OpenLimits.max_pending=1` で要求を 1 つ開き、それが期限（`expires_at`）を過ぎた後に、同じ User・同じ Task で別の要求を開くと `TOO_MANY_PENDING` になります。期限を過ぎた要求はもう誰も使えないので、上限には数えないはずです（期限内の要求は今までどおり数えます。数えるのは同じ Task・同じ要求者の分だけ）。\n\n3. **Retry / Restart で再開した Task に、前の Run の承認が残る**\n   失敗（`failed`）・中止（`cancelled`）・完了（`completed`）した Task が再び動き出すとき（`TaskService` の listener に、`from_state` がそれらの状態で `to_state` が `queued` などの Event が届く）、終わる前に承認されて使われずに残っていた承認が、`approved` のまま残ります。`ApprovalService.revoke_on_task_end` の説明のとおり、終わった Task の承認は、終わった時か再開した時に System によって取り消される（`revoked`、`revoked_by` は `None`）はずです。動いている状態どうしの遷移（例: `queued` → `running`）では何も変えません。Event の状態は `TaskState` でも同じ値の文字列でも扱えます。\n\n## 作業の条件\n\n- 作業はこのRepositoryのstarting commitから始めます。既存のTestを削除・無効化したり、期待値を不当に緩めたりしてはいけません。\n- 評価はExecutable Evaluatorが行います。公開されたcheck（visible checks）に加えて、候補から見えないHidden checkがあります。\n- Credential・秘密情報をcode・log・commitへ入れないでください（SECURITY.md）。\n",
+  "visible_checks": [
+    {
+      "id": "lint",
+      "type": "lint",
+      "command": [
+        "python",
+        "-m",
+        "ruff",
+        "check",
+        "apps/backend"
+      ]
+    }
+  ],
+  "hidden_checks": [
+    {
+      "id": "hidden-acceptance",
+      "type": "acceptance",
+      "reference_id": "seed-v2-f15ef3089ca0"
+    },
+    {
+      "id": "hidden-regression",
+      "type": "regression",
+      "reference_id": "seed-v2-feca2bb18888"
+    }
+  ]
+}

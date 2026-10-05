@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "task_id": "paw-seed-v2-bug-20-working-set-obligations",
+  "kind": "injected_bug",
+  "repository": {
+    "locator": "paw-dataset://paw-seed-v2/paw-seed-v2-bug-20-working-set-obligations",
+    "starting_commit": "5ef9cb52b270f9662a90e85c80c5613ee6fa5c97"
+  },
+  "issue_text": "# Working Setの完了条件と権限の判定が、Decision 0030のとおりになっていない\n\nMulti-Repo Task（Working Set、Decision 0030 / `REQUIREMENTS.md`「Multi-Repo Task / Working Set」）で、運用中に次の3つの報告がありました。\nどれも、DatabaseのないRule（Repositoryの役割・完了の判定・必要な権限）の段階で起きています。原因を調べて直してください。\n\n## 報告1: Targetを降格すると、Pull Requestなしで完了できる\n\nAttemptの中で`target`のRepositoryに書き込み（変更あり）、その後で`working`へ降格（`downgrade_to_working`）しました。\nこのRepositoryは変更されたので、完了の判定では「Attemptの中で持った最も強い役割」（ここでは`target`）の条件、つまりEvaluationのPASSED・`open`か`merged`のPull Request・`approved`のReviewが要るはずです。\nところが、Pull RequestもReviewもないまま、完了を妨げるRepositoryとして挙がりません（`working`の条件、Evaluationだけで判定されています）。\n`referenced`へ降格した場合も同じです。役割の強さは`referenced` < `working` < `target`です。\n\n## 報告2: Starting commitが分からないRepositoryの変更が見逃される\n\nStarting commitが記録されていない（`None`）Repositoryで、HEADは記録されている場合、Backendは変更の有無を区別できません。\nDecision 0030（fail-closed）では、これは「変更あり」と扱い、完了にはそのRepositoryのEvaluationが要ります。\nところが現在は「変更なし」と扱われ、EvaluationがFAILEDでも完了を妨げません。HEADも記録されていないときは、これまでどおり「変更なし」です。\n\n## 報告3: 読み取り権限だけのMemberが、`working`のRepositoryを外せる\n\n降格や削除（`downgrade_to_referenced`・`remove`）に要るRepositoryの権限は、変更前の役割の権限です（`referenced`なら`read`、`working`・`target`なら`write`）。\nところが、`working`のRepositoryを`referenced`へ降格したり、Working Setから外したりする判定が`read`だけで通ります。\nTool Brokerでも、Repositoryに`read`しか持たないMemberが`task.working_set.remove`で`working`のRepositoryを外す要求を出すと、拒否（`REPO_ACL_FORBIDS`）ではなく承認待ちになります。\n\n## 作業の条件\n\n- 作業はこのRepositoryのstarting commitから始めます。既存のTestを削除・無効化したり、期待値を不当に緩めたりしてはいけません。\n- 評価はExecutable Evaluatorが行います。公開されたcheck（visible checks）に加えて、候補から見えないHidden checkがあります。\n- Credential・秘密情報をcode・log・commitへ入れないでください（SECURITY.md）。\n",
+  "visible_checks": [
+    {
+      "id": "lint",
+      "type": "lint",
+      "command": [
+        "python",
+        "-m",
+        "ruff",
+        "check",
+        "apps/backend"
+      ]
+    }
+  ],
+  "hidden_checks": [
+    {
+      "id": "hidden-acceptance",
+      "type": "acceptance",
+      "reference_id": "seed-v2-50ea8d11eb2d"
+    },
+    {
+      "id": "hidden-regression",
+      "type": "regression",
+      "reference_id": "seed-v2-a5c43b201a7e"
+    }
+  ]
+}

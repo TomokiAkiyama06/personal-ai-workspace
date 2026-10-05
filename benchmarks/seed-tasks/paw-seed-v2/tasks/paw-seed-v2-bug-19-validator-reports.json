@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "task_id": "paw-seed-v2-bug-19-validator-reports",
+  "kind": "injected_bug",
+  "repository": {
+    "locator": "paw-dataset://paw-seed-v2/paw-seed-v2-bug-19-validator-reports",
+    "starting_commit": "9b5055dc53d04ae8f3dcfec6c3b272998a495eca"
+  },
+  "issue_text": "# Task / Result validatorの報告が不正確・不足している（4件）\n\n`python -m benchmarks.validate_task`と`python -m benchmarks.validate_result`（と、それぞれの`validate_document`）を使っていて、次の4つの問題に気付きました。\nどれも別の原因のようです。すべて直してください。出力の形式（`<path>: valid`をstdout、`<path>:<error>`または`<path>: <読み込みのerror>`をstderr、終了code 0 / 1 / 2）と、入力の値をmessageに含めない方針は変えません。\n\n## 1. 「required property is missing」に、ある項目まで並ぶ\n\nTask JSONから`kind`だけを消すと、`$: required property is missing: kind`ではなく、Taskのrequiredな項目がすべて（実際にある`schema_version`や`task_id`も）並んだmessageになります。\nmessageには、実際に欠けている項目だけを、schemaの`required`に書かれた順で並べてください（例: `task_id`と`issue_text`が欠けていれば`$: required property is missing: task_id, issue_text`）。入れ子の場所でも同じです（Resultの`check_results[1]`の`status`がなければ`$.check_results[1]: required property is missing: status`）。\n\n## 2. Schemaのerrorがあると、重複したcheck idが報告されない\n\nResult validatorは、`check_results`の中で既に出た`id`を再び使う要素を`$.check_results[<index>].id: duplicate check id`（`<index>`は2回目以降の要素の位置）として報告します。\nところが、同じ文書に別のschemaのerror（たとえば未知のtop levelのproperty、`status`の値の誤り）が1つでもあると、重複が報告されません。\n両方のerrorを報告してください（CLIでは両方の行がstderrに出て、終了code 1）。\n\n## 3. 桁あふれする数が通ってしまう\n\n`\"wall_clock_ms\": 1e400`のように、floatにすると無限大になる数を含むResult JSONが`valid`になります（`-1e999`を含むTask JSONも同様）。\nREADMEのとおり、Benchmarkの全てのJSON（Task・Result・Datasetのcase file・Workerの出力）は厳格なdecoder（`benchmarks.json_input.decode_json`）で読み、非標準の数は拒否するはずです。\n`decode_json`は、有限でない数になる入力（`1e400`、`-1e400`、配列やobjectの中の`2e999`など）を`ValueError`にしてください。CLIでは、`NaN`などと同じく`<path>: JSON contains a non-standard numeric constant or duplicate object key`をstderrに出して終了code 1です（数の文字列はmessageに出しません）。普通の数（`1.5e3`、`-0.25`）はこれまでどおり読めます。\n\n## 4. Task validatorのJSON構文errorの列番号が違う\n\n次のfileを`validate_task`に渡すと、`JSON syntax error at line 3, column 3`ではなく、ずっと大きい列番号が出ます（`validate_result`は正しく`column 3`と出します）。\n\n```\n{\n  \"schema_version\": \"1.0\",\n  oops\n}\n```\n\n行・列はどちらも1始まりで、2つのvalidatorで同じmessageになるようにしてください。複数fileを渡したときは、これまでどおり構文errorのfileを報告したうえで、残りのfileも検証します。\n\n## 作業の条件\n\n- 作業はこのRepositoryのstarting commitから始めます。既存のTestを削除・無効化したり、期待値を不当に緩めたりしてはいけません。\n- 評価はExecutable Evaluatorが行います。公開されたcheck（visible checks）に加えて、候補から見えないHidden checkがあります。\n- Credential・秘密情報をcode・log・commitへ入れないでください（SECURITY.md）。\n",
+  "visible_checks": [
+    {
+      "id": "lint",
+      "type": "lint",
+      "command": [
+        "python",
+        "-m",
+        "ruff",
+        "check",
+        "benchmarks"
+      ]
+    }
+  ],
+  "hidden_checks": [
+    {
+      "id": "hidden-acceptance",
+      "type": "acceptance",
+      "reference_id": "seed-v2-58b3fcc90f75"
+    },
+    {
+      "id": "hidden-regression",
+      "type": "regression",
+      "reference_id": "seed-v2-c8fec6251c0a"
+    }
+  ]
+}

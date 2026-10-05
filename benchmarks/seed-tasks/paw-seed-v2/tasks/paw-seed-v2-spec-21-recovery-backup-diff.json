@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "task_id": "paw-seed-v2-spec-21-recovery-backup-diff",
+  "kind": "spec",
+  "repository": {
+    "locator": "paw-dataset://paw-seed-v2/paw-seed-v2-spec-21-recovery-backup-diff",
+    "starting_commit": "3df6f807a92497ba24366d47259b16e18e8136be"
+  },
+  "issue_text": "# Recovery Repository の 2 つの Backup の差分を Entity ごとに出す（entity_of・diff_backups）\n\nRecovery Repository（`paw_backend.recovery`、Decision 0054、`apps/backend/README.md` の「Recovery Repository（Backup / Restore）」）の Backup の Run が、どの Record を変えたのかを運用者が確かめられるように、2 つの Backup の file を Entity（User・Project・Memory の file など）の単位で比べる純粋な関数（I/O なし）を足してください。\n\n## 仕様\n\n### `paw_backend/recovery/format.py`\n\n- `ENTITY_KINDS`: Entity の種類の tuple。この順です: `(\"user\", \"user_deletion\", \"project\", \"repo\", \"memory_record\", \"task\", \"policy\", \"memory_file\")`。\n- `entity_of(path: str) -> tuple[str, str] | None`: その file が持つ Entity の `(kind, key)`。\n  - `path` が `str` でなければ `TypeError`。\n  - Marker（`MARKER_NAME`）・`manifest.json`・`recovery/checksums.sha256` は Entity ではなく `None`。\n  - `is_valid_path(path)` が偽（Backup が書けない path）なら `RecoveryFormatError(\"not a recovery path\")`。\n  - `users/<key>.json` → `(\"user\", key)`、`projects/<key>.json` → `(\"project\", key)`、`repos/<key>.json` → `(\"repo\", key)`、`memory-records/<key>.json` → `(\"memory_record\", key)`、`tasks/<key>.json` → `(\"task\", key)`、`policies/<key>.json` → `(\"policy\", key)`（いずれも directory の直下だけ。`key` は file 名から末尾の `.json` を除いたもの）。\n  - `deletions/users/<key>.json` → `(\"user_deletion\", key)`。\n  - `memory/` の下の file（深さは問わない）→ `(\"memory_file\", \"memory/\" を除いた残りの path)`（例: `memory/projects/p1/a.md` → `(\"memory_file\", \"projects/p1/a.md\")`）。\n  - それ以外（`users/x.txt`、`users/a/b.json`、`deletions/x.json`、`recovery/other.txt`、`memory` だけ、など。拡張子は小文字の `.json` だけ）は `RecoveryFormatError(\"not a record path\")`。\n- どちらも `format` の `__all__` に足してください。\n\n### 新しい module `paw_backend/recovery/diff.py`\n\n- `EntityChange`: frozen な dataclass（`slots=True`）、field は順に `kind: str`、`key: str`、`change: str`。\n- `BackupDiff`: frozen な dataclass（`slots=True`）、field は順に `changes: tuple[EntityChange, ...]`、`unchanged: int`。\n  - property `is_empty`: `changes` が空のとき `True`。\n  - `summary() -> dict[str, dict[str, int]]`: 変更が 1 つ以上ある kind だけを `ENTITY_KINDS` の順に key にし、値は、その kind で起きた変更の種類ごとの件数（件数が 0 の種類は含めない。種類の順は `added`・`changed`・`removed`・`deleted`・`restored`）。\n- `diff_backups(old, new) -> BackupDiff`:\n  - `old` と `new` は Backup の file の `{path: bytes}`（`collections.abc.Mapping` なら何でもよい）。\n  - Entity（`entity_of` が `None` でないもの）だけを比べ、Marker・Manifest・Checksums の違いは無視します。\n  - Entity ごとに: `new` にだけある → `\"added\"`、`old` にだけある → `\"removed\"`、両方にあり bytes が違う → `\"changed\"`、同じ → 変更なし（`unchanged` に数える）。\n  - **User の削除**: 同じ `key` について `(\"user\", key)` が `\"removed\"` で `(\"user_deletion\", key)` が `\"added\"` なら、2 件の代わりに `EntityChange(\"user\", key, \"deleted\")` の 1 件にします。逆に `(\"user\", key)` が `\"added\"` で `(\"user_deletion\", key)` が `\"removed\"` なら `EntityChange(\"user\", key, \"restored\")` の 1 件です。ほかの組み合わせ（別の User どうし、両方 `\"changed\"` など）はまとめません。\n  - `changes` は kind の `ENTITY_KINDS` での順、同じ kind の中では `key` の文字列の順に並べます。\n  - 入力の検査: `old`・`new` が Mapping でなければ `TypeError`。`old` のすべての entry を見てから `new` を見ます。entry ごとに、path が `str` でなければ `TypeError`、値が `bytes` でなければ（`bytearray`・`str`・`None` も）`TypeError`、次に `entity_of(path)`（その `RecoveryFormatError` をそのまま出す）。\n  - 引数を変更しません。\n\n### 公開\n\n`ENTITY_KINDS`・`entity_of`・`BackupDiff`・`EntityChange`・`diff_backups` を `paw_backend.recovery` から import できるようにし（`__all__` にも追加）、`apps/backend/README.md` の「Recovery Repository（Backup / Restore）」に短い説明を足してください。\n\n## 作業の条件\n\n- 作業はこのRepositoryのstarting commitから始めます。既存のTestを削除・無効化したり、期待値を不当に緩めたりしてはいけません。\n- 評価はExecutable Evaluatorが行います。公開されたcheck（visible checks）に加えて、候補から見えないHidden checkがあります。\n- Credential・秘密情報をcode・log・commitへ入れないでください（SECURITY.md）。\n",
+  "visible_checks": [
+    {
+      "id": "lint",
+      "type": "lint",
+      "command": [
+        "python",
+        "-m",
+        "ruff",
+        "check",
+        "apps/backend"
+      ]
+    }
+  ],
+  "hidden_checks": [
+    {
+      "id": "hidden-acceptance",
+      "type": "acceptance",
+      "reference_id": "seed-v2-11adb2ab5058"
+    },
+    {
+      "id": "hidden-regression",
+      "type": "regression",
+      "reference_id": "seed-v2-5aebb60067db"
+    }
+  ]
+}

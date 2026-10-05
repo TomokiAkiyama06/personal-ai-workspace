@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "task_id": "paw-seed-v2-spec-18-event-replay",
+  "kind": "spec",
+  "repository": {
+    "locator": "paw-dataset://paw-seed-v2/paw-seed-v2-spec-18-event-replay",
+    "starting_commit": "3df6f807a92497ba24366d47259b16e18e8136be"
+  },
+  "issue_text": "# 再接続した SSE の Client に、見逃した通知の Event を渡す（Last-Event-ID）\n\n今の Event Bus（`paw_backend/events.py`）は Event を残さないため、Server-Sent Events の Client が再接続すると、切れていた間の `notification.changed` を受け取れません（`GET /api/v1/events/stream` は `Last-Event-ID` を無視しています）。\n直近の通知の Event を Memory に残し、再接続した Client に渡せるようにしてください。WebSocket は対象外です（今のまま）。\n\n## 仕様\n\n### `paw_backend/events.py`\n\n- 関数 `audience_accepts(audience: EventAudience | None, viewer: Viewer | None) -> bool` を追加します。規則は今の `Subscription.accepts` と同じです（`audience` が `None` なら誰でも `True`。それ以外は、`viewer` が `None` なら `False`、`viewer.user_id` が `audience.user_ids` にあるか、`audience.capability` が `None` でなく `viewer.audiences` にあれば `True`）。`Subscription.accepts` はこの関数を使います。\n- `EventBus.__init__` に 3 番目の引数 `history`（`EventHistory | None`、既定 `None`）を足します。既存の 2 つの引数の順と既定値は変えません。property `history` はその値を返します。\n- `EventBus.publish` は、`history` があれば、配る前に（Subscriber が 0 でも）`history.record(event)` を呼びます。\n\n### 新しい module `paw_backend/event_history.py`\n\n- `Replay`: frozen な dataclass。field は `events: tuple[Event, ...]` と `complete: bool`（この順。等価比較できること）。\n- `EventHistory(capacity: int = 200)`:\n  - `capacity` が整数でない（`bool` を含む）なら `TypeError`、1 未満なら `ValueError`。property `capacity` で読めます。`len(history)` は今残している Event の数です。\n  - `record(event) -> bool`: Event を末尾に残して `True`。ただし System の Event（`system.connected`・`system.heartbeat`）は残さず `False`、同じ `id` の Event を既に残していれば残さず `False`。残す数が `capacity` を超えたら、古いものから捨てます。\n  - `since(last_event_id: str | None, viewer: Viewer | None) -> Replay`:\n    - `last_event_id` が `None` なら `Replay((), True)`。`str` でも `None` でもなければ `TypeError`（`bytes` も）。\n    - `last_event_id` の Event を今残していれば、それより後に残した Event が対象で `complete=True`。残していなければ（捨てた・知らない id・空文字列）、残している全ての Event が対象で `complete=False`。\n    - `last_event_id` の Event 自体を `viewer` が受け取れなくても、位置としては使います。\n    - 対象のうち `audience_accepts(event.audience, viewer)` が `True` の Event だけを、残した順に返します。\n    - そのうえで、`notification.changed` は中身を持たないので、**`viewer` が受け取れる `notification.changed` のうち最後の 1 つだけ**を残します（それより前の `notification.changed` は返しません。位置は最後の 1 つの位置）。\n\n### 設定と App\n\n- `Settings.event_history_size`（環境変数 `PAW_EVENT_HISTORY_SIZE`）: 整数、既定 `200`、`0` 以上 `10000` 以下（範囲外は Settings の検証エラー）。`0` は残さないという意味です。\n- `create_app` が作る `EventBus` は、`event_history_size` が 1 以上なら `EventHistory(event_history_size)` を持ち、`0` なら `history` は `None` です（引数で `event_bus` を渡したときはそれをそのまま使います）。`apps/backend/README.md` の環境変数の表にも足してください。\n\n### `GET /api/v1/events/stream`\n\n- Request に `Last-Event-ID` header がなければ、今までどおりです（最初の `system.connected` の `data` は `{}`）。\n- header があるとき:\n  - Bus に `history` がなければ、最初の `system.connected` の `data` を `{\"replay\": \"unavailable\"}` にし、何も再送しません。\n  - `history` があれば、`history.since(<header の値>, <この Stream の viewer>)` の結果について、最初の `system.connected` の `data` を `{\"replay\": \"complete\"}`（`complete` が `True`）か `{\"replay\": \"incomplete\"}` にし、その直後に返った Event を順に送ります（形式は通常の Event と同じ）。その後は今までどおり、接続後に publish された Event を送ります。\n  - 再送の Event を読む前に Subscription を attach し、その間に `await` を挟まないこと（接続の途中で publish された Event を失わないため）。\n\n## 作業の条件\n\n- 作業はこのRepositoryのstarting commitから始めます。既存のTestを削除・無効化したり、期待値を不当に緩めたりしてはいけません。\n- 評価はExecutable Evaluatorが行います。公開されたcheck（visible checks）に加えて、候補から見えないHidden checkがあります。\n- Credential・秘密情報をcode・log・commitへ入れないでください（SECURITY.md）。\n",
+  "visible_checks": [
+    {
+      "id": "lint",
+      "type": "lint",
+      "command": [
+        "python",
+        "-m",
+        "ruff",
+        "check",
+        "apps/backend"
+      ]
+    }
+  ],
+  "hidden_checks": [
+    {
+      "id": "hidden-acceptance",
+      "type": "acceptance",
+      "reference_id": "seed-v2-ede29bc4c515"
+    },
+    {
+      "id": "hidden-regression",
+      "type": "regression",
+      "reference_id": "seed-v2-9d8bb785e2fe"
+    }
+  ]
+}

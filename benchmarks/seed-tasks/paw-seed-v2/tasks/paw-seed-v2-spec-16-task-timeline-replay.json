@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "task_id": "paw-seed-v2-spec-16-task-timeline-replay",
+  "kind": "spec",
+  "repository": {
+    "locator": "paw-dataset://paw-seed-v2/paw-seed-v2-spec-16-task-timeline-replay",
+    "starting_commit": "3df6f807a92497ba24366d47259b16e18e8136be"
+  },
+  "issue_text": "# Taskの履歴を再生して、状態ごとの滞在時間を求める\n\nAgent Task Lifecycle（PAW-032、`paw_backend/tasks/`）の履歴（Commandと、それが効いた時刻の列）から、Taskが各状態にいた区間と時間を求める純粋な関数を足してください。\n運用画面で「このTaskはRunningに何分、Waiting（理由ごと）に何分いたか」を出すためのものです。状態遷移の規則は既存の`paw_backend.tasks.domain`（`plan_transition`）をそのまま使い、規則を複製しないでください。\n\n## 仕様\n\n新しいmodule `paw_backend/tasks/timeline.py`を作り、次の名前をpackage `paw_backend.tasks`からもimportできるようにします（`__all__`にも足す）: `TimelineEvent`、`StateSpan`、`TaskTimeline`、`replay`、`TimelineReplayError`。\n\n### `TimelineEvent(command, at, wait_reason=None)`（frozenなdataclass）\n\n- `command`は`TaskCommand`の要素か、その値の`str`（`\"start\"`など）。値で与えたときは要素に直して持ちます。それ以外は既存の`enum_member`と同じく`InvalidCommandArgumentError`。\n- `wait_reason`は`None`か、`WaitReason`の要素かその値の`str`（同じく要素に直す。それ以外は`InvalidCommandArgumentError`）。\n- `at`はtimezone付きの`datetime`（`utcoffset()`が`None`でない）。それ以外は`InvalidCommandArgumentError`。\n- 検査の順は`command`、`wait_reason`、`at`。\n\n### `StateSpan`（frozenなdataclass）\n\nfield: `state`（`TaskState`）、`start`、`end`（開いている区間は`None`）、`run`（`TaskRun`）、`wait_reason`（Waitingの区間だけ理由、他は`None`）。property `duration`は`end - start`（`end`が`None`なら`None`）。\n\n### `TaskTimeline`（frozenなdataclass）\n\n- `spans`: `StateSpan`のtuple（時刻順）。property `state`と`run`は最後の区間のもの。\n- `time_in_state`: 閉じた区間（`end`が`None`でない）だけを状態ごとに合計した`timedelta`の読み取り専用のmapping。keyは閉じた区間が1つ以上ある状態だけで、`TaskState`の宣言順。\n- `waiting_by_reason`: 閉じたWaitingの区間を理由ごとに合計した読み取り専用のmapping。keyは現れた理由だけで、`WaitReason`の宣言順。\n- `as_dict()`: JSONにできるdict（毎回新しいobject）: `{\"state\": 値, \"attempt\": int, \"retry_count\": int, \"spans\": [{\"state\", \"start\", \"end\", \"attempt\", \"retry_count\", \"wait_reason\"}...], \"time_in_state\": {状態の値: 秒(float)}, \"waiting_by_reason\": {理由の値: 秒(float)}}`。時刻は`datetime.isoformat()`の文字列（`end`が`None`なら`None`）、`wait_reason`は値か`None`。\n\n### `replay(events, *, created_at, now=None) -> TaskTimeline`\n\n1. `created_at`がtimezone付きの`datetime`でなければ`InvalidCommandArgumentError`。`now`が`None`でもtimezone付きの`datetime`でもなければ`InvalidCommandArgumentError`。\n2. `events`は任意のiterable（generatorでもよい）。1回だけ読みます。渡されたlistを並べ替えたり変更したりしません。\n3. 要素が`TimelineEvent`でなければ`TimelineReplayError`（problem `\"not_an_event\"`）。この検査は、再生を始める前に全要素について先に行います（最初に見つかったもの）。\n4. Taskは`created_at`に`queued`、`TaskRun(1, 0)`で始まります。Eventは`at`の順（同じ時刻のEventは与えられた順）に適用します。異なるtimezoneの時刻は瞬間として比べます。\n5. 各Eventについて、次の順に判定します。\n   - `at`が`created_at`より前なら`\"before_creation\"`。\n   - `change_working_set`と`release_repository_write`は状態を変えないので読み飛ばします（区間を切らない）。ただし`wait_reason`を持っていれば`\"invalid_wait_reason\"`。\n   - それ以外は`plan_transition(現在の状態, command, wait_reason=...)`で判定します。`IllegalTransitionError`（`create`を含む）は`\"illegal_transition\"`、`InvalidCommandArgumentError`（Waitに理由がない、Wait以外に理由がある）は`\"invalid_wait_reason\"`。\n   - 遷移したら、今の区間を`at`で閉じ、遷移先の区間を`at`から開きます（長さ0の区間も残す）。Waitの区間には理由を持たせます。\n   - `retry`は`retry_count`を1増やし、`restart`は`attempt`を1増やします（`retry_count`はそのまま）。新しい区間の`run`は増やした後の値です。\n6. `TimelineReplayError`は`TaskError`のsubclassで、`code`は`\"timeline_replay\"`、属性`index`（**与えられた列での位置**。時刻順の位置ではない）と`problem`を持ち、messageは`f\"Event {index}: {problem}\"`（Eventの値を含めない）。`paw_backend/tasks/errors.py`に置きます。\n7. 最後の区間: `now`を与え、最後の状態が終わった状態（`completed`・`failed`・`cancelled`、`TERMINAL_STATES`）でなければ`now`で閉じます。終わった状態か、`now`がなければ開いたまま（`end`が`None`）です。`now`が最後の区間の開始より前なら`InvalidCommandArgumentError`。\n\n`apps/backend/README.md`のAgent Task Lifecycleの節に、この関数の説明を短く足してください。\n\n## 作業の条件\n\n- 作業はこのRepositoryのstarting commitから始めます。既存のTestを削除・無効化したり、期待値を不当に緩めたりしてはいけません。\n- 評価はExecutable Evaluatorが行います。公開されたcheck（visible checks）に加えて、候補から見えないHidden checkがあります。\n- Credential・秘密情報をcode・log・commitへ入れないでください（SECURITY.md）。\n",
+  "visible_checks": [
+    {
+      "id": "lint",
+      "type": "lint",
+      "command": [
+        "python",
+        "-m",
+        "ruff",
+        "check",
+        "apps/backend"
+      ]
+    }
+  ],
+  "hidden_checks": [
+    {
+      "id": "hidden-acceptance",
+      "type": "acceptance",
+      "reference_id": "seed-v2-2e6d6eb1c34b"
+    },
+    {
+      "id": "hidden-regression",
+      "type": "regression",
+      "reference_id": "seed-v2-5124c79da897"
+    }
+  ]
+}

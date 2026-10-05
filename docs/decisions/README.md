@@ -76,6 +76,7 @@
 | [0070](0070-stored-notifications-and-event-stream.md) | 保存される通知（Code と数値だけ、宛先は 1 人の User か読む時点の Role の Capability、User ごとの既読・非表示）と `/api/v1/notifications`、Capability `notification.read` / `notification.manage`、Event の Stream の Session 必須と内容のない `notification.changed`・Session の定期的な再確認、System Health の Severity の変化を Owner / Admin へ通知、90 日で削除、Migration 0188（Issue #188） | Approved |
 | [0071](0071-agent-oom-and-escalation-records.md) | Agent の OOM は Runtime が `AgentOutOfMemory`（Runtime が名乗れる閉じた Error Class に追加。`MemoryError` も OOM）で報告し、OOM と Escalation を `agent_incidents` に 1 件 1 行で残して System Health の `task_queue` で数える（OOM 1 件 `WARNING`・3 件 `ERROR`、Escalation は `WARNING`。Issue #183、Decision 0059 の後続） | Approved |
 | [0072](0072-runtime-jit-host-memory-guard.md) | Model の Runtime の起動で JIT ビルドの並列数を `MAX_JOBS=4` / `FLASHINFER_NVCC_THREADS=1` に絞り、GPU の Runtime の起動前にホストの `MemAvailable` が 40 GiB 以上あることを確かめ（足りない・読めないときは起動せず警告）、Run 中は Unit の `MemoryMax=32G` で抑え、Model の操作の上限の検証の上限を 1,800 秒にする（Decision 0039 の 4 の値。Issue #182） | Approved |
+| [0074](0074-seed-v2-and-qwen-27b-comparison.md) | paw-seed-v2 の構成（v1 の 24 Task をそのまま含め、比べない 3 Model の予備の Run で全員が解いた Task を外した新しい 25 Task を足して 49 Task）と、Qwen3.6-27B-FP8 / Qwen3.8-27B-FP8 の単独・同じ設定での 3 回ずつの比較の結果の扱い（選び方は Human が 2026-10-05 に決めた: Resolved@3 と平均の両方で 2 Task 以上多ければ Qwen3.8-27B-FP8。Issue #198） | Proposed |
 
 運用は [AGENTS.md](../../AGENTS.md) の「仕様変更」に従います。
 

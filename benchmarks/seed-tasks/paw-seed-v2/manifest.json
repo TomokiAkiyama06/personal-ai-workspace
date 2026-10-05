@@ -487,26 +487,6 @@
       "dataset": "paw-seed-v1"
     },
     {
-      "task_id": "paw-seed-v2-bug-01-retrieval-cutoff",
-      "file": "tasks/paw-seed-v2-bug-01-retrieval-cutoff.json",
-      "kind": "injected_bug",
-      "difficulty": "medium",
-      "categories": [
-        "bug_fix",
-        "metrics",
-        "multi_file"
-      ],
-      "source": {
-        "upstream": "https://github.com/TomokiAkiyama06/personal-ai-workspace",
-        "base_commit": "3df6f807a92497ba24366d47259b16e18e8136be",
-        "injected_files": [
-          "benchmarks/retrieval_metrics.py",
-          "benchmarks/retrieval_runner.py"
-        ],
-        "requirement": "benchmarks/README.md#retrieval-benchmark"
-      }
-    },
-    {
       "task_id": "paw-seed-v2-bug-02-memory-worker-labels",
       "file": "tasks/paw-seed-v2-bug-02-memory-worker-labels.json",
       "kind": "injected_bug",
@@ -530,231 +510,6 @@
       }
     },
     {
-      "task_id": "paw-seed-v2-bug-03-adapter-retry-snapshot",
-      "file": "tasks/paw-seed-v2-bug-03-adapter-retry-snapshot.json",
-      "kind": "injected_bug",
-      "difficulty": "medium",
-      "categories": [
-        "bug_fix",
-        "api_contract"
-      ],
-      "source": {
-        "upstream": "https://github.com/TomokiAkiyama06/personal-ai-workspace",
-        "base_commit": "3df6f807a92497ba24366d47259b16e18e8136be",
-        "injected_files": [
-          "benchmarks/candidate_adapter.py",
-          "benchmarks/tests/test_candidate_adapter.py"
-        ],
-        "requirement": "benchmarks/README.md#candidate-adapter-interface"
-      }
-    },
-    {
-      "task_id": "paw-seed-v2-bug-04-collector-usage-sampler",
-      "file": "tasks/paw-seed-v2-bug-04-collector-usage-sampler.json",
-      "kind": "injected_bug",
-      "difficulty": "medium",
-      "categories": [
-        "bug_fix",
-        "metrics"
-      ],
-      "source": {
-        "upstream": "https://github.com/TomokiAkiyama06/personal-ai-workspace",
-        "base_commit": "3df6f807a92497ba24366d47259b16e18e8136be",
-        "injected_files": [
-          "benchmarks/metrics_collector.py"
-        ],
-        "requirement": "benchmarks/README.md#metrics-collector"
-      }
-    },
-    {
-      "task_id": "paw-seed-v2-bug-05-retrieval-scope-context",
-      "file": "tasks/paw-seed-v2-bug-05-retrieval-scope-context.json",
-      "kind": "injected_bug",
-      "difficulty": "medium",
-      "categories": [
-        "bug_fix",
-        "metrics",
-        "repo_exploration"
-      ],
-      "source": {
-        "upstream": "https://github.com/TomokiAkiyama06/personal-ai-workspace",
-        "base_commit": "3df6f807a92497ba24366d47259b16e18e8136be",
-        "injected_files": [
-          "benchmarks/retrieval_runner.py",
-          "benchmarks/tests/test_retrieval_runner.py",
-          "benchmarks/tests/test_synthetic_datasets.py"
-        ],
-        "requirement": "benchmarks/README.md#retrieval-benchmark"
-      }
-    },
-    {
-      "task_id": "paw-seed-v2-bug-06-dag-order-and-blocking",
-      "file": "tasks/paw-seed-v2-bug-06-dag-order-and-blocking.json",
-      "kind": "injected_bug",
-      "difficulty": "medium",
-      "categories": [
-        "bug_fix",
-        "multi_file",
-        "repo_exploration"
-      ],
-      "source": {
-        "upstream": "https://github.com/TomokiAkiyama06/personal-ai-workspace",
-        "base_commit": "3df6f807a92497ba24366d47259b16e18e8136be",
-        "injected_files": [
-          "apps/backend/paw_backend/orchestrator/plan.py",
-          "apps/backend/paw_backend/orchestrator/scheduling.py",
-          "apps/backend/tests/test_orchestrator_plan.py",
-          "apps/backend/tests/test_orchestrator_scheduling.py"
-        ],
-        "requirement": "REQUIREMENTS.md (Dependency / failure isolation), docs/decisions/0021-dag-orchestrator-policy.md"
-      }
-    },
-    {
-      "task_id": "paw-seed-v2-bug-07-unseen-reservations",
-      "file": "tasks/paw-seed-v2-bug-07-unseen-reservations.json",
-      "kind": "injected_bug",
-      "difficulty": "hard",
-      "categories": [
-        "bug_fix",
-        "multi_file",
-        "repo_exploration",
-        "concurrency_or_process"
-      ],
-      "source": {
-        "upstream": "https://github.com/TomokiAkiyama06/personal-ai-workspace",
-        "base_commit": "3df6f807a92497ba24366d47259b16e18e8136be",
-        "injected_files": [
-          "apps/backend/paw_backend/compute/accounting.py",
-          "apps/backend/paw_backend/compute/concurrency.py",
-          "apps/backend/tests/test_compute_free_vram.py"
-        ],
-        "requirement": "REQUIREMENTS.md (GPU / Compute Resource Scheduler), docs/decisions/0037-gpu-compute-scheduler.md, docs/decisions/0042-gpu-free-vram-admission.md"
-      }
-    },
-    {
-      "task_id": "paw-seed-v2-bug-08-loop-hash-and-escalation",
-      "file": "tasks/paw-seed-v2-bug-08-loop-hash-and-escalation.json",
-      "kind": "injected_bug",
-      "difficulty": "medium",
-      "categories": [
-        "bug_fix",
-        "repo_exploration"
-      ],
-      "source": {
-        "upstream": "https://github.com/TomokiAkiyama06/personal-ai-workspace",
-        "base_commit": "3df6f807a92497ba24366d47259b16e18e8136be",
-        "injected_files": [
-          "apps/backend/paw_backend/tasks/queueing/loop.py",
-          "apps/backend/tests/test_queueing_loop.py"
-        ],
-        "requirement": "REQUIREMENTS.md (loop prevention), docs/decisions/0007-task-queue-budget-and-loop-policy.md"
-      }
-    },
-    {
-      "task_id": "paw-seed-v2-bug-09-sensitive-key-redaction",
-      "file": "tasks/paw-seed-v2-bug-09-sensitive-key-redaction.json",
-      "kind": "injected_bug",
-      "difficulty": "medium",
-      "categories": [
-        "bug_fix",
-        "security"
-      ],
-      "source": {
-        "upstream": "https://github.com/TomokiAkiyama06/personal-ai-workspace",
-        "base_commit": "3df6f807a92497ba24366d47259b16e18e8136be",
-        "injected_files": [
-          "apps/backend/paw_backend/tools/credentials.py",
-          "apps/backend/tests/test_tools_credentials.py"
-        ],
-        "requirement": "paw_backend/tools/credentials.py redact_value contract; docs/SECURITY_TOOL_PERMISSIONS.md (results are redacted)"
-      }
-    },
-    {
-      "task_id": "paw-seed-v2-bug-10-unnormalised-invocation",
-      "file": "tasks/paw-seed-v2-bug-10-unnormalised-invocation.json",
-      "kind": "injected_bug",
-      "difficulty": "medium",
-      "categories": [
-        "bug_fix",
-        "security",
-        "api_contract"
-      ],
-      "source": {
-        "upstream": "https://github.com/TomokiAkiyama06/personal-ai-workspace",
-        "base_commit": "3df6f807a92497ba24366d47259b16e18e8136be",
-        "injected_files": [
-          "apps/backend/paw_backend/tools/calls.py",
-          "apps/backend/tests/test_tools_broker.py",
-          "apps/backend/tests/test_tools_runner.py"
-        ],
-        "requirement": "paw_backend/tools/calls.py and broker docstrings: targets are normalised so that the approval hash, the scope check and the executor see one canonical spelling"
-      }
-    },
-    {
-      "task_id": "paw-seed-v2-bug-11-excluded-scope-escape",
-      "file": "tasks/paw-seed-v2-bug-11-excluded-scope-escape.json",
-      "kind": "injected_bug",
-      "difficulty": "hard",
-      "categories": [
-        "bug_fix",
-        "security",
-        "repo_exploration"
-      ],
-      "source": {
-        "upstream": "https://github.com/TomokiAkiyama06/personal-ai-workspace",
-        "base_commit": "3df6f807a92497ba24366d47259b16e18e8136be",
-        "injected_files": [
-          "apps/backend/paw_backend/tools/scope.py",
-          "apps/backend/tests/test_orchestrator_worktree_scope.py"
-        ],
-        "requirement": "PAW-034 / PAW-035 (TaskScope.excluded_paths / excluded_repositories, paw_backend.tools.scope docstrings)"
-      }
-    },
-    {
-      "task_id": "paw-seed-v2-bug-12-research-source-dedup",
-      "file": "tasks/paw-seed-v2-bug-12-research-source-dedup.json",
-      "kind": "injected_bug",
-      "difficulty": "hard",
-      "categories": [
-        "bug_fix",
-        "multi_file",
-        "repo_exploration",
-        "security"
-      ],
-      "source": {
-        "upstream": "https://github.com/TomokiAkiyama06/personal-ai-workspace",
-        "base_commit": "3df6f807a92497ba24366d47259b16e18e8136be",
-        "injected_files": [
-          "apps/backend/paw_backend/research/providers/locator.py",
-          "apps/backend/paw_backend/research/providers/normalize.py",
-          "apps/backend/tests/test_research_broker.py",
-          "apps/backend/tests/test_research_locator.py",
-          "apps/backend/tests/test_research_normalize.py"
-        ],
-        "requirement": "PAW-051 research providers (canonicalize_locator / merge_items docstrings), REQUIREMENTS.md Evidence / provenance"
-      }
-    },
-    {
-      "task_id": "paw-seed-v2-bug-13-retention-calendar-months",
-      "file": "tasks/paw-seed-v2-bug-13-retention-calendar-months.json",
-      "kind": "injected_bug",
-      "difficulty": "medium",
-      "categories": [
-        "bug_fix",
-        "repo_exploration"
-      ],
-      "source": {
-        "upstream": "https://github.com/TomokiAkiyama06/personal-ai-workspace",
-        "base_commit": "3df6f807a92497ba24366d47259b16e18e8136be",
-        "injected_files": [
-          "apps/backend/paw_backend/authz/retention/rules.py",
-          "apps/backend/tests/test_retention_rules.py",
-          "apps/backend/tests/test_retention_schedule.py"
-        ],
-        "requirement": "Decision 0027 (audit retention and partitioning), Issue #117"
-      }
-    },
-    {
       "task_id": "paw-seed-v2-bug-14-health-outage-changes",
       "file": "tasks/paw-seed-v2-bug-14-health-outage-changes.json",
       "kind": "injected_bug",
@@ -775,65 +530,74 @@
       }
     },
     {
-      "task_id": "paw-seed-v2-bug-15-retrieval-conflict-lost",
-      "file": "tasks/paw-seed-v2-bug-15-retrieval-conflict-lost.json",
+      "task_id": "paw-seed-v2-bug-19-validator-reports",
+      "file": "tasks/paw-seed-v2-bug-19-validator-reports.json",
       "kind": "injected_bug",
-      "difficulty": "medium",
+      "difficulty": "hard",
       "categories": [
         "bug_fix",
-        "repo_exploration",
-        "multi_file"
-      ],
-      "source": {
-        "upstream": "https://github.com/TomokiAkiyama06/personal-ai-workspace",
-        "base_commit": "3df6f807a92497ba24366d47259b16e18e8136be",
-        "injected_files": [
-          "apps/backend/paw_backend/memory/retrieval/grouping.py",
-          "apps/backend/tests/test_retrieval_grouping.py"
-        ],
-        "requirement": "docs/MEMORY_ARCHITECTURE.md (retrieval: dedup / conflicts), Decision 0019"
-      }
-    },
-    {
-      "task_id": "paw-seed-v2-bug-16-repository-registration-gaps",
-      "file": "tasks/paw-seed-v2-bug-16-repository-registration-gaps.json",
-      "kind": "injected_bug",
-      "difficulty": "medium",
-      "categories": [
-        "bug_fix",
-        "security",
+        "schema_or_validation",
+        "multi_file",
         "repo_exploration"
       ],
       "source": {
         "upstream": "https://github.com/TomokiAkiyama06/personal-ai-workspace",
         "base_commit": "3df6f807a92497ba24366d47259b16e18e8136be",
         "injected_files": [
-          "apps/backend/paw_backend/repositories/paths.py",
-          "apps/backend/tests/test_repositories_paths.py"
+          "benchmarks/json_input.py",
+          "benchmarks/schema_validation.py",
+          "benchmarks/tests/test_validate_result.py",
+          "benchmarks/validate_result.py",
+          "benchmarks/validate_task.py"
         ],
-        "requirement": "Decision 0017 (existing repository registration), paw_backend.repositories.paths"
+        "requirement": "benchmarks/README.md#validator"
       }
     },
     {
-      "task_id": "paw-seed-v2-bug-17-calendar-period-shift",
-      "file": "tasks/paw-seed-v2-bug-17-calendar-period-shift.json",
+      "task_id": "paw-seed-v2-bug-20-working-set-obligations",
+      "file": "tasks/paw-seed-v2-bug-20-working-set-obligations.json",
       "kind": "injected_bug",
-      "difficulty": "medium",
+      "difficulty": "hard",
       "categories": [
         "bug_fix",
-        "repo_exploration",
-        "multi_file"
+        "security",
+        "multi_file",
+        "repo_exploration"
       ],
       "source": {
         "upstream": "https://github.com/TomokiAkiyama06/personal-ai-workspace",
         "base_commit": "3df6f807a92497ba24366d47259b16e18e8136be",
         "injected_files": [
-          "apps/backend/paw_backend/connections/domain.py",
-          "apps/backend/paw_backend/connections/report.py",
-          "apps/backend/tests/test_connections_domain.py",
-          "apps/backend/tests/test_connections_report.py"
+          "apps/backend/paw_backend/tasks/domain.py",
+          "apps/backend/paw_backend/tasks/working_set.py",
+          "apps/backend/tests/test_task_working_set_rules.py",
+          "apps/backend/tests/test_tools_working_set.py"
         ],
-        "requirement": "Decision 0016 section 4, Decision 0069 point 2"
+        "requirement": "Decision 0030 (Working Set), REQUIREMENTS.md Multi-Repo Task / Working Set"
+      }
+    },
+    {
+      "task_id": "paw-seed-v2-bug-22-approval-lifecycle-gaps",
+      "file": "tasks/paw-seed-v2-bug-22-approval-lifecycle-gaps.json",
+      "kind": "injected_bug",
+      "difficulty": "hard",
+      "categories": [
+        "bug_fix",
+        "security",
+        "multi_file",
+        "repo_exploration"
+      ],
+      "source": {
+        "upstream": "https://github.com/TomokiAkiyama06/personal-ai-workspace",
+        "base_commit": "3df6f807a92497ba24366d47259b16e18e8136be",
+        "injected_files": [
+          "apps/backend/paw_backend/tools/approval_memory.py",
+          "apps/backend/paw_backend/tools/approval_types.py",
+          "apps/backend/paw_backend/tools/approvals.py",
+          "apps/backend/tests/test_tools_approvals.py",
+          "apps/backend/tests/tools_store_contract.py"
+        ],
+        "requirement": "Decision 0030/0031 tool approvals; paw_backend/tools approvals docs"
       }
     },
     {
@@ -1033,10 +797,10 @@
       }
     },
     {
-      "task_id": "paw-seed-v2-spec-13-ranking-policy-mapping",
-      "file": "tasks/paw-seed-v2-spec-13-ranking-policy-mapping.json",
+      "task_id": "paw-seed-v2-spec-14-run-plan",
+      "file": "tasks/paw-seed-v2-spec-14-run-plan.json",
       "kind": "spec",
-      "difficulty": "medium",
+      "difficulty": "hard",
       "categories": [
         "feature",
         "schema_or_validation",
@@ -1046,7 +810,126 @@
       "source": {
         "upstream": "https://github.com/TomokiAkiyama06/personal-ai-workspace",
         "base_commit": "3df6f807a92497ba24366d47259b16e18e8136be",
-        "requirement": "Decision 0019 (provisional ranking numbers tuned by PAW-019)"
+        "requirement": "docs/BENCHMARK_EVALUATOR.md (Resolved@N, fair comparison rules); Issue #198 (interleaved repeated runs)"
+      }
+    },
+    {
+      "task_id": "paw-seed-v2-spec-15-task-json-patch",
+      "file": "tasks/paw-seed-v2-spec-15-task-json-patch.json",
+      "kind": "spec",
+      "difficulty": "hard",
+      "categories": [
+        "feature",
+        "schema_or_validation",
+        "api_contract",
+        "multi_file"
+      ],
+      "source": {
+        "upstream": "https://github.com/TomokiAkiyama06/personal-ai-workspace",
+        "base_commit": "3df6f807a92497ba24366d47259b16e18e8136be",
+        "requirement": "benchmarks/README.md#validator (value-free errors); RFC 6901 / RFC 6902"
+      }
+    },
+    {
+      "task_id": "paw-seed-v2-spec-16-task-timeline-replay",
+      "file": "tasks/paw-seed-v2-spec-16-task-timeline-replay.json",
+      "kind": "spec",
+      "difficulty": "hard",
+      "categories": [
+        "feature",
+        "api_contract",
+        "multi_file",
+        "schema_or_validation"
+      ],
+      "source": {
+        "upstream": "https://github.com/TomokiAkiyama06/personal-ai-workspace",
+        "base_commit": "3df6f807a92497ba24366d47259b16e18e8136be",
+        "requirement": "REQUIREMENTS.md Agent Task lifecycle; apps/backend/README.md Agent Task Lifecycle (PAW-032)"
+      }
+    },
+    {
+      "task_id": "paw-seed-v2-spec-17-health-history-episodes",
+      "file": "tasks/paw-seed-v2-spec-17-health-history-episodes.json",
+      "kind": "spec",
+      "difficulty": "hard",
+      "categories": [
+        "feature",
+        "metrics",
+        "api_contract",
+        "multi_file"
+      ],
+      "source": {
+        "upstream": "https://github.com/TomokiAkiyama06/personal-ai-workspace",
+        "base_commit": "3df6f807a92497ba24366d47259b16e18e8136be",
+        "requirement": "REQUIREMENTS.md Observability / System Health baseline; Decision 0059"
+      }
+    },
+    {
+      "task_id": "paw-seed-v2-spec-18-event-replay",
+      "file": "tasks/paw-seed-v2-spec-18-event-replay.json",
+      "kind": "spec",
+      "difficulty": "hard",
+      "categories": [
+        "feature",
+        "api_contract",
+        "multi_file",
+        "repo_exploration"
+      ],
+      "source": {
+        "upstream": "https://github.com/TomokiAkiyama06/personal-ai-workspace",
+        "base_commit": "3df6f807a92497ba24366d47259b16e18e8136be",
+        "requirement": "apps/backend/paw_backend/events.py (Decision 0070: notification.changed), SSE Last-Event-ID"
+      }
+    },
+    {
+      "task_id": "paw-seed-v2-spec-19-claim-assessment",
+      "file": "tasks/paw-seed-v2-spec-19-claim-assessment.json",
+      "kind": "spec",
+      "difficulty": "hard",
+      "categories": [
+        "feature",
+        "api_contract",
+        "multi_file",
+        "repo_exploration"
+      ],
+      "source": {
+        "upstream": "https://github.com/TomokiAkiyama06/personal-ai-workspace",
+        "base_commit": "3df6f807a92497ba24366d47259b16e18e8136be",
+        "requirement": "REQUIREMENTS.md Evidence / provenance; apps/backend/README.md Evidence / Claim Provenance (Decision 0011)"
+      }
+    },
+    {
+      "task_id": "paw-seed-v2-spec-20-memory-freshness-assessment",
+      "file": "tasks/paw-seed-v2-spec-20-memory-freshness-assessment.json",
+      "kind": "spec",
+      "difficulty": "hard",
+      "categories": [
+        "feature",
+        "api_contract",
+        "schema_or_validation",
+        "multi_file"
+      ],
+      "source": {
+        "upstream": "https://github.com/TomokiAkiyama06/personal-ai-workspace",
+        "base_commit": "3df6f807a92497ba24366d47259b16e18e8136be",
+        "requirement": "REQUIREMENTS.md (Memory Freshness / Revalidate Policy), MEMORY_ARCHITECTURE.md 11, Decision 0034"
+      }
+    },
+    {
+      "task_id": "paw-seed-v2-spec-21-recovery-backup-diff",
+      "file": "tasks/paw-seed-v2-spec-21-recovery-backup-diff.json",
+      "kind": "spec",
+      "difficulty": "hard",
+      "categories": [
+        "feature",
+        "api_contract",
+        "schema_or_validation",
+        "multi_file"
+      ],
+      "source": {
+        "upstream": "https://github.com/TomokiAkiyama06/personal-ai-workspace",
+        "base_commit": "3df6f807a92497ba24366d47259b16e18e8136be",
+        "requirement": "REQUIREMENTS.md (Dedicated Recovery Repository), Decision 0054"
       }
     }
   ]
