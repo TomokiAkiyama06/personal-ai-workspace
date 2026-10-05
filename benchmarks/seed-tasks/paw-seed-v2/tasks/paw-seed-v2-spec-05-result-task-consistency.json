@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "task_id": "paw-seed-v2-spec-05-result-task-consistency",
+  "kind": "spec",
+  "repository": {
+    "locator": "paw-dataset://paw-seed-v2/paw-seed-v2-spec-05-result-task-consistency",
+    "starting_commit": "3df6f807a92497ba24366d47259b16e18e8136be"
+  },
+  "issue_text": "# Evaluator ResultをTaskと突き合わせて、矛盾を検出する\n\nResult validator（`python -m benchmarks.validate_result`）はResultの形式（Result schema v1）と`check_results[].id`の重複だけを検査します。\nREADMEのとおり`check_results[].id`は対応するTaskの`visible_checks` / `hidden_checks`の`id`を使い、`test_outcomes`はcheckの結果をまとめたものですが、\nTaskと食い違うResult（別のTaskの結果、checkの欠落、`fail_to_pass`だけ`passed`にしたものなど）も`valid`になります。Taskと突き合わせる検査を追加してください。\n\n## 仕様\n\n`benchmarks/validate_result.py`に次を追加します。\n\n- `aggregate_status(statuses: list[str]) -> str`: 空なら`\"not_run\"`。`\"error\"`が1つでもあれば`\"error\"`、なければ`\"failed\"`があれば`\"failed\"`、なければ`\"not_run\"`があれば`\"not_run\"`、それ以外は`\"passed\"`。\n- `consistency_errors(result: dict, task: dict) -> list[str]`: Result schemaに適合した`result`と、Task schemaに適合した`task`を突き合わせ、次の順でエラーを返します（なければ空のlist）。messageに入力の値（idなど）を含めません。\n  1. `result[\"task_id\"]`が`task[\"task_id\"]`と違えば`$.task_id: does not match the task`。\n  2. `check_results`を先頭から見て、`id`がTaskのどのcheck（`visible_checks`と`hidden_checks`）の`id`でもなければ`$.check_results[<index>].id: not a check of the task`。Taskのcheckの`id`だが`type`がTaskのそのcheckの`type`と違えば`$.check_results[<index>].type: differs from the task`。\n  3. Taskのcheckを`visible_checks`の順、続いて`hidden_checks`の順に見て、`check_results`に同じ`id`の結果がないものごとに`$.check_results: missing result for visible_checks[<index>]`（`hidden_checks`なら`hidden_checks[<index>]`。indexはそのlistの中の位置）。\n  4. Taskのcheckの状態（そのidの`check_results`の`status`。同じidが複数あれば最初のもの。結果がなければ`\"not_run\"`）から:\n     - `hidden_checks`のうち`type`が`acceptance`のcheckの状態を`aggregate_status`でまとめた値が`test_outcomes.fail_to_pass`と違えば`$.test_outcomes.fail_to_pass: inconsistent with check_results`（`visible_checks`のacceptanceは含めない）。\n     - `visible_checks`と`hidden_checks`を通して`type`が`regression`のcheckの状態をまとめた値が`test_outcomes.pass_to_pass`と違えば`$.test_outcomes.pass_to_pass: inconsistent with check_results`。\n  - 引数を変更しません。\n- CLI: `python -m benchmarks.validate_result --task TASK FILE...`\n  - `--task`を付けたときは、最初にTASKを読みます。読めない・strictなJSONでない・Task schema（`benchmarks.validate_task.validate_document`）に適合しなければ、stderrへ`<TASK>: invalid task`を出し、Resultを1つも検査せずに終了code 1。\n  - 各FILEは、これまでどおり読み込み・Result schemaの検査を行い、schemaのエラーがない文書にだけ`consistency_errors`を行います。見つかったエラーはschemaのエラーと同じ形式（stderrへ`<path>:<error>`）で出し、終了code 1。エラーのない文書は`<path>: valid`。\n  - `--task`を付けないときの動作は変わりません。\n- `benchmarks/README.md`のResult schema / Validatorの説明を更新してください。\n\n## 作業の条件\n\n- 作業はこのRepositoryのstarting commitから始めます。既存のTestを削除・無効化したり、期待値を不当に緩めたりしてはいけません。\n- 評価はExecutable Evaluatorが行います。公開されたcheck（visible checks）に加えて、候補から見えないHidden checkがあります。\n- Credential・秘密情報をcode・log・commitへ入れないでください（SECURITY.md）。\n",
+  "visible_checks": [
+    {
+      "id": "lint",
+      "type": "lint",
+      "command": [
+        "python",
+        "-m",
+        "ruff",
+        "check",
+        "benchmarks"
+      ]
+    }
+  ],
+  "hidden_checks": [
+    {
+      "id": "hidden-acceptance",
+      "type": "acceptance",
+      "reference_id": "seed-v2-6fea15f11228"
+    },
+    {
+      "id": "hidden-regression",
+      "type": "regression",
+      "reference_id": "seed-v2-4c6f11162a5c"
+    }
+  ]
+}

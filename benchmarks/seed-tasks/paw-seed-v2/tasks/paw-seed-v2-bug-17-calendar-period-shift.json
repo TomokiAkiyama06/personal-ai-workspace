@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "task_id": "paw-seed-v2-bug-17-calendar-period-shift",
+  "kind": "injected_bug",
+  "repository": {
+    "locator": "paw-dataset://paw-seed-v2/paw-seed-v2-bug-17-calendar-period-shift",
+    "starting_commit": "c7f07e15272d8b44dcd1760196991df4e9654934"
+  },
+  "issue_text": "# Quota の日・週・月の区切りが 9 時間ずれる／使用状況の「前月比」が 1 日短い\n\n共有接続（Codex / Claude）の Quota と、使用状況の画面（Usage）の集計で、暦の期間がおかしいという報告が2つあります。\nどちらも `paw_backend.connections` の、暦の期間（calendar period）の計算です。\n\n## 1. Quota の `day` / `week` / `month` が東京の 0 時で切り替わらない\n\nDecision 0016 の 4 のとおり、`day`・`week`（月曜始まり）・`month` の Quota は設定された時間帯（既定 `Asia/Tokyo`）の暦で数えます。\nところが本番では、日本時間の **0 時〜9 時** に使った分が、**前の日**（週・月の境目では前の週・前の月）の window に数えられます。window が日本時間の 9 時（UTC の 0 時）に切り替わっているように見えます。\n\n- 例: Database の時計が `2026-09-24T20:30:00+00:00`（日本時間 9/25 05:30）のとき、`day` の window は日本時間 9/25 0 時〜9/26 0 時のはずですが、9/24 0 時〜9/25 0 時になります。\n- 現在時刻は Database の時計から読むので、Backend には **UTC の instant** として渡されます（Store が渡す値）。日本時間の `datetime` を渡す単体の確認では再現しません。\n- 夏時間のある時間帯（例: `America/New_York`）でも、その時間帯の 0 時から 0 時です。window は常に現在時刻を含みます。\n\n## 2. Usage の `month` の「前の期間」が 1 日短い\n\nDecision 0069 の 2 のとおり、`range=month` の前の期間は **前月の 1 日から、今日と同じ日まで**（今日が 17 日なら前月の 1〜17 日。前月が短ければ前月末まで）です。\n\n- 例: 日本時間 2026-09-17 の `month` では、前の期間は 8/1 0 時〜8/18 0 時のはずですが、8/1 0 時〜8/17 0 時（1〜16 日）になります。\n- 前月が短い場合（3/31 の前の期間は 2/1〜2/28、つまり 2/1 0 時〜3/1 0 時）の切り方は今のままで正しい結果です。\n\n## 求めること\n\n- 2つの原因を調べて直してください。`last14` / `last30`、`rolling_5h` の計算、関数の引数と戻り値の形は変えないでください。\n\n## 作業の条件\n\n- 作業はこのRepositoryのstarting commitから始めます。既存のTestを削除・無効化したり、期待値を不当に緩めたりしてはいけません。\n- 評価はExecutable Evaluatorが行います。公開されたcheck（visible checks）に加えて、候補から見えないHidden checkがあります。\n- Credential・秘密情報をcode・log・commitへ入れないでください（SECURITY.md）。\n",
+  "visible_checks": [
+    {
+      "id": "lint",
+      "type": "lint",
+      "command": [
+        "python",
+        "-m",
+        "ruff",
+        "check",
+        "apps/backend"
+      ]
+    }
+  ],
+  "hidden_checks": [
+    {
+      "id": "hidden-acceptance",
+      "type": "acceptance",
+      "reference_id": "seed-v2-693896b9635b"
+    },
+    {
+      "id": "hidden-regression",
+      "type": "regression",
+      "reference_id": "seed-v2-47afea3cc0cf"
+    }
+  ]
+}

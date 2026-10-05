@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "task_id": "paw-seed-v2-bug-09-sensitive-key-redaction",
+  "kind": "injected_bug",
+  "repository": {
+    "locator": "paw-dataset://paw-seed-v2/paw-seed-v2-bug-09-sensitive-key-redaction",
+    "starting_commit": "56ae2392074fc3638d2ce91f58993016a5de705a"
+  },
+  "issue_text": "# Tool の結果で、秘密を表す key の値が隠されないことがある\n\nTool Runner（`ToolRunner`）は、Tool の実行結果を Agent に返す・log に残す前に redaction します。\n仕様（`paw_backend.tools` の credentials の説明）では、**秘密を表す名前の key**（`password`・`secret`・`token`・`api_key`・`private_key`・`access_key`・`authorization`・`credential` などの語を含む key。\n大文字・小文字と `_` `-` などの区切りは区別しない: `DB_PASSWORD`、`dbPassword`、`db-password` は同じ扱い）の下の値は、\nそれが文字列でも、list や dict などの構造でも、中身にかかわらず丸ごと `[REDACTED]` に置き換え（1 件と数える）、\n数値・真偽値・`None`・空文字列・credential handle（`cred_` + 32 桁の 16 進）はそのまま残すことになっています。\n\nところが、次のような結果がそのまま Agent に返っています。\n\n```python\n{\"DB_PASSWORD\": \"hunter2\", \"dbPassword\": \"x\", \"GITHUB_TOKEN\": \"abc\"}\n# 期待: 3 つとも \"[REDACTED]\"。実際: \"db_password\" や \"password\" と書いた key だけが隠される\n\n{\"credentials\": {\"user\": \"alice\", \"value\": \"hunter22\"}, \"secrets\": [\"abc123\"]}\n# 期待: {\"credentials\": \"[REDACTED]\", \"secrets\": \"[REDACTED]\"}（redaction は 2 件）\n# 実際: 中まで降りて、\"hunter22\" や \"abc123\" が見えてしまう\n```\n\n原因を調べて直してください（Backend は `apps/backend`）。\n\n## 作業の条件\n\n- 作業はこのRepositoryのstarting commitから始めます。既存のTestを削除・無効化したり、期待値を不当に緩めたりしてはいけません。\n- 評価はExecutable Evaluatorが行います。公開されたcheck（visible checks）に加えて、候補から見えないHidden checkがあります。\n- Credential・秘密情報をcode・log・commitへ入れないでください（SECURITY.md）。\n",
+  "visible_checks": [
+    {
+      "id": "lint",
+      "type": "lint",
+      "command": [
+        "python",
+        "-m",
+        "ruff",
+        "check",
+        "apps/backend"
+      ]
+    }
+  ],
+  "hidden_checks": [
+    {
+      "id": "hidden-acceptance",
+      "type": "acceptance",
+      "reference_id": "seed-v2-93b1a3907a74"
+    },
+    {
+      "id": "hidden-regression",
+      "type": "regression",
+      "reference_id": "seed-v2-713bb0857fd2"
+    }
+  ]
+}

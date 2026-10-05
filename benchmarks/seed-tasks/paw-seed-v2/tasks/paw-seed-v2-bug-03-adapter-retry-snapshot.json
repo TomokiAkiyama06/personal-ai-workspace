@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "task_id": "paw-seed-v2-bug-03-adapter-retry-snapshot",
+  "kind": "injected_bug",
+  "repository": {
+    "locator": "paw-dataset://paw-seed-v2/paw-seed-v2-bug-03-adapter-retry-snapshot",
+    "starting_commit": "b51b499794d81ad67d464345f238e9e7d9d774ca"
+  },
+  "issue_text": "# Candidate adapterのRetry回数とTool schemaのsnapshotが契約どおりでない\n\nBenchmarkの候補adapter（`benchmarks/candidate_adapter.py`、READMEの「Candidate adapter interface」）で、2つの契約違反が見つかりました。\n\n## 症状1: `max_attempts`を超えてRetryが許可される\n\n`RetryPolicy(max_attempts=2)`では、試行は全部で2回までです。ところがBackendが2回目の試行（retryableな失敗）の後に`should_retry(2, result)`を呼ぶと`True`が返り、3回目の試行が始まってしまいます。\n`should_retry(completed_attempts, result)`は、`result`がretryableで、かつ次の試行（`completed_attempts + 1`回目）を`allows_attempt`が許すときだけ`True`を返すはずです。`max_attempts=1`ならretryableな失敗でも`False`です。\n\n## 症状2: 配列の中のschemaを書き換えられる\n\n`ToolDefinition.input_schema`は、READMEのとおり**深いread-onlyのsnapshot**で、ある候補が書き換えて別の候補のToolが変わることがあってはいけません（mappingは書き込み不可、配列はtupleになるはずです）。\nところが`anyOf`や`prefixItems`のように**配列の中に置かれたschema**は、普通の`dict`のままで書き換えられ、その後の`to_dict()`・`input_schema_as_dict()`・`copy.deepcopy`の結果も変わってしまいます。\n\n例:\n\n```python\ntool = ToolDefinition(\"pick\", \"Pick a mode.\", {\n    \"type\": \"object\",\n    \"properties\": {\"mode\": {\"anyOf\": [{\"type\": \"string\", \"enum\": [\"fast\", \"safe\"]}, {\"type\": \"null\"}]}},\n})\ntool.input_schema[\"properties\"][\"mode\"][\"anyOf\"][0][\"type\"] = \"integer\"  # TypeErrorになるはずが成功する\n```\n\n配列の中のmappingも書き込み不可（`TypeError`）にし、その中の配列もtupleにしてください。`input_schema_as_dict()`は、これまでどおりどの深さでも普通の`dict` / `list`の独立した複製を返します。\n\n両方を直してください。\n\n## 作業の条件\n\n- 作業はこのRepositoryのstarting commitから始めます。既存のTestを削除・無効化したり、期待値を不当に緩めたりしてはいけません。\n- 評価はExecutable Evaluatorが行います。公開されたcheck（visible checks）に加えて、候補から見えないHidden checkがあります。\n- Credential・秘密情報をcode・log・commitへ入れないでください（SECURITY.md）。\n",
+  "visible_checks": [
+    {
+      "id": "lint",
+      "type": "lint",
+      "command": [
+        "python",
+        "-m",
+        "ruff",
+        "check",
+        "benchmarks"
+      ]
+    }
+  ],
+  "hidden_checks": [
+    {
+      "id": "hidden-acceptance",
+      "type": "acceptance",
+      "reference_id": "seed-v2-03d768e86fa6"
+    },
+    {
+      "id": "hidden-regression",
+      "type": "regression",
+      "reference_id": "seed-v2-8adbff265f8b"
+    }
+  ]
+}

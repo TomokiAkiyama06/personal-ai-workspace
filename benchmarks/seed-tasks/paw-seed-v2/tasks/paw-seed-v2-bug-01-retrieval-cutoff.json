@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "task_id": "paw-seed-v2-bug-01-retrieval-cutoff",
+  "kind": "injected_bug",
+  "repository": {
+    "locator": "paw-dataset://paw-seed-v2/paw-seed-v2-bug-01-retrieval-cutoff",
+    "starting_commit": "bac5d6be81fa21b948be7321c905f1dce1073d73"
+  },
+  "issue_text": "# Retrieval benchmarkの採点が、重複したidや返却数の少ないRetrieverで誤る\n\nRetrieval benchmark（`python -m benchmarks.run_retrieval_benchmark`）のReportで、READMEの「Retrieval benchmark」の節に書かれた採点の規則と合わない値が出ます。2つの症状があります。\n\n## 症状1: 重複したidが上位k件の枠を使ってしまう\n\nREADMEでは、Retrieverが返したidの重複は2件目以降を捨て、**重複を除いた上位`k`件**を採点します。\nところが、重複が上位`k`件の中にあると、その分だけ採点されるidが減ります。\n\n例（`k=2`、queryのrelevantは`m1`と`m2`）: Retrieverが`[\"m1\", \"m1\", \"m2\"]`を返すと、重複を除いた上位2件は`[\"m1\", \"m2\"]`なので`recall_at_k`は1.0のはずですが、0.5になります。\n同様に`[\"m3\", \"m3\", \"m3\", \"m1\"]`（`m3`はrelevantでない）では、上位2件は`[\"m3\", \"m1\"]`で`mrr`は0.5のはずですが、0.0になります。\n\n## 症状2: stale / superseded / Scope誤選択率の分母が`k`になっている\n\nREADMEでは、stale / superseded / Scope誤選択率の分母は`k`ではなく、**実際に返した（重複を除いた）上位k件以内の件数**です。\nところが、返却数が`k`より少ないと率が小さく出ます。\n\n例（`k=5`）: Retrieverがstaleなmemory 1件だけ（`[\"s1\"]`）を返すと、`stale_rate`は1.0のはずですが、0.2になります。\n`benchmarks.retrieval_metrics.misselection_rate([\"a\", \"b\"], {\"a\"}, 4)`も0.5のはずが0.25を返します。\n\n両方の原因を調べて直してください（queryごとの値と、Reportの`metrics`の平均の両方が正しくなるように）。返却数が`k`以上で重複のない場合の値は変わりません。\n\n## 作業の条件\n\n- 作業はこのRepositoryのstarting commitから始めます。既存のTestを削除・無効化したり、期待値を不当に緩めたりしてはいけません。\n- 評価はExecutable Evaluatorが行います。公開されたcheck（visible checks）に加えて、候補から見えないHidden checkがあります。\n- Credential・秘密情報をcode・log・commitへ入れないでください（SECURITY.md）。\n",
+  "visible_checks": [
+    {
+      "id": "lint",
+      "type": "lint",
+      "command": [
+        "python",
+        "-m",
+        "ruff",
+        "check",
+        "benchmarks"
+      ]
+    }
+  ],
+  "hidden_checks": [
+    {
+      "id": "hidden-acceptance",
+      "type": "acceptance",
+      "reference_id": "seed-v2-9e476ce9b540"
+    },
+    {
+      "id": "hidden-regression",
+      "type": "regression",
+      "reference_id": "seed-v2-99ff9188faf4"
+    }
+  ]
+}

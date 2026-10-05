@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "task_id": "paw-seed-v2-bug-05-retrieval-scope-context",
+  "kind": "injected_bug",
+  "repository": {
+    "locator": "paw-dataset://paw-seed-v2/paw-seed-v2-bug-05-retrieval-scope-context",
+    "starting_commit": "775795a1142f2500124ecec31f5eed586f545692"
+  },
+  "issue_text": "# Retrieval benchmarkで、`allowed_scopes`のあるqueryの正解がScope誤選択に数えられる\n\nRetrieval benchmarkのDatasetでは、queryの`scope`に加えて、任意の`allowed_scopes`（そのqueryへ正当に適用できる他のScope）を書けます（READMEの「Retrieval benchmark」）。\n`allowed_scopes`を使うqueryで、次の2つの症状が出ます。\n\n## 症状1: queryの自分のScopeのmemoryがScope誤選択になる\n\n`scope: \"repo\"`、`allowed_scopes: [\"user\"]`、relevantが`repo`のmemory `r1`と`user`のmemory `u1`のqueryで、Retrieverが正解の`[\"r1\", \"u1\"]`を返しても、`scope_mismatch_rate`が0.0になりません（0.5になります）。\nREADMEでは、`allowed_scopes`にも`scope`にも入らないScopeのmemoryだけがScope誤選択です。`RetrievalQuery.effective_scopes`（そのqueryでScope誤選択にならないScopeの集合）は、`scope`と`allowed_scopes`の和集合のはずです。\n`benchmarks/gold/retrieval-synthetic-v1.json`で、正解をそのまま返すRetrieverを走らせても`scope_mismatch_rate`が0になりません。\n\n## 症状2: Retrieverへ渡すScopeの順序が違う\n\nREADMEでは、Retrieverの`retrieve(query_text, requester_principals, k, scopes)`の`scopes`は、**queryの`scope`が先頭**で、続けて`allowed_scopes`を昇順（`scope`と同じものは除く）に並べたものです。\nところが、`scope: \"user\"`、`allowed_scopes: [\"shared\", \"repo\"]`のqueryで`(\"repo\", \"shared\", \"user\")`が渡されます。正しくは`(\"user\", \"repo\", \"shared\")`です。`allowed_scopes`のないqueryでは`(scope,)`だけを渡します。\n\n両方の原因を調べて直してください。\n\n## 作業の条件\n\n- 作業はこのRepositoryのstarting commitから始めます。既存のTestを削除・無効化したり、期待値を不当に緩めたりしてはいけません。\n- 評価はExecutable Evaluatorが行います。公開されたcheck（visible checks）に加えて、候補から見えないHidden checkがあります。\n- Credential・秘密情報をcode・log・commitへ入れないでください（SECURITY.md）。\n",
+  "visible_checks": [
+    {
+      "id": "lint",
+      "type": "lint",
+      "command": [
+        "python",
+        "-m",
+        "ruff",
+        "check",
+        "benchmarks"
+      ]
+    }
+  ],
+  "hidden_checks": [
+    {
+      "id": "hidden-acceptance",
+      "type": "acceptance",
+      "reference_id": "seed-v2-338c4a86e55e"
+    },
+    {
+      "id": "hidden-regression",
+      "type": "regression",
+      "reference_id": "seed-v2-933429490593"
+    }
+  ]
+}

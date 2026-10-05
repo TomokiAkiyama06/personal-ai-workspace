@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "task_id": "paw-seed-v2-bug-16-repository-registration-gaps",
+  "kind": "injected_bug",
+  "repository": {
+    "locator": "paw-dataset://paw-seed-v2/paw-seed-v2-bug-16-repository-registration-gaps",
+    "starting_commit": "0c6f4a42a70ff6ee31e5ceef82f7713740c0eb0c"
+  },
+  "issue_text": "# 既存のRepositoryの登録で、隠しdirectoryと壊れた alternates の link が通ってしまう\n\nユーザーの既存のRepositoryを登録するとき（`paw_backend.repositories` の「existing repository」の登録、Decision 0017）、Backend は登録してよい path かを検査します。\n次の2つが、拒否されるべきなのに受け付けられています。\n\n## 1. 隠しdirectory\n\nroot（既定は `{home}`）より下の path の部分（component）が `.` で始まるときは `PathProblem.HIDDEN` で拒否する仕様です。\n\n- `~/.dotfiles/tool` は正しく拒否されます。\n- ところが `~/src/.secret-tool` や `~/.tool` のように、**Repository の directory 自身**の名前が `.` で始まるときは受け付けられます。\n- root 自身が隠しdirectory（例: root が `{home}/.repos`）なのは問題ありません。root より下だけが対象です。`tool.v2` のように途中に `.` がある名前は隠しではありません。\n\n## 2. alternates / commondir\n\n`.git/objects/info/alternates` か `.git/commondir` が**ある** Repository は、別の Repository の object や git directory を読ませる仕掛けなので `PathProblem.GIT_TRICK` で拒否する仕様です。\n\n- 普通の file なら正しく拒否されます。\n- ところが、それが**指す先のない symbolic link**（dangling link）だと受け付けられます。登録の後で link の先を作れば、別の Repository を読ませることができます。\n- 中身が空の file、別の場所の file を指す link も、どちらも「ある」ので拒否します。\n\n## 求めること\n\n- 原因を調べて直してください。検査の順（最初に失敗したものが答え）と、他の検査の結果は変えないでください。\n\n## 作業の条件\n\n- 作業はこのRepositoryのstarting commitから始めます。既存のTestを削除・無効化したり、期待値を不当に緩めたりしてはいけません。\n- 評価はExecutable Evaluatorが行います。公開されたcheck（visible checks）に加えて、候補から見えないHidden checkがあります。\n- Credential・秘密情報をcode・log・commitへ入れないでください（SECURITY.md）。\n",
+  "visible_checks": [
+    {
+      "id": "lint",
+      "type": "lint",
+      "command": [
+        "python",
+        "-m",
+        "ruff",
+        "check",
+        "apps/backend"
+      ]
+    }
+  ],
+  "hidden_checks": [
+    {
+      "id": "hidden-acceptance",
+      "type": "acceptance",
+      "reference_id": "seed-v2-b8c044aa1274"
+    },
+    {
+      "id": "hidden-regression",
+      "type": "regression",
+      "reference_id": "seed-v2-55f59d03671e"
+    }
+  ]
+}

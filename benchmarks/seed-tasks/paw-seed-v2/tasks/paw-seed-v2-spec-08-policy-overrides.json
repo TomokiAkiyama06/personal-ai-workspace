@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "task_id": "paw-seed-v2-spec-08-policy-overrides",
+  "kind": "spec",
+  "repository": {
+    "locator": "paw-dataset://paw-seed-v2/paw-seed-v2-spec-08-policy-overrides",
+    "starting_commit": "3df6f807a92497ba24366d47259b16e18e8136be"
+  },
+  "issue_text": "# Tool Policy を Admin の設定で厳しくできるようにする（緩めることはできない）\n\nTool Broker の `ToolPolicy`（`DEFAULT_TOOL_POLICY`、Capability class × Environment × Scope の状態 → Approval level）は、今は Code の中の固定の表だけです。\nAdmin が運用に合わせて一部のマスを**厳しくする**（例: `network` を全て `approval` にする）ための、JSON の上書きの文書を読めるようにしてください。\n上書きは**厳しくする方向にしか働かない**ことが要件です（Policy は狭めるだけ: `docs/SECURITY_TOOL_PERMISSIONS.md`、`paw_backend/tools/policy.py` の説明）。\n\n## 仕様\n\n`paw_backend/tools/policy.py` に次を追加し、`PolicyConfigError`・`parse_policy_overrides`・`load_policy` を `paw_backend.tools` からも import できるようにします。\n\n### `ToolPolicy.narrowed(overrides) -> ToolPolicy`\n\n- `overrides` は `{(ToolCapability, Environment, ScopeStatus): ApprovalLevel}` の Mapping。\n- 戻り値は**新しい** `ToolPolicy`。`overrides` の各 key のマスは「今の Level（表にないマスは `DENY`）と上書きの Level のうち厳しい方」（`most_restrictive`）、他のマスは今のまま。上書きが今より緩くても、今の Level が残る（エラーにしない）。\n- 元の Policy は変わらない。`overrides` が Mapping でない、key がこの 3 つの enum の組でない、値が `ApprovalLevel` でない場合は `TypeError`。\n\n### `ToolPolicy.diff(other) -> dict`\n\n- Level が違うマスを `{key: (self の Level, other の Level)}` で返す。表にないマスは `DENY` とみなす（一方で `DENY`・もう一方で表にないマスは違いではない）。`other` が `ToolPolicy` でなければ `TypeError`。\n\n### `parse_policy_overrides(document) -> dict[PolicyKey, ApprovalLevel]`\n\n文書（`json.loads` した値）の形:\n\n```json\n{\"version\": 1, \"rules\": [\n  {\"capability\": \"network\", \"level\": \"approval\"},\n  {\"capability\": \"*\", \"environment\": \"host\", \"scope\": \"in_scope\", \"level\": \"strong_approval\"}\n]}\n```\n\n- top level の member は `version` と `rules` だけ。`version` は整数の `1` だけ（`true`・`1.0`・`\"1\"`・`2` は不可）。`rules` は list で、256 件まで。\n- 規則の member は `capability`（必須）・`environment`（省略可、既定 `\"*\"`）・`scope`（省略可、既定 `\"*\"`）・`level`（必須）だけ。値はそれぞれ `ToolCapability`・`Environment`・`ScopeStatus`・`ApprovalLevel` の値の文字列（完全一致。大文字などは不可）で、`capability`・`environment`・`scope` は `\"*\"`（その enum の全ての値）も取れる。`level` に `\"*\"` は不可。\n- 規則を key（capability, environment, scope）に展開し、同じ key に当たる規則が複数あれば**最も厳しい** Level にする。規則が 0 件なら空の dict。\n- 不正な文書は `PolicyConfigError`（`ValueError` の subclass）。Message は次の固定の形で、**文書の値（未知の member の名前を含む）を含めない**。文書の順に、最初に見つかった問題だけを報告する:\n  1. 文書が object（dict）でない: `$: expected object`\n  2. top level に `version` / `rules` 以外の member: `$: unknown member`\n  3. `version` がない・不正: `$.version: unsupported version`\n  4. `rules` がない・list でない: `$.rules: expected array`\n  5. 257 件以上: `$.rules: too many rules`\n  6. 規則ごとに（`i` は 0 始まりの位置）: object でない `$.rules[i]: expected object` → 未知の member `$.rules[i]: unknown member` → `capability` がない `$.rules[i].capability: required` → 値が不正 `$.rules[i].capability: not allowed` → `environment`・`scope` の値が不正 `$.rules[i].environment: not allowed` / `$.rules[i].scope: not allowed` → `level` がない `$.rules[i].level: required` → 値が不正 `$.rules[i].level: not allowed`（文字列でない値も `not allowed`）\n\n### `load_policy(document, base=None) -> ToolPolicy`\n\n- `base`（`None` なら `DEFAULT_TOOL_POLICY`）を `parse_policy_overrides(document)` で `narrowed` したもの。`base` が `ToolPolicy` でなければ `TypeError`。\n- 範囲外（`out_of_scope`）のマスは、上書きでも `DENY` のまま（厳しい方が残るため）。\n\n`apps/backend/README.md` の「Tool Broker / Capability Policy」に、この上書きの説明を足してください。\n\n## 作業の条件\n\n- 作業はこのRepositoryのstarting commitから始めます。既存のTestを削除・無効化したり、期待値を不当に緩めたりしてはいけません。\n- 評価はExecutable Evaluatorが行います。公開されたcheck（visible checks）に加えて、候補から見えないHidden checkがあります。\n- Credential・秘密情報をcode・log・commitへ入れないでください（SECURITY.md）。\n",
+  "visible_checks": [
+    {
+      "id": "lint",
+      "type": "lint",
+      "command": [
+        "python",
+        "-m",
+        "ruff",
+        "check",
+        "apps/backend"
+      ]
+    }
+  ],
+  "hidden_checks": [
+    {
+      "id": "hidden-acceptance",
+      "type": "acceptance",
+      "reference_id": "seed-v2-412f4c9d04b4"
+    },
+    {
+      "id": "hidden-regression",
+      "type": "regression",
+      "reference_id": "seed-v2-8c1710506926"
+    }
+  ]
+}

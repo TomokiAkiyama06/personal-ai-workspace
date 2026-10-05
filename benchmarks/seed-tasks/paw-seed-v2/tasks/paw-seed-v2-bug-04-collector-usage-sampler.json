@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "task_id": "paw-seed-v2-bug-04-collector-usage-sampler",
+  "kind": "injected_bug",
+  "repository": {
+    "locator": "paw-dataset://paw-seed-v2/paw-seed-v2-bug-04-collector-usage-sampler",
+    "starting_commit": "396b22e45e105901cbe2773c9644cd959f0e0f63"
+  },
+  "issue_text": "# Benchmarkのmetricsで、token数とVRAMの合計が欠ける\n\nEvaluator Resultの`metrics`（READMEの「Metrics collector」）で、取得できているはずの値が欠けたり小さくなったりします。2つの症状があります。\n\n## 症状1: context tokenだけの報告で`token_count`が消える\n\nRuntimeによっては、応答ごとに累積の`token_count`と`context_tokens`の片方だけを報告します。adapterはその値を`MetricsCollector.record_runtime_usage(...)`へ渡します（渡さなかった値は「今回は報告がない」という意味です）。\nところが、`record_runtime_usage(token_count=120, context_tokens=900)`の後に`record_runtime_usage(context_tokens=1500)`を呼ぶと、`metrics()`から`token_count`がなくなります。\n`token_count`は120、`context_tokens`は1500のままになるはずです（それぞれ最後に報告された値。一度も報告されなかった値は、これまでどおり`metrics`から省略します）。\n\n## 症状2: 一部のGPUの値が読めないと、それより後のGPUがVRAMの合計から落ちる\n\n`NvidiaSmiGpuSampler`は、`nvidia-smi`の全GPUの行から使用VRAMの合計とutilizationの最大値を作ります。\nGPUによっては`nvidia-smi`が`[N/A]`を返します。そのとき、読めない行のGPUだけを除くはずが、**その行より後のGPUもすべて**除かれます。\n\n例: `nvidia-smi`の出力が\n\n```text\n100, 10\n[N/A], 0\n300, 90\n```\n\nのとき、`peak_vram_bytes`は100 MiB + 300 MiB（= `400 * 1024 * 1024`）、`peak_gpu_utilization_percent`は90のはずですが、100 MiBと10になります。\n値の数が2つでない行や空行も、その行だけを除きます。\n\n両方を直してください。\n\n## 作業の条件\n\n- 作業はこのRepositoryのstarting commitから始めます。既存のTestを削除・無効化したり、期待値を不当に緩めたりしてはいけません。\n- 評価はExecutable Evaluatorが行います。公開されたcheck（visible checks）に加えて、候補から見えないHidden checkがあります。\n- Credential・秘密情報をcode・log・commitへ入れないでください（SECURITY.md）。\n",
+  "visible_checks": [
+    {
+      "id": "lint",
+      "type": "lint",
+      "command": [
+        "python",
+        "-m",
+        "ruff",
+        "check",
+        "benchmarks"
+      ]
+    }
+  ],
+  "hidden_checks": [
+    {
+      "id": "hidden-acceptance",
+      "type": "acceptance",
+      "reference_id": "seed-v2-b33401f505e1"
+    },
+    {
+      "id": "hidden-regression",
+      "type": "regression",
+      "reference_id": "seed-v2-f9f2bd238f48"
+    }
+  ]
+}

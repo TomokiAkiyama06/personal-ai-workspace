@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "task_id": "paw-seed-v2-bug-13-retention-calendar-months",
+  "kind": "injected_bug",
+  "repository": {
+    "locator": "paw-dataset://paw-seed-v2/paw-seed-v2-bug-13-retention-calendar-months",
+    "starting_commit": "69dcf4f59bab7e790aa5c305e6a9f8abb399cbd3"
+  },
+  "issue_text": "# 監査 Log の Partition の保守が、年末と JST の月初に誤った Partition を計画する\n\n`audit_events` は Decision 0027 のとおり `recorded_at` の **UTC の暦月** ごとに Partition（`audit_events_p<YYYY>_<MM>`）に分かれ、定期の保守（`run_scheduled_maintenance`、CLI の `audit-retention-check`）が、今の月と `horizon_months` か月先までの Partition を作り、その後で Partition の抜け（`first_uncovered_moment`）を確かめます。運用で次の 2 つの問題が見つかりました。\n\n## 1. 11 月・12 月の保守が、来年の Partition を作らない\n\n`now` が 2026-11-20（UTC）、`horizon_months=3` のとき、作られるはずの Partition は `audit_events_p2026_12`・`audit_events_p2027_01`・`audit_events_p2027_02` です。ところが実際には、来年の分ではなく **同じ年の 1 月・2 月**（下限が上限より後になる Window）が計画されます。12 月には、1 月の Partition がなくても抜けの確認が「抜けなし」と答えるため、`audit-retention-check` が警告しません。\n\n## 2. JST の月初の朝に、1 か月先の月として扱われる\n\nServer の時計を JST（UTC+9）の aware な `datetime` で渡すと、2026-10-01 05:00 JST（= 2026-09-30 20:00 UTC）が 10 月として扱われます。UTC ではまだ 9 月なので、9 月の Partition が「今の月」であり、9 月の Partition がない場合の最初の抜けは `now` そのものです。月の境目は、渡された `datetime` の Timezone によらず、常に UTC で決まらなければいけません（`month_start` の docstring）。\n\n`paw_backend.authz.retention` の規則を調べて、両方を直してください。\n\n## 作業の条件\n\n- 作業はこのRepositoryのstarting commitから始めます。既存のTestを削除・無効化したり、期待値を不当に緩めたりしてはいけません。\n- 評価はExecutable Evaluatorが行います。公開されたcheck（visible checks）に加えて、候補から見えないHidden checkがあります。\n- Credential・秘密情報をcode・log・commitへ入れないでください（SECURITY.md）。\n",
+  "visible_checks": [
+    {
+      "id": "lint",
+      "type": "lint",
+      "command": [
+        "python",
+        "-m",
+        "ruff",
+        "check",
+        "apps/backend"
+      ]
+    }
+  ],
+  "hidden_checks": [
+    {
+      "id": "hidden-acceptance",
+      "type": "acceptance",
+      "reference_id": "seed-v2-29913a60547f"
+    },
+    {
+      "id": "hidden-regression",
+      "type": "regression",
+      "reference_id": "seed-v2-e9a086271d99"
+    }
+  ]
+}

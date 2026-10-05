@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "task_id": "paw-seed-v2-spec-02-retrieval-map-by-scope",
+  "kind": "spec",
+  "repository": {
+    "locator": "paw-dataset://paw-seed-v2/paw-seed-v2-spec-02-retrieval-map-by-scope",
+    "starting_commit": "3df6f807a92497ba24366d47259b16e18e8136be"
+  },
+  "issue_text": "# Retrieval benchmarkにMAP@K・Hit rate@K・Scopeごとの集計・Recallの下限を足す\n\nRetrieval benchmark（`benchmarks.retrieval_metrics` / `benchmarks.retrieval_runner` / `python -m benchmarks.run_retrieval_benchmark`）で、\n順位の付け方の差をもう少し細かく比べられるように、指標と集計を足してください。既存の指標・fieldの値と意味は変えません。\n\n## 仕様\n\n### `benchmarks/retrieval_metrics.py`\n\n- `average_precision_at_k(ranked_ids, relevant_ids, k) -> float`: 上位`k`件のうちrelevantなidがある順位`i`ごとのprecision@i（その順位までのrelevantな件数 / `i`）の和を、`min(len(relevant_ids), k)`で割った値。relevantなidが1つもなければ0.0。\n- `first_relevant_rank(ranked_ids, relevant_ids) -> int | None`: 最初のrelevantなidの順位（1始まり）。なければ`None`。\n- 入力の検査は既存の関数と同じです（`average_precision_at_k`は`ndcg_at_k`と同じ、`first_relevant_rank`は`reciprocal_rank`と同じ: idが文字列でなければ`TypeError`、`ranked_ids`の重複・空の`relevant_ids`は`ValueError`、`k`が`bool`や整数でなければ`TypeError`、1未満は`ValueError`）。\n\n### `benchmarks/retrieval_runner.py`\n\n- queryごとの記録（`RetrievalReport.queries`の各要素）に`\"average_precision_at_k\"`と`\"first_relevant_rank\"`を足します。値は、既存の指標と同じく、重複を除いた上位`k`件（`ranked`）で計算します。Retrieverが例外を出したqueryでは`0.0`と`None`です。\n- `RetrievalReport.metrics`に次を足します。\n  - `\"map_at_k\"`: queryごとの`average_precision_at_k`の平均\n  - `\"hit_rate_at_k\"`: `first_relevant_rank`が`None`でないqueryの割合（失敗したqueryは「なし」として数える）\n- `RetrievalReport`に`by_scope: dict[str, dict] | None = None`を足します（既存の引数の順と既定値は変えない）。`run_benchmark`は常にこれを埋めます:\n  - keyはqueryの`scope`（`allowed_scopes`ではなくquery自身の`scope`）で、keyの昇順のdict。\n  - 値は`{\"queries\": そのscopeのquery数, \"recall_at_k\": 平均, \"map_at_k\": average_precision_at_kの平均, \"ndcg_at_k\": 平均, \"failed_queries\": 失敗したquery数}`。\n- `RetrievalReport.to_dict()`は、`by_scope`が`None`でなければ`\"by_scope\"`を含めます（`None`なら含めない）。戻り値を変更しても`RetrievalReport`に波及しないこと（`metrics`・`queries`と同じ扱い）。\n\n### `python -m benchmarks.run_retrieval_benchmark`\n\n- `--min-recall VALUE`を足します（0以上1以下の数。範囲外や数でない値はargparseのusage error、終了code 2）。\n- 指定したとき、Reportを通常どおり出力（stdoutまたは`--output`）したあとで、`metrics.recall_at_k`が`VALUE`より**小さい**ときだけ、stderrへ`recall_at_k is below --min-recall`を出して終了code 3にします。等しいときは0です。Reportの出力に失敗したときは、これまでどおり終了code 2です。\n- 指定しないときの動作は変わりません。\n\n`benchmarks/README.md`のRetrieval benchmarkの説明も更新してください。\n\n## 作業の条件\n\n- 作業はこのRepositoryのstarting commitから始めます。既存のTestを削除・無効化したり、期待値を不当に緩めたりしてはいけません。\n- 評価はExecutable Evaluatorが行います。公開されたcheck（visible checks）に加えて、候補から見えないHidden checkがあります。\n- Credential・秘密情報をcode・log・commitへ入れないでください（SECURITY.md）。\n",
+  "visible_checks": [
+    {
+      "id": "lint",
+      "type": "lint",
+      "command": [
+        "python",
+        "-m",
+        "ruff",
+        "check",
+        "benchmarks"
+      ]
+    }
+  ],
+  "hidden_checks": [
+    {
+      "id": "hidden-acceptance",
+      "type": "acceptance",
+      "reference_id": "seed-v2-6ac8b4aa88bf"
+    },
+    {
+      "id": "hidden-regression",
+      "type": "regression",
+      "reference_id": "seed-v2-22b92d1af689"
+    }
+  ]
+}

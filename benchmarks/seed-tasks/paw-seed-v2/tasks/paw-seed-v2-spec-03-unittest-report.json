@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "task_id": "paw-seed-v2-spec-03-unittest-report",
+  "kind": "spec",
+  "repository": {
+    "locator": "paw-dataset://paw-seed-v2/paw-seed-v2-spec-03-unittest-report",
+    "starting_commit": "3df6f807a92497ba24366d47259b16e18e8136be"
+  },
+  "issue_text": "# Hidden checkのunittestの出力から部分点（通ったtestの割合）を出す\n\nHidden checkは`passed` / `failed`しか返さないため、ほとんど解けている候補と、まったく解けていない候補を区別できません。\n`python -m unittest`のtext出力から、実行数・失敗の内訳・失敗したtestのidを読み取り、部分点を計算するmoduleとCLIを追加してください。\n\n## 仕様\n\n新しいmodule `benchmarks/unittest_report.py`:\n\n- `UnittestSummary`: frozenなdataclass。fieldは順に`ran: int`、`failures: int`、`errors: int`、`skipped: int`、`expected_failures: int`、`unexpected_successes: int`、`outcome: str`、`failing_tests: tuple[str, ...]`。\n- `parse_unittest_output(text: str) -> UnittestSummary`（1回の`python -m unittest`の出力全体。CPython 3.11以降の形式）:\n  - `ran`: 行全体が`Ran <N> test in <時間>`または`Ran <N> tests in <時間>`の行のうち、**最後**の行の`N`。そのような行がなければ、`ran`と各countは0、`outcome`は`\"unknown\"`。\n  - `outcome`と各count: 最後の`Ran`行より後で、最初の空白でない行を見ます。その行が`OK`または`FAILED`で始まり、その後に何もないか` (<item>, <item>, ...)`だけが続くなら、`OK`→`\"ok\"`、`FAILED`→`\"failed\"`。それ以外の行（または行がない）なら`\"unknown\"`で各countは0。\n    itemは`<名前>=<整数>`で、名前`failures`・`errors`・`skipped`・`expected failures`・`unexpected successes`をそれぞれ`failures`・`errors`・`skipped`・`expected_failures`・`unexpected_successes`に入れます。書かれていないものは0、知らない名前は無視します。\n  - `failing_tests`: 行頭が`FAIL: <name> (<location>)`または`ERROR: <name> (<location>)`の行（出力のどこにあってもよい。`(<location>)`の後にsubTestの` (i=1)`などが続いてもよい）から作るtest id。`<location>`が`.<name>`で終わればidは`<location>`、そうでなければ`<location>.<name>`（例: `ERROR: setUpClass (pkg.mod.Case)`→`pkg.mod.Case.setUpClass`）。重複を除いて昇順のtuple。`UNEXPECTED SUCCESS:`の行は含めません。`outcome`が`\"unknown\"`でも集めます。\n- `partial_credit(summary: UnittestSummary) -> float | None`: `outcome`が`\"unknown\"`なら`None`。`counted = ran - skipped`が0以下なら`None`。それ以外は`max(0, counted - len(failing_tests)) / counted`。\n- CLI `python -m benchmarks.unittest_report [FILE]`:\n  - FILEを省略するか`-`ならstdinを、そうでなければFILEをbytesで読みUTF-8（不正なbyteは置き換え）でdecodeして集計します。\n  - stdoutへ、`UnittestSummary`の全fieldに`\"partial_credit\"`を足したobjectをJSON（`indent=2`、`sort_keys=True`。`failing_tests`はlist）で出します。\n  - 終了code: `outcome`が`\"ok\"`なら0、`\"failed\"`なら1、`\"unknown\"`なら3。FILEを読めなければ、stdoutに何も出さず、stderrへ`<FILE>: cannot read`を出して2。\n- `benchmarks/README.md`に説明を足してください。\n\n## 例\n\n```\nERROR: test_err (pkg.test_demo.A.test_err)\n...\nFAIL: test_sub (pkg.test_demo.A.test_sub) (i=1)\n...\nFAIL: test_sub (pkg.test_demo.A.test_sub) (i=2)\n...\nRan 8 tests in 0.001s\n\nFAILED (failures=2, errors=1, skipped=1)\n```\n\nは`ran=8`、`failures=2`、`errors=1`、`skipped=1`、`outcome=\"failed\"`、`failing_tests=(\"pkg.test_demo.A.test_err\", \"pkg.test_demo.A.test_sub\")`、部分点は`(7 - 2) / 7`です。\n\n## 作業の条件\n\n- 作業はこのRepositoryのstarting commitから始めます。既存のTestを削除・無効化したり、期待値を不当に緩めたりしてはいけません。\n- 評価はExecutable Evaluatorが行います。公開されたcheck（visible checks）に加えて、候補から見えないHidden checkがあります。\n- Credential・秘密情報をcode・log・commitへ入れないでください（SECURITY.md）。\n",
+  "visible_checks": [
+    {
+      "id": "lint",
+      "type": "lint",
+      "command": [
+        "python",
+        "-m",
+        "ruff",
+        "check",
+        "benchmarks"
+      ]
+    }
+  ],
+  "hidden_checks": [
+    {
+      "id": "hidden-acceptance",
+      "type": "acceptance",
+      "reference_id": "seed-v2-8700a5b3e1d9"
+    },
+    {
+      "id": "hidden-regression",
+      "type": "regression",
+      "reference_id": "seed-v2-8e44c7d59c46"
+    }
+  ]
+}

@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "task_id": "paw-seed-v2-spec-13-ranking-policy-mapping",
+  "kind": "spec",
+  "repository": {
+    "locator": "paw-dataset://paw-seed-v2/paw-seed-v2-spec-13-ranking-policy-mapping",
+    "starting_commit": "3df6f807a92497ba24366d47259b16e18e8136be"
+  },
+  "issue_text": "# Retrieval の RankingPolicy を設定の値と相互に変換し、Score の内訳を返せるようにする\n\nHybrid Retrieval（PAW-043、Decision 0019）の Score の数値は暫定値で、`paw_backend/memory/retrieval/ranking.py` の `RankingPolicy` に集めてあります。\nBenchmark（PAW-019）で値を調整するときに、設定（JSON の object）から Policy を作り、Policy を設定の形に書き戻し、1 つの候補の Score がどの係数でできているかを見られるようにします。\n\n## 仕様\n\n### 1. `RankingPolicy.from_mapping(values) -> RankingPolicy`（classmethod）\n\n- `values` は `{field 名: 値}` の `Mapping`。与えない field は既定値のまま。\n- 検査の順:\n  1. `values` が `Mapping` でない（`list`、`None`、`str` など）: `InvalidRetrievalInputError`、`field == \"ranking\"`、`problem == InputProblem.WRONG_TYPE`。\n  2. key を Mapping の順に見て、最初に問題のある key で止める。`str` でない key は `field == \"ranking\"`・`WRONG_TYPE`、`RankingPolicy` の field 名でない key は `field == \"ranking\"`・`INVALID_FORMAT`。Message に key や値を含めない（`InvalidRetrievalInputError` の Message は field と problem だけ）。\n  3. それ以外は、今の constructor と同じ検査（エラーの field と problem も constructor と同じ）。`min_vector_similarity` の `None` は「下限なし」で有効、他の field の `None` は constructor のとおり `REQUIRED`。\n- 引数を変更しない。\n\n### 2. `RankingPolicy.to_mapping() -> dict[str, object]`\n\n- すべての field（13 個）を、dataclass の宣言の順に、検査後の値で返す（`rrf_k` は `int`、数値の field は `float`、`min_vector_similarity` は `None` か `float`）。\n- `RankingPolicy.from_mapping(policy.to_mapping()) == policy`。返す dict を変更しても Policy は変わらない。\n\n### 3. `score_breakdown(relevance_value, candidate, freshness, policy=DEFAULT_RANKING) -> ScoreBreakdown`\n\n`final_score` と同じ引数を取り、Score の内訳を返します。`ScoreBreakdown` は frozen な dataclass で、field は次の順です。\n\n| field | 値 |\n| --- | --- |\n| `relevance` | `relevance_value` |\n| `confirmation` | `policy.confirmation_factor(candidate.confirmation_state)` |\n| `stale` | `freshness` が `Freshness.STALE` なら `policy.stale_factor`、でなければ `1.0` |\n| `importance` | `1 + policy.importance_span * (candidate.importance - 50) / 50` |\n| `pinned` | `candidate.pinned` なら `policy.pinned_factor`、でなければ `1.0` |\n| `scope` | `1 + policy.scope_step * SCOPE_SPECIFICITY[candidate.scope]` |\n| `score` | `relevance * confirmation * stale * importance * pinned * scope`（この順に左から掛ける） |\n\n- `final_score(...)` は常に `score_breakdown(...).score` と**同じ float** を返すこと（今の `final_score` の結果も変えない）。\n- `ScoreBreakdown` と `score_breakdown` を `paw_backend.memory.retrieval` からも import できるようにし（`__all__` にも入れる）、`apps/backend/README.md` の Hybrid Retrieval の節に一言足してください。\n\n## 作業の条件\n\n- 作業はこのRepositoryのstarting commitから始めます。既存のTestを削除・無効化したり、期待値を不当に緩めたりしてはいけません。\n- 評価はExecutable Evaluatorが行います。公開されたcheck（visible checks）に加えて、候補から見えないHidden checkがあります。\n- Credential・秘密情報をcode・log・commitへ入れないでください（SECURITY.md）。\n",
+  "visible_checks": [
+    {
+      "id": "lint",
+      "type": "lint",
+      "command": [
+        "python",
+        "-m",
+        "ruff",
+        "check",
+        "apps/backend"
+      ]
+    }
+  ],
+  "hidden_checks": [
+    {
+      "id": "hidden-acceptance",
+      "type": "acceptance",
+      "reference_id": "seed-v2-1ccbf1a4429d"
+    },
+    {
+      "id": "hidden-regression",
+      "type": "regression",
+      "reference_id": "seed-v2-ee97d5756ea0"
+    }
+  ]
+}

@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "task_id": "paw-seed-v2-bug-06-dag-order-and-blocking",
+  "kind": "injected_bug",
+  "repository": {
+    "locator": "paw-dataset://paw-seed-v2/paw-seed-v2-bug-06-dag-order-and-blocking",
+    "starting_commit": "62f5e14eb33e4c540f0c564bf74a1e747c68f63a"
+  },
+  "issue_text": "# DAG の Node の順序が提案の順にならず、失敗が間接の依存先に伝わらない\n\nDAG Agent Orchestrator（PAW-034、`apps/backend/paw_backend/orchestrator`）で、2 つの不具合が報告されています。どちらも README と Decision 0021 の説明と違います。\n\n## 1. 受理した Plan の Node の順序（ordinal）が、Planner の提案の順にならない\n\nREADME（Plan の節）と `plan.py` の説明では、受理した Plan の Node は決定的な位相順で、**同時に次に進める Node の中では、提案で先に来た Node が先**です。\nところが、依存のない 3 つの Node を `setup`、`build`、`alpha` の順に提案すると、受理後の順序が `alpha`、`build`、`setup` になります（key の名前順）。\n並列数 1 の Task では、提案の先頭の `setup` ではなく `alpha` から始まってしまいます。依存のある Plan でも、同時に Ready になる Node の順序が名前順になっています\n（例: `x`（`a` に依存）、`y`、`a` の順の提案は `y`、`a`、`x` になるはずが、`a`、`x`、`y` になる）。依存先が依存元より前に来ることは守られています。\n\n## 2. Node の失敗が、間接に依存する Node を blocked にしない\n\n`A → B → C`（C は B に、B は A に依存）の DAG で A が失敗すると、状態を決め直した結果で B は `blocked` になるのに、C は `pending` のままです。\n要件（「Dependency / failure isolation」）と `scheduling.py` の説明では、失敗は 1 回の決め直しで直接・間接のすべての依存先に伝わり、それらは `blocked` になります。\n逆に、Task の Retry で失敗した A が Ready に戻ったとき、B は `pending` に戻るのに C は `blocked` のまま残ります。\n\n原因を調べて、両方を直してください。Plan の受理の規則、Scheduler の他の規則（Ready の判定、`ready_batch`、DAG の判定）は変えないでください。\n\n## 作業の条件\n\n- 作業はこのRepositoryのstarting commitから始めます。既存のTestを削除・無効化したり、期待値を不当に緩めたりしてはいけません。\n- 評価はExecutable Evaluatorが行います。公開されたcheck（visible checks）に加えて、候補から見えないHidden checkがあります。\n- Credential・秘密情報をcode・log・commitへ入れないでください（SECURITY.md）。\n",
+  "visible_checks": [
+    {
+      "id": "lint",
+      "type": "lint",
+      "command": [
+        "python",
+        "-m",
+        "ruff",
+        "check",
+        "apps/backend"
+      ]
+    }
+  ],
+  "hidden_checks": [
+    {
+      "id": "hidden-acceptance",
+      "type": "acceptance",
+      "reference_id": "seed-v2-8f81233e6bbd"
+    },
+    {
+      "id": "hidden-regression",
+      "type": "regression",
+      "reference_id": "seed-v2-c146cd78a4f7"
+    }
+  ]
+}

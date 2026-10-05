@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "task_id": "paw-seed-v2-spec-10-notification-groups",
+  "kind": "spec",
+  "repository": {
+    "locator": "paw-dataset://paw-seed-v2/paw-seed-v2-spec-10-notification-groups",
+    "starting_commit": "3df6f807a92497ba24366d47259b16e18e8136be"
+  },
+  "issue_text": "# 通知を集約キーごとに 1 件にまとめる（Notification Center の集約）\n\n`docs/NOTIFICATION_POLICY.md` の「4. Noise Reduction」は、同種の通知を 1 件に集約して見せます（例: 「Memory Backup が 5 回連続で失敗しています / 最新失敗: 13:00」）。保存された通知（`paw_backend.notifications`、Decision 0070）は、集約の `key` を持っています。1 人の User が見る通知（`StoredNotification` の列）を、`key` ごとの 1 件にまとめる純粋な関数を Backend に追加してください（Database・時計は使いません）。\n\n## 仕様\n\n### `Severity.rank`（`paw_backend/notifications/domain.py`）\n\n`Severity` に property `rank` を追加: `info` は 0、`warning` は 1、`error` は 2、`critical` は 3。\n\n### 新しい module `paw_backend/notifications/grouping.py`\n\n`NotificationGroup`: frozen な dataclass。field は次のとおり。\n\n| field | 値 |\n| --- | --- |\n| `key` | 集約キー |\n| `kind`・`category`・`project_id` | グループの中で最も新しい通知のもの |\n| `params` | 最も新しい通知の `params` の、変更できない Mapping（`types.MappingProxyType`） |\n| `severity` | グループの中で最も高い severity（`rank` で比べる） |\n| `count` | グループの通知の数 |\n| `unread` | そのうち未読（`read` が False）の数 |\n| `first_at` / `latest_at` | 最も古い / 最も新しい通知の `created_at` |\n| `ids` | 通知の `id` の tuple（新しい順） |\n\n「新しい順」は `(created_at, str(id))` の降順です（同じ時刻なら `id` の文字列が大きい方が新しい）。\n\n`NotificationGroup.as_dict()` は JSON にできる dict を返します: key は上の field 名と同じで、`category`・`severity` は文字列の値、`project_id` は文字列（`None` はそのまま）、`params` は普通の `dict`（tuple の値は list にする）、`first_at`・`latest_at` は `isoformat()`、`ids` は文字列の list。\n\n`group_notifications(items, *, min_severity=Severity.INFO, category=None, unread_only=False) -> tuple[NotificationGroup, ...]`:\n\n- `items` は `StoredNotification` の iterable（list に限らない）。それ以外の要素は `TypeError`。同じ `id` が 2 回現れたら `ValueError`。\n- `min_severity` と `category` は enum の値でも文字列でもよい（`\"warning\"` など）。知らない値は `ValueError`。`unread_only` が `bool` でなければ `TypeError`。\n- まとめる **前に**、`min_severity` より低い通知と、`category` が指定されたときはそれ以外の category の通知を除く（`count`・`unread`・`kind` などは残った通知だけで決まる）。\n- `key` ごとに 1 つの `NotificationGroup`。`unread_only=True` のときは、未読が 1 件もないグループを除く。\n- 並び順: 未読のあるグループが先、次に `severity` の高い順、次に `latest_at` の新しい順、最後に `key` の昇順。\n- 入力を変更しない。空の入力は `()`。\n\n### 公開\n\n`paw_backend.notifications` から `NotificationGroup` と `group_notifications` を import できるようにし、package の docstring に `grouping.py` の説明を足してください。\n\n## 作業の条件\n\n- 作業はこのRepositoryのstarting commitから始めます。既存のTestを削除・無効化したり、期待値を不当に緩めたりしてはいけません。\n- 評価はExecutable Evaluatorが行います。公開されたcheck（visible checks）に加えて、候補から見えないHidden checkがあります。\n- Credential・秘密情報をcode・log・commitへ入れないでください（SECURITY.md）。\n",
+  "visible_checks": [
+    {
+      "id": "lint",
+      "type": "lint",
+      "command": [
+        "python",
+        "-m",
+        "ruff",
+        "check",
+        "apps/backend"
+      ]
+    }
+  ],
+  "hidden_checks": [
+    {
+      "id": "hidden-acceptance",
+      "type": "acceptance",
+      "reference_id": "seed-v2-ce326dd1f040"
+    },
+    {
+      "id": "hidden-regression",
+      "type": "regression",
+      "reference_id": "seed-v2-512375b0f82c"
+    }
+  ]
+}

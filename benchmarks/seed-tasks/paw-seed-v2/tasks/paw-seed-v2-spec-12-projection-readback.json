@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "task_id": "paw-seed-v2-spec-12-projection-readback",
+  "kind": "spec",
+  "repository": {
+    "locator": "paw-dataset://paw-seed-v2/paw-seed-v2-spec-12-projection-readback",
+    "starting_commit": "3df6f807a92497ba24366d47259b16e18e8136be"
+  },
+  "issue_text": "# Memory Markdown Projection の File を読み戻す parser と、Directory の検査を足す\n\nMemory Markdown Projection（PAW-045、Decision 0038）は、`paw_backend/memory/projection/render.py` の Renderer が Memory ごとの `<memory-id>.md` と Directory ごとの `INDEX.md` を書きます。\nRecovery Repository から戻した Projection を確かめられるように、Renderer が書いた File を読み戻す parser と、1 つの Directory の検査を追加してください。\n\n## 仕様\n\n新しい module `paw_backend/memory/projection/parse.py` を作り、次の 4 つを `paw_backend.memory.projection` からも import できるようにします（package の `__init__.py` と `__all__`）。`apps/backend/README.md` の「Memory Markdown Projection」に短い説明を足してください。\n\n### `ProjectionParseError`\n\n`ValueError` の subclass。Message は固定の文で、File の中身（Title・本文・値）を含めません。\n\n### `ParsedMemoryFile`\n\nfrozen な dataclass で、field は次の 3 つ。\n\n- `fields: dict[str, object]`: Front Matter の各行を、File に現れた順に `key → JSON として読んだ値`（`render.py` の `_json` が書いた `\\uXXXX` も `json` が読み戻す）。\n- `heading: str`: `# ` の後の見出しの文字列（行末の改行を含まない）。\n- `body: str`: 見出しの後の空行の次から File の末尾までで、**最後の改行 1 つを除いたもの**。本文が空の Memory では `\"\"`。\n\n### `parse_memory_file(data: bytes) -> ParsedMemoryFile`\n\n`render_memory_file` が書く形（`---` の行、`key: <JSON>` の行が 1 行以上、`---` の行、`GENERATED_NOTICE` の行、空行、`# <見出し>` の行、空行、本文）だけを受け付けます。次のどれかなら `ProjectionParseError` です。\n\n1. `bytes` でない、UTF-8 として読めない、`\\r` を含む\n2. 先頭が `---\\n` でない、Front Matter を閉じる `---` の行がない、Front Matter の行が 1 つもない\n3. Front Matter の行が `<key>: <value>`（key は `[a-z_]+`、区切りは `\": \"`）の形でない、value が JSON として読めない（`NaN`・`Infinity` などの非標準の定数も拒否）、同じ key が 2 回ある\n4. 必ずある key（`projection_format`、`memory_id`、`version`、`scope`、`title`、`memory_type`、`status`、`confirmation_state`、`importance`、`pinned`、`freshness_policy`、`version_created_at`）のどれかがない。`verified_at` などの省略できる key はなくてよい\n5. `projection_format` が `int` の `FORMAT_VERSION`（`render.FORMAT_VERSION`）でない（`true` や `1.0`、`2` は拒否）\n6. Front Matter の直後が「`GENERATED_NOTICE` の行、空行、`# ` で始まる空でない見出しの行、空行」でない\n7. File が改行で終わっていない\n\n### `check_directory(key: DirectoryKey, files: Mapping[str, bytes]) -> list[str]`\n\n1 つの Directory（`key` は `directory_for` と同じ `(\"shared\",)` や `(\"users\", \"<uuid>\")`）の File（名前 → 中身）を確かめ、見つかった問題を **sort した list**（同じ文は 1 回）で返します。問題がなければ `[]`。文の形は次のとおりで、`<name>` は File の名前です。\n\n- `INDEX.md` 以外で、Renderer が作れる名前（`render.is_memory_file_name`）でない File: `<name>: unexpected file`\n- Memory の File を `parse_memory_file` で読めない: `<name>: unreadable`（その File の他の検査はしない）\n- Front Matter の `memory_id` が File の名前（`.md` を除いたもの）と違う: `<name>: memory_id does not match the file name`\n- Front Matter の `scope` と、その scope の id の key（`user` → `owner_user_id`、`project` → `project_id`、`project_group` → `project_group_id`、`repo` → `repo_id`。`shared` は id なし）から決まる Directory が `key` と違う（決まらない場合も含む）: `<name>: belongs to another directory`\n- `INDEX.md` がない: `INDEX.md: missing`（このとき `INDEX.md` に関する他の検査はしない）\n- `INDEX.md` が UTF-8 として読めない: `INDEX.md: unreadable`（同上）\n- `INDEX.md` の 1 行目が `# Memory index: <key を / でつないだもの>` でない: `INDEX.md: belongs to another directory`\n- `INDEX.md` の表の行（`| ` で始まる行のうち、見出しの行 `| Status ...` と区切りの行 `| --- ...` を除いたもの）の最後の列が `[<file>](<file>)`（2 つの名前が同じ）でない: `INDEX.md: unreadable row`\n- 表の行が指す File が `files` の Memory の File にない: `<file>: listed in INDEX.md but missing`\n- 同じ File を指す行が 2 つ以上: `<file>: listed in INDEX.md more than once`\n- Memory の File（名前が Renderer の形のもの。読めない File も含む）が表のどの行にもない: `<name>: not in INDEX.md`\n\n`render_projection` が作った Directory は、どれも `check_directory` で `[]` になります。引数は変更しません。\n\n## 作業の条件\n\n- 作業はこのRepositoryのstarting commitから始めます。既存のTestを削除・無効化したり、期待値を不当に緩めたりしてはいけません。\n- 評価はExecutable Evaluatorが行います。公開されたcheck（visible checks）に加えて、候補から見えないHidden checkがあります。\n- Credential・秘密情報をcode・log・commitへ入れないでください（SECURITY.md）。\n",
+  "visible_checks": [
+    {
+      "id": "lint",
+      "type": "lint",
+      "command": [
+        "python",
+        "-m",
+        "ruff",
+        "check",
+        "apps/backend"
+      ]
+    }
+  ],
+  "hidden_checks": [
+    {
+      "id": "hidden-acceptance",
+      "type": "acceptance",
+      "reference_id": "seed-v2-a750ebe34b4a"
+    },
+    {
+      "id": "hidden-regression",
+      "type": "regression",
+      "reference_id": "seed-v2-0546f645e43a"
+    }
+  ]
+}

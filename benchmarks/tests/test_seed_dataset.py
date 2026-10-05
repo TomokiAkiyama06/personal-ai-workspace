@@ -22,6 +22,7 @@ from benchmarks.seed_dataset import (
     dataset_summary,
     hidden_command,
     load_manifest,
+    manifest_path,
     snapshot_commit,
 )
 
@@ -92,6 +93,46 @@ class PublicDatasetTest(unittest.TestCase):
                 self.assertNotIn("golden.patch", text)
                 document = json.loads(text)
                 self.assertNotIn("known_good_commit", document["repository"])
+
+
+class PublicDatasetV2Test(unittest.TestCase):
+    """paw-seed-v2 (Issue #198, Decision 0074): v1 listed unchanged plus new tasks."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.path = manifest_path("paw-seed-v2")
+        cls.manifest, cls.entries = load_manifest(cls.path)
+
+    def test_manifest_and_tasks_are_consistent(self):
+        manifest = json.loads(self.path.read_text(encoding="utf-8"))
+        self.assertEqual(check_manifest(manifest, self.path.parent), [])
+
+    def test_every_v1_task_is_listed_unchanged(self):
+        _, v1 = load_manifest()
+        listed = {e.task_id: e for e in self.entries if e.dataset == "paw-seed-v1"}
+        self.assertEqual(set(listed), {e.task_id for e in v1})
+        for entry in v1:
+            with self.subTest(task=entry.task_id):
+                self.assertEqual(listed[entry.task_id].path, entry.path)
+                self.assertEqual(listed[entry.task_id].document, entry.document)
+
+    def test_new_tasks_are_spec_or_injected_bug_of_medium_or_hard(self):
+        new = [e for e in self.entries if e.dataset == "paw-seed-v2"]
+        self.assertGreaterEqual(len(new), 20)
+        for entry in new:
+            with self.subTest(task=entry.task_id):
+                self.assertIn(entry.kind, ("spec", "injected_bug"))
+                self.assertIn(entry.difficulty, ("medium", "hard"))
+                for check in entry.document["hidden_checks"]:
+                    self.assertRegex(check["reference_id"], r"^seed-v2-[0-9a-f]{12}$")
+
+    def test_public_files_do_not_name_private_material(self):
+        for path in (self.path.parent / "tasks").glob("*.json"):
+            text = path.read_text(encoding="utf-8")
+            with self.subTest(path=path.name):
+                self.assertNotIn("/data/datasets", text)
+                self.assertNotIn("golden.patch", text)
+                self.assertNotIn("known_good_commit", json.loads(text)["repository"])
 
 
 class CheckManifestTest(unittest.TestCase):

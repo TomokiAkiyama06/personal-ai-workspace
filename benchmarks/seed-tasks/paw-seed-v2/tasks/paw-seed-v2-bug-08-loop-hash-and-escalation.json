@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "task_id": "paw-seed-v2-bug-08-loop-hash-and-escalation",
+  "kind": "injected_bug",
+  "repository": {
+    "locator": "paw-dataset://paw-seed-v2/paw-seed-v2-bug-08-loop-hash-and-escalation",
+    "starting_commit": "048817a2a7b5529005a820564ac4a2661273a452"
+  },
+  "issue_text": "# Loop 検知: Commit hash を含む失敗が同じ失敗と数えられず、代替案も失敗したときに Escalate しない\n\nTask の Loop 検知（PAW-033、Decision 0007、`apps/backend/paw_backend/tasks/queueing`）について、運用中の Agent の失敗の記録から 2 つの不具合が報告されています。\n\n## 1. Commit hash だけが違う失敗が、別の失敗として数えられる\n\nAgent が `git rebase` を繰り返し失敗し、失敗の message は毎回\n`could not apply 9fceb02... Add parser`、`could not apply 4e1243b... Add parser` のように Commit hash だけが違います。\nLoop 検知の仕様（README の「Loop 検知」と `normalize_failure_message` の説明）では、Commit hash のような 16 進の token は `<hex>` に置き換えて同じ失敗と数えるはずですが、\nこれらは別の Signature になり、3 回繰り返しても `TRY_ALTERNATIVE` になりません。\nUUID や `0x7FFF` のような `0x` 付きの 16 進数、ただの数字（`Timeout after 30s` の `30`）を含む失敗は、正しく同じ失敗と数えられています。\n\n## 2. 代替の Approach でも同じ失敗を繰り返したとき、`ESCALATE` にならない\n\n既定の Policy（同じ失敗 3 回で Loop、代替の Approach は 1 つ）では、元の Approach（0）で Loop になると `TRY_ALTERNATIVE`、\n代替の Approach（1）でも Loop になると `ESCALATE`（より強い Agent への引き継ぎ）になるはずです（Decision 0007、README）。\nところが Approach 1 で同じ失敗を 3 回繰り返しても、判定は `TRY_ALTERNATIVE` のままで、`decide_next_action` も `ESCALATE_AGENT` を返しません。\n`max_alternatives=0` の Policy でも、最初の Loop で `ESCALATE` にならず `TRY_ALTERNATIVE` になります。\n\n原因を調べて、両方を直してください。Signature の形式（`failure_signature` の Hash の入力）、窓の大きさ・閾値の意味は変えないでください。\n\n## 作業の条件\n\n- 作業はこのRepositoryのstarting commitから始めます。既存のTestを削除・無効化したり、期待値を不当に緩めたりしてはいけません。\n- 評価はExecutable Evaluatorが行います。公開されたcheck（visible checks）に加えて、候補から見えないHidden checkがあります。\n- Credential・秘密情報をcode・log・commitへ入れないでください（SECURITY.md）。\n",
+  "visible_checks": [
+    {
+      "id": "lint",
+      "type": "lint",
+      "command": [
+        "python",
+        "-m",
+        "ruff",
+        "check",
+        "apps/backend"
+      ]
+    }
+  ],
+  "hidden_checks": [
+    {
+      "id": "hidden-acceptance",
+      "type": "acceptance",
+      "reference_id": "seed-v2-a05492102d70"
+    },
+    {
+      "id": "hidden-regression",
+      "type": "regression",
+      "reference_id": "seed-v2-3a20e1327640"
+    }
+  ]
+}

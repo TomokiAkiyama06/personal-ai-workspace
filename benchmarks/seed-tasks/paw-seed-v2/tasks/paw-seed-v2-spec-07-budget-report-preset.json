@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "task_id": "paw-seed-v2-spec-07-budget-report-preset",
+  "kind": "spec",
+  "repository": {
+    "locator": "paw-dataset://paw-seed-v2/paw-seed-v2-spec-07-budget-report-preset",
+    "starting_commit": "3df6f807a92497ba24366d47259b16e18e8136be"
+  },
+  "issue_text": "# Task の Budget の使用状況の Report と、続けるための Preset の提案\n\nTask の Budget（PAW-033、`apps/backend/paw_backend/tasks/queueing`）が超過して `decide_next_action` が `WAIT_FOR_USER` を返したとき、\n人は「どの項目をどれだけ使ったか」と「どの Preset に変えれば続けられるか」を知りたい。\nDB を使わない純粋関数として、使用状況の Report と Preset の提案を追加してください。超過の判定は `BudgetTracker.check` と同じ規則\n（`消費 + planned > 上限` のとき超過、上限 `None` は超過しない。上限ちょうどは超過ではない）で、Preset の上限は `domain.PRESET_LIMITS` です。\n\n## 仕様\n\n### 1. `BudgetUsage.percent`（`paw_backend/tasks/queueing/domain.py`）\n\n`BudgetUsage` に property `percent -> int | None` を追加します。\n\n- 上限が `None` なら `None`。\n- 上限が 0 なら、消費が 0 のとき 0、それ以外は 100。\n- それ以外は `consumed * 100 // limit`（整数演算で切り捨て。100 を超えることがある。`float` を経由しないこと: 大きな値でも正確に）。\n\n### 2. 新しい module `paw_backend/tasks/queueing/report.py`\n\n- `presets_sufficient_for(consumed, *, planned=None) -> tuple[BudgetPreset, ...]`:\n  `consumed`（`BudgetKind` → 消費量の Mapping。無い種類は 0）に `planned`（同じ形。`None` は何もなし）を足して、\n  どの種類も超過しない Preset を、`BudgetPreset` の宣言順（STANDARD, LONG, UNLIMITED）で返します。\n- `smallest_sufficient_preset(consumed, *, planned=None) -> BudgetPreset`: 上の結果の先頭（UNLIMITED は常に含まれる）。\n- 検証（どちらの関数も同じ。`InvalidQueueingArgumentError` の `parameter` で区別）:\n  - `consumed` が Mapping でない、key が `BudgetKind` の member でない（文字列の `\"steps\"` も不可）、値が 0 以上 10^15 以下の `int` でない（`bool`・`float` を含む）: `\"consumed\"`。\n  - `planned` が Mapping でない、key が `BudgetKind` の member でない: `\"planned\"`。値が `validation.check_amount` に通らない: `\"amount\"`。\n  - 引数を変更しない。\n- `budget_report(verdict: BudgetVerdict) -> dict`: JSON にできる dict を返します。key はちょうど次の 4 つ:\n  - `\"status\"`: `verdict.status` の値（`\"ok\"` / `\"exceeded\"`）\n  - `\"exceeded\"`: 超過した種類の値の list（`verdict.exceeded` の順）\n  - `\"items\"`: `verdict.usage` の順（`BudgetKind` の宣言順）に、`{\"kind\": 値, \"consumed\": int, \"limit\": int | None, \"remaining\": BudgetUsage.remaining, \"percent\": BudgetUsage.percent, \"exceeded\": bool}`\n  - `\"smallest_sufficient_preset\"`: `verdict.usage` の消費（`planned` なし）に対する `smallest_sufficient_preset` の値（`\"standard\"` など）\n  - `verdict` が `BudgetVerdict` でなければ `InvalidQueueingArgumentError(\"verdict\")`。\n\n### 3. `suggest_preset(decision, budget) -> BudgetPreset | None`（`paw_backend/tasks/queueing/escalation.py`）\n\n- `decision` の `action` が `WAIT_FOR_USER` で、かつ `reason` が `BUDGET_EXCEEDED` のときだけ、`budget`（`BudgetVerdict`）の `usage` の消費に対する `smallest_sufficient_preset` を返します。\n- それ以外（`FAIL`（Retry の超過）、Loop による `WAIT_FOR_USER`、`CONTINUE` など）は `None`。\n- `decision` が `Decision` でなければ `InvalidQueueingArgumentError(\"decision\")`、`budget` が `BudgetVerdict` でなければ `InvalidQueueingArgumentError(\"budget\")`。\n- `decide_next_action` と `Decision` の振る舞い・field は変えません。\n\n### 4. 公開と文書\n\n`budget_report`・`presets_sufficient_for`・`smallest_sufficient_preset`・`suggest_preset` を `paw_backend.tasks.queueing` からも import できるようにし、`__all__` に加えてください。\n`apps/backend/README.md` の Budget の節に説明を足してください。\n\n## 例\n\nStandard の Task が `steps` を 60、`tokens` を 250,000 使った Verdict の Report では、`steps` の項目は\n`{\"kind\": \"steps\", \"consumed\": 60, \"limit\": 50, \"remaining\": 0, \"percent\": 120, \"exceeded\": true}`、\n`\"smallest_sufficient_preset\"` は `\"long\"` です。\n\n## 作業の条件\n\n- 作業はこのRepositoryのstarting commitから始めます。既存のTestを削除・無効化したり、期待値を不当に緩めたりしてはいけません。\n- 評価はExecutable Evaluatorが行います。公開されたcheck（visible checks）に加えて、候補から見えないHidden checkがあります。\n- Credential・秘密情報をcode・log・commitへ入れないでください（SECURITY.md）。\n",
+  "visible_checks": [
+    {
+      "id": "lint",
+      "type": "lint",
+      "command": [
+        "python",
+        "-m",
+        "ruff",
+        "check",
+        "apps/backend"
+      ]
+    }
+  ],
+  "hidden_checks": [
+    {
+      "id": "hidden-acceptance",
+      "type": "acceptance",
+      "reference_id": "seed-v2-42c08a7555c3"
+    },
+    {
+      "id": "hidden-regression",
+      "type": "regression",
+      "reference_id": "seed-v2-b1f66aba2563"
+    }
+  ]
+}
