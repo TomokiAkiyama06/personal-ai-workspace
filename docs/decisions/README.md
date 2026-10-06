@@ -76,6 +76,7 @@
 | [0070](0070-stored-notifications-and-event-stream.md) | 保存される通知（Code と数値だけ、宛先は 1 人の User か読む時点の Role の Capability、User ごとの既読・非表示）と `/api/v1/notifications`、Capability `notification.read` / `notification.manage`、Event の Stream の Session 必須と内容のない `notification.changed`・Session の定期的な再確認、System Health の Severity の変化を Owner / Admin へ通知、90 日で削除、Migration 0188（Issue #188） | Approved |
 | [0071](0071-agent-oom-and-escalation-records.md) | Agent の OOM は Runtime が `AgentOutOfMemory`（Runtime が名乗れる閉じた Error Class に追加。`MemoryError` も OOM）で報告し、OOM と Escalation を `agent_incidents` に 1 件 1 行で残して System Health の `task_queue` で数える（OOM 1 件 `WARNING`・3 件 `ERROR`、Escalation は `WARNING`。Issue #183、Decision 0059 の後続） | Approved |
 | [0072](0072-runtime-jit-host-memory-guard.md) | Model の Runtime の起動で JIT ビルドの並列数を `MAX_JOBS=4` / `FLASHINFER_NVCC_THREADS=1` に絞り、GPU の Runtime の起動前にホストの `MemAvailable` が 40 GiB 以上あることを確かめ（足りない・読めないときは起動せず警告）、Run 中は Unit の `MemoryMax=32G` で抑え、Model の操作の上限の検証の上限を 1,800 秒にする（Decision 0039 の 4 の値。Issue #182） | Approved |
+| [0073](0073-main-coexistence-confirmation.md) | Main Coding Model の共存の確認 Run の結果の扱い（同時に動かした 14 / 13 / 14 を採用条件を満たしたと読む案は保留で Decision 0074 で決める、共存時の Main の `gpu-memory-utilization` を 0.51 に下げて Footprint・Headroom・復帰の Margin が GPU に収まるようにする（確認 Run は行ってよいが、その合否と Deployment への反映は Decision 0074 まで保留）、KAT の Load 時の FP8 量子化は使わない。Decision 0040 の確認、Issue #180） | Approved（1 は保留） |
 
 運用は [AGENTS.md](../../AGENTS.md) の「仕様変更」に従います。
 
