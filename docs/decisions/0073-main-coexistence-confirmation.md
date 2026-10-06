@@ -1,9 +1,10 @@
 # Main Coding Model の共存の確認 Run（#180）の結果の扱い（採用条件の読み方、共存時の Footprint、KAT の FP8 版）
 
-- Status: Proposed
+- Status: Approved（2 と 3。1 は保留し、Decision 0074 で決める）
+- Approval: 2026-10-06、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで直接回答して承認（2 と 3 は推奨どおり承認。1 は保留し、Issue #198 の Qwen3.6-27B-FP8 / Qwen3.8-27B-FP8 の比較の結果（Decision 0074）で決める。末尾の「承認時の決定」）
 - Date: 2026-10-02
 - Scope: Issue [#180](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/180)（[Decision 0040](0040-main-coding-model-selection.md) の 1〜3 の確認 Run）。根拠は [PAW-017 の報告](../benchmarks/paw-017-main-coding-2026-09.md) の 6
-- Supersedes: [Decision 0040](0040-main-coding-model-selection.md) のうち、3 の 1 つ目の「Resolved が今回（14/24）より下がらないこと」と、決めてほしいこと 1 の推奨の「3 の確認 Run で Resolved が下がらず」の採用条件の部分だけ（この Decision の 1 の読み方で置き換える）。0040 のほかの点（Peak + Headroom が GPU に収まる条件、Resolved@3 を測ること、2・4〜6）は変えない。[Decision 0037](0037-gpu-compute-scheduler.md)・[Decision 0039](0039-compute-scheduler-calibration.md) は変えない（2 はその規則に従って割り当てを決める）
+- Supersedes: [Decision 0040](0040-main-coding-model-selection.md) のうち、3 の 1 つ目の「Resolved が今回（14/24）より下がらないこと」と、決めてほしいこと 1 の推奨の「3 の確認 Run で Resolved が下がらず」の採用条件の部分だけ（この Decision の 1 の読み方で置き換える。1 は 2026-10-06 に保留となったため、Decision 0074 で決まるまで効力を持たない）。0040 のほかの点（Peak + Headroom が GPU に収まる条件、Resolved@3 を測ること、2・4〜6）は変えない。[Decision 0037](0037-gpu-compute-scheduler.md)・[Decision 0039](0039-compute-scheduler-calibration.md) は変えない（2 はその規則に従って割り当てを決める）
 
 ## 背景
 
@@ -72,3 +73,7 @@ Decision 0040 は Main を Qwen3.6-27B-FP8 にすることを、次の条件つ�
 
 承認されたら `Approval` に記録し、Status を Approved に改める。2 の確認 Run と Deployment の設定（Model の Path、vLLM の引数、Footprint）は別の Issue で行い、DB には書かない。
 方針を変えるときは、この Decision を書き換えず、新しい Decision から `Supersedes` する。
+
+## 承認時の決定（2026-10-06）
+
+Human は、作業 Session で判断が必要な点について推奨つきの説明を受け、直接回答して承認した（2 と 3 は推奨どおり承認。1 は保留し、Issue #198 の Qwen3.6-27B-FP8 / Qwen3.8-27B-FP8 の比較の結果（Decision 0074）で決める）。1 は承認していないため、Main Coding Model の採用はまだ確定しない。上の Supersedes（Decision 0040 の採用条件の読み方の置き換え）も、1 が Decision 0074 で決まるまで効力を持たない。
