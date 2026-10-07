@@ -65,13 +65,14 @@ Orchestrator（PAW-034）は Node の 1 回の試行を `AgentRuntime.run_node(N
   | vLLM が CUDA の OOM を返した（応答の Error の型・本文に `CUDA out of memory` / `OutOfMemoryError`）、Model の Server の Unit が OOM Killer で終わった（`systemctl show` の `Result=oom-kill`。Scheduler / System Health が持つ状態から読む）、CLI の Process が Sandbox の cgroup の `memory.events` の `oom_kill` の増加とともに終わった | `AgentOutOfMemory` | はい |
   | Model の Server に繋がらない・503（起動中・Unload 中） | `ConnectionError` | はい |
   | HTTP / CLI の Timeout（Node の Timeout より先に Adapter の上限に達した） | `TimeoutError` | はい |
-  | Context の上限（Prompt の上限や vLLM の `maximum context length`）、Step の上限、Tool を呼ばない応答の繰り返し | `RuntimeError` | いいえ（同じ方法の再試行は無駄。Loop 検知と Escalation は Orchestrator が決める） |
+  | Context の上限（Prompt の上限や vLLM の `maximum context length`）、Step の上限、Tool を呼ばない応答の繰り返し | `RuntimeError` | はい（下の注。理由ごとに固定の文を付ける） |
   | 応答が JSON でない・Tool 呼び出しの形が壊れている（3 回続いたら） | `ValueError` | はい |
-  | CLI の Provider の Rate limit・Credential の失効 | `ConnectionService` の `FailureCode`（`rate_limited` / `expired`）で記録し、Runtime は `ConnectionError` | Rate limit ははい、失効はいいえ |
+  | CLI の Provider の Rate limit・Credential の失効 | `ConnectionService` の `FailureCode`（`rate_limited` / `expired`）で記録し、Runtime は `ConnectionError` | はい（下の注） |
   | `submit` の引数が `NodeResult` として不正 | `InvalidNodeResultError` | はい |
   | その他 | `AdapterError` | はい |
 
   - Python の `MemoryError` は `AgentOutOfMemory` と同じに数えられる（Decision 0071 の 1）。Adapter は自分の `MemoryError` を握りつぶさない。
+  - **`retryable=False` は使わない（どの行も `True`）。** 今の Orchestrator（`_retry_step`）は `retryable=False` の失敗を Escalation の判定より前に `GIVE_UP` にするので、Local の段の Context の上限で Node が終わり、上の段（Codex / Claude）へ上がれなくなる。代わりに、Context の上限・Step の上限・Tool を呼ばない応答・Credential の失効には理由ごとの **固定の文**（例 `context_exhausted`）を付けて返す。同じ段で同じ理由が続くと、失敗の文の Hash が同じなので Loop 検知（Decision 0007: 直近 10 件で同じ Signature が 3 回）がまず代替（`TRY_ALTERNATIVE`）を、その後 `ESCALATE_AGENT` を選び、次の段へ上がる。**欠点**: 上がるまでに同じ段で最大 6 回ほど試すので、長い Node（Context の上限まで走る）では時間と Token が無駄になる。これを避けるには「この段では再試行しないが Escalation はする」を `NodeOutcome` に表す欄を足し、Orchestrator の `_retry_step` がそれを Escalation の判定に回す必要がある。Runtime の Protocol と Retry の規則（Decision 0021 の 3）の変更なので、この Decision では代替として示し、Local の Runtime の PR（11 の 3）の前に、実際の無駄の大きさを見て別の Decision で決める（推奨は、まず固定の文と Loop 検知で始めること）。
   - `NodeStopped`（Budget の超過・Task の終了）は捕まえずにそのまま上げる（`runtime.py` の規則）。
 - 代替: OOM を System Health の側だけで見て、Adapter は報告しない（どの Node の失敗か分からず、Decision 0071 の記録が付かない）。
 
@@ -80,7 +81,7 @@ Orchestrator（PAW-034）は Node の 1 回の試行を `AgentRuntime.run_node(N
 - **推奨:**
   - Local: vLLM の応答ごとに、`usage.prompt_tokens + usage.completion_tokens` を `NodeBudget.charge(TOKENS, n)` で **その場で** 報告する（Node の終わりにまとめない。途中で止まっても使った分が残り、Budget の超過でその場で止まる）。Prefix Cache の当たりは引かない（Server が処理した量として数える。Codex / Claude の「入力 + 出力」と同じ数え方）。`HybridRuntime` の包みがこれを数えて `local_usage` に入れる（Decision 0077 の 2）。`usage` のない応答は 0。
   - GPU 時間: Adapter は報告しない（`HybridRuntime` が Lease の時間を数える）。
-  - CLI: Token は CLI の機械読みの出力（JSON の `usage`）から `AgentSessionResult` に入れ、`ConnectionService` が使用量の行と Task の Budget の `TOKENS` に計上する。**Runtime は `NodeBudget` に二重に報告しない。** CLI が数を出さないときは `None`（Decision 0016 の 5: 0 として数える）。
+  - CLI: Token は CLI の機械読みの出力（JSON の `usage`）から `AgentSessionResult` に入れ、`ConnectionService` が使用量の行と Task の Budget の `TOKENS` に計上する。**Runtime は `NodeBudget` に二重に報告しない。** Token を機械読みの出力で報告しない CLI・版は **有効にしない**（Fake の CLI ではなく、実装の PR でその版の出力を確かめ Test に固定する）。有効にした版でも 1 回の Run の出力に Token の数がない（異常終了など）ときは、0 とせず、控えめな上限の見積もり（設定 `cli_unknown_usage_tokens`。暫定 200,000 token）を `AgentSessionResult` に入れて計上する（Decision 0016 の 5 の「返さない呼び出しは 0」は 1 回の Prompt の呼び出しの規則で、何十 Step も走る CLI の Run には当てはめない）。
 - 代替: Node の終わりに合計を 1 回だけ報告する（途中で止まった分が失われ、長い Node が Budget を超えて走る）。
 
 ### 6. Credential と Sandbox
@@ -117,6 +118,7 @@ Orchestrator（PAW-034）は Node の 1 回の試行を `AgentRuntime.run_node(N
 ### 10. `NodeResult` の作り方と Commit
 
 - **推奨:** Commit するのは Worker の Node（Runtime）で、Backend の自動 Commit ではない（Decision 0036 の 7 を変えない）。Model の `submit` の引数は `summary`（必須）・`changed_files`（必須。変えた File の一覧）と、任意の `discovered_facts`・`unresolved_questions`・`confidence`。Adapter は `submit` を受けたら、Worktree の `git status`（Broker の Read-only の Git の Tool）と `changed_files` を突き合わせる。一致しない（申告にない変更・未追跡の File がある、申告した File に変更がない、Scope の外や `.git` を指す）ときは `submit` を受け付けず、その差を Model に返して直させる（3 回まで。それでも合わなければ `InvalidNodeResultError` で失敗）。一致したら、**申告した Path だけ** を指定して Broker の Git の Tool（`repo.git.commit`、決まった Commit Message と Author）で Commit し、Commit の SHA を `NodeResult.commit` に入れる。Commit の後に未 Commit の変更が残ることはない（残れば Decision 0036 の 7 のとおり統合の前に `dirty` で止まり、Backend は自動で Commit も破棄もしない）。Model には Benchmark と同じく「Commit しない」と指示する（Model に Git の操作をさせない）。`test_result` は Model の申告を使わない（Evaluator の仕事。AGENTS.md の「Agent 自身の完了を成功判定に使わない」）。
+- **複数の Repository の Worktree を持つ Node**（`NodeAssignment.worktrees` が 2 つ以上）: Worktree は 1 つなら Benchmark と同じく `/workspace` に、2 つ以上なら `/workspace/<Repository の名前>/` に置く。`changed_files` の Path は `/workspace` からの相対なので、2 つ以上のときは Repository の Directory が先頭に付き、同じ相対 Path（両方の `README.md` など）も区別できる。Adapter は Repository ごとに突き合わせて、Repository ごとに 1 つの Commit を作る。`NodeResult.commit`（1 つの値、64 文字）は Repository が 1 つのときだけその SHA を入れ、2 つ以上のときは空にして、Repository ごとの Commit を `artifacts` に固定形式（`commit:<repo_id>:<sha>`）で 1 行ずつ入れる。統合は Node の Branch を読む（Decision 0036）ので、`commit` の値には依存しない。どれかの Repository で Commit に失敗したら Node を失敗にする（Commit 済みの他の Repository はそのまま。再試行で同じ Branch の続きから直す）。
 - Planner は `submit` の引数に Plan の JSON を入れ、`NodeOutcome.succeeded(result, plan=...)` で返す。
 - 代替: (a) Model に Commit させる（Message・Author・`.git` の扱いが Model 任せになる）。(b) `submit` の後に Worktree の変更をすべて Commit する（申告にない生成物・一時 File を含みうる。Decision 0036 の 7 が退けた形なので推奨しない）。
 
@@ -140,13 +142,13 @@ Orchestrator（PAW-034）は Node の 1 回の試行を `AgentRuntime.run_node(N
 1. **3 つの Runtime を新しい `paw_backend/agents/` に置き、Local は `local_runtimes` で `HybridRuntime` に包み、CLI の 2 つは Ladder の段と `HybridRuntime` の `cloud` の両方で使う。どちらの経路でも共通の `CloudGate`（`CloudPolicy` → Placement の記録）を通し、`CloudPolicy` がなければ Cloud に送らない。CLI は必ず `ConnectionService` を通し、そのために Worktree を受け取る `AgentSessionAdapter` と `execute_session` を足す（`AdapterRequest` は変えない）**（1）でよいか。推奨: はい。
 2. **Local の Tool loop は Benchmark の Harness のコードではなく振る舞いを asyncio で移し（Prompt・4 つの Tool・切り詰め・催促・60 Step・16,384 / 120,000 token は同じ）、Tool の実行はすべて Tool Broker に足すファイル・Shell の Tool を通す。外側の時間の上限は Node の Timeout（30 分）**（2）でよいか。推奨: はい。
 3. **Reasoning の履歴は `ReasoningHistoryPolicy` の差し込み口だけを作り、既定は Benchmark と同じ「残す」。方針の選択は #200 の Decision（0076）に委ねる。Reasoning は保存・Log しない**（3）でよいか。推奨: はい。
-4. **失敗の分類は 4 の表のとおり（CUDA OOM・OOM Killer・Sandbox の cgroup の OOM は `AgentOutOfMemory`、Context・Step の上限は `RuntimeError` で再試行しない など）**（4）でよいか。推奨: はい。
-5. **Local は応答ごとに `prompt_tokens + completion_tokens` をその場で `TOKENS` として報告し（Prefix Cache は引かない）、GPU 時間は `HybridRuntime` に任せる。CLI の Token は `ConnectionService` だけが計上し、Runtime は二重に報告しない**（5）でよいか。推奨: はい。
+4. **失敗の分類は 4 の表のとおり（CUDA OOM・OOM Killer・Sandbox の cgroup の OOM は `AgentOutOfMemory`、Context・Step の上限は `RuntimeError`）。`retryable=False` は使わず、理由ごとの固定の文で Loop 検知に上の段への Escalation を選ばせる**（4）でよいか。推奨: はい。
+5. **Local は応答ごとに `prompt_tokens + completion_tokens` をその場で `TOKENS` として報告し（Prefix Cache は引かない）、GPU 時間は `HybridRuntime` に任せる。CLI の Token は `ConnectionService` だけが計上し、Runtime は二重に報告しない。Token を報告しない CLI・版は有効にせず、1 回の Run で数が欠けたら 0 ではなく控えめな見積もり（暫定 200,000）を計上する**（5）でよいか。推奨: はい。
 6. **Shell・ファイルの Tool は、Task の作成者の Linux の Account で起動する Node ごとの Container（Worktree だけを Mount、Network なし、認証情報なし）で動かし、経路は Decision 0029 の SSH の Wrapper を広げる。CLI は組み込みの Tool を最初から止め、PAW の Tool だけを MCP の Bridge で渡して 1 回ずつ Tool Broker を通す（止められない CLI・版は有効にしない）。CLI の Process は Worktree のない別の Container（Provider と Bridge だけに出られる）で動かし、認証情報は呼び出しの間だけその tmpfs に置く（Proxy で付けられるならその形）。Refresh された Token は Secret Store に書き戻す**（6）でよいか。推奨: はい。
 7. **承認が要る呼び出しは待たずに「実行していない」と Model に返し、残った承認は `unresolved_questions` に Tool 名と承認の ID だけで載せる。試行をまたいで承認を待って再開する仕組みは後続の Decision**（7）でよいか。推奨: はい。
 8. **Adapter の上限（HTTP は残り時間と 15 分の小さい方、Tool は 300 秒、CLI は Node の Timeout）と、取り消しで SIGTERM → 5 秒で SIGKILL → Container の停止（`HybridRuntime` の 10 秒の待ちより短く）**（8）でよいか。推奨: はい（数値は暫定）。
 9. **CI は Fake の Server・Fake の CLI・Fake の Sandbox だけで Test し、GPU の Smoke は #180 の Run の後に Human の許可を得てから、CLI の Smoke は利用規約と使用量への影響を Human が確認した後に行う**（9）でよいか。推奨: はい。
-10. **Commit は Worker の Node（Runtime）が行い、Backend の自動 Commit にはしない（Decision 0036 の 7 のまま）。Model は `submit` で `changed_files` を申告し、Adapter は `git status` と突き合わせて一致したときだけ申告した Path を Broker の Git の Tool で Commit する（合わなければ Model に直させ、3 回で失敗）。`test_result` は Model の申告を使わない**（10）でよいか。推奨: はい。
+10. **Commit は Worker の Node（Runtime）が行い、Backend の自動 Commit にはしない（Decision 0036 の 7 のまま）。Model は `submit` で `changed_files` を申告し、Adapter は `git status` と突き合わせて一致したときだけ申告した Path を Broker の Git の Tool で Commit する（合わなければ Model に直させ、3 回で失敗）。複数の Repository の Node は Repository の Directory 付きの Path で申告し、Repository ごとに Commit して SHA を `artifacts` に入れる。`test_result` は Model の申告を使わない**（10）でよいか。推奨: はい。
 11. **11 の 5 段階で PR を分ける（共有部品と #38 の Interpreter → Broker の Tool と Sandbox → Local の Runtime と Server の設定 → CLI の Runtime → GPU の Smoke）**（11）でよいか。推奨: はい。
 12. **本番の `paw-llm-main.service` に `--reasoning-parser qwen3 --enable-auto-tool-choice --tool-call-parser qwen3_coder` を足し、Context の大きさは #200 に委ねる**（12）でよいか。推奨: はい。
 
