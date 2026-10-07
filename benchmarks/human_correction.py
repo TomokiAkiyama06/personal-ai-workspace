@@ -268,14 +268,17 @@ class CorrectionLog:
         descriptor = self._open_locked()
         with os.fdopen(descriptor, "r+", encoding="utf-8") as handle:
             handle.seek(0)
-            lines = handle.read().splitlines()
+            content = handle.read()
+            lines = content.splitlines()
             event = {"v": LOG_VERSION, "event": kind, "session": name}
             event["at"] = _format(self.clock())
             event.update(fields)
             # Replaying the log plus the new line applies exactly the rules a reader
             # applies, so an event the reader would reject is never written.
             sessions = replay([*lines, json.dumps(event)])
-            handle.write(json.dumps(event, ensure_ascii=False) + "\n")
+            # A last line without its newline (an edited log) must stay its own line.
+            separator = "\n" if content and not content.endswith("\n") else ""
+            handle.write(separator + json.dumps(event, ensure_ascii=False) + "\n")
         return sessions[name]
 
     def resolve(self, name: str | None) -> str:

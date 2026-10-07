@@ -249,6 +249,15 @@ class StopwatchTest(unittest.TestCase):
         self.assertIn("event log", err)
         self.assertFalse(self.log.exists())
 
+    def test_append_after_an_unterminated_last_line_keeps_lines_apart(self):
+        self.start()
+        text = self.log.read_text(encoding="utf-8")
+        self.log.write_text(text.rstrip("\n"), encoding="utf-8")
+        self.clock.advance(minutes=3)
+        self.ok("finish")
+        self.assertEqual(len(self.log.read_text(encoding="utf-8").splitlines()), 2)
+        self.assertEqual(self.summary()["outcomes"]["accepted"], 1)
+
     def write_result(self, task=TASK, model=MODEL):
         result = json.loads(FIXTURE.read_text(encoding="utf-8"))
         result["task_id"] = task
