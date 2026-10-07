@@ -26,9 +26,9 @@ Integration Gate が PR を作って Attempt に記録し、Task の完了（ま
 ### 2. 保存する範囲と安全
 
 - ファイルは最大 300（GitHub は最大 3,000 を返す。超えた分は `truncated`）。Path は 300 文字で切る。
-- Patch は先頭の 50 ファイルだけ、1 ファイル 10,000 文字まで（超えたら `patch_truncated`）。GitHub が Patch を返さない Binary や巨大なファイルは Patch なし。
+- Patch は先頭の 50 ファイルだけ、1 ファイル 9,000 文字まで（Redact はその少し先まで読んだうえで行い、切るときは行の切れ目で切る。超えたら `patch_truncated`）。GitHub が Patch を返さない Binary や巨大なファイルは Patch なし。
 - `gh` の出力の上限（64 KiB）に、最悪の名前でも収まるように Page の大きさと `--jq` の切り詰めを決める（読み切れずに失敗しない）。全体で 120 秒の期限。
-- Patch は Credential を Redact し（`tools.credentials.redact_text`）、Tab と改行以外の制御文字を見える Escape にし、その後でも 10,000 文字を超えないように切る。Path も制御文字を Escape する。読んだ内容は Log に出さない。
+- Patch は Credential を Redact し（`tools.credentials.redact_text`）、Tab と改行以外の制御文字を見える Escape にし、その後でも 9,000 文字を超えないように切る。Path も制御文字を Escape する。読んだ内容は Log に出さない。
 - 保存した行は記録と一緒に消える（`ON DELETE CASCADE`）。Application の Role は SELECT・INSERT・UPDATE だけ。
 
 ### 3. 変更ファイル・差分・Review・Audit を見られる人
@@ -80,7 +80,7 @@ Backend の承認は 1 回の呼び出しごと（Decision 0006）なので、**
 ## 決めてほしいこと
 
 1. **変更ファイルと差分は、Gate が PR を届けた直後に GitHub から作成者の `gh api` で 1 回読み、PR の記録に保存し、画面はそれだけを読む**（1）でよいか。推奨: はい。代案 A: 閲覧時に Worktree の `git diff`（Wrapper の許可リストの変更）。代案 B: 閲覧時に GitHub。
-2. **保存の上限（300 ファイル、Patch は先頭 50 ファイル・各 10,000 文字、Credential の Redact）と Best effort（失敗しても Task は止めない）**（2）でよいか。推奨: はい。
+2. **保存の上限（300 ファイル、Patch は先頭 50 ファイル・各 9,000 文字、Credential の Redact）と Best effort（失敗しても Task は止めない）**（2）でよいか。推奨: はい。
 3. **Review の要約は、記録された結果と DAG の Reviewer Node（Agent・Model・状態・終了時刻）だけで、Check の本文は出さない**（4）でよいか。推奨: はい（本文は Reviewer の Check を実装するときに別の Decision）。
 4. **Audit の行は、PR を見られる Member に、その Task とその Tool の承認の行を閉じた形（時刻・Action・allow / deny・理由・Agent / 人 / System）で最大 100 行**（5）でよいか。推奨: はい。代案 A: 作成者と Owner / Admin だけ。代案 B: 出さない。
 5. **Tool の承認の一覧は本人（その Agent が代わりに働く人）だけに、読める Project の待っているものだけ**（6）でよいか。推奨: はい。

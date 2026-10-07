@@ -5,6 +5,7 @@
 // approval (merging to main, changing a credential) needs a Passkey
 // re-authentication and is never allowed here; it can be rejected.
 import { useCallback, useEffect, useRef, useState } from "react";
+import { isApiError } from "../api/client";
 import { useI18n } from "../i18n";
 import { errorMessage } from "../i18n/errors";
 import { Link, useRouter } from "../router";
@@ -78,9 +79,16 @@ function ApprovalsView({ source }: { source: TaskSource }) {
 
   const approvals = load.status === "ready" ? load.data : [];
   // A selected approval the bounded list does not hold (an older one) is read by
-  // its id; one that is gone is "not found" (Codex review of #206).
+  // its id; one that is gone is "not found", and a read that failed otherwise
+  // says so and can be retried (Codex review of #206).
   const listed = !loaded || !selectedId || approvals.some((item) => item.id === selectedId);
-  const [single, setSingle] = useState<{ id: string; approval: ToolApproval | null } | null>(null);
+  const [single, setSingle] = useState<{
+    id: string;
+    approval: ToolApproval | null;
+    error?: unknown;
+  } | null>(null);
+  const [attempt, setAttempt] = useState(0);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `attempt` reads it again
   useEffect(() => {
     if (listed || !selectedId) return;
     let current = true;
@@ -89,18 +97,24 @@ function ApprovalsView({ source }: { source: TaskSource }) {
       .then((approval) => {
         if (current) setSingle({ id: selectedId, approval });
       })
-      .catch(() => {
-        if (current) setSingle({ id: selectedId, approval: null });
+      .catch((error: unknown) => {
+        if (!current) return;
+        setSingle(
+          isApiError(error, "approval_not_found")
+            ? { id: selectedId, approval: null }
+            : { id: selectedId, approval: null, error },
+        );
       });
     return () => {
       current = false;
     };
-  }, [listed, selectedId, source]);
+  }, [listed, selectedId, source, attempt]);
   const selected =
     approvals.find((item) => item.id === selectedId) ??
     (single !== null && single.id === selectedId ? single.approval : null);
-  const missing =
-    loaded && selectedId !== null && !listed && single?.id === selectedId && !single.approval;
+  const read = loaded && selectedId !== null && !listed && single?.id === selectedId;
+  const missing = read && !single.approval && single.error === undefined;
+  const failed = read && single.error !== undefined ? single.error : undefined;
   const close = useCallback(() => navigate(APPROVALS_PATH), [navigate]);
 
   return (
@@ -160,6 +174,20 @@ function ApprovalsView({ source }: { source: TaskSource }) {
           <p className="form-error" role="alert">
             {t("approvals.notFound")}
           </p>
+        )}
+        {failed !== undefined && (
+          <div className="stack">
+            <p className="form-error" role="alert">
+              {errorMessage(t, failed)}
+            </p>
+            <button
+              type="button"
+              className="secondary small-button"
+              onClick={() => setAttempt((count) => count + 1)}
+            >
+              {t("app.retry")}
+            </button>
+          </div>
         )}
       </div>
       {selected && (

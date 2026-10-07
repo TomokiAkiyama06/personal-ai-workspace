@@ -19,7 +19,8 @@ Bounded at every step:
 * at most :data:`MAX_FILES` files are kept (GitHub lists up to 3000); more is
   ``truncated``. A path is cut at :data:`MAX_PATH_CHARS` characters.
 * the patch of the first :data:`MAX_PATCH_FILES` files only, each cut at
-  :data:`MAX_PATCH_CHARS` characters (``patch_truncated``); GitHub gives none for
+  :data:`MAX_PATCH_CHARS` characters on a whole line, after the credentials of a
+  little more than that were redacted (``patch_truncated``); GitHub gives none for
   a binary or a very large file.
 * every ``gh`` answer fits in ``MAX_GH_OUTPUT_BYTES`` whatever the names hold
   (``--jq`` cuts each field before gh prints it, and the page sizes are chosen
@@ -74,7 +75,12 @@ logger = logging.getLogger(__name__)
 MAX_FILES = MAX_PULL_REQUEST_FILES
 MAX_PATH_CHARS = 300
 MAX_PATCH_FILES = 50
-MAX_PATCH_CHARS = 10_000
+MAX_PATCH_CHARS = 9_000
+# Read past the kept part, so that a credential that crosses its end is still
+# whole when it is redacted (Codex review of #206); what is kept then ends on a
+# whole line.
+PATCH_LOOKAHEAD_CHARS = 1_000
+PATCH_READ_CHARS = MAX_PATCH_CHARS + PATCH_LOOKAHEAD_CHARS
 # GitHub's file statuses (REST "List pull requests files").
 STATUSES = (
     "added",
@@ -129,7 +135,7 @@ def patch_jq() -> str:
         "[.[] | {"
         f"filename: (.filename | tostring | .[:{MAX_PATH_CHARS}]), "
         "patch: (if .patch == null then null"
-        f" else (.patch | tostring | .[:{MAX_PATCH_CHARS}]) end), "
+        f" else (.patch | tostring | .[:{PATCH_READ_CHARS}]) end), "
         "patch_chars: (if .patch == null then 0 else (.patch | tostring | length) end)"
         "}]"
     )
@@ -151,7 +157,7 @@ def patch_bytes() -> int:
     return (
         2
         + MAX_PATH_CHARS * _BYTES_PER_CHAR
-        + MAX_PATCH_CHARS * _BYTES_PER_CHAR
+        + PATCH_READ_CHARS * _BYTES_PER_CHAR
         + _NUMBER_BYTES
         + _PATCH_ROW_OVERHEAD
     )
@@ -200,16 +206,21 @@ def _visible(text: str, *, keep: str = "") -> str:
     )
 
 
-def safe_patch(patch: str) -> tuple[str, bool]:
-    """A patch as it may be stored and shown: credentials redacted, control
-    characters other than tab and line feed escaped, and still at most
-    :data:`MAX_PATCH_CHARS` characters (an escape makes one character six); and
-    whether that cut it (Codex review of #206)."""
+def safe_patch(patch: str, *, cut: bool = False) -> tuple[str, bool]:
+    """A patch as it may be stored and shown, and whether it was cut: credentials
+    redacted in all that was read (``cut``: GitHub's patch went on after it),
+    control characters other than tab and line feed escaped, and then at most
+    :data:`MAX_PATCH_CHARS` characters (an escape makes one character six).
+    Redaction runs before the cut, and a cut patch keeps whole lines only: a
+    credential at the end of what was read is never kept in part (Codex review
+    of #206)."""
     redacted, _ = redact_text(patch)
     shown = _visible(redacted, keep="\t\n")
-    if len(shown) <= MAX_PATCH_CHARS:
+    if not cut and len(shown) <= MAX_PATCH_CHARS:
         return shown, False
-    return shown[:MAX_PATCH_CHARS], True
+    kept = shown[:MAX_PATCH_CHARS]
+    line_end = kept.rfind("\n")
+    return (kept[: line_end + 1] if line_end >= 0 else ""), True
 
 
 def _count(value: object) -> int:
@@ -341,12 +352,12 @@ class GitHubChangeReader:
             return changed
         if (
             not isinstance(patch, str)
-            or len(patch) > MAX_PATCH_CHARS
+            or len(patch) > PATCH_READ_CHARS
             or type(length) is not int
             or length < len(patch)
         ):
             raise ChangesNotReadError()
-        shown, cut = safe_patch(patch)
+        shown, cut = safe_patch(patch, cut=length > len(patch))
         return ChangedFile(
             changed.path,
             changed.previous_path,
@@ -354,7 +365,7 @@ class GitHubChangeReader:
             changed.additions,
             changed.deletions,
             patch=shown,
-            patch_truncated=cut or length > len(patch),
+            patch_truncated=cut,
         )
 
     def _github_repository(self, remotes: Sequence[str]) -> GitHubRepo:

@@ -4556,7 +4556,7 @@ PR 画面の「変更されたファイル」「レビューの要点」「監�
 | `POST /api/v1/approvals/{approval_id}/decision` | 承認の Project の `project.task.run`（Audit 必須） | `{"decision": "approve" \| "reject"}` を `ApprovalService` で。本人以外は 404 `approval_not_found`、決定済みは 409 `approval_not_pending`、期限切れは 409 `approval_expired`。`strong_approval` の承認は 403 `strong_approval_unavailable`（Step-up は Fail closed のまま。拒否はできる） |
 
 - PR の 4 つの経路は、`GET /api/v1/pull-requests/{record_id}` と同じく、PR を読める人だけに答えます（Project と Repository の `project.read`。それ以外とない記録は 404 `pull_request_not_found`）。
-- 変更ファイルと差分は、Integration Gate が PR を記録し、Task を完了させた後で `integration/changes.py` の `ChangeRecorder` が（Gate が Task を完了させた後で）GitHub の `pulls/{n}/files` を作成者の `gh api` で読み、`pull_request_changes`（Migration `0190`）に保存したものです。ファイルは最大 300、Patch は先頭 50 ファイル・各 10,000 文字まで、`gh` の出力の上限に最悪の名前でも収まる Page の大きさで読みます。全体で 120 秒、読む前と後に PR の Head が確認した Commit であることを確かめ、失敗しても Task は止めません（Best effort。完了の経路の外）。`IntegrationGate(changes=...)` に渡します（Gate の本番の組み立ては Gate を動かす Issue で行うため、それまで本番では「記録されていません」）。
+- 変更ファイルと差分は、Integration Gate が PR を記録し、Task を完了させた後で `integration/changes.py` の `ChangeRecorder` が（Gate が Task を完了させた後で）GitHub の `pulls/{n}/files` を作成者の `gh api` で読み、`pull_request_changes`（Migration `0190`）に保存したものです。ファイルは最大 300、Patch は先頭 50 ファイル・各 9,000 文字まで（Redact の後で行の切れ目で切る）、`gh` の出力の上限に最悪の名前でも収まる Page の大きさで読みます。全体で 120 秒、読む前と後に PR の Head が確認した Commit であることを確かめ、失敗しても Task は止めません（Best effort。完了の経路の外）。`IntegrationGate(changes=...)` に渡します（Gate の本番の組み立ては Gate を動かす Issue で行うため、それまで本番では「記録されていません」）。
 - Migration `0190` は `pull_request_changes`（Application の Role は SELECT・INSERT・記録の列の UPDATE）と、Index `ix_audit_events_resource (resource_id, occurred_at)`・`ix_tool_approvals_pending_requester`（`pending` の行だけ）を足します。
 - Merge の経路はありません。
 

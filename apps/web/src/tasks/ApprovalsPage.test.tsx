@@ -126,6 +126,26 @@ describe("Approvals page", () => {
     expect(one).toHaveBeenCalledWith(first.id);
   });
 
+  it("retries an exact read that failed instead of calling it gone", async () => {
+    const { source } = fakeTaskSource();
+    const [first, ...rest] = await source.listApprovals();
+    if (!first) throw new Error("no sample");
+    vi.spyOn(source, "listApprovals").mockResolvedValue(rest);
+    const one = vi
+      .spyOn(source, "getApproval")
+      .mockRejectedValueOnce(new ApiError(503, "approvals_unavailable", "x"))
+      .mockResolvedValue(first);
+    renderAt(`/approvals/${first.id}`, source);
+    expect(await screen.findByRole("alert")).toHaveTextContent("いま承認を受け付けられません");
+    expect(screen.queryByText(/この承認は見つかりませんでした/)).not.toBeInTheDocument();
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "再試行" }));
+    expect(
+      await screen.findByRole("dialog", { name: "この操作を許可しますか" }),
+    ).toBeInTheDocument();
+    expect(one).toHaveBeenCalledTimes(2);
+  });
+
   it("says an approval that is gone was not found", async () => {
     const { source } = fakeTaskSource();
     renderAt("/approvals/approval-9", source);

@@ -32,6 +32,7 @@ from paw_backend.integration.changes import (
     MAX_PATCH_CHARS,
     MAX_PATCH_FILES,
     MAX_PATH_CHARS,
+    PATCH_READ_CHARS,
     ChangedFile,
     ChangeRecorder,
     ChangesNotReadError,
@@ -270,7 +271,22 @@ class ReaderTest(unittest.IsolatedAsyncioTestCase):
         self.github.files = [github_file("big.py", patch="+x\n" * MAX_PATCH_CHARS)]
         (changed,) = (await self.read()).files
         self.assertTrue(changed.patch_truncated)
-        self.assertEqual(len(changed.patch), MAX_PATCH_CHARS)
+        self.assertLessEqual(len(changed.patch), MAX_PATCH_CHARS)
+        # Whole lines only.
+        self.assertTrue(changed.patch.endswith("+x\n"))
+
+    async def test_a_credential_across_the_cut_is_redacted(self):
+        # Codex review of #206: the credential must be whole when it is redacted,
+        # and no part of it is kept.
+        secret = "hunter2" + "x" * 20
+        url = f"https://user:{secret}@example.com/repo.git"
+        head = "+" + "a" * (MAX_PATCH_CHARS - 20) + "\n"
+        self.github.files = [
+            github_file("cfg.py", patch=head + f"+URL = '{url}'\n" + "+z\n" * 5_000)
+        ]
+        (changed,) = (await self.read()).files
+        self.assertTrue(changed.patch_truncated)
+        self.assertNotIn("hunter2", changed.patch)
 
     async def test_what_is_kept_is_safe_to_show(self):
         token = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
@@ -328,7 +344,7 @@ class ReaderTest(unittest.IsolatedAsyncioTestCase):
             status="\x01" * 100,
             additions=2_147_483_647,
             deletions=2_147_483_647,
-            patch="\x01" * (MAX_PATCH_CHARS + 50),
+            patch="\x01" * (PATCH_READ_CHARS + 50),
         )
         for jq, count in ((listing_jq(), LIST_PAGE_SIZE), (patch_jq(), 1)):
             projected = subprocess.run(
@@ -346,9 +362,16 @@ class SafePatchTest(unittest.TestCase):
 
     def test_escapes_do_not_grow_it_past_the_limit(self):
         # Codex review of #206: an escape makes one character six.
-        shown, cut = safe_patch("\x01" * MAX_PATCH_CHARS)
+        shown, cut = safe_patch(("\x01" * 100 + "\n") * (MAX_PATCH_CHARS // 100))
         self.assertTrue(cut)
-        self.assertEqual(len(shown), MAX_PATCH_CHARS)
+        self.assertLessEqual(len(shown), MAX_PATCH_CHARS)
+        self.assertTrue(shown.endswith("\n"))
+
+    def test_a_cut_patch_is_redacted_whole_then_cut_on_a_line(self):
+        token = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+        shown, cut = safe_patch("+a\n+b " + token, cut=True)
+        self.assertTrue(cut)
+        self.assertEqual(shown, "+a\n")
 
 
 class Reader:
