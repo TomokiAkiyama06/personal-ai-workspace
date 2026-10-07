@@ -222,6 +222,15 @@ def _apply(session: Session, kind: str, at: datetime, line: int) -> None:
         session.ended, session.end_event = at, kind
 
 
+def _read_text(handle) -> str:
+    """Read the whole log; bytes that are not UTF-8 are a log error, not a crash
+    (Codex P2, PR #202)."""
+    try:
+        return handle.read()
+    except UnicodeDecodeError:
+        raise CorrectionLogError("log is not valid UTF-8") from None
+
+
 class CorrectionLog:
     def __init__(
         self, path: Path, clock: Callable[[], datetime] = lambda: datetime.now(UTC)
@@ -234,7 +243,7 @@ class CorrectionLog:
             return {}
         descriptor = self._open_checked(os.O_RDONLY, fcntl.LOCK_SH)
         with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
-            return replay(handle.read().splitlines())
+            return replay(_read_text(handle).splitlines())
 
     def _open_locked(self) -> int:
         """Open the log for appending, make it private and hold an exclusive lock
@@ -277,7 +286,7 @@ class CorrectionLog:
         descriptor = self._open_locked()
         with os.fdopen(descriptor, "r+", encoding="utf-8") as handle:
             handle.seek(0)
-            content = handle.read()
+            content = _read_text(handle)
             lines = content.splitlines()
             event = {"v": LOG_VERSION, "event": kind, "session": name}
             event["at"] = _format(self.clock())
