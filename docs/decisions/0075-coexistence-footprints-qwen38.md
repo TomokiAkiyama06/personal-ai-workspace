@@ -3,7 +3,7 @@
 - Status: Proposed
 - Date: 2026-10-08
 - Scope: Issue [#180](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/180)（[Decision 0073](0073-main-coexistence-confirmation.md) の 2 の確認 Run の結果）。根拠は [共存の確認 Run（0.51）の報告](../benchmarks/paw-017-coexist-qwen38-2026-10.md)。KV の不足への対策は [#200](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/200) で別に決める
-- Supersedes: なし。[Decision 0037](0037-gpu-compute-scheduler.md)・[Decision 0039](0039-compute-scheduler-calibration.md)・[Decision 0073](0073-main-coexistence-confirmation.md)・[Decision 0074](0074-seed-v2-and-qwen-27b-comparison.md) は変えない（この Decision はそれらの規則で値を決める）
+- Supersedes: [Decision 0073](0073-main-coexistence-confirmation.md) の 2 のうち、「確認 Run は Scheduler の Admission（`kv_safety` と Class の上限）を通した構成で行い、待ちの時間も記録する」の部分だけ（承認されたら、この Decision の 3 で置き換える: Admission を通さず、vLLM の `/metrics` で KV の使用率・待ち・Preemption を記録した 2026-10-07 の Run を 0073 の 2 の確認 Run とし、Admission を通した確認は会話の伸びを予約に反映する変更（#200）の確認で行う）。0073 のほかの点（0.51 にすること、Embedding と Reranker を別々の Runtime にすること、3 回の Run の後に Footprint を与えること、1 と 3）は変えない。[Decision 0037](0037-gpu-compute-scheduler.md)・[Decision 0039](0039-compute-scheduler-calibration.md)・[Decision 0074](0074-seed-v2-and-qwen-27b-comparison.md) は変えない（この Decision はそれらの規則で値を決める。2 の `restore_margin_bytes` は 0037 が「既定は Headroom と同じ」とし、Benchmark 後に見直すとした値で、0037 の方針は変えない）
 
 ## 背景
 
@@ -68,7 +68,7 @@ Decision 0039 の 1（Footprint = 実測のピーク + 2 GiB）で数えると�
 
 1. **4 つの Deployment の Footprint を、Load の途中を含む Process ごとの Peak + 2 GiB（Main 54,152・Memory Worker 15,996・Embedding 4,050・Reranker 14,334 MiB）にする**（1）か。推奨: はい。
 2. **Scheduler の予約の勘定で足りない 477 MiB を、`restore_margin_bytes` を 4 GiB（4,096 MiB）にして解く**（2）か。推奨: はい（Headroom は変えない。代わりの案は Main を 0.50 にする・Reranker を `ALWAYS` にする・Embedding / Reranker を CPU に置く）。
-3. **Scheduler の Admission を通さず vLLM の `/metrics` で待ちを記録したこの Run を、Decision 0073 の 2 の確認 Run として受け入れる**（3）か。推奨: はい（今の Scheduler の Lease の取り方では Admission で待つことはない見込み。Admission を通した確認は、会話の伸びを予約に反映する変更（#200）の確認で行う）。
+3. **Scheduler の Admission を通さず vLLM の `/metrics` で待ちを記録したこの Run を、Decision 0073 の 2 の確認 Run として受け入れる**（3。0073 の 2 の Admission の部分を `Supersedes`）か。推奨: はい（今の Scheduler の Lease の取り方では Admission で待つことはない見込み。Admission を通した確認は、会話の伸びを予約に反映する変更（#200）の確認で行う）。
 
 ## 承認後の扱い
 
