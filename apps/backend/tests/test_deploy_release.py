@@ -81,6 +81,9 @@ class World:
         self.running = False
         self.fail: set[str] = set()
         self.calls: list[str] = []
+        # The stop commands (counted from 1) that fail.
+        self.stops = 0
+        self.failing_stops: set[int] = set()
 
     def release_of(self, argv) -> str:
         python = Path(argv[argv.index("-m") - 1])
@@ -112,6 +115,9 @@ class World:
         )
         self.calls.append(name)
         if name == "svc-stop":
+            self.stops += 1
+            if self.stops in self.failing_stops:
+                return Result(1)
             self.running = False
         elif name == "svc-start":
             if f"start:{current}" in self.fail:
@@ -428,6 +434,18 @@ class UpdateTest(ReleaseToolTestCase):
         self.assertEqual(code, paw_release.EXIT_REFUSED)
         self.assertIn("no_operation_in_progress", out)
 
+    def test_a_rollback_whose_stop_fails_stays_in_maintenance(self):
+        # Codex review #204: the new release may still run (and write).
+        self.installed()
+        self.world.fail.add("health:r2")
+        self.world.failing_stops = {2}  # the update's stop works, the rollback's not
+        code, out = self.run_tool("update", "r2")
+        self.assertEqual(code, paw_release.EXIT_MAINTENANCE, out)
+        self.assertNotIn("r1:deploy-restore-point-restore", self.world.calls)
+        self.assertEqual(self.current(), "r2")
+        self.assertTrue(self.world.maintenance)
+        self.assertEqual(self.world.calls[-1], "notify")
+
     def test_a_drain_timeout_aborts_unless_stop_now(self):
         self.installed()
         self.world.fail.add("deploy-drain")
@@ -532,6 +550,20 @@ class RollbackTest(ReleaseToolTestCase):
         self.assertIn("r2:user-erasure-run", self.world.calls)
         self.assertFalse(self.world.maintenance)
 
+    def test_a_failed_stop_changes_nothing_else(self):
+        # Codex review #204: no restore and no switch while the release may run.
+        self.installed()
+        self.assertEqual(self.run_tool("update", "r2")[0], 0)
+        self.assertEqual(self.run_tool("update", "r3")[0], 0)
+        (point,) = [p.stem for p in self.points.glob("r2-to-r3-*.json")]
+        self.world.failing_stops = {self.world.stops + 1}
+        self.world.calls.clear()
+        code, out = self.run_tool("rollback", "--restore-point", point)
+        self.assertEqual(code, paw_release.EXIT_MAINTENANCE, out)
+        self.assertNotIn("r2:deploy-restore-point-restore", self.world.calls)
+        self.assertEqual((self.current(), self.world.revision), ("r3", "0003"))
+        self.assertEqual(self.world.calls[-1], "notify")
+
     def test_only_to_a_known_good_release(self):
         self.installed()
         code, out = self.run_tool("rollback", "--to", "r3")
@@ -610,6 +642,15 @@ class RepositoryTest(unittest.TestCase):
         self.assertEqual(migrations["0191"].compatibility, "expand")
         release = paw_release.Release("x", versions, "c", head, migrations, "d")
         self.assertEqual(len(release.chain()), len(migrations))
+
+    def test_the_example_stops_the_services_of_the_timers_it_stops(self):
+        # Codex review #204: stopping a timer does not stop its running job.
+        config = paw_release.load_config(TOOL_PATH.parent / "release.example.toml")
+        stopped = {unit for argv in config.commands["stop"] for unit in argv[2:]}
+        for unit in sorted(stopped):
+            if unit.endswith(".timer"):
+                with self.subTest(unit=unit):
+                    self.assertIn(unit.removesuffix(".timer") + ".service", stopped)
 
 
 class PruneTest(ReleaseToolTestCase):

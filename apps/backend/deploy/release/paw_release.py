@@ -1183,7 +1183,10 @@ class _Update(_Operation):
         """After the migration or the switch: back to the known-good release."""
         tool, current = self.tool, self.current
         self.say(f"Rolling back to {current.version} ...")
-        self.step("rollback_stop", tool.configured("stop", release=self.target))
+        # The new release may still run (and write): nothing is restored or
+        # switched unless it stopped.
+        if not self.step("rollback_stop", tool.configured("stop", release=self.target)):
+            return self.maintenance_mode(f"{self.target.version} could not be stopped")
         if self.migrated:
             point = [
                 "--dir",
@@ -1265,7 +1268,8 @@ class _Rollback(_Operation):
                     str(tool.config.drain_timeout_seconds),
                 ),
             )
-        self.step("stop", tool.configured("stop", release=current))
+        if not self.step("stop", tool.configured("stop", release=current)):
+            return self.maintenance_mode(f"{current.version} could not be stopped")
         expected = target.schema_head
         if self.restore_point is not None:
             if not self.step(

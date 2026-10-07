@@ -40,9 +40,13 @@ precheck = [
   ["/usr/bin/systemctl", "is-enabled", "--quiet", "paw-audit-retention.timer"],
   ["/usr/bin/systemctl", "is-enabled", "--quiet", "paw-recovery-backup.timer"],
 ]
-# Every database writer: the backend and the timers that write.
+# Every database writer: the backend, the timers that write and the jobs they
+# may be running right now (stopping a timer does not stop its service;
+# systemctl stop waits until they are inactive). A run cut off this way records
+# its failure and the next run does it again.
 stop = [
   ["/usr/bin/systemctl", "stop", "paw-audit-retention.timer", "paw-recovery-backup.timer", "paw-memory-projection.timer", "paw-user-erasure.timer"],
+  ["/usr/bin/systemctl", "stop", "paw-audit-retention.service", "paw-recovery-backup.service", "paw-memory-projection.service", "paw-user-erasure.service"],
   ["/usr/bin/systemctl", "stop", "paw-backend.service"],
 ]
 start = [

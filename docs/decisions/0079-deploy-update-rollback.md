@@ -47,6 +47,7 @@ Issue #54 のコメント: Decision 0031 の Audit の保存期間の Timer（`p
 - **受付停止**: 保守の間、`deploy_maintenance` に 1 行がある（Migration 0191。Application の Role は SELECT だけ）。行がある間 `TaskQueue.claim_next` は何も渡さないので、**新しい Task は始まらない**。Task の作成と Queue への追加は拒否しない（Queue に残り、保守の後に順番どおりに始まる）。行は DB にあるので、どの Backend の Process にも効き、再起動の後も続き、保守中に取った復旧点を戻した DB でも保守は続く（明示的に終えるまで）。
 - **Drain**: `running` の Task を Full GPU Mode と同じやり方（Decision 0055 の 2）で Hold する。Policy の Actor で `waiting`（Resource）、理由は固定の `Deploy / Update maintenance`。新しい Node は始まらず、走っている Node は終わるまで走る（Node の終わりが Checkpoint。結果・Branch・Worktree は残る）。**Drain の完了** = 有効な Lease の Claim が 0 で、`running` の Task が 0。Drain は Hold を繰り返す（保守の直前に Claim された Task も Hold される）。
 - **再開**: 保守の終わりに、この保守が Hold した Task だけを `unblock` して同じ Priority で Queue に戻し（Full GPU Mode が Hold した Task は触らない。その逆も）、行を消す。途中で落ちても保守は続き（安全）、もう一度終えれば続きをする。
+- **Writer の停止**: 設定の `stop` は Backend と、DB に書く Timer **とその Service**（Timer を止めても実行中の Job は止まらない）を止める。`systemctl stop` は止まるまで待つ。止められた Job は失敗を記録し、次の実行がやり直す。
 - **Drain の待ち**: 既定 900 秒（設定 `drain_timeout_seconds`）。過ぎたら Update を中止し（何も切り替えない）、保守を終えて Task を再開する。
 - **`--stop-now`**（Critical Security Update）: Drain が終わらなくても進む。走っている Node は Backend の停止で切られ、その Queue の Lease が切れ、Task は Hold されたまま保守の後に再開する（Task は Cancel しない）。
 - 代わりに、保守の間は Task の作成を拒否する案（API が 503）がある。要件の「受付停止」により近いが、作った Task が失われないことの方が利用者には分かりやすいと考えた。
@@ -73,7 +74,7 @@ Issue #54 のコメント: Decision 0031 の Audit の保存期間の Timer（`p
 - Release は Update の Health check を通ると **known-good** になる（最初の Release は `install` で）。Rollback の戻り先は known-good だけ（既定は現在のものの直前の known-good）。
 - **Update の中の自動の Rollback**: Migration・起動・Health check のどれかが失敗したら、新しい Release を止め、Migration をしていれば復旧点を戻し、`current` を元に戻し、`post_restore` を実行し、起動して Health check（Schema の Revision の一致と設定の Health の Command。既定 300 秒まで再試行）を通してから保守を終える（終了コード 4）。
 - **手動の Rollback**（`paw-release rollback [--to V] [--restore-point L]`）: DB が戻り先の Head と同じか、間が `expand` だけなら Application だけ。そうでなければ戻り先の Head と同じ Revision の検証済みの復旧点を要求する（5 の削除の確認つき）。
-- **戻せないとき**: 復元・起動・Health のどれかが失敗したら、保守（Task は始まらない）のまま止め、設定の `notify`（例は Journal の `crit` と `wall`）を実行する（終了コード 5）。運用者が直した後、`paw-release end-maintenance` で再開する。
+- **戻せないとき**: 走っている Release の停止（設定の `stop`）・復元・起動・Health のどれかが失敗したら（停止に失敗したときは、まだ書き込むかもしれないので復元も切り替えもしない）、保守（Task は始まらない）のまま止め、設定の `notify`（例は Journal の `crit` と `wall`）を実行する（終了コード 5）。運用者が直した後、`paw-release end-maintenance` で再開する。
 - 同時に 2 つの操作をしない（`state_dir/lock`）。中断した操作が残っている間は Update を拒否する（Rollback か `end-maintenance` で片付ける）。
 
 ### 7. 記録
