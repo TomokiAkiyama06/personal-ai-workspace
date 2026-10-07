@@ -37,7 +37,7 @@ from sqlalchemy.dialects import postgresql
 from paw_backend.db_roles import grant_app_privileges
 
 revision: str = "0190"
-down_revision: str | Sequence[str] | None = "0188"
+down_revision: str | Sequence[str] | None = "0189"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
