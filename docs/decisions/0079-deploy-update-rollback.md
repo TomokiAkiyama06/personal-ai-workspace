@@ -1,6 +1,7 @@
 # Deploy / Update / Rollback の仕組み（Release の形、手動の Update、保守と Drain、互換な Migration の印、DB の復旧点、Rollback、Audit の保存期間の Timer）
 
-- Status: Proposed
+- Status: Approved
+- Approval: 2026-10-08、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで直接回答して承認（すべての判断点を推奨どおり承認。末尾の「承認時の決定」）
 - Date: 2026-10-07
 - Scope: Issue [#54](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/54)（PAW-068: Deployment / Update / Rollback 機構）。`apps/backend/deploy/release/`（`paw_release.py`、`release.example.toml`）、`apps/backend/paw_backend/deploy/`、`apps/backend/paw_backend/cli/deploy.py`、Migration `0191`（`deploy_maintenance`）、`TaskQueue.claim_next`、`PostgresTaskHolds` の理由の引数、`apps/backend/deploy/systemd/paw-backend.service` と既存の Unit の Path
 - Supersedes: なし。[Decision 0031](0031-audit-retention-scheduler.md)（Approved）・[Decision 0054](0054-recovery-repository-projection-restore.md)（Approved）・[Decision 0055](0055-kaggle-full-gpu-mode.md)（Approved）・[Decision 0043](0043-user-deletion-follow-ups.md) を書き換えない。それらの Command・Timer・Hold を Update の手順から使う
@@ -134,3 +135,7 @@ Issue #54 のコメント: Decision 0031 の Audit の保存期間の Timer（`p
 - 承認されるまで、Tool・Command・Unit File はコードとして入るが、実運用の Server で `paw-release` による Update・Rollback を行わない（運用の切り替えは承認の後）。
 - 承認されたら、運用者が README の「Deploy / Update / Rollback」の手順で `/opt/paw` の配置・`/etc/paw/release.toml`・`/etc/paw/deploy.env`・Unit File を用意し、最初の Release を `install` する。
 - 方針を変える場合は、この Decision を書き換えず、新しい Decision から `Supersedes` する。
+
+## 承認時の決定（2026-10-08）
+
+Human は、作業 Session で判断が必要な点について推奨つきの説明を受け、直接回答して承認した（すべての判断点を推奨どおり承認）。

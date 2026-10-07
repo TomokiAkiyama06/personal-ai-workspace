@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """paw-release: versioned releases, manual update and rollback of the Personal AI
-Workspace (PAW-068, Issue #54, Decision 0079 Proposed).
+Workspace (PAW-068, Issue #54, Decision 0079).
 
 Standard library only (Python 3.11+): it runs with the host's ``python3``, not
 with the venv of a release it is replacing. What needs the database it asks the

@@ -1,5 +1,5 @@
 """The maintenance of an update: no task starts while it lasts (issue #54,
-Decision 0079 Proposed).
+Decision 0079).
 
 Revision ID: 0191
 Revises: 0188

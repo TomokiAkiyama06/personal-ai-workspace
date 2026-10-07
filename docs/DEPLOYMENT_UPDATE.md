@@ -122,7 +122,7 @@ the sum of its four parts) of the benchmark's measured peak, not
 `gpu-memory-utilization` × the GPU: `max(GPU memory used during the run − used before
 the load) + 2 GiB`. vLLM exceeded its `gpu-memory-utilization` budget by up to 8.4 GiB.
 
-## Implementation (Issue #54, Decision 0079 Proposed)
+## Implementation (Issue #54, Decision 0079)
 
 [Decision 0079](decisions/0079-deploy-update-rollback.md) proposes the mechanism; until it is
 approved, no production update or rollback is run with it. Operator steps are in the

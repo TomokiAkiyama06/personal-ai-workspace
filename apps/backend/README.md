@@ -151,7 +151,7 @@ Database には pgvector が必要です（CI は `pgvector/pgvector:pg18` を�
 | `PAW_MIGRATION_DATABASE_URL` | なし | Migration 専用の接続先（Schema の Owner の Role）。設定すると Alembic は `PAW_DATABASE_URL` の代わりにこれを使う。認可・Audit の節を参照 |
 | `PAW_APP_DATABASE_ROLE` | なし | Web の Application が接続する PostgreSQL の Role 名（英数字と `_`、63 文字まで。`public`、`pg_` で始まる名前、`postgres` などの予約名は拒否）。Audit Table の Migration が、実在するこの Role に INSERT と SELECT だけを与える（存在しなければ Migration が失敗する）。Migration `0021` は `users` / `setup_tokens` について Token の使用に必要な最小限の権限だけを与える |
 | `PAW_DATABASE_READINESS_CACHE_SECONDS` | `1` | Readiness の結果（失敗を含む）を再利用する秒数。`0` で再利用しない |
-| `PAW_DEPLOY_ADMIN_DATABASE_URL` | なし | Update の復旧点の検証と復元（`deploy-restore-point-verify` / `-restore`）が Database を作成・改名・削除する接続先（`CREATEDB` を持ち Workspace の Database を所有する Role。普通は Migration の Role で `postgres` Database に接続）。[Deploy / Update / Rollback](#deploy--update--rollbackpaw-068)（Decision 0079、Proposed） |
+| `PAW_DEPLOY_ADMIN_DATABASE_URL` | なし | Update の復旧点の検証と復元（`deploy-restore-point-verify` / `-restore`）が Database を作成・改名・削除する接続先（`CREATEDB` を持ち Workspace の Database を所有する Role。普通は Migration の Role で `postgres` Database に接続）。[Deploy / Update / Rollback](#deploy--update--rollbackpaw-068)（Decision 0079） |
 | `PAW_OPERATOR_DATABASE_URL` | なし | Owner の管理コマンド（`python -m paw_backend.cli`）の接続先（Token を作れる Role）。未設定のときだけ `PAW_DATABASE_URL` を使い、警告する。[Owner の初期設定と復旧](#owner-の初期設定と復旧) |
 | `PAW_OPERATOR_DATABASE_ROLE` | なし | 上の Role 名（`PAW_APP_DATABASE_ROLE` と同じ検証）。Migration `0021` が、実在するこの Role に管理コマンドの権限を与える |
 | `PAW_SETUP_TOKEN_TTL_SECONDS` | `1800` | Owner の Setup / Recovery Token の有効期間（60〜14400 秒） |
@@ -3833,7 +3833,7 @@ python -m paw_backend.cli recovery-restore --apply  # 1 Transaction で書く
 
 ## Deploy / Update / Rollback（PAW-068）
 
-[Issue #54](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/54)。方式は [Decision 0079](../../docs/decisions/0079-deploy-update-rollback.md)（**Proposed**。承認されるまで実運用の Server で `paw-release` による Update・Rollback を行わない）。要件は [DEPLOYMENT_UPDATE.md](../../docs/DEPLOYMENT_UPDATE.md)。
+[Issue #54](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/54)。方式は [Decision 0079](../../docs/decisions/0079-deploy-update-rollback.md)（2026-10-08 Approved）。要件は [DEPLOYMENT_UPDATE.md](../../docs/DEPLOYMENT_UPDATE.md)。
 
 - **Release Tool** [`deploy/release/paw_release.py`](deploy/release/paw_release.py)（標準 Library だけ。Host の `python3` 3.12 以上で動く）: Commit ごとの不変の Release（`/opt/paw/releases/<YYYYMMDD-sha12>/`、`release.json` に Schema の Head と Migration の鎖・互換性・Source の Digest）、`/opt/paw/current` の Symlink の切り替え、更新前の確認、Update、Rollback、最初の Install、古い復旧点の削除。Service の停止・起動・Health・通知は設定（[`release.example.toml`](deploy/release/release.example.toml)）の Command だけで行い、Tool 自身は `systemctl` / `sudo` を呼ばない。
 - **DB 側の Command** `python -m paw_backend.cli deploy-*`（`paw_backend/cli/deploy.py`、`paw_backend/deploy/`。`PAW_MIGRATION_DATABASE_URL` で接続）: `deploy-status` / `deploy-precheck`（JSON）、`deploy-maintenance-begin` / `deploy-drain` / `deploy-maintenance-end`、`deploy-restore-point-create` / `-verify` / `-restore`。終了コードは 0（成功）・1（拒否）・2（環境）・3（失敗）。
@@ -3879,7 +3879,7 @@ python3 /usr/local/sbin/paw-release precheck <next version>   # Timer と Partit
 
 ### 制限と未確認の点
 
-- 実際のサーバーではまだ動かしていない（Decision 0079 が Proposed）。Test は一時 Directory と Fake（Service、Health、`pg_dump` / `pg_restore`）。`pg_dump` / `pg_restore` の実物では、作業環境の Docker（`pgvector/pgvector:pg18` の Client）で全 Schema の作成・検証・名前の入れ替えを手で確かめた。
+- 実際のサーバーではまだ動かしていない（Decision 0079 は 2026-10-08 に承認。本番への配置は「配置」の手順で Human が行う）。Test は一時 Directory と Fake（Service、Health、`pg_dump` / `pg_restore`）。`pg_dump` / `pg_restore` の実物では、作業環境の Docker（`pgvector/pgvector:pg18` の Client）で全 Schema の作成・検証・名前の入れ替えを手で確かめた。
 - 「Update available」の通知、Model の Update（Application と独立。`paw-llm-main.service` は別）は後続。
 - `install` は既存の DB の復旧点を取らない（Tool を使う前の配備から移るときは手で `pg_dump` を取る）。
 

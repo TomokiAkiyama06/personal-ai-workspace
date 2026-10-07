@@ -1,5 +1,5 @@
 """Update / Rollback of the Personal AI Workspace, the database side (PAW-068,
-Issue #54, Decision 0079 Proposed).
+Issue #54, Decision 0079).
 
 The release tool (``apps/backend/deploy/release/paw_release.py``, standard
 library only) switches between versioned releases; it runs the server-local
