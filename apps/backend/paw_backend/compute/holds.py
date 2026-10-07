@@ -58,13 +58,31 @@ _BATCH = 100
 class PostgresTaskHolds:
     """See the module."""
 
-    def __init__(self, tasks: TaskService, queue: TaskQueue) -> None:
+    def __init__(
+        self,
+        tasks: TaskService,
+        queue: TaskQueue,
+        *,
+        hold_reason: str = HOLD_REASON,
+        resume_reason: str = RESUME_REASON,
+    ) -> None:
+        """``hold_reason`` / ``resume_reason``: the fixed reasons of the policy's
+        ``wait`` / ``unblock``. Full GPU Mode's by default; an update's
+        maintenance (Issue #54, Decision 0079) holds with its own, so neither
+        resumes the other's tasks."""
         if not isinstance(tasks, TaskService):
             raise TypeError("tasks must be a TaskService")
         if not isinstance(queue, TaskQueue):
             raise TypeError("queue must be a TaskQueue")
+        for reason in (hold_reason, resume_reason):
+            if not isinstance(reason, str) or not reason:
+                raise TypeError("the reasons must be non-empty strings")
+        if hold_reason == resume_reason:
+            raise ValueError("the hold and resume reasons must differ")
         self._tasks = tasks
         self._queue = queue
+        self._hold_reason = hold_reason
+        self._resume_reason = resume_reason
 
     @property
     def _database(self) -> Database:
@@ -77,7 +95,7 @@ class PostgresTaskHolds:
                 TaskCommand.WAIT,
                 actor=Actor.policy(),
                 wait_reason=WaitReason.RESOURCE,
-                reason=HOLD_REASON,
+                reason=self._hold_reason,
             )
         except (IllegalTransitionError, TaskNotFoundError):
             return False  # not running: nothing of it will start meanwhile
@@ -104,7 +122,7 @@ class PostgresTaskHolds:
             .where(
                 TaskRow.state == TaskState.WAITING,
                 TaskRow.wait_reason == WaitReason.RESOURCE,
-                latest_wait.c.reason == HOLD_REASON,
+                latest_wait.c.reason == self._hold_reason,
             )
             .order_by(TaskRow.id)
             .limit(limit)
@@ -158,7 +176,7 @@ class PostgresTaskHolds:
                 TaskCommand.UNBLOCK,
                 actor=Actor.policy(),
                 expected_version=version,
-                reason=RESUME_REASON,
+                reason=self._resume_reason,
                 in_transaction=enqueue,
             )
         except (TaskConflictError, IllegalTransitionError, TaskNotFoundError):

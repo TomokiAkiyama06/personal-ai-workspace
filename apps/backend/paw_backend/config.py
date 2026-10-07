@@ -81,6 +81,11 @@ class Settings(BaseSettings):
     # uses it instead of ``database_url``, so the application itself can run as
     # a role that cannot alter or drop the append-only audit trail.
     migration_database_url: SecretStr | None = None
+    # The update's restore points (Issue #54, Decision 0079 5) create, rename and
+    # drop databases with this URL: a role with CREATEDB that owns the workspace
+    # database (typically the migration role, connected to the ``postgres``
+    # database). Only ``deploy-restore-point-verify`` / ``-restore`` use it.
+    deploy_admin_database_url: SecretStr | None = None
     # The role the application connects as. The audit migration grants it
     # INSERT and SELECT on ``audit_events`` (and nothing else on it). Migration
     # ``0021`` grants it only what redeeming an Owner token needs (SELECT, and
@@ -277,6 +282,7 @@ class Settings(BaseSettings):
         "web_dist_dir",
         "database_url",
         "migration_database_url",
+        "deploy_admin_database_url",
         "operator_database_url",
         "app_database_role",
         "operator_database_role",
@@ -292,6 +298,7 @@ class Settings(BaseSettings):
     @field_validator(
         "database_url",
         "migration_database_url",
+        "deploy_admin_database_url",
         "operator_database_url",
         mode="after",
     )
