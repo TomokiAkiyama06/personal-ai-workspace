@@ -129,6 +129,55 @@ describe("apiTaskSource", () => {
     expect(list.capacity).toBeUndefined();
   });
 
+  it("reads the scheduler's parallel limit and, when it comes, the VRAM in GB", async () => {
+    mockApi({
+      "GET /tasks": reply(200, {
+        tasks: [],
+        capacity: {
+          parallel_limit: 2,
+          running: 1,
+          vram_used_bytes: 19_541_778_432, // 18.2 GiB
+          vram_total_bytes: 51_539_607_552, // 48 GiB
+        },
+      }),
+    });
+    expect((await apiTaskSource.listTasks()).capacity).toEqual({
+      parallelLimit: 2,
+      vramUsedGb: 18.2,
+      vramTotalGb: 48,
+    });
+  });
+
+  it("shows the parallel limit alone without the VRAM, and nothing without a scheduler", async () => {
+    mockApi({
+      "GET /tasks": reply(200, {
+        tasks: [],
+        capacity: { parallel_limit: 0, running: 0, vram_used_bytes: null, vram_total_bytes: null },
+      }),
+    });
+    expect((await apiTaskSource.listTasks()).capacity).toEqual({ parallelLimit: 0 });
+    mockApi({ "GET /tasks": reply(200, { tasks: [], capacity: null }) });
+    expect((await apiTaskSource.listTasks()).capacity).toBeUndefined();
+  });
+
+  it("puts the limit and the VRAM in the task list's header", async () => {
+    mockApi({
+      "GET /auth/session": reply(200, session()),
+      "GET /tasks": reply(200, {
+        tasks: [wire()],
+        capacity: {
+          parallel_limit: 2,
+          running: 1,
+          vram_used_bytes: 19_541_778_432,
+          vram_total_bytes: 51_539_607_552,
+        },
+      }),
+      [`GET /tasks/${TASK}`]: reply(200, wire()),
+    });
+    renderApp("/agents");
+    expect(await screen.findByText("並列上限 2 · VRAM 18.2 / 48 GB")).toBeInTheDocument();
+  });
+
   it("maps the detail: step tool calls, budget, repositories and DAG", async () => {
     mockApi({ [`GET /tasks/${TASK}`]: reply(200, wire()) });
     const task = await apiTaskSource.getTask(TASK);

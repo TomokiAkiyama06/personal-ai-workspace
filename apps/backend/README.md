@@ -4539,9 +4539,9 @@ PAW-062 の画面（`/agents`、`/pulls`、Web の `src/tasks/apiSource.ts`）�
 - 一覧の Project は Session の Membership から、Project ごとに Policy で `project.read` を判定します。Repository は、その ACL で `project.read` があるものだけを出し、ない Repository は名前も PR も出しません。
 - 存在しない Task と、読めない Project の Task はどちらも 403 です（Guard が区別しない）。
 - Task の入力、Log、Node の Goal / 結果、Event の詳細は返しません。
-- 未実装: 一覧の並列の上限 / VRAM（Decision 0067 の 6）。
+- 一覧の `capacity` は Compute Scheduler の並列の上限と VRAM です（[Decision 0084](../../docs/decisions/0084-task-list-parallel-limit-and-vram.md)、Proposed。推奨どおりに実装）。`parallel_limit` は Main Model の GPU で動いている Coding の Lease（`running`）と、Main の最も長い Context（KV Pool の Coding の取り分まで）の Agent をあと何件受け付けるか（`ComputeScheduler.coding_capacity()`。読むだけで何も予約しない）の和で、Context が埋まるほど下がり、Main が GPU にいない・Probe が古い・Exclusive・縮退の 4 段目以降は `running` だけです。`vram_used_bytes` / `vram_total_bytes` は Probe の最新の読み取り（新しいときだけ）で、System Health の詳細を見られる人（`admin.system_health.view`、Owner / Admin。Decision 0059 の 3）にだけ返し、他は `null` です（判定は Policy だけで Audit しない）。Scheduler のない構成（`create_app(compute=None)`）と Main Model のない構成では `capacity` が `null` で、画面は表示しません。
 
-Test: `tests/test_tasks_api.py`（PostgreSQL。見える範囲、ACL、操作の権限、Version、遷移表、Queue、Merge Ready）。
+Test: `tests/test_tasks_api.py`（PostgreSQL。見える範囲、ACL、操作の権限、Version、遷移表、Queue、Merge Ready、並列の上限と VRAM の見える範囲）、`tests/test_compute_scheduler.py` の `CodingCapacityTest`（並列の上限の計算）。
 
 ### PR 画面とモバイルの Board（Issue #185 の 6、Decision 0078）
 

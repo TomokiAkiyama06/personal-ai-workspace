@@ -82,6 +82,7 @@
 | [0078](0078-pr-screen-and-mobile-board-api.md) | PR 画面とモバイルの Board の HTTP API（変更ファイルと差分は Gate が PR を届けた直後に GitHub から作成者の `gh api` で読んで上限つき・Redact して保存、Review の要約は記録された結果と DAG の Reviewer Node だけ、Audit の行は PR を見られる Member にその Task と Tool の承認の行を閉じた形で、Tool の承認の一覧と承認・拒否は本人だけで `STRONG_APPROVAL` はこの経路では承認しない、「このタスクの間は許可」は出さない。Migration 0190。Issue #185 の 6） | Approved |
 | [0080](0080-system-health-ui.md) | System Health UI の方針（Monitoring Board の Host・温度の代わりに System Health の Component を UI_DESIGN.md の 5 つの領域で出す、通常時は 1 行と閉じた行だけで異常時は Banner・最悪の領域・異常な Component の詳細を自動で開く、知らない Code はそのまま出す、Header の状態 Chip は Owner / Admin に GPU と Queue（異常時は最悪の Component）、一般の User に Summary だけ、15 秒 / 30 秒の更新、通知の「詳細を見る」をサーバー監視へ。Issue #53） | Approved |
 | [0082](0082-human-correction-time-measurement.md) | Human correction time（人が直す時間）の測り方（Main の基準値を得る目的で Main は変えない、対象は Qwen3.8-27B-FP8 の paw-seed-v2 run1 の部分点 0.9 以上で未解決の 4 Task、次点は測らない、Hidden test と Golden は見せない、stopwatch の CLI `benchmarks.human_correction` の Event log と未解決を 60 分の値で記録する規則。Decision 0040 の 5・0041 の 8 の具体化、Issue #181） | Approved |
+| [0084](0084-task-list-parallel-limit-and-vram.md) | Task の一覧の並列の上限と VRAM（並列の上限 = Main の GPU で動いている Coding の Agent ＋ 最も長い Context（KV の Coding の取り分まで）の Agent をあと何件受け付けるか、Local の GPU だけを数える、受け付けられないときは動いている数だけ、VRAM は Probe の used / total を Owner / Admin（`admin.system_health.view`）にだけ、Migration なし。Decision 0067 の 6・7 で後に回した値。Issue #185 の 1） | Proposed |
 
 運用は [AGENTS.md](../../AGENTS.md) の「仕様変更」に従います。
 

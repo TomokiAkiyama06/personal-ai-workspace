@@ -3,7 +3,10 @@ over HTTP (issue #185, Decision 0067 Approved; the screens of PAW-062, #48).
 
 * ``GET /tasks`` (``tasks.list``, every human role): the latest updated tasks of
   the projects the person may read (``project.read``, decided per project), newest
-  first, at most ``limit`` (default 100, up to 200).
+  first, at most ``limit`` (default 100, up to 200), with the compute
+  scheduler's parallel limit of the local coding agents and, for a person who
+  may see System Health's detail, the VRAM (``capacity``; Decision 0084,
+  Proposed; ``null`` without a scheduler).
 * ``GET /tasks/{task_id}`` (``project.read`` on the task's project): the task as
   ``TaskService.restore`` reads it, its Working Set with each repository's state
   in the current attempt, the DAG of the current attempt with every node attempt,
@@ -45,7 +48,8 @@ from starlette.requests import HTTPConnection
 
 from paw_backend.api.v1 import task_views as views
 from paw_backend.authz import Capability, Principal, Resource, require_capability
-from paw_backend.authz.policy import Policy
+from paw_backend.authz.policy import Policy, decide
+from paw_backend.compute.wiring import ComputeServices
 from paw_backend.db import Database
 from paw_backend.errors import ApiError
 from paw_backend.orchestrator.composition import TaskExecution
@@ -125,8 +129,22 @@ class TaskSummaryOut(BaseModel):
     updated_at: datetime
 
 
+class TaskCapacityOut(BaseModel):
+    # The parallel limit of the local coding agents (Decision 0084, Proposed):
+    # the running ones and how many more of a whole context fit now.
+    parallel_limit: int
+    running: int
+    # The GPU's memory as the probe last saw it: only for a person who may see
+    # System Health's detail (Decision 0059 3), and only while the reading is
+    # fresh; else null.
+    vram_used_bytes: int | None
+    vram_total_bytes: int | None
+
+
 class TaskListOut(BaseModel):
     tasks: list[TaskSummaryOut]
+    # null when the deployment runs no compute scheduler or no main model.
+    capacity: TaskCapacityOut | None
 
 
 class PullRequestRefOut(BaseModel):
@@ -264,6 +282,34 @@ def _execution(request: Request) -> TaskExecution:
 
 def _policy(request: Request) -> Policy:
     return request.app.state.authorizer.policy
+
+
+def _capacity(request: Request, principal: Principal) -> TaskCapacityOut | None:
+    """The scheduler's parallel limit and, for System Health's viewers, the VRAM.
+    Read from the process's scheduler in memory (nothing is admitted, nothing
+    touches the GPU)."""
+    services: ComputeServices | None = getattr(request.app.state, "compute", None)
+    if services is None:
+        return None
+    scheduler = services.scheduler
+    coding = scheduler.coding_capacity()
+    if coding is None:
+        return None
+    vram = None
+    # A filter of a read the route authorized: decided, not audited.
+    if decide(
+        principal,
+        Capability.ADMIN_SYSTEM_HEALTH_VIEW,
+        Resource.system(),
+        policy=_policy(request),
+    ).allowed:
+        vram = scheduler.status().vram
+    return TaskCapacityOut(
+        parallel_limit=coding.limit,
+        running=coding.running,
+        vram_used_bytes=None if vram is None else vram.actual,
+        vram_total_bytes=None if vram is None else vram.total,
+    )
 
 
 async def _read_only(session: AsyncSession) -> None:
@@ -525,7 +571,8 @@ async def list_tasks(
                 updated_at=item.updated_at,
             )
             for item in items
-        ]
+        ],
+        capacity=_capacity(request, principal),
     )
 
 

@@ -590,3 +590,68 @@ class ObservedOnGpuTest(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CodingCapacityTest(unittest.IsolatedAsyncioTestCase):
+    """The parallel limit of the local coding agents (Decision 0084, Proposed):
+    the Coding leases on the main model and how many more agents of a whole
+    context it would admit now."""
+
+    # 90% of the pool, 95% of that for Coding: 112,066 tokens.
+    CODING_SHARE = 112_066
+
+    async def test_an_idle_main_model_fits_its_whole_contexts(self):
+        scheduler, *_ = build()
+        await scheduler.refresh()
+        capacity = scheduler.coding_capacity()
+        # 112,066 // 65,536: one agent of the longest context.
+        self.assertEqual((capacity.running, capacity.limit), (0, 1))
+        # Nothing was admitted or reserved to find out.
+        status = scheduler.status()
+        self.assertEqual(status.leases[CO], 0)
+        self.assertEqual(status.deployment("main").reserved_tokens, 0)
+
+    async def test_it_falls_as_the_pool_fills(self):
+        scheduler, *_ = build((main_spec(max_context_tokens=32_768),))
+        await scheduler.refresh()
+        self.assertEqual(scheduler.coding_capacity().limit, 3)
+        coding = (await scheduler.try_acquire(request(CO, tokens=8_000))).lease
+        capacity = scheduler.coding_capacity()
+        # The running agent and (112,066 - 8,000) // 32,768 = 3 more.
+        self.assertEqual((capacity.running, capacity.limit), (1, 4))
+        # A chat is not a coding agent, but its context takes room in the pool.
+        chat = (await scheduler.try_acquire(request(IC, tokens=30_000))).lease
+        capacity = scheduler.coding_capacity()
+        # (112,066 - 38,000) // 32,768 = 2 more.
+        self.assertEqual((capacity.running, capacity.limit), (1, 3))
+        await chat.release()
+        await coding.release()
+        self.assertEqual(scheduler.coding_capacity().limit, 3)
+
+    async def test_a_context_longer_than_the_coding_share_counts_as_the_share(self):
+        scheduler, *_ = build((main_spec(max_context_tokens=200_000),))
+        await scheduler.refresh()
+        self.assertEqual(scheduler.coding_capacity().limit, 1)
+
+    async def test_only_the_running_agents_while_coding_is_held_back(self):
+        scheduler, probe, *_ = build((main_spec(max_context_tokens=32_768),))
+        await scheduler.refresh()
+        lease = (await scheduler.try_acquire(request(CO, tokens=8_000))).lease
+        probe.fail = True
+        await scheduler.refresh()
+        capacity = scheduler.coding_capacity()
+        self.assertEqual((capacity.running, capacity.limit), (1, 1))
+        await lease.release()
+
+    async def test_a_main_model_off_the_gpu_runs_nothing(self):
+        scheduler, *_ = build(
+            (main_spec(initial=DeploymentState.UNLOADED),), control=False
+        )
+        await scheduler.refresh()
+        capacity = scheduler.coding_capacity()
+        self.assertEqual((capacity.running, capacity.limit), (0, 0))
+
+    async def test_no_main_model_no_capacity(self):
+        scheduler, *_ = build((embedding_spec(),))
+        await scheduler.refresh()
+        self.assertIsNone(scheduler.coding_capacity())
