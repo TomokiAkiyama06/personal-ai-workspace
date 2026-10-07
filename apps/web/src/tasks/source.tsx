@@ -4,11 +4,17 @@
 // Center's `NotificationSource`, Decision 0044's 11).
 import { createContext, type ReactNode, useContext } from "react";
 import type {
+  ApprovalDecision,
+  AuditRow,
+  ChangedFiles,
   ControlCommand,
   ControlOptions,
+  FileDiff,
   PullRequestRecord,
+  ReviewSummary,
   TaskDetail,
   TaskList,
+  ToolApproval,
 } from "./model";
 
 export interface TaskSource {
@@ -19,6 +25,17 @@ export interface TaskSource {
   listPullRequests(): Promise<readonly PullRequestRecord[]>;
   /** One record by its id: the PR screen opens one the bounded list does not hold. */
   getPullRequest(id: string): Promise<PullRequestRecord>;
+  /** The files the pull request changes, as recorded when it was delivered. */
+  getChangedFiles(id: string): Promise<ChangedFiles>;
+  /** One of them with its diff. */
+  getFileDiff(id: string, index: number): Promise<FileDiff>;
+  getReview(id: string): Promise<ReviewSummary>;
+  /** The newest audit rows of the pull request's task. */
+  getAudit(id: string): Promise<readonly AuditRow[]>;
+  /** The pending tool approvals the person is asked for (of one task, if given). */
+  listApprovals(taskId?: string): Promise<readonly ToolApproval[]>;
+  /** Approve or reject one; resolves when the Backend stored the decision. */
+  decideApproval(id: string, decision: ApprovalDecision): Promise<void>;
 }
 
 const TaskSourceContext = createContext<TaskSource | null>(null);

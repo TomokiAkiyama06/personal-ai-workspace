@@ -4,12 +4,18 @@
 // (snake_case) to the screens' types.
 import { apiRequest } from "../api/client";
 import type {
+  ApprovalDecision,
+  ApprovalLevel,
   AttemptState,
+  AuditRow,
   BudgetPreset,
+  ChangedFile,
+  ChangedFiles,
   ControlCommand,
   ControlOptions,
   DagNode,
   EvaluationResult,
+  FileDiff,
   NodeAttempt,
   NodeRole,
   NodeState,
@@ -19,11 +25,13 @@ import type {
   PullRequestState,
   RepoRole,
   ReviewStatus,
+  ReviewSummary,
   TaskDetail,
   TaskList,
   TaskRepository,
   TaskState,
   TaskSummary,
+  ToolApproval,
   ToolCall,
   WaitReason,
 } from "./model";
@@ -240,7 +248,98 @@ function pullRequest(wire: PullRequestWire): PullRequestRecord {
   };
 }
 
+interface ChangedFileWire {
+  index: number;
+  path: string;
+  previous_path: string | null;
+  status: string;
+  additions: number;
+  deletions: number;
+  has_patch: boolean;
+  patch_truncated: boolean;
+}
+
+interface ChangesWire {
+  recorded: boolean;
+  head_commit: string | null;
+  truncated: boolean;
+  additions: number;
+  deletions: number;
+  files: ChangedFileWire[];
+}
+
+interface FileDiffWire extends ChangedFileWire {
+  count: number;
+  patch: string | null;
+}
+
+interface ReviewWire {
+  review: ReviewStatus;
+  evaluation: EvaluationResult;
+  reviewers: {
+    key: string;
+    title: string;
+    state: NodeState;
+    agent: string | null;
+    model: string | null;
+    finished_at: string | null;
+  }[];
+}
+
+interface AuditWire {
+  rows: {
+    occurred_at: string;
+    action: string;
+    decision: "allow" | "deny";
+    reason: string;
+    actor: AuditRow["actor"];
+  }[];
+}
+
+interface ApprovalWire {
+  id: string;
+  task_id: string;
+  task_title: string;
+  agent: string | null;
+  project_id: string;
+  tool: string;
+  level: ApprovalLevel;
+  summary: { name: string; kind: string; value: string }[];
+  repositories: string[];
+  created_at: string;
+  expires_at: string;
+}
+
+function changedFile(wire: ChangedFileWire): ChangedFile {
+  return {
+    index: wire.index,
+    path: wire.path,
+    previousPath: wire.previous_path,
+    status: wire.status,
+    additions: wire.additions,
+    deletions: wire.deletions,
+    hasPatch: wire.has_patch,
+    patchTruncated: wire.patch_truncated,
+  };
+}
+
+function approval(wire: ApprovalWire): ToolApproval {
+  return {
+    id: wire.id,
+    taskId: wire.task_id,
+    taskTitle: wire.task_title,
+    agent: wire.agent,
+    tool: wire.tool,
+    level: wire.level,
+    summary: wire.summary,
+    repositories: wire.repositories,
+    createdAt: wire.created_at,
+    expiresAt: wire.expires_at,
+  };
+}
+
 const taskPath = (id: string) => `/tasks/${encodeURIComponent(id)}`;
+const pullPath = (id: string) => `/pull-requests/${encodeURIComponent(id)}`;
 
 /** The production source: the Backend's /api/v1 task routes. */
 export const apiTaskSource: TaskSource = {
@@ -266,8 +365,53 @@ export const apiTaskSource: TaskSource = {
     return body.pull_requests.map(pullRequest);
   },
   async getPullRequest(id: string): Promise<PullRequestRecord> {
-    return pullRequest(
-      await apiRequest<PullRequestWire>("GET", `/pull-requests/${encodeURIComponent(id)}`),
-    );
+    return pullRequest(await apiRequest<PullRequestWire>("GET", pullPath(id)));
+  },
+  async getChangedFiles(id: string): Promise<ChangedFiles> {
+    const body = await apiRequest<ChangesWire>("GET", `${pullPath(id)}/files`);
+    return {
+      recorded: body.recorded,
+      truncated: body.truncated,
+      additions: body.additions,
+      deletions: body.deletions,
+      files: body.files.map(changedFile),
+    };
+  },
+  async getFileDiff(id: string, index: number): Promise<FileDiff> {
+    const body = await apiRequest<FileDiffWire>("GET", `${pullPath(id)}/files/${index}`);
+    return { ...changedFile(body), count: body.count, patch: body.patch };
+  },
+  async getReview(id: string): Promise<ReviewSummary> {
+    const body = await apiRequest<ReviewWire>("GET", `${pullPath(id)}/review`);
+    return {
+      review: body.review,
+      evaluation: body.evaluation,
+      reviewers: body.reviewers.map((reviewer) => ({
+        key: reviewer.key,
+        title: reviewer.title,
+        state: reviewer.state,
+        agent: reviewer.agent,
+        model: reviewer.model,
+        finishedAt: reviewer.finished_at,
+      })),
+    };
+  },
+  async getAudit(id: string): Promise<readonly AuditRow[]> {
+    const body = await apiRequest<AuditWire>("GET", `${pullPath(id)}/audit`);
+    return body.rows.map((row) => ({
+      occurredAt: row.occurred_at,
+      action: row.action,
+      decision: row.decision,
+      reason: row.reason,
+      actor: row.actor,
+    }));
+  },
+  async listApprovals(taskId?: string): Promise<readonly ToolApproval[]> {
+    const query = taskId === undefined ? "" : `?task_id=${encodeURIComponent(taskId)}`;
+    const body = await apiRequest<{ approvals: ApprovalWire[] }>("GET", `/approvals${query}`);
+    return body.approvals.map(approval);
+  },
+  async decideApproval(id: string, decision: ApprovalDecision): Promise<void> {
+    await apiRequest("POST", `/approvals/${encodeURIComponent(id)}/decision`, { decision });
   },
 };

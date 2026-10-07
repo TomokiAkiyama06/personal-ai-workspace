@@ -243,6 +243,121 @@ describe("apiTaskSource", () => {
     expect(calls).toHaveLength(1);
   });
 
+  it("reads the changed files, one diff, the review and the audit rows", async () => {
+    const file = {
+      index: 0,
+      path: "src/app.py",
+      previous_path: null,
+      status: "modified",
+      additions: 2,
+      deletions: 1,
+      has_patch: true,
+      patch_truncated: false,
+    };
+    const { calls } = mockApi({
+      "GET /pull-requests/17/files": reply(200, {
+        recorded: true,
+        head_commit: "a".repeat(40),
+        truncated: false,
+        additions: 2,
+        deletions: 1,
+        files: [file],
+      }),
+      "GET /pull-requests/17/files/0": reply(200, { ...file, count: 1, patch: "@@ -1 +1 @@\n" }),
+      "GET /pull-requests/17/review": reply(200, {
+        review: "approved",
+        evaluation: "passed",
+        reviewers: [
+          {
+            key: "r",
+            title: "Review",
+            state: "succeeded",
+            agent: "claude",
+            model: null,
+            finished_at: "2026-10-01T09:05:00Z",
+          },
+        ],
+      }),
+      "GET /pull-requests/17/audit": reply(200, {
+        rows: [
+          {
+            occurred_at: "2026-10-01T09:05:00Z",
+            action: "tool.run_tests",
+            decision: "deny",
+            reason: "path_out_of_scope",
+            actor: "agent",
+          },
+        ],
+      }),
+    });
+    const changes = await apiTaskSource.getChangedFiles("17");
+    expect(changes.files[0]).toEqual({
+      index: 0,
+      path: "src/app.py",
+      previousPath: null,
+      status: "modified",
+      additions: 2,
+      deletions: 1,
+      hasPatch: true,
+      patchTruncated: false,
+    });
+    const diff = await apiTaskSource.getFileDiff("17", 0);
+    expect(diff).toMatchObject({ count: 1, patch: "@@ -1 +1 @@\n", path: "src/app.py" });
+    const review = await apiTaskSource.getReview("17");
+    expect(review.reviewers[0]).toMatchObject({
+      agent: "claude",
+      finishedAt: "2026-10-01T09:05:00Z",
+    });
+    const audit = await apiTaskSource.getAudit("17");
+    expect(audit).toEqual([
+      {
+        occurredAt: "2026-10-01T09:05:00Z",
+        action: "tool.run_tests",
+        decision: "deny",
+        reason: "path_out_of_scope",
+        actor: "agent",
+      },
+    ]);
+    expect(calls.map((call) => call.path)).toEqual([
+      "/pull-requests/17/files",
+      "/pull-requests/17/files/0",
+      "/pull-requests/17/review",
+      "/pull-requests/17/audit",
+    ]);
+  });
+
+  it("lists the approvals of a task and sends a decision", async () => {
+    const { calls, fetchMock } = mockApi({
+      "GET /approvals": reply(200, {
+        approvals: [
+          {
+            id: "a-1",
+            task_id: TASK,
+            task_title: "Fix login",
+            agent: "codex",
+            project_id: "p-1",
+            tool: "package.add",
+            level: "approval",
+            summary: [{ name: "command", kind: "text", value: "uv add x" }],
+            repositories: ["web-app"],
+            created_at: "2026-10-01T09:00:00Z",
+            expires_at: "2026-10-01T10:00:00Z",
+          },
+        ],
+      }),
+      "POST /approvals/a-1/decision": reply(200, { id: "a-1", outcome: "approved" }),
+    });
+    const [item] = await apiTaskSource.listApprovals(TASK);
+    expect(item).toMatchObject({ id: "a-1", taskId: TASK, level: "approval", tool: "package.add" });
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain(`/approvals?task_id=${TASK}`);
+    await apiTaskSource.decideApproval("a-1", "approve");
+    expect(calls[1]).toMatchObject({
+      method: "POST",
+      path: "/approvals/a-1/decision",
+      body: { decision: "approve" },
+    });
+  });
+
   it("computes what is left of the budget", () => {
     expect(remainingPercent([{ consumed: 0, limit: null }])).toBeUndefined();
     expect(remainingPercent([{ consumed: 80, limit: 50 }])).toBe(0);
