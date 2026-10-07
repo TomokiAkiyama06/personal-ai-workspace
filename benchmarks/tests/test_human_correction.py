@@ -241,6 +241,14 @@ class StopwatchTest(unittest.TestCase):
                 self.assertIn("event log", err)
                 self.assertEqual(self.log.read_text(encoding="utf-8"), before)
 
+    def test_summary_never_takes_the_place_of_an_absent_log(self):
+        (self.log.parent / "sub").mkdir(parents=True)
+        output = self.log.parent / "sub" / ".." / self.log.name
+        code, _, err = self.run_cli("summary", "--output", str(output))
+        self.assertEqual(code, 1)
+        self.assertIn("event log", err)
+        self.assertFalse(self.log.exists())
+
     def write_result(self, task=TASK, model=MODEL):
         result = json.loads(FIXTURE.read_text(encoding="utf-8"))
         result["task_id"] = task

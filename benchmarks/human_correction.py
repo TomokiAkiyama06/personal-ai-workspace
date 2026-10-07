@@ -324,7 +324,7 @@ def write_summary(output: Path, log: Path, text: str) -> None:
         same = output.exists() and log.exists() and os.path.samefile(output, log)
     except OSError:
         same = True
-    if same or output.absolute() == log.absolute():
+    if same or output.resolve() == log.resolve():
         raise CorrectionLogError("--output must not be the event log")
     # A new file replaces the directory entry: a link at the output path is replaced,
     # not written through.
