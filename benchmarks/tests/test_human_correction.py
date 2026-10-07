@@ -192,6 +192,21 @@ class StopwatchTest(unittest.TestCase):
         self.assertIn("regular file", err)
         self.assertEqual(target.read_text(encoding="utf-8"), "")
 
+    def test_read_commands_refuse_a_symlinked_log(self):
+        real = Path(self.directory.name) / "real.jsonl"
+        self.log.parent.mkdir(parents=True)
+        self.log.symlink_to(real)
+        link = self.log
+        self.log = real
+        self.start()
+        self.log = link
+        for argv in (("summary",), ("status",)):
+            with self.subTest(argv=argv):
+                code, out, err = self.run_cli(*argv)
+                self.assertEqual(code, 1)
+                self.assertIn("regular file", err)
+                self.assertNotIn(TASK, out)
+
     def test_validation_and_append_hold_an_exclusive_lock(self):
         self.start()
         self.log.touch()

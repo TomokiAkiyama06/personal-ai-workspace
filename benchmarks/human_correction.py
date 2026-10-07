@@ -230,19 +230,24 @@ class CorrectionLog:
         self.clock = clock
 
     def sessions(self) -> dict[str, Session]:
-        try:
-            text = self.path.read_text(encoding="utf-8")
-        except FileNotFoundError:
+        if not os.path.lexists(self.path):
             return {}
-        return replay(text.splitlines())
+        descriptor = self._open_checked(os.O_RDONLY, fcntl.LOCK_SH)
+        with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+            return replay(handle.read().splitlines())
 
     def _open_locked(self) -> int:
-        """Open the log for appending, refuse anything but the caller's regular file,
-        make it private and hold an exclusive lock until the descriptor is closed."""
+        """Open the log for appending, make it private and hold an exclusive lock
+        until the descriptor is closed."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        flags = os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW
+        flags = os.O_RDWR | os.O_APPEND | os.O_CREAT
+        return self._open_checked(flags, fcntl.LOCK_EX, private=True)
+
+    def _open_checked(self, flags: int, lock: int, private: bool = False) -> int:
+        """Open without following a link and refuse anything but the caller's own
+        regular file (reads and writes alike)."""
         try:
-            descriptor = os.open(self.path, flags, 0o600)
+            descriptor = os.open(self.path, flags | os.O_NOFOLLOW, 0o600)
         except OSError:
             raise CorrectionLogError(
                 "log must be a regular file (not a link)"
@@ -253,8 +258,9 @@ class CorrectionLog:
                 raise CorrectionLogError("log must be a regular file (not a link)")
             if status.st_uid != os.geteuid():
                 raise CorrectionLogError("log must be owned by the current user")
-            os.fchmod(descriptor, 0o600)
-            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            if private:
+                os.fchmod(descriptor, 0o600)
+            fcntl.flock(descriptor, lock)
         except BaseException:
             os.close(descriptor)
             raise

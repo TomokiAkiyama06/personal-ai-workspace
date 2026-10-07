@@ -524,7 +524,7 @@ Result schema validatorもTask schema validatorと同じ終了code・値を出�
 `benchmarks.human_correction`は、候補の未解決の結果を人が直す時間（`human_correction_ms`）を測るstopwatchです
 （[Decision 0041](../docs/decisions/0041-seed-benchmark-dataset.md)の8、[Decision 0082](../docs/decisions/0082-human-correction-time-measurement.md)（Proposed））。
 人が`start`・`pause`・`resume`・`finish`（Evaluatorの再実行が成功し、人が受け入れた）・`abandon`（諦めた）を明示的に記録し、
-`unchanged`は直さずに受け入れた結果（0 ms）です。EventはJSON Lines（追記のみ、`0600`。既存のfileも`0600`にし、symlinkや他のUserのfileは拒否します）に、Task id・Model・Run・UTCの時刻だけを書きます。
+`unchanged`は直さずに受け入れた結果（0 ms）です。EventはJSON Lines（追記のみ、`0600`。既存のfileも`0600`にします。読むだけのcommandも含め、symlinkや他のUserのfileは拒否します）に、Task id・Model・Run・UTCの時刻だけを書きます。
 codeやtestの出力、メモは書きません（Hidden checkの内容をLogに漏らさないため）。
 
 作業時間は`start`から`finish` / `abandon`までのうち`pause`〜`resume`を除いた時間です。60分を超えたもの（`capped`）と
