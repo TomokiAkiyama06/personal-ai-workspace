@@ -519,7 +519,7 @@ MAX_PULL_REQUEST_FILES = 300
 
 class PullRequestChangesRow(Base):
     """The changed files of a delivered pull request (revision ``0190``, issue
-    #185 item 6, Decision 0078 Proposed): read from GitHub when the Integration
+    #185 item 6, Decision 0078): read from GitHub when the Integration
     Gate delivered it (``integration/changes.py``), for the PR screen.
 
     ``files`` holds one object per file (``path``, ``previous_path``, ``status``,

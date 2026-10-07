@@ -1,6 +1,7 @@
 # PR 画面とモバイルの Board の HTTP API（変更ファイルと差分の出所、Review の要約、Audit の行の見える範囲、Tool の承認の経路）
 
-- Status: Proposed
+- Status: Approved
+- Approval: 2026-10-08、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで直接回答して承認（すべての判断点を推奨どおり承認。末尾の「承認時の決定」）
 - Date: 2026-10-07
 - Scope: Issue [#185](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/185) の 6（PR の画面とモバイルの Board 用：変更したファイル、Review の要約、Audit の行、Tool の承認（MobileApproval）、Diff（MobileDiff））。`apps/backend/paw_backend/api/v1/boards.py`、`api/v1/board_views.py`、`integration/changes.py`、`integration/gate.py`、Migration `0190`、`apps/web/src/tasks/`
 - Supersedes: なし。[Decision 0067](0067-task-pr-http-api.md)（Approved）の 7・8 で後に回した Board を扱う（0067 は書き換えない）
@@ -93,3 +94,7 @@ Backend の承認は 1 回の呼び出しごと（Decision 0006）なので、**
 承認されたら Status を Approved に改め、承認の内容を記録する。
 方針を変えるときは、この Decision を書き換えず、新しい Decision から `Supersedes` する。
 [REQUIREMENTS.md](../../REQUIREMENTS.md) の原文は書き換えない。
+
+## 承認時の決定（2026-10-08）
+
+Human は、作業 Session で判断が必要な点について推奨つきの説明を受け、直接回答して承認した（すべての判断点を推奨どおり承認）。

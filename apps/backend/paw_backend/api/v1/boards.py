@@ -1,5 +1,5 @@
 """The PR screen's panels and the mobile boards over HTTP (issue #185 item 6,
-Decision 0078 Proposed; the Design's PullRequest, MobileDiff and MobileApproval
+Decision 0078; the Design's PullRequest, MobileDiff and MobileApproval
 boards).
 
 * ``GET /pull-requests/{record_id}/files`` (``tasks.list``): the files the pull

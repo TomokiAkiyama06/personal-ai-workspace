@@ -1,5 +1,5 @@
 """Reads of the PR screen's and the mobile boards' panels (issue #185 item 6,
-Decision 0078 Proposed): the changed files and diff of a pull request, its
+Decision 0078): the changed files and diff of a pull request, its
 reviewers, the audit rows of its task, and the tool approvals a person is asked
 for. Read only; who may see a pull request is ``task_views``' (Decision 0067, 2),
 decided before any of these is read.

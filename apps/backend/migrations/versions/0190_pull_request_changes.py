@@ -1,5 +1,5 @@
 """The changed files of a delivered pull request, and the audit rows of a task by
-their resource (issue #185, item 6; Decision 0078 Proposed).
+their resource (issue #185, item 6; Decision 0078).
 
 Revision ID: 0190
 Revises: 0188

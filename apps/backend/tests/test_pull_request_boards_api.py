@@ -1,5 +1,5 @@
 """The PR screen's panels and the mobile boards over HTTP (issue #185 item 6,
-Decision 0078 Proposed) on PostgreSQL: changed files and diff, reviewers, audit
+Decision 0078) on PostgreSQL: changed files and diff, reviewers, audit
 rows, and the tool approvals a person is asked for.
 
 The application's own composition (``create_app`` with a database: the task

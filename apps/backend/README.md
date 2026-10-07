@@ -4541,9 +4541,9 @@ PAW-062 の画面（`/agents`、`/pulls`、Web の `src/tasks/apiSource.ts`）�
 
 Test: `tests/test_tasks_api.py`（PostgreSQL。見える範囲、ACL、操作の権限、Version、遷移表、Queue、Merge Ready）。
 
-### PR 画面とモバイルの Board（Issue #185 の 6、Decision 0078（Proposed））
+### PR 画面とモバイルの Board（Issue #185 の 6、Decision 0078）
 
-PR 画面の「変更されたファイル」「レビューの要点」「監査」と、MobileDiff（差分）・MobileApproval（Tool の承認）の Board の接続先です。`paw_backend/api/v1/boards.py` が経路、`paw_backend/api/v1/board_views.py` が読み取りです。方針は [Decision 0078](../../docs/decisions/0078-pr-screen-and-mobile-board-api.md)（**Proposed**。推奨どおりに実装）です。
+PR 画面の「変更されたファイル」「レビューの要点」「監査」と、MobileDiff（差分）・MobileApproval（Tool の承認）の Board の接続先です。`paw_backend/api/v1/boards.py` が経路、`paw_backend/api/v1/board_views.py` が読み取りです。方針は [Decision 0078](../../docs/decisions/0078-pr-screen-and-mobile-board-api.md)（推奨どおりに実装）です。
 
 | Endpoint | Capability | 内容 |
 | --- | --- | --- |
