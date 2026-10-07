@@ -1090,7 +1090,9 @@ class _Update(_Operation):
                 target.version,
             ),
         ):
-            return self.abort(running=True, maintenance=False)
+            # The row may be committed although the command failed (holding a
+            # task, the audit row): ending it is idempotent and lets the queue go.
+            return self.abort(running=True)
         drained = self.step(
             "drain",
             tool.cli(
@@ -1162,7 +1164,7 @@ class _Update(_Operation):
         self.say(f"Updated to {target.version}.")
         return EXIT_OK
 
-    def abort(self, *, running: bool, maintenance: bool = True) -> int:
+    def abort(self, *, running: bool) -> int:
         """Nothing was switched: the current release runs on (``running``: it
         was not stopped)."""
         tool = self.tool
@@ -1170,9 +1172,7 @@ class _Update(_Operation):
             "restart", tool.configured("start", release=self.current)
         ):
             return self.maintenance_mode("the current release did not start again")
-        if maintenance and not self.step(
-            "resume", tool.cli(self.current, "deploy-maintenance-end")
-        ):
+        if not self.step("resume", tool.cli(self.current, "deploy-maintenance-end")):
             return self.maintenance_mode("the tasks could not be resumed")
         self.state.update(in_progress=None)
         self.state.log("update", "aborted", "ok")

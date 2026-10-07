@@ -104,6 +104,9 @@ class World:
             module, args = argv[argv.index("-m") + 1], argv[argv.index("-m") + 2 :]
             name = "alembic" if module == "alembic" else args[0]
             self.calls.append(f"{version}:{name}")
+            if name == "deploy-maintenance-begin" and "begin:after-row" in self.fail:
+                self.maintenance = True  # the row committed, holding failed
+                return Result(3, "", "")
             if name in self.fail:
                 return Result(3, "", "")
             return self.backend(version, name, args)
@@ -445,6 +448,17 @@ class UpdateTest(ReleaseToolTestCase):
         self.assertEqual(self.current(), "r2")
         self.assertTrue(self.world.maintenance)
         self.assertEqual(self.world.calls[-1], "notify")
+
+    def test_a_begin_that_failed_after_its_row_ends_the_maintenance(self):
+        # Codex review #204 (ad3c59c): the row may be committed although the
+        # command failed (holding a task, the audit row): the queue stays gated.
+        self.installed()
+        self.world.fail.add("begin:after-row")
+        code, out = self.run_tool("update", "r2")
+        self.assertEqual(code, paw_release.EXIT_ABORTED, out)
+        self.assertFalse(self.world.maintenance)
+        self.assertEqual(self.world.calls[-1], "r1:deploy-maintenance-end")
+        self.assertIsNone(self.state()["in_progress"])
 
     def test_a_drain_timeout_aborts_unless_stop_now(self):
         self.installed()
