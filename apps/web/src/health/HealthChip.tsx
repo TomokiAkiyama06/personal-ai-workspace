@@ -39,23 +39,25 @@ function useChipState(admin: boolean): State {
     setState({ kind: "none" });
     if (!source) return;
     let cancelled = false;
-    // One read at a time, so an older answer never replaces a newer one.
-    let reading = false;
+    // The latest answer wins: an older answer arriving late is dropped, and one
+    // that never comes does not hold up the next reads.
+    let requested = 0;
+    let shown = 0;
     const read = () => {
-      if (reading) return;
       if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
-      reading = true;
-      const request: Promise<State> = admin
+      requested += 1;
+      const request = requested;
+      const answer: Promise<State> = admin
         ? source.report().then((report) => ({ kind: "admin", report }))
         : source.summary().then((summary) => ({ kind: "user", summary }));
-      request.then(
+      answer.then(
         (next) => {
-          reading = false;
-          if (!cancelled) setState(next);
+          if (cancelled || request < shown) return;
+          shown = request;
+          setState(next);
         },
         () => {
           // Only a hint: the last state stays (or nothing is shown).
-          reading = false;
         },
       );
     };

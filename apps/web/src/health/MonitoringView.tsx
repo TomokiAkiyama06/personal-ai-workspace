@@ -657,7 +657,10 @@ function componentLines(t: Translate, health: ComponentHealth): string[] {
     case "recovery_backup":
     case "memory_projection":
     case "audit_retention": {
+      // Only times the check returned: a failed check returns none, and a missing
+      // time is not "never" (null, sent by the Backend, is) (Codex P2, PR #203).
       if (health.status === "never_ran") break;
+      if (!("last_run_seconds_ago" in m && "last_success_seconds_ago" in m)) break;
       lines.push(
         t("health.metric.job", {
           run: agoText(t, n("last_run_seconds_ago")),
@@ -801,16 +804,18 @@ export function MonitoringView() {
     }
     void attempt;
     let cancelled = false;
-    // One read at a time: a slow answer must never land after (and over) a
-    // newer one (Codex P2, PR #203). A read still pending skips the tick.
-    let reading = false;
+    // The latest answer wins: an answer to an older request that arrives after a
+    // newer one was shown is dropped, and a request that never answers does not
+    // hold up the next ones (Codex P2, PR #203).
+    let requested = 0;
+    let shown = 0;
     const read = () => {
-      if (reading) return;
-      reading = true;
+      requested += 1;
+      const request = requested;
       source.report().then(
         (report) => {
-          reading = false;
-          if (cancelled) return;
+          if (cancelled || request < shown) return;
+          shown = request;
           setLoad({ status: "ready", report });
           setReceivedAt(new Date().toISOString());
           setReceivedOk(true);
@@ -821,8 +826,7 @@ export function MonitoringView() {
           }
         },
         (error: unknown) => {
-          reading = false;
-          if (cancelled) return;
+          if (cancelled || request < shown) return;
           setFailures((value) => value + 1);
           setReceivedOk(false);
           // A failed refresh keeps the last report on screen (受信 says it is stale).
@@ -845,22 +849,25 @@ export function MonitoringView() {
   useEffect(() => {
     if (!source) return;
     let cancelled = false;
-    // One history read at a time, like the report (an older answer never lands last).
-    let reading = false;
+    // The latest answer wins, like the report.
+    let requested = 0;
+    let chartShown = 0;
+    let eventsShown = 0;
     const read = () => {
-      if (reading) return;
-      reading = true;
+      requested += 1;
+      const request = requested;
       const until = new Date();
       const since = new Date(until.getTime() - RANGE_SECONDS[range] * 1000);
       const step = chartStepSeconds(range);
-      const chartRead = Promise.all([
+      Promise.all([
         source.series(CHART_METRICS.gpu, since, until, step),
         source.series(CHART_METRICS.used, since, until, step),
         source.series(CHART_METRICS.reserved, since, until, step),
         source.series(CHART_METRICS.total, since, until, step),
       ]).then(
         ([gpu, used, reserved, total]) => {
-          if (!cancelled) {
+          if (!cancelled && request >= chartShown) {
+            chartShown = request;
             setChart({
               status: "ready",
               value: percentPoints({ gpu, used, reserved, total }, step),
@@ -868,22 +875,21 @@ export function MonitoringView() {
           }
         },
         () => {
-          if (!cancelled)
+          if (!cancelled && request >= chartShown)
             setChart((previous) => (previous.status === "ready" ? previous : { status: "error" }));
         },
       );
-      const eventsRead = source.events(since).then(
+      source.events(since).then(
         (value) => {
-          if (!cancelled) setEvents({ status: "ready", value });
+          if (cancelled || request < eventsShown) return;
+          eventsShown = request;
+          setEvents({ status: "ready", value });
         },
         () => {
-          if (!cancelled)
+          if (!cancelled && request >= eventsShown)
             setEvents((previous) => (previous.status === "ready" ? previous : { status: "error" }));
         },
       );
-      void Promise.all([chartRead, eventsRead]).then(() => {
-        reading = false;
-      });
     };
     setChart({ status: "loading" });
     setEvents({ status: "loading" });

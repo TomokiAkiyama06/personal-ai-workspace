@@ -254,18 +254,48 @@ describe("サーバー監視", () => {
     expect(within(detail).queryByText(/待ち 0/)).not.toBeInTheDocument();
   });
 
-  it("never lets an older answer replace a newer one: one read at a time (Codex P2)", async () => {
+  it("never lets an older answer replace a newer one, nor waits on a hung one (Codex P2)", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     const pending: ((report: HealthReport) => void)[] = [];
     const report = vi.fn(() => new Promise<HealthReport>((resolve) => pending.push(resolve)));
     renderMonitoring(fakeHealthSource(normalReport(), { report }));
-    await waitFor(() => expect(pending.length).toBeGreaterThan(0));
-    const before = report.mock.calls.length;
+    await waitFor(() => expect(pending.length).toBe(2)); // the page and the header chip
+    // The first reads never answer; the next tick still reads.
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(REFRESH_SECONDS * 1000 * 2);
+      await vi.advanceTimersByTimeAsync(REFRESH_SECONDS * 1000);
     });
-    // The page's read is still pending: no second one started behind it.
-    expect(report.mock.calls.length).toBe(before);
+    expect(pending).toHaveLength(3);
+    await act(async () => pending[2]?.(abnormalReport()));
+    expect(await screen.findByText("Backup: 続けて失敗しています")).toBeVisible();
+    // The older reads answer late with a normal report: the newer state stays.
+    await act(async () => {
+      pending[0]?.(normalReport());
+      pending[1]?.(normalReport());
+    });
+    expect(screen.getByText("Backup: 続けて失敗しています")).toBeVisible();
+    expect(screen.queryByText("すべて正常です")).not.toBeInTheDocument();
+  });
+
+  it("does not word unread job times as never recorded (Codex P2)", async () => {
+    const report = normalReport();
+    report.severity = "warning";
+    report.components = report.components.map((entry) =>
+      entry.component === "recovery_backup"
+        ? {
+            ...entry,
+            severity: "warning",
+            status: "check_failed",
+            reasons: ["check_error"],
+            metrics: {},
+          }
+        : entry,
+    );
+    renderMonitoring(fakeHealthSource(report));
+    const detail = await screen.findByRole("region", { name: "Recovery Repository" });
+    expect(within(detail).getAllByText("確認に失敗しました").length).toBeGreaterThan(0);
+    expect(within(detail).queryByText(/最後の実行/)).not.toBeInTheDocument();
+    // A job that ran reports both times; one never succeeded says so.
+    expect(within(detail).getByRole("button", { name: "Memory Projection の詳細" })).toBeVisible();
   });
 
   it("is not shown to a Member", async () => {
