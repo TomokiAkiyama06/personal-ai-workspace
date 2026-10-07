@@ -5,7 +5,7 @@ confirmation is a person's change of their own memory, written with the same
 transaction, lock, authorization and history rules (Decision 0034), plus what the
 requirements give only to this flow (Decision 0018: "範囲を広げるのは確認 Flow
 (PAW-044) が新しい Version で行う"). The choices the requirements leave open are
-proposed in Decision 0081 (Proposed); ``rules.py`` holds the pure ones.
+decided in Decision 0081; ``rules.py`` holds the pure ones.
 
 Candidates (``candidates``)
 ---------------------------

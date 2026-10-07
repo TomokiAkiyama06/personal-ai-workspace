@@ -3,7 +3,7 @@
 No database. The service (``service.py``) reads the owner's own journal and memory
 rows and asks these functions what they mean; keeping them apart lets
 ``tests/test_preference_rules.py`` try every branch with plain values, and lets a
-reviewer read the policy in one place (Decision 0081, Proposed).
+reviewer read the policy in one place (Decision 0081).
 
 The flow (REQUIREMENTS.md "Inferred Preference / Confirmation Flow",
 docs/MEMORY_ARCHITECTURE.md section 9)::

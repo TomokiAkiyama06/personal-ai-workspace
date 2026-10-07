@@ -1,4 +1,4 @@
-"""Inferred Preference / Confirmation Flow (PAW-044, Decision 0081 Proposed).
+"""Inferred Preference / Confirmation Flow (PAW-044, Decision 0081).
 
 Observation -> Candidate -> Confirmation -> Confirmed (REQUIREMENTS.md "Inferred
 Preference / Confirmation Flow", docs/MEMORY_ARCHITECTURE.md section 9):

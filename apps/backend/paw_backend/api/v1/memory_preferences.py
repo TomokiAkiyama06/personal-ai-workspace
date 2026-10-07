@@ -2,7 +2,7 @@
 
 ``/api/v1/memory/preferences/*``. The service is
 ``paw_backend.memory.preferences.PreferenceConfirmationService``; this module only
-translates. Decision 0081 (Proposed) records the choices.
+translates. Decision 0081 records the choices.
 
 * ``GET /candidates``: the person's candidates with their evidence, the recommended
   scope, the buttons and ``ready`` (ask now).

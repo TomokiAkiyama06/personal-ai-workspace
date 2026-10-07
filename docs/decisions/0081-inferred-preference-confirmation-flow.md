@@ -1,6 +1,7 @@
 # Inferred Preference の確認 Flow の方針（観測と候補の置き場所、根拠の計り方、いつ聞くか、推奨 Scope、確認・保存しないの書き方、Repo への確定の権限、高リスクの扱い、自由入力の構造化）
 
-- Status: Proposed
+- Status: Approved
+- Approval: 2026-10-08、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで直接回答して承認（すべての判断点を推奨どおり承認。末尾の「承認時の決定」）
 - Date: 2026-10-07
 - Scope: Issue [#38](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/38)（PAW-044: Inferred Preference Confirmation Flow）の Backend と API。`apps/backend/paw_backend/memory/preferences/`、`api/v1/memory_preferences.py`（`/api/v1/memory/preferences/*`）、Migration `0192`
 - Supersedes: なし。[Decision 0018](0018-memory-journal-consolidation-policy.md)（Journal）・[0034](0034-memory-versioning-freshness.md)（Versioning）・[0045](0045-memory-edit-sources.md)（出典）・[0068](0068-memory-http-api.md)（Memory の HTTP API）（いずれも Approved）を変えない
@@ -154,3 +155,7 @@ Project Group の実体はまだない（`memory_versions` の `project_group` �
 11. 自由入力を、モデルの Interpreter（Port、未配線）と規則の Interpreter の Fallback で構造にし、プレビューを人が直して確定でき、Backend が検証と Risk を計り直すこと（11）。推奨: 承認（モデルの本番の配線は後続の Issue）。
 12. `project_group` を本人の Memory に条件を書いて保存すること（12）。推奨: 承認。
 13. UI を作らず、必要な画面を後続の Issue にすること（13）。推奨: 承認。
+
+## 承認時の決定（2026-10-08）
+
+Human は、作業 Session で判断が必要な点について推奨つきの説明を受け、直接回答して承認した（すべての判断点を推奨どおり承認）。

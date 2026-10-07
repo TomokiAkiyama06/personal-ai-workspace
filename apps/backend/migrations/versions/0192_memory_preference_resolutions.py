@@ -1,5 +1,5 @@
 """The answers to held Inferred Preference candidates (issue #38, PAW-044;
-Decision 0081, Proposed).
+Decision 0081).
 
 Revision ID: 0192
 Revises: 0188
