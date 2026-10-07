@@ -3,7 +3,7 @@
 - Status: Proposed
 - Date: 2026-10-08
 - Scope: Issue [#208](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/208)。この Decision は設計だけで、実装は承認の後に下の 11 の段階ごとの PR で行う。関係する既存の口: `apps/backend/paw_backend/orchestrator/runtime.py`（`AgentRuntime`・`NodeAssignment`・`NodeOutcome`・`NodeTools`・`NodeBudget`・`NodePlacement`）、`compute/runtimes.py`（`HybridRuntime`）、`compute/wiring.py`（`LocalRuntime`）、`orchestrator/composition.py`（`local_runtimes`・`agent_runtimes`）、`orchestrator/errors.py`（`RUNTIME_ERROR_CLASSES`・`AGENT_OUT_OF_MEMORY`）、`connections/`（`ConnectionAdapter`・`ConnectionService.execute`）、`tools/`（Tool Broker・`ToolRunner`・Registry）、`apps/backend/deploy/systemd/paw-llm-main.service`
-- Supersedes: なし。[Decision 0021](0021-dag-orchestrator-policy.md)（Runtime の Protocol・Error Class・Node の Timeout）、[Decision 0016](0016-shared-connection-adapter-policy.md)（共有 Connection・Credential・Quota）、[Decision 0006](0006-tool-broker-policy.md)（Tool Broker）、[Decision 0047](0047-task-execution-composition-and-task-end-effects.md) の 5（本番の Runtime はまだない）、[Decision 0048](0048-node-placement-audit.md)（Placement の記録）、[Decision 0058](0058-compute-scheduler-application-wiring.md) の 7（`local_runtimes`）、[Decision 0071](0071-agent-oom-and-escalation-records.md)（`AgentOutOfMemory`）、[Decision 0074](0074-seed-v2-and-qwen-27b-comparison.md)（Main は Qwen3.8-27B-FP8）は書き換えず、その中で Runtime を作る。Budget / 使用量の記録は Proposed の Decision 0077（PR #207）を前提にし、Reasoning の履歴の方針そのものは #200 の Decision（0076 を予約済み）に委ねる
+- Supersedes: なし。[Decision 0021](0021-dag-orchestrator-policy.md)（Runtime の Protocol・Error Class・Node の Timeout）、[Decision 0016](0016-shared-connection-adapter-policy.md)（共有 Connection・Credential・Quota）、[Decision 0006](0006-tool-broker-policy.md)（Tool Broker）、[Decision 0047](0047-task-execution-composition-and-task-end-effects.md) の 5（本番の Runtime はまだない）、[Decision 0036](0036-parallel-worktree-integration.md) の 7（Worker が Commit し、Backend は自動で Commit しない）、[Decision 0037](0037-gpu-compute-scheduler.md) の 14（`CloudPolicy` がなければ Cloud に送らない）、[Decision 0046](0046-tool-call-lease-fencing.md)（Tool 呼び出しの Fencing）、[Decision 0048](0048-node-placement-audit.md)（Placement の記録）、[Decision 0058](0058-compute-scheduler-application-wiring.md) の 7（`local_runtimes`）、[Decision 0071](0071-agent-oom-and-escalation-records.md)（`AgentOutOfMemory`）、[Decision 0074](0074-seed-v2-and-qwen-27b-comparison.md)（Main は Qwen3.8-27B-FP8）は書き換えず、その中で Runtime を作る。Budget / 使用量の記録は Proposed の Decision 0077（PR #207）を前提にし、Reasoning の履歴の方針そのものは #200 の Decision（0076 を予約済み）に委ねる
 
 ## 背景
 
@@ -34,7 +34,7 @@ Orchestrator（PAW-034）は Node の 1 回の試行を `AgentRuntime.run_node(N
 
 - **推奨:** 新しい Package `paw_backend/agents/` に、`AgentRuntime` を満たす 3 つの Runtime と、それらが共有する部品を置く。
   - `LocalAgentRuntime`: Local の Main Model（vLLM の OpenAI 互換 API）で Tool loop を回す。組み立ては今の `local_runtimes`（`LocalRuntime(runtime=..., deployment="main", local_model=...)`）に渡し、`HybridRuntime` が包む（Lease・GPU 時間・Placement は `HybridRuntime` の仕事のまま。Adapter は GPU 時間を報告しない）。
-  - `CodexCliRuntime` / `ClaudeCliRuntime`: CLI を 1 回の Node の試行として動かす。Ladder の上の段（`agent_runtimes` に Label で渡す）と、`HybridRuntime` の `cloud`（Local が混んでいるときの振り替え）の両方で使える。どちらで呼ばれても、Cloud に送る前に `placement.record(CLOUD, agent="codex" | "claude", model=...)` が済んでいること（Decision 0048）。`placement` のない呼び出し（Planner）では Cloud に送らず `COMPUTE_UNAVAILABLE` 相当で失敗にする（`HybridRuntime` と同じ fail-closed）。Ladder から直接呼ばれる場合は Runtime 自身が `record` する。
+  - `CodexCliRuntime` / `ClaudeCliRuntime`: CLI を 1 回の Node の試行として動かす。Ladder の上の段（`agent_runtimes` に Label で渡す）と、`HybridRuntime` の `cloud`（Local が混んでいるときの振り替え）の両方で使える。**どちらの経路でも、外部へ送る前に同じ `CloudPolicy`（Task の依存・権限・Quota による外部送信の可否。Decision 0037 の 14）を確かめる。** そのため判定を共通の `CloudGate`（`CloudPolicy.allows` → `placement.record(CLOUD, agent="codex" | "claude", model=...)` の順。どちらかが通らなければ何も送らない）にまとめ、`HybridRuntime` と CLI の Runtime の両方がこれを使う。Ladder から直接呼ばれたときも CLI の Runtime 自身がこの Gate を通す（Placement と Audit だけでは外部送信の許可にならない）。`CloudPolicy` が注入されていない（今の組み立てがそう: Decision 0037 の 14）・`placement` のない呼び出し（Planner）では、Cloud に送らず `COMPUTE_UNAVAILABLE` で失敗にする（fail-closed）。つまり CLI の段が実際に動くのは、`CloudPolicy` の本番の実装が承認されて注入された後になる（その中身は後続の Decision）。
   - 共有部品: `ChatCompletionsClient`（vLLM への 1 回の呼び出し。httpx の非同期 Client。Tool なしの 1 回の呼び出しは #38 の Interpreter と Planner も使う）、`ErrorClassifier`（4）、`ReasoningHistoryPolicy`（3）、`NodeResult` の組み立て（10）。
 - CLI の 2 つは **`ConnectionService` を必ず通す**（Admission・Quota・使用量の行・Task の Budget の `TOKENS`・`Secret` の取り扱いを 1 か所に保つ）。今の `ConnectionAdapter.run(secret, AdapterRequest)` は Prompt → 文の 1 回の呼び出しなので、Worktree と Sandbox を受け取る別の口 `AgentSessionAdapter.run_session(secret, AgentSessionRequest) -> AgentSessionResult`（最終の文・入出力の Token・終了の分類）と、`ConnectionService.execute_session`（`execute` と同じ順の確認・記録。用途の Category は Node の Role から `coding` / `review`）を足す。`AdapterRequest` の型は変えない。
 - 代替: (a) CLI の Runtime が `ConnectionService` を通らず直接 CLI を起動する（Quota・使用量・Credential の規則が 2 か所に分かれるので推奨しない）。(b) Local も `ConnectionAdapter`（`ConnectionKind` に `local` を足す）として作る（共有 Connection の Admission・Quota・Reaper は Local に当てはまらない。Decision 0077 の 1 の代替 (a) と同じ理由で推奨しない）。
@@ -43,7 +43,7 @@ Orchestrator（PAW-034）は Node の 1 回の試行を `AgentRuntime.run_node(N
 
 - **推奨:** paw-bench の `coding_harness.py` のコードはそのまま使わず（Repository の外・同期の urllib と Thread・Docker を直接呼ぶ）、`LocalAgentRuntime` に asyncio で書き直す。ただし **Model から見える形は Benchmark と同じにする**（Decision 0074 の数値はその形で測ったため）。
   - 同じにするもの: System Prompt の構成（Worktree の場所の言い換えだけ変える）、Tool の名前と引数（`bash`・`str_replace`・`write_file`・`submit`）、`tool_choice: auto`、Tool の出力の切り詰め（12,000 文字、前後を残す）、Tool を呼ばない応答への催促（3 回で終わり）、Step の上限 60、1 回の応答の `max_tokens` 16,384、Prompt の上限 120,000 token、Sampling は Model の `generation_config` の既定。
-  - 変えるもの: Tool の実行は Docker を直接呼ばず、すべて `NodeTools.call` で Tool Broker を通す。そのために Broker に Tool と Executor を足す（`repo.file.str_replace` / `repo.file.write`: `write`、`repo.shell.run`: `execute`。Decision 0006 の表で範囲内は `SCOPED_AUTO`。Path は Node の Scope（Worktree）の中だけ、`.git` は編集不可）。`submit` は Broker を通らない Adapter の内部の Tool。
+  - 変えるもの: Tool の実行は Docker を直接呼ばず、すべて `NodeTools.call` で Tool Broker を通す。そのために Broker に Tool と Executor を足す（`repo.file.str_replace` / `repo.file.write`: `write`、`repo.shell.run`: `execute`。Decision 0006 の表で範囲内は `SCOPED_AUTO`。Path は Node の Scope（Worktree）の中だけ、`.git` は編集不可）。`submit` は Broker を通らない Adapter の内部の Tool。Model から見える形で Benchmark と違うのは、`submit` の引数に `changed_files`（10）を足すことだけ。
   - 壁時計の上限は Benchmark の 45 分ではなく、Orchestrator の Node の Timeout（Decision 0021 の 3、30 分）を外側の上限とし、Adapter は残り時間で HTTP の Timeout を決める。
   - 同等性は Test で固定する: 記録した会話（Fake の Server の応答列）を与え、送る Request の Message・Tool の定義・Option が Benchmark の Harness と一致することを確かめる。
 - Read-only の Role（Planner・Reviewer など、Worktree のない Node）は同じ loop で、書き込みの Tool を渡さない（`bash` も Read-only の Executor にする。7 の Sandbox の読み取り専用の Mount）。
@@ -86,9 +86,9 @@ Orchestrator（PAW-034）は Node の 1 回の試行を `AgentRuntime.run_node(N
 ### 6. Credential と Sandbox
 
 - **推奨（Local の Shell・ファイルの Tool）:** `repo.shell.run` などの Executor は、Node ごとの Container（`--network none`、CPU / Memory / PID の上限、Worktree だけを Mount、Read-only の Role は読み取り専用で Mount）の中で動かす。Container は **Task の作成者の Linux の Account で** 起動する（Worktree はその Account の持ち物: Decision 0017 / 0029）。経路は Decision 0029 の SSH の Wrapper を広げ、許す操作を「決まった Image の Sandbox の起動・その中での実行・停止」に限る（Rootless の Podman を想定。実装の PR で確かめる）。Backend の User が Docker を直接呼ぶ形（Benchmark の形）は、Docker の Group が Host の root と同じ権限なので採らない。
-- **推奨（CLI）:** CLI は同じ形の Container の中で動かす。違いは Network で、Provider の Endpoint だけに出られる（Egress の Proxy の Allowlist）。Subscription の認証情報は Secret Store にあり、呼び出しの間だけ Container の中の tmpfs（`CODEX_HOME` / `CLAUDE_CONFIG_DIR` に当たる場所、Mode 0700）に書き、終わったら消す。CLI が更新した Token（OAuth の Refresh）は、終わったときに Secret Store の Handle に書き戻す（`ConnectionService` の Credential の置き換えの内部の経路。Audit は `connection.replace` と同じ Event）。認証情報は Log・DB・Error・`NodeResult`・Tool の出力に出さず、CLI の出力は Decision 0016 の 1 の Redact を通してから使う。Git の Push の Credential は Container に渡さない（Push は Integration の後に Backend が行う: Decision 0052）。
-- **推奨（CLI 自身の Tool）:** 最初の実装では、CLI の組み込みの Tool（Shell・編集）を **Container の中に限って** 使わせ、Broker の 1 回の呼び出し `agent.cli.run`（`execute` + `network` + `credential-use`、範囲内なら `SCOPED_AUTO`）で Run の開始を記録する。CLI の個々の Tool 呼び出しは Broker を通らないが、触れられるのは専用の Worktree（専用の Branch）と Provider の Endpoint だけで、Push・他の Repository・他の Host には届かない。後続で、CLI の組み込みの Tool を止めて PAW の Tool を MCP で渡し、1 つずつ Broker を通す形（Claude Code の Tool の制限と MCP の設定、Codex の MCP の設定。Flag は実装時に確認）を検討する。
-- 代替: (a) Sandbox なしで Backend の Process から直接実行する（Path の外への書き込み・Network を止められないので推奨しない）。(b) 最初から MCP の形にする（CLI の組み込みの Tool を確実に止められるかが CLI ごと・版ごとに違い、確かめるまで品質が読めない）。(c) Benchmark と同じく Backend の User が Docker を呼ぶ（上の理由で推奨しない）。
+- **推奨（CLI）:** CLI の組み込みの Tool（Shell・編集・読み取り）は **最初の実装から止め**、CLI が使える Tool は PAW の Tool だけにする。PAW の Tool は MCP の Server（Backend 側の Bridge）として CLI に渡し、1 回の呼び出しごとに `NodeTools.call` で Tool Broker を通す（Grant・ACL・承認・Budget・Queue の Lease の Fencing: Decision 0006 / 0046 / 0057 をそのまま適用する）。Tool の実行は Local と同じ Sandbox の Container（Worktree だけを Mount、Network なし、認証情報なし）で行う。CLI の Process 自身は **別の** Container で動かす: Worktree を Mount せず、Network は Provider の Endpoint と MCP の Bridge だけ（Egress の Allowlist）。こうすると Model が選んだ操作はすべて Credential の見えない Tool の Container で動き、CLI の認証情報は Model が触れる Filesystem の外にある。組み込みの Tool を確実に止められること（Claude Code の Tool の制限と MCP の設定、Codex の MCP の設定と組み込みの Shell の無効化。Flag は実装時に公式の情報で確かめる）を CLI の版ごとに Test で確かめ、**止められない CLI・版は有効にしない**（fail-closed）。Subscription の認証情報は Secret Store にあり、呼び出しの間だけ CLI の Container の tmpfs（`CODEX_HOME` / `CLAUDE_CONFIG_DIR` に当たる場所、Mode 0700）に書き、終わったら消す。CLI が更新した Token（OAuth の Refresh）は、終わったときに Secret Store の Handle に書き戻す（`ConnectionService` の Credential の置き換えの内部の経路。Audit は `connection.replace` と同じ Event）。認証情報は Log・DB・Error・`NodeResult`・Tool の出力に出さず、CLI の出力は Decision 0016 の 1 の Redact を通してから使う。Git の Push の Credential はどの Container にも渡さない（Push は Integration の後に Backend が行う: Decision 0052）。CLI が Provider への通信を外部の Proxy で認証できる（認証情報を Proxy が付ける）なら、tmpfs に置く代わりにその形を採る（CLI の Container にも認証情報を置かずに済む）。実装の PR で CLI ごとに確かめる。
+- Run の開始は Broker の 1 回の呼び出しとしても記録しない（Run 全体を 1 つの Tool 呼び出しとして許す形は、Decision 0006 の 1 回ごとの判定を飛ばすので採らない）。外部送信の記録は 1 の `CloudGate` の Placement と Audit（Decision 0048）が担う。
+- 代替: (a) Sandbox なしで Backend の Process から直接実行する（Path の外への書き込み・Network を止められないので推奨しない）。(b) CLI の組み込みの Tool を Container の中で使わせ、Run の開始だけを Broker に記録する（個々の操作が Broker の承認・ACL・Budget・Fencing を通らず、Decision 0006 / 0046 に反する。同じ Container の Shell から認証情報の File が読めるので、Mode 0700 では守れない。推奨しない）。(c) Benchmark と同じく Backend の User が Docker を呼ぶ（Docker の Group は Host の root と同じ権限なので推奨しない）。
 
 ### 7. 承認が要る Tool 呼び出し
 
@@ -110,15 +110,15 @@ Orchestrator（PAW-034）は Node の 1 回の試行を `AgentRuntime.run_node(N
 
 - **推奨:**
   - CI では GPU・Network・本物の CLI を使わない。Local は httpx の `MockTransport` の Fake の OpenAI 互換 Server（記録した応答列、Tool 呼び出し・Reasoning・`usage`・Error の本文を返す）で、CLI は Fake の CLI（決まった JSON を出す Script。終了 Code・Signal・遅延・Token の Refresh を真似る）で Test する。Sandbox は Fake の Runner で、実際の Container を使う Test は手動の Smoke に回す。
-  - 固定するもの: 2 の Request の同等性、3 の方針の適用、4 の対応表の各行、5 の報告（二重にならない）、6 の Credential が Log・Error・`repr`・結果に出ないこと（Secret の形の文字列は分割して書く）、7 の承認の扱い、8 の取り消しで Process と Container が残らないこと、`NodeStopped` がそのまま上がること。
+  - 固定するもの: 2 の Request の同等性、3 の方針の適用、4 の対応表の各行、5 の報告（二重にならない）、6 の Credential が Log・Error・`repr`・結果に出ないこと（Secret の形の文字列は分割して書く）と CLI の組み込みの Tool が止まっていること（Fake の CLI が組み込みの Tool を使おうとしたら失敗にする）、7 の承認の扱い、8 の取り消しで Process と Container が残らないこと、`NodeStopped` がそのまま上がること。
   - **GPU を使う Smoke Test は、#180 の Run が終わった後に、Human の許可を得てから** 行う。内容: 本番の `paw-llm-main.service`（12 の Flag を足したもの）で paw-seed-v1 の数 Task を `LocalAgentRuntime` に解かせ、Benchmark の Harness と Tool 呼び出しの形・Step 数が大きく違わないことを見る。CLI の Smoke は、Subscription の利用規約（Decision 0016 の前提）と使用量への影響を Human が確認した後。
 - 代替: 本物の vLLM を CI で動かす（GPU が要り、#180 と共有の Machine で負荷が大きい）。
 
 ### 10. `NodeResult` の作り方と Commit
 
-- **推奨:** Model の `submit` の引数は `summary`（必須）と、任意の `discovered_facts`・`unresolved_questions`・`confidence` だけにする。`changed_files` と `commit` は Adapter が Worktree から作る: `submit` の後、Adapter が Broker の Git の Tool（`repo.git.commit`、決まった Commit Message と Author）で Commit し、変更の一覧と Commit の SHA を `NodeResult` に入れる。Model には Benchmark と同じく「Commit しない」と指示する（Model に Git の操作をさせない）。`test_result` は Model の申告を使わない（Evaluator の仕事。AGENTS.md の「Agent 自身の完了を成功判定に使わない」）。
+- **推奨:** Commit するのは Worker の Node（Runtime）で、Backend の自動 Commit ではない（Decision 0036 の 7 を変えない）。Model の `submit` の引数は `summary`（必須）・`changed_files`（必須。変えた File の一覧）と、任意の `discovered_facts`・`unresolved_questions`・`confidence`。Adapter は `submit` を受けたら、Worktree の `git status`（Broker の Read-only の Git の Tool）と `changed_files` を突き合わせる。一致しない（申告にない変更・未追跡の File がある、申告した File に変更がない、Scope の外や `.git` を指す）ときは `submit` を受け付けず、その差を Model に返して直させる（3 回まで。それでも合わなければ `InvalidNodeResultError` で失敗）。一致したら、**申告した Path だけ** を指定して Broker の Git の Tool（`repo.git.commit`、決まった Commit Message と Author）で Commit し、Commit の SHA を `NodeResult.commit` に入れる。Commit の後に未 Commit の変更が残ることはない（残れば Decision 0036 の 7 のとおり統合の前に `dirty` で止まり、Backend は自動で Commit も破棄もしない）。Model には Benchmark と同じく「Commit しない」と指示する（Model に Git の操作をさせない）。`test_result` は Model の申告を使わない（Evaluator の仕事。AGENTS.md の「Agent 自身の完了を成功判定に使わない」）。
 - Planner は `submit` の引数に Plan の JSON を入れ、`NodeOutcome.succeeded(result, plan=...)` で返す。
-- 代替: Model に Commit させる（Message・Author・`.git` の扱いが Model 任せになる）。
+- 代替: (a) Model に Commit させる（Message・Author・`.git` の扱いが Model 任せになる）。(b) `submit` の後に Worktree の変更をすべて Commit する（申告にない生成物・一時 File を含みうる。Decision 0036 の 7 が退けた形なので推奨しない）。
 
 ### 11. PR の分け方（段階）
 
@@ -126,7 +126,7 @@ Orchestrator（PAW-034）は Node の 1 回の試行を `AgentRuntime.run_node(N
   1. `agents/` の共有部品: `ChatCompletionsClient`・`ErrorClassifier`（4）・`ReasoningHistoryPolicy`（3、既定は残す）と、#38 の Model の Interpreter の本番の配線（Tool なしの 1 回の呼び出し）。GPU なしの Test のみ。
   2. Tool Broker のファイル・Shell・Git の Tool と Executor、Sandbox の Runner（6。SSH の Wrapper の拡張を含む）。
   3. `LocalAgentRuntime`（2・5・7・8・10）、`local_runtimes` への配線、`paw-llm-main.service` に `--reasoning-parser qwen3 --enable-auto-tool-choice --tool-call-parser qwen3_coder` を足す（Deploy の変更は Human が反映する）。ここで Orchestrator の Worker（`Orchestrator.serve`）を起動するかどうかは、Decision 0047 の 5 のとおりこの段階の PR で提案する。
-  4. `AgentSessionAdapter` と `ConnectionService.execute_session`、`CodexCliRuntime` / `ClaudeCliRuntime`（1・6）。
+  4. `CloudGate`、`AgentSessionAdapter` と `ConnectionService.execute_session`、PAW の Tool の MCP の Bridge、`CodexCliRuntime` / `ClaudeCliRuntime`（1・6）。
   5. Human の許可を得た GPU の Smoke と、その記録（9）。
 - 代替: 1 つの大きな PR にする（Review と Revert が難しく、#180 との GPU の調整も分けられない）。
 
@@ -137,23 +137,23 @@ Orchestrator（PAW-034）は Node の 1 回の試行を `AgentRuntime.run_node(N
 
 ## 決めてほしいこと
 
-1. **3 つの Runtime を新しい `paw_backend/agents/` に置き、Local は `local_runtimes` で `HybridRuntime` に包み、CLI の 2 つは Ladder の段と `HybridRuntime` の `cloud` の両方で使う。CLI は必ず `ConnectionService` を通し、そのために Worktree を受け取る `AgentSessionAdapter` と `execute_session` を足す（`AdapterRequest` は変えない）**（1）でよいか。推奨: はい。
+1. **3 つの Runtime を新しい `paw_backend/agents/` に置き、Local は `local_runtimes` で `HybridRuntime` に包み、CLI の 2 つは Ladder の段と `HybridRuntime` の `cloud` の両方で使う。どちらの経路でも共通の `CloudGate`（`CloudPolicy` → Placement の記録）を通し、`CloudPolicy` がなければ Cloud に送らない。CLI は必ず `ConnectionService` を通し、そのために Worktree を受け取る `AgentSessionAdapter` と `execute_session` を足す（`AdapterRequest` は変えない）**（1）でよいか。推奨: はい。
 2. **Local の Tool loop は Benchmark の Harness のコードではなく振る舞いを asyncio で移し（Prompt・4 つの Tool・切り詰め・催促・60 Step・16,384 / 120,000 token は同じ）、Tool の実行はすべて Tool Broker に足すファイル・Shell の Tool を通す。外側の時間の上限は Node の Timeout（30 分）**（2）でよいか。推奨: はい。
 3. **Reasoning の履歴は `ReasoningHistoryPolicy` の差し込み口だけを作り、既定は Benchmark と同じ「残す」。方針の選択は #200 の Decision（0076）に委ねる。Reasoning は保存・Log しない**（3）でよいか。推奨: はい。
 4. **失敗の分類は 4 の表のとおり（CUDA OOM・OOM Killer・Sandbox の cgroup の OOM は `AgentOutOfMemory`、Context・Step の上限は `RuntimeError` で再試行しない など）**（4）でよいか。推奨: はい。
 5. **Local は応答ごとに `prompt_tokens + completion_tokens` をその場で `TOKENS` として報告し（Prefix Cache は引かない）、GPU 時間は `HybridRuntime` に任せる。CLI の Token は `ConnectionService` だけが計上し、Runtime は二重に報告しない**（5）でよいか。推奨: はい。
-6. **Shell・ファイルの Tool と CLI は、Task の作成者の Linux の Account で起動する Node ごとの Container（Worktree だけを Mount。Local は Network なし、CLI は Provider の Endpoint だけ）で動かし、経路は Decision 0029 の SSH の Wrapper を広げる。CLI の認証情報は呼び出しの間だけ tmpfs に置き、Refresh された Token は Secret Store に書き戻す。CLI の組み込みの Tool は最初は Container の中に限って使わせ、Run の開始を Broker の `agent.cli.run` で記録する（MCP で 1 つずつ Broker を通す形は後続）**（6）でよいか。推奨: はい。
+6. **Shell・ファイルの Tool は、Task の作成者の Linux の Account で起動する Node ごとの Container（Worktree だけを Mount、Network なし、認証情報なし）で動かし、経路は Decision 0029 の SSH の Wrapper を広げる。CLI は組み込みの Tool を最初から止め、PAW の Tool だけを MCP の Bridge で渡して 1 回ずつ Tool Broker を通す（止められない CLI・版は有効にしない）。CLI の Process は Worktree のない別の Container（Provider と Bridge だけに出られる）で動かし、認証情報は呼び出しの間だけその tmpfs に置く（Proxy で付けられるならその形）。Refresh された Token は Secret Store に書き戻す**（6）でよいか。推奨: はい。
 7. **承認が要る呼び出しは待たずに「実行していない」と Model に返し、残った承認は `unresolved_questions` に Tool 名と承認の ID だけで載せる。試行をまたいで承認を待って再開する仕組みは後続の Decision**（7）でよいか。推奨: はい。
 8. **Adapter の上限（HTTP は残り時間と 15 分の小さい方、Tool は 300 秒、CLI は Node の Timeout）と、取り消しで SIGTERM → 5 秒で SIGKILL → Container の停止（`HybridRuntime` の 10 秒の待ちより短く）**（8）でよいか。推奨: はい（数値は暫定）。
 9. **CI は Fake の Server・Fake の CLI・Fake の Sandbox だけで Test し、GPU の Smoke は #180 の Run の後に Human の許可を得てから、CLI の Smoke は利用規約と使用量への影響を Human が確認した後に行う**（9）でよいか。推奨: はい。
-10. **Model の `submit` は `summary` などだけを返し、`changed_files` と `commit` は Adapter が Broker の Git の Tool で Commit して作る。`test_result` は Model の申告を使わない**（10）でよいか。推奨: はい。
+10. **Commit は Worker の Node（Runtime）が行い、Backend の自動 Commit にはしない（Decision 0036 の 7 のまま）。Model は `submit` で `changed_files` を申告し、Adapter は `git status` と突き合わせて一致したときだけ申告した Path を Broker の Git の Tool で Commit する（合わなければ Model に直させ、3 回で失敗）。`test_result` は Model の申告を使わない**（10）でよいか。推奨: はい。
 11. **11 の 5 段階で PR を分ける（共有部品と #38 の Interpreter → Broker の Tool と Sandbox → Local の Runtime と Server の設定 → CLI の Runtime → GPU の Smoke）**（11）でよいか。推奨: はい。
 12. **本番の `paw-llm-main.service` に `--reasoning-parser qwen3 --enable-auto-tool-choice --tool-call-parser qwen3_coder` を足し、Context の大きさは #200 に委ねる**（12）でよいか。推奨: はい。
 
 ## リスク
 
 - Benchmark と Model から見える形を同じにしても、Tool の実行の経路（Broker・Sandbox の違い、承認で実行されない呼び出し）が違うので、本番の解ける割合は Benchmark の数値と同じとは限らない。9 の Smoke で大きな差がないことを見る。
-- CLI の組み込みの Tool を Container の中で使わせる間は、個々の Tool 呼び出しが Broker の Audit に残らない（Run の開始だけが残る）。Worktree の差分は Integration と Review で見る。
+- CLI の組み込みの Tool を止めて MCP の Tool だけで動かすと、CLI 本来の Tool を使う場合より解ける割合が下がるかもしれない。CLI の Smoke で確かめ、下がる場合も Broker を通らない形には戻さず、Tool の形を見直す。
 - CLI の認証の形（OAuth の File の場所・Refresh の仕方）と Option は CLI の版で変わりうる。実装の PR でその時点の公式の情報を確かめ、Fake の CLI の Test を合わせる。
 - Rootless の Container を Task の作成者の Account で動かす準備（Image の配布・cgroup の委任）が Host ごとに要る。Deploy の手順に入れる。
 
