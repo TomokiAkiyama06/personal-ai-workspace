@@ -10,6 +10,7 @@
 // catalog). Its actions only NAVIGATE (NOTIFICATION_POLICY §6).
 import { useEffect } from "react";
 import { EVENT_STREAM_URL, notificationsApi, type StoredNotification } from "../api/notifications";
+import { componentName, reasonText, severityLabel, statusText } from "../health/text";
 import { type MessageKey, useI18n } from "../i18n";
 import { type IncomingNotification, useNotifications } from "./store";
 
@@ -20,18 +21,6 @@ export const SERVER_POLL_MS = 60_000;
 export const STREAM_RETRY_MS = 30_000;
 
 type Translate = (key: MessageKey, params?: Record<string, string | number>) => string;
-
-const HEALTH_COMPONENTS = new Set([
-  "database",
-  "compute",
-  "task_queue",
-  "memory_worker",
-  "connections",
-  "connection_reaper",
-  "recovery_backup",
-  "memory_projection",
-  "audit_retention",
-]);
 
 function text(value: unknown): string {
   return typeof value === "string" ? value : value == null ? "-" : String(value);
@@ -49,10 +38,7 @@ export function toIncoming(item: StoredNotification, t: Translate): IncomingNoti
     remote: true,
   } as const;
   if (item.kind === "system_health.component_changed") {
-    const component = text(item.params.component);
-    const name = HEALTH_COMPONENTS.has(component)
-      ? t(`notifications.health.component.${component}` as MessageKey)
-      : component;
+    const name = componentName(t, text(item.params.component));
     const reasons = Array.isArray(item.params.reasons) ? item.params.reasons : [];
     return {
       ...base,
@@ -63,12 +49,14 @@ export function toIncoming(item: StoredNotification, t: Translate): IncomingNoti
         { component: name },
       ),
       body: t("notifications.health.body", {
-        status: text(item.params.status),
-        previous: text(item.params.previous_severity),
+        status: statusText(t, text(item.params.status)),
+        previous: severityLabel(t, text(item.params.previous_severity)),
       }),
-      detail: reasons.length > 0 ? reasons.join(" · ") : undefined,
+      detail:
+        reasons.length > 0 ? reasons.map((reason) => reasonText(t, reason)).join(" · ") : undefined,
       source: t("notifications.health.source"),
-      actions: [{ label: t("notifications.health.open"), to: "/admin", primary: true }],
+      // 管理 › サーバー監視 (PAW-067) opens the details of the abnormal component.
+      actions: [{ label: t("notifications.health.open"), to: "/admin/monitoring", primary: true }],
     };
   }
   // A kind this version does not know yet: still listed, with its code.

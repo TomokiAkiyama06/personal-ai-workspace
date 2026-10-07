@@ -56,7 +56,12 @@ class ValuesTest(unittest.TestCase):
         revision = revision_module()
         self.assertEqual(revision.KINDS, tuple(kind.value for kind in IncidentKind))
         self.assertEqual(AgentIncidentRow.__tablename__, INCIDENTS_TABLE)
-        (index,) = AgentIncidentRow.__table__.indexes
+        # The index of this revision (revision 0189 adds the one of ``task_id``).
+        (index,) = (
+            index
+            for index in AgentIncidentRow.__table__.indexes
+            if [column.name for column in index.columns] == ["occurred_at"]
+        )
         self.assertEqual(revision.INDEX, index.name)
 
 

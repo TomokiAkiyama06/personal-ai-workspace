@@ -89,7 +89,10 @@ from paw_backend.connections.records import (
 )
 from paw_backend.connections.report import (
     DailyTasks,
+    EscalationTotal,
     KindTotal,
+    LocalDailyTasks,
+    LocalTotal,
     PurposeTotal,
     UsageRange,
     UsageReport,
@@ -151,16 +154,49 @@ _REPORT_FILTER = (
     " AND started_at >= %(since)s AND started_at < %(until)s"
 )
 _TOKENS_SUM = "COALESCE(sum(COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)), 0)"
+# The tasks of the period with a call of a shared connection or of a local model
+# (Decision 0077, point 5).
+_TASKS_REPORT_SQL = (
+    "SELECT count(DISTINCT task_id) FROM (SELECT task_id FROM connection_usage"
+    f" WHERE {_REPORT_FILTER} UNION ALL SELECT task_id FROM local_usage"
+    f" WHERE {_REPORT_FILTER}) AS used"
+)
+# The local calls of the period: tasks, tokens and the GPU time (the seconds of the
+# calls placed on the GPU, Decision 0077, point 3).
+_LOCAL_REPORT_SQL = (
+    "SELECT count(DISTINCT task_id), COALESCE(sum(tokens), 0),"
+    " COALESCE(sum(seconds) FILTER (WHERE placement = 'local_gpu'), 0)"
+    f" FROM local_usage WHERE {_REPORT_FILTER}"
+)
+_LOCAL_DAILY_SQL = (
+    "SELECT width_bucket(started_at, %(starts)s::timestamptz[]) AS day,"
+    f" count(DISTINCT task_id) FROM local_usage WHERE {_REPORT_FILTER} GROUP BY day"
+)
+# The escalated tasks of the period (Decision 0077, point 4): one user's are those
+# of the tasks the user created; a row without a task (written before revision
+# 0189) is one escalation, of the workspace only.
+_ESCALATIONS_REPORT_SQL = (
+    "SELECT count(DISTINCT i.task_id) + count(*) FILTER (WHERE i.task_id IS NULL)"
+    " FROM agent_incidents i LEFT JOIN tasks t ON t.id = i.task_id"
+    " WHERE i.kind = 'escalation'"
+    " AND i.occurred_at >= %(since)s AND i.occurred_at < %(until)s"
+    " AND (%(user)s::uuid IS NULL OR t.created_by = %(user)s)"
+)
 # Every user of the workspace report: the ones that are not deleted, and a deleted
 # one whose calls are in the period (the totals count them). Owner, Admins, Users,
-# then by login name.
+# then by login name. A user's tasks and tokens are those of the shared connections
+# and of the local models together (Decision 0077, point 5).
 USERS_REPORT_SQL = (
-    "SELECT u.id, u.login_name, u.system_role, u.status,"
-    " count(DISTINCT c.task_id),"
-    " COALESCE(sum(COALESCE(c.input_tokens, 0) + COALESCE(c.output_tokens, 0)), 0)"
-    " FROM users u LEFT JOIN connection_usage c ON c.user_id = u.id"
-    " AND c.started_at >= %(since)s AND c.started_at < %(until)s"
-    " WHERE u.status <> 'deleted' OR c.id IS NOT NULL"
+    "WITH used AS (SELECT user_id, task_id,"
+    " COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0) AS tokens"
+    " FROM connection_usage"
+    " WHERE started_at >= %(since)s AND started_at < %(until)s"
+    " UNION ALL SELECT user_id, task_id, tokens FROM local_usage"
+    " WHERE started_at >= %(since)s AND started_at < %(until)s)"
+    " SELECT u.id, u.login_name, u.system_role, u.status,"
+    " count(DISTINCT c.task_id), COALESCE(sum(c.tokens), 0)"
+    " FROM users u LEFT JOIN used c ON c.user_id = u.id"
+    " WHERE u.status <> 'deleted' OR c.task_id IS NOT NULL"
     " GROUP BY u.id, u.login_name, u.system_role, u.status"
     " ORDER BY CASE u.system_role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1"
     " ELSE 2 END, u.login_name"
@@ -651,20 +687,24 @@ class ConnectionStore:
                 cursor = await connection.execute(sql, params)
                 return await cursor.fetchall()
 
-            (total,) = await rows(
-                f"SELECT count(DISTINCT task_id), {_TOKENS_SUM}"
-                f" FROM connection_usage WHERE {_REPORT_FILTER}",
+            ((tasks,),) = await rows(_TASKS_REPORT_SQL, current)
+            ((tokens,),) = await rows(
+                f"SELECT {_TOKENS_SUM} FROM connection_usage WHERE {_REPORT_FILTER}",
                 current,
             )
-            (previous,) = await rows(
-                "SELECT count(DISTINCT task_id) FROM connection_usage"
-                f" WHERE {_REPORT_FILTER}",
+            ((previous,),) = await rows(
+                _TASKS_REPORT_SQL,
                 {
                     **scope,
                     "since": window.previous_start,
                     "until": window.previous_end,
                 },
             )
+            ((local_tasks, local_tokens, gpu_seconds),) = await rows(
+                _LOCAL_REPORT_SQL, current
+            )
+            local_daily = await rows(_LOCAL_DAILY_SQL, current)
+            ((escalated,),) = await rows(_ESCALATIONS_REPORT_SQL, current)
             # The day of a call: the index of the last day start at or before it
             # (``width_bucket`` over the sorted instants of the days' midnights).
             daily = await rows(
@@ -708,9 +748,9 @@ class ConnectionStore:
                 window.days,
                 window.start,
                 window.end,
-                int(total[0]),
-                int(previous[0]),
-                int(total[1]),
+                int(tasks),
+                int(previous),
+                int(tokens),
                 tuple(
                     sorted(
                         (
@@ -743,6 +783,22 @@ class ConnectionStore:
                 ),
                 quotas,
                 None if users is None else tuple(users),
+                LocalTotal(
+                    int(local_tasks),
+                    int(local_tokens),
+                    int(gpu_seconds),
+                    tuple(
+                        sorted(
+                            (
+                                LocalDailyTasks(window.days[day - 1], int(count))
+                                for day, count in local_daily
+                                if 1 <= day <= len(window.days)
+                            ),
+                            key=lambda item: item.day,
+                        )
+                    ),
+                ),
+                EscalationTotal(failed=0, loop_detected=int(escalated)),
             )
 
         # One snapshot for every statement (READ COMMITTED would give each its
