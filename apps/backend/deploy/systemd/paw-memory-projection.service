@@ -37,8 +37,8 @@ OnFailure=paw-memory-projection-failure.service
 Type=oneshot
 User=paw
 EnvironmentFile=/etc/paw/memory-projection.env
-WorkingDirectory=/opt/paw/apps/backend
-ExecStart=/opt/paw/venv/bin/python -m paw_backend.cli memory-projection-run
+WorkingDirectory=/opt/paw/current/apps/backend
+ExecStart=/opt/paw/current/venv/bin/python -m paw_backend.cli memory-projection-run
 UMask=0077
 # systemd sends SIGTERM when this is exceeded: the command waits for the file it
 # is writing, records memory.projection.failed and exits 3 (OnFailure= fires);

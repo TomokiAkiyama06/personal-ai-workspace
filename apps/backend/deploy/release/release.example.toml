@@ -1,0 +1,65 @@
+# Configuration of paw-release (apps/backend/deploy/release/paw_release.py;
+# Issue #54, Decision 0079). Copy to /etc/paw/release.toml (root-owned, 0644:
+# it holds no secret) and adjust the paths and the unit names.
+
+# releases/<version>/ and the current -> releases/<version> link.
+root = "/opt/paw"
+# state.json, history.jsonl and the lock (0700, root).
+state_dir = "/var/lib/paw/deploy"
+# The database restore points (0700; never inside the Recovery Repository).
+restore_point_dir = "/var/lib/paw/restore-points"
+# PAW_MIGRATION_DATABASE_URL, PAW_DATABASE_URL (the application role, for
+# recovery-backup-run), PAW_RECOVERY_REPOSITORY_DIR, PAW_DEPLOY_ADMIN_DATABASE_URL
+# ...: given only to the backend commands of a release. chmod 600, root.
+env_file = "/etc/paw/deploy.env"
+# The backend commands run as paw-maint (Decision 0031 6), not as root.
+backend_prefix = ["/usr/sbin/runuser", "-u", "paw-maint", "--"]
+
+min_free_gib = 10
+# Restore points hold personal data: deleted after this many days (Decision
+# 0079 5), also automatically after every update.
+restore_point_keep_days = 7
+drain_timeout_seconds = 900
+health_timeout_seconds = 300
+health_interval_seconds = 5
+# pg_dump / pg_restore of the server's major version (PostgreSQL 18).
+pg_dump = "/usr/lib/postgresql/18/bin/pg_dump"
+pg_restore = "/usr/lib/postgresql/18/bin/pg_restore"
+
+[commands]
+# Run in the new release's directory ({release}) after it is extracted.
+build = [
+  ["/usr/local/bin/uv", "venv", "--python", "3.13", "{release}/venv"],
+  ["/usr/local/bin/uv", "pip", "install", "--python", "{release}/venv/bin/python", "{release}/apps/backend"],
+  ["/usr/bin/npm", "--prefix", "{release}/apps/web", "ci", "--ignore-scripts"],
+  ["/usr/bin/npm", "--prefix", "{release}/apps/web", "run", "build"],
+]
+# Extra pre-update checks: the timers whose jobs the update relies on must be
+# enabled (Decision 0031: no audit_events partitions without its timer).
+precheck = [
+  ["/usr/bin/systemctl", "is-enabled", "--quiet", "paw-audit-retention.timer"],
+  ["/usr/bin/systemctl", "is-enabled", "--quiet", "paw-recovery-backup.timer"],
+]
+# Every database writer: the backend and the timers that write.
+stop = [
+  ["/usr/bin/systemctl", "stop", "paw-audit-retention.timer", "paw-recovery-backup.timer", "paw-memory-projection.timer", "paw-user-erasure.timer"],
+  ["/usr/bin/systemctl", "stop", "paw-backend.service"],
+]
+start = [
+  ["/usr/bin/systemctl", "start", "paw-backend.service"],
+  ["/usr/bin/systemctl", "start", "paw-audit-retention.timer", "paw-recovery-backup.timer", "paw-memory-projection.timer", "paw-user-erasure.timer"],
+]
+health = [
+  ["/usr/bin/curl", "-fsS", "--max-time", "5", "-o", "/dev/null", "http://127.0.0.1:8000/api/v1/health/ready"],
+]
+# After a restore point was restored, before anything starts: backend commands
+# (python -m paw_backend.cli ...) of the release that runs on it. The latest
+# User deletion state is applied (REQUIREMENTS "Rollback").
+post_restore = [
+  ["user-erasure-run"],
+]
+# When the system is left in maintenance. {message} is the reason.
+notify = [
+  ["/usr/bin/systemd-cat", "--identifier=paw-release", "--priority=crit", "/bin/echo", "{message}"],
+  ["/usr/bin/wall", "{message}"],
+]

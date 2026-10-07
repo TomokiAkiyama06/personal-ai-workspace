@@ -264,3 +264,23 @@ class PostgresRestorePointTest(unittest.TestCase):
                 self.points.restore(self.points.load("p1"), self.url, self.admin_url)
         self.assertEqual(caught.exception.code, "database_in_use_or_not_allowed")
         self.assertEqual(self.databases(), {self.name})
+
+    def test_a_restore_is_refused_when_a_user_was_deleted_since_the_point(self):
+        self.sql(
+            "CREATE TABLE user_status_changes (new_status text,"
+            " recorded_at timestamptz DEFAULT clock_timestamp())",
+            "INSERT INTO user_status_changes (new_status) VALUES ('deleted')",
+        )
+        point = self.points.verify(
+            self.points.create(self.url, "p1"), self.url, self.admin_url
+        )
+        # Deleted before the point: in the restored data already.
+        self.sql("INSERT INTO user_status_changes (new_status) VALUES ('active')")
+        self.points.restore(point, self.url, self.admin_url)
+        self.sql(
+            "INSERT INTO user_status_changes VALUES"
+            " ('pending_deletion', clock_timestamp())"
+        )
+        with self.assertRaises(RestorePointError) as caught:
+            self.points.restore(self.points.load("p1"), self.url, self.admin_url)
+        self.assertEqual(caught.exception.code, "users_deleted_since_the_point")

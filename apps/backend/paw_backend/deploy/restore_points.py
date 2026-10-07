@@ -19,7 +19,9 @@ start. Here:
   --single-transaction --exit-on-error``, its ``alembic_version`` must be the
   recorded revision and it must have tables; then the scratch database is
   dropped. The result is written into the ``.json`` (``verified``).
-* **restore**: only a verified point whose dump still has its checksum. It is
+* **restore**: only a verified point whose dump still has its checksum, and
+  only when no user was deleted (``user_status_changes``) after the point was
+  taken (the database's clock). It is
   restored into a new database (``<db>_restore_<stamp>``) and checked as above;
   then the workspace database is renamed to ``<db>_replaced_<stamp>`` (kept for
   the operator to inspect and drop) and the new one takes its name. Restoring
@@ -230,6 +232,8 @@ class RestorePoints:
         if not url.database:
             raise RestorePointError("no_database")
         revision = self._revision(_sync_url(url))
+        # The database's clock: what ``restore`` compares the deletions with.
+        taken_at = self._scalar(_sync_url(url), "SELECT now()")
         partial = directory / f".{label}.dump.partial"
         self._run(
             [
@@ -251,7 +255,7 @@ class RestorePoints:
             label=label,
             database=url.database,
             revision=revision,
-            created_at=datetime.now(UTC).isoformat(timespec="seconds"),
+            created_at=taken_at.isoformat(),
             size=dump.stat().st_size,
             sha256=_sha256(dump),
             verified=None,
@@ -333,6 +337,20 @@ class RestorePoints:
         if url.database != point.database:
             raise RestorePointError("other_database")
         self._check_dump(point)
+        # A user deleted since the point was taken would be back after the
+        # restore (REQUIREMENTS: restored backups must not resurrect erased
+        # data). Within an update the writers are stopped from the point to the
+        # restore, so there are none; a later manual rollback is refused.
+        history = self._scalar(
+            _sync_url(url), "SELECT to_regclass('user_status_changes') IS NOT NULL"
+        )
+        if history and self._scalar(
+            _sync_url(url),
+            "SELECT count(*) FROM user_status_changes WHERE new_status IN"
+            " ('pending_deletion', 'deleted') AND recorded_at > :since",
+            since=datetime.fromisoformat(point.created_at),
+        ):
+            raise RestorePointError("users_deleted_since_the_point")
         incoming = _scratch_name(point.database, "restore")
         self._create_like(admin_url, point.database, incoming)
         try:
@@ -400,6 +418,16 @@ class RestorePoints:
         if len(rows) != 1:
             raise RestorePointError("revision_unreadable")
         return str(rows[0][0])
+
+    def _scalar(self, url: URL, sql: str, **parameters):
+        engine = self._engine(url)
+        try:
+            with engine.connect() as connection:
+                return connection.execute(text(sql), parameters).scalar_one()
+        except Exception:
+            raise RestorePointError("database_unreadable") from None
+        finally:
+            engine.dispose()
 
     def _admin(self, admin_url: URL):
         engine = self._engine(_sync_url(admin_url), isolation_level="AUTOCOMMIT")

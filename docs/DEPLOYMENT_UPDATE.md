@@ -1,6 +1,6 @@
 # Deployment / Update / Rollback
 
-更新日: 2026-10-01
+更新日: 2026-10-07
 Status: [FIXED DIRECTION]
 
 ## Principles
@@ -121,6 +121,59 @@ Model footprint (Decision 0039 1): give each `DeploymentSpec` a footprint (`gpu_
 the sum of its four parts) of the benchmark's measured peak, not
 `gpu-memory-utilization` × the GPU: `max(GPU memory used during the run − used before
 the load) + 2 GiB`. vLLM exceeded its `gpu-memory-utilization` budget by up to 8.4 GiB.
+
+## Implementation (Issue #54, Decision 0079 Proposed)
+
+[Decision 0079](decisions/0079-deploy-update-rollback.md) proposes the mechanism; until it is
+approved, no production update or rollback is run with it. Operator steps are in the
+[backend README](../apps/backend/README.md#deploy--update--rollbackpaw-068).
+
+- **Versioned release**: `paw-release build` makes one immutable directory per commit,
+  `/opt/paw/releases/<YYYYMMDD-sha12>/` (`git archive`, its own venv and web build, and
+  `release.json` with the schema head, the migration chain and a source digest). The units run
+  `/opt/paw/current`, a symlink switched atomically. Releases are kept; one becomes
+  **known-good** when it passes an update's health check.
+- **Manual update**: `paw-release update <version>` on the server by the Owner/Admin
+  (no HTTP API, no automatic update). `paw-release precheck <version>` shows the checks
+  and whether a schema migration is needed, changing nothing.
+- **Safe drain / checkpoint**: a maintenance row in the database stops the task queue from
+  handing out work; running tasks are held like in Full GPU Mode (Decision 0055) and finish
+  their running node (the checkpoint); the update waits up to `drain_timeout_seconds`
+  (900 s) and otherwise aborts and resumes them. `--stop-now` (critical security update)
+  goes on without waiting; the tasks are not cancelled and resume afterwards.
+- **Pre-update health / recovery check**: database reachable and migrated, no maintenance on,
+  `audit_events` partitions to the end of next month (the `audit-retention-check` of
+  Decision 0031), the last Recovery backup completed within 90 minutes, the Recovery
+  Repository configured, disk space, the schema compatibility, and configured commands
+  (for example that `paw-audit-retention.timer` and `paw-recovery-backup.timer` are enabled).
+  The Recovery projection is refreshed (`recovery-backup-run`) before the writers stop.
+- **Backward-compatible migration**: a migration declares `paw_compatibility = "expand"` when
+  the release before it runs on the new schema; a rollback over expand-only migrations keeps
+  the database. Anything else (or no declaration) needs a restore point to roll back.
+- **Restore point**: only for an update with a migration, after every writer stopped:
+  `pg_dump` to a private directory outside the Recovery Repository, verified by restoring it
+  into a scratch database; restored into a new database that then takes the workspace
+  database's name (the replaced one is kept). A restore is refused when a user was deleted
+  after the point was taken; `user-erasure-run` runs after a restore. Points are deleted
+  after 7 days.
+- **Known-good rollback**: a failed migration, start or health check rolls back automatically
+  (restore point, previous release, health check, then resume). If that fails too, the system
+  stays in maintenance and the configured notify commands run; `paw-release end-maintenance`
+  resumes after a manual fix. `paw-release rollback` goes back to a known-good release by hand.
+
+### Deploy checklist (audit retention timer, Decision 0031)
+
+Deploying (and every update's pre-check) includes the scheduled jobs whose failure would stop
+the workspace later:
+
+1. Install `paw-audit-retention.service`, `paw-audit-retention.timer` and
+   `paw-audit-retention-failure.service` and run `systemctl enable --now paw-audit-retention.timer`
+   (Decision 0031). Without it no `audit_events` partition is created and every audited action
+   fails once the existing ones run out.
+2. Likewise enable `paw-recovery-backup.timer` (Decision 0054), `paw-memory-projection.timer`
+   and `paw-user-erasure.timer`.
+3. Before each update, `paw-release precheck` must pass: it runs `audit-retention-check`'s
+   coverage check (partitions to the end of next month) and checks that the timers are enabled.
 
 ## Open implementation choice
 

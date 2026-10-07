@@ -1,0 +1,39 @@
+# The Personal AI Workspace backend (Issue #54, Decision 0079): the release
+# that /opt/paw/current points at (apps/backend/deploy/release, paw-release).
+# paw-release switches the link while this unit is stopped and starts it again
+# through the commands of /etc/paw/release.toml; this unit never names a
+# version.
+#
+# User: the backend's own OS user (here paw), never paw-maint nor root. The
+# releases under /opt/paw/releases are root-owned and not writable by it.
+#
+# Install (as root), adjusting the paths and the User to your deployment:
+#   cp paw-backend.service /etc/systemd/system/
+#   systemctl daemon-reload
+#   systemctl enable --now paw-backend.service
+#
+# /etc/paw/backend.env holds the backend's PAW_* settings (PAW_DATABASE_URL as
+# the application role, PAW_WEB_DIST_DIR=/opt/paw/current/apps/web/dist, ...)
+# and is readable by root and the backend's user only. It never holds
+# PAW_MIGRATION_DATABASE_URL (Decision 0004 5.2).
+
+[Unit]
+Description=Personal AI Workspace backend
+Wants=network-online.target
+After=network-online.target postgresql.service
+
+[Service]
+Type=exec
+User=paw
+EnvironmentFile=/etc/paw/backend.env
+WorkingDirectory=/opt/paw/current/apps/backend
+ExecStart=/opt/paw/current/venv/bin/python -m paw_backend
+# The backend's own shutdown closes the open SSE / WebSocket connections within
+# PAW_SHUTDOWN_TIMEOUT_SECONDS; an update drains the tasks before it stops this.
+KillSignal=SIGTERM
+TimeoutStopSec=60s
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict

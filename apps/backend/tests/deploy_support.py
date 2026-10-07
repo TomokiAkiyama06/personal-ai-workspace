@@ -3,8 +3,8 @@
 The CI runner has no PostgreSQL client of the server's version, so the tests use
 two small executables with the same interface (connection in ``PG*`` variables,
 ``--file=`` / ``--dbname=`` and the dump's path as arguments) that read and write
-a real database with psycopg: the "dump" is the database's revision and the
-names of its tables; the "restore" creates those tables (empty) and
+a real database with psycopg: the "dump" is the database's revision and its
+tables' columns; the "restore" creates those tables (empty) and
 ``alembic_version`` with the revision. Each call is appended to ``calls.jsonl``
 next to them (its arguments and the names of its ``PG*`` variables, never their
 values), so a test can see that no credential was on the command line.
@@ -52,9 +52,13 @@ with connect() as connection:
     (revision,) = connection.execute(
         "SELECT version_num FROM alembic_version"
     ).fetchone()
-    tables = [row[0] for row in connection.execute(
-        "SELECT tablename FROM pg_tables WHERE schemaname = 'public'"
-        " AND tablename <> 'alembic_version' ORDER BY 1")]
+    tables = {}
+    for table, column, kind in connection.execute(
+        "SELECT t.tablename, c.column_name, c.data_type FROM pg_tables t"
+        " JOIN information_schema.columns c ON c.table_schema = t.schemaname"
+        " AND c.table_name = t.tablename WHERE t.schemaname = 'public'"
+        " AND t.tablename <> 'alembic_version' ORDER BY 1, c.ordinal_position"):
+        tables.setdefault(table, []).append([column, kind])
 Path(target).write_text(json.dumps({"revision": revision, "tables": tables}))
 """
 
@@ -67,8 +71,9 @@ with connect(database) as connection:
         "CREATE TABLE alembic_version (version_num varchar(32) PRIMARY KEY)"
     )
     connection.execute("INSERT INTO alembic_version VALUES (%s)", (dump["revision"],))
-    for table in dump["tables"]:
-        connection.execute(f'CREATE TABLE "{table}" (id int)')
+    for table, columns in dump["tables"].items():
+        listed = ", ".join(f'"{name}" {kind}' for name, kind in columns)
+        connection.execute(f'CREATE TABLE "{table}" ({listed})')
 """
 
 

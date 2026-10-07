@@ -493,6 +493,7 @@ _REFUSALS = frozenset(
         "label_exists",
         "not_found",
         "not_verified",
+        "users_deleted_since_the_point",
         "other_database",
         "directory_not_absolute",
         "directory_in_recovery_repository",
