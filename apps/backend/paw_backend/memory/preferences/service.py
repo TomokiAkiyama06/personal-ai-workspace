@@ -183,13 +183,15 @@ def _texts(name: str) -> Any:
     return bindparam(name, type_=ARRAY(sqltypes.Text()))
 
 
-# The latest unanswered held item per key (``:key`` NULL: every key), unless a later
-# observation of the key was written (the held one is outdated). The person's own
-# consolidated entries only.
+# The unanswered held items (``:key`` NULL: of every key) that no LATER written
+# observation of their key made outdated. "Later" is the journal's own order
+# (``journal.rules.is_newer``): in one conversation the event sequence, across
+# conversations the recorded time and then the conversation id (Codex P1 on #205:
+# the time alone is wrong when the clock ties or steps back in one conversation).
+# The latest item per key is chosen with ``is_newer`` too (``_live_held``). The
+# person's own consolidated entries only, newest first, at most ``:limit``.
 _LIVE_HELD = text(
-    "SELECT * FROM ("
-    " SELECT DISTINCT ON (item->>'key')"
-    "  item->>'key' AS key, e.id AS entry_id,"
+    "SELECT item->>'key' AS key, e.id AS entry_id,"
     "  CAST(item->>'index' AS integer) AS item_index,"
     "  item->>'result' AS result, item->'candidate'->>'content' AS content,"
     "  e.conversation_id, e.message_id, e.event_sequence, e.recorded_at"
@@ -201,16 +203,16 @@ _LIVE_HELD = text(
     "  AND (CAST(:key AS text) IS NULL OR item->>'key' = CAST(:key AS text))"
     "  AND NOT EXISTS (SELECT 1 FROM memory_preference_resolutions r"
     "   WHERE r.entry_id = e.id AND r.item_index = CAST(item->>'index' AS integer))"
-    " ORDER BY item->>'key', e.recorded_at DESC, e.event_sequence DESC,"
-    "  CAST(item->>'index' AS integer) DESC"
-    ") latest"
-    " WHERE NOT EXISTS ("
-    "  SELECT 1 FROM memory_journal_entries later"
-    "  CROSS JOIN LATERAL jsonb_array_elements(later.outcome->'items') AS li"
-    "  WHERE later.owner_user_id = :owner AND later.state = 'consolidated'"
-    "   AND li->>'key' = latest.key AND li->>'result' = ANY(:written)"
-    "   AND later.recorded_at > latest.recorded_at)"
-    " ORDER BY recorded_at DESC LIMIT :limit"
+    "  AND NOT EXISTS ("
+    "   SELECT 1 FROM memory_journal_entries later"
+    "   CROSS JOIN LATERAL jsonb_array_elements(later.outcome->'items') AS li"
+    "   WHERE later.owner_user_id = :owner AND later.state = 'consolidated'"
+    "    AND li->>'key' = item->>'key' AND li->>'result' = ANY(:written)"
+    "    AND CASE WHEN later.conversation_id = e.conversation_id"
+    "     THEN later.event_sequence > e.event_sequence"
+    "     ELSE (later.recorded_at, CAST(later.conversation_id AS text))"
+    "      > (e.recorded_at, CAST(e.conversation_id AS text)) END)"
+    " ORDER BY e.recorded_at DESC LIMIT :limit"
 ).bindparams(_texts("held"), _texts("written"))
 
 # The observations of some keys: the person's consolidated entries, newest first,
@@ -440,10 +442,11 @@ class PreferenceConfirmationService(MemoryVersioningService):
                 "held": _HELD_VALUES,
                 "written": list(_WRITTEN),
                 "key": key,
-                "limit": limits.MAX_CANDIDATES,
+                "limit": limits.MAX_HELD_ITEMS,
             },
         )
-        return [
+        latest: dict[str, _Held] = {}
+        for held in (
             _Held(
                 key=row.key,
                 entry_id=row.entry_id,
@@ -456,7 +459,12 @@ class PreferenceConfirmationService(MemoryVersioningService):
                 recorded_at=row.recorded_at,
             )
             for row in rows
-        ]
+        ):
+            best = latest.get(held.key)
+            if best is None or is_newer(held.order, best.order):
+                latest[held.key] = held
+        found = sorted(latest.values(), key=lambda h: h.recorded_at, reverse=True)
+        return found[: limits.MAX_CANDIDATES]
 
     @staticmethod
     async def _observations(

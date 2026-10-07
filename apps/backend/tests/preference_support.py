@@ -8,7 +8,7 @@ end-to-end test that goes through it says so).
 """
 
 import json
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -112,23 +112,29 @@ class PostgresPreferenceTestCase(PostgresVersioningTestCase):
         message: str = "tabs please",
         content: str | None = None,
         index: int = 0,
+        conversation: UUID | None = None,
+        sequence: int = 0,
+        at: datetime | None = None,
     ) -> UUID:
         """One consolidated journal entry whose outcome names ``key`` (a new
-        conversation each time, one second after the previous observation)."""
+        conversation unless one is given, one second after the previous observation
+        unless ``at`` is given)."""
         self._tick += 1
-        at = T0 + timedelta(seconds=self._tick)
-        conversation = self.execute(
-            "INSERT INTO conversations (owner_user_id, project_id, repo_id)"
-            " VALUES (:o, :p, :r) RETURNING id",
-            o=owner,
-            p=project,
-            r=repo,
-        ).scalar_one()
+        at = at or T0 + timedelta(seconds=self._tick)
+        if conversation is None:
+            conversation = self.execute(
+                "INSERT INTO conversations (owner_user_id, project_id, repo_id)"
+                " VALUES (:o, :p, :r) RETURNING id",
+                o=owner,
+                p=project,
+                r=repo,
+            ).scalar_one()
         message_id = self.execute(
             "INSERT INTO messages (conversation_id, turn_id, event_sequence, role,"
-            " content) VALUES (:c, :t, 0, 'user', :m) RETURNING id",
+            " content) VALUES (:c, :t, :n, 'user', :m) RETURNING id",
             c=conversation,
             t=uuid4(),
+            n=sequence,
             m=message,
         ).scalar_one()
         item: dict[str, Any] = {"index": index, "result": result, "key": key}
@@ -144,11 +150,12 @@ class PostgresPreferenceTestCase(PostgresVersioningTestCase):
         return self.execute(
             "INSERT INTO memory_journal_entries (conversation_id, message_id, turn_id,"
             " event_sequence, owner_user_id, project_id, repo_id, recorded_at, state,"
-            " consolidated_at, outcome) SELECT :c, :m, turn_id, 0, :o, :p, :r, :at,"
+            " consolidated_at, outcome) SELECT :c, :m, turn_id, :n, :o, :p, :r, :at,"
             " 'consolidated', :at, CAST(:outcome AS jsonb) FROM messages WHERE id = :m"
             " RETURNING id",
             c=conversation,
             m=message_id,
+            n=sequence,
             o=owner,
             p=project,
             r=repo,

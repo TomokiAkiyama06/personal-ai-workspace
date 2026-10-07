@@ -18,3 +18,5 @@ INTERPRETER_TIMEOUT_SECONDS = 20.0
 # first, and at most this many observations per key are read for the evidence.
 MAX_CANDIDATES = 200
 MAX_OBSERVATIONS_PER_KEY = 100
+# How many unanswered held items are read to find the latest one of each key.
+MAX_HELD_ITEMS = 2_000

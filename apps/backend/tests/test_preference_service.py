@@ -139,6 +139,61 @@ class CandidatesTest(PostgresPreferenceTestCase):
         self.assertIs(found.evidence.risk_level, RiskLevel.HIGH)
         self.assertIsNone(found.memory_id)
 
+    async def test_held_ordering_follows_the_journal_in_one_conversation(self):
+        # In one conversation the event sequence orders the entries, whatever the
+        # recorded times say (Codex P1 on #205): the clock stepped backwards here.
+        me = self.user()
+        conversation = self.execute(
+            "INSERT INTO conversations (owner_user_id) VALUES (:o) RETURNING id",
+            o=me.user_id,
+        ).scalar_one()
+        late_clock = T0 + timedelta(minutes=10)
+        self.observe(
+            me.user_id,
+            "k",
+            result="held_high_risk",
+            conversation=conversation,
+            sequence=1,
+            at=late_clock,
+        )
+        # Written afterwards (sequence 2) but recorded with an earlier time.
+        self.observe(
+            me.user_id,
+            "k",
+            result="created",
+            conversation=conversation,
+            sequence=2,
+            at=T0,
+        )
+        self.assertEqual(await self.preferences.candidates(me), ())
+
+    async def test_the_latest_held_item_follows_the_journal_in_one_conversation(self):
+        me = self.user()
+        conversation = self.execute(
+            "INSERT INTO conversations (owner_user_id) VALUES (:o) RETURNING id",
+            o=me.user_id,
+        ).scalar_one()
+        self.observe(
+            me.user_id,
+            "k",
+            result="held_high_risk",
+            content="older",
+            conversation=conversation,
+            sequence=1,
+            at=T0 + timedelta(minutes=10),
+        )
+        newer = self.observe(
+            me.user_id,
+            "k",
+            result="held_high_risk",
+            content="newer",
+            conversation=conversation,
+            sequence=2,
+            at=T0,
+        )
+        (found,) = await self.preferences.candidates(me)
+        self.assertEqual((found.entry_id, found.content), (newer, "newer"))
+
     async def test_a_conflict_is_shown_but_not_asked(self):
         me = self.user()
         first = self.seed_candidate(me.user_id, "a", "use tabs")
