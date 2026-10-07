@@ -1,6 +1,7 @@
 # Human correction time（人が直す時間）の測り方（PAW-017 の後続、#181）
 
-- Status: Proposed
+- Status: Approved
+- Approval: 2026-10-08、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで直接回答して承認（すべての判断点を推奨どおり承認。末尾の「承認時の決定」）
 - Date: 2026-10-07
 - Scope: Issue [#181](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/181)（[Decision 0040](0040-main-coding-model-selection.md) の 5 の後続）。測る対象の Run は [Decision 0074](0074-seed-v2-and-qwen-27b-comparison.md) の paw-seed-v2 の比較 Run（[報告](../benchmarks/paw-017-seed-v2-2026-10.md)）
 - Supersedes: なし。[Decision 0041](0041-seed-benchmark-dataset.md) の 8（人間の修正時間の定義・stopwatch・60 分の打ち切り・上位 2 候補の未解決 Task から人が選ぶ）を変えず、その具体化（対象の Task、数えるもの、記録の形式）だけを提案する
@@ -124,3 +125,7 @@ Log・作業 Directory・Evaluator の結果は Repository の外（`/data/resul
 
 承認されたら `Approval` に記録し、Status を Approved に改める。Human が 4 の手順で測り、結果を `docs/benchmarks/` の報告と MODEL_CANDIDATES.md の「残っていること」の更新（別の PR）にまとめて #181 を閉じる。
 方針を変えるときは、この Decision を書き換えず、新しい Decision から `Supersedes` する。
+
+## 承認時の決定（2026-10-08）
+
+Human は、作業 Session で判断が必要な点について推奨つきの説明を受け、直接回答して承認した（すべての判断点を推奨どおり承認）。
