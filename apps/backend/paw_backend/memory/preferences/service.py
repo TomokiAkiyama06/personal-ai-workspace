@@ -450,7 +450,10 @@ class PreferenceConfirmationService(MemoryVersioningService):
                 "held": _HELD_VALUES,
                 "written": list(_WRITTEN),
                 "key": key,
-                "limit": limits.MAX_HELD_ITEMS,
+                # One key (a confirmation's check): every item, so that the latest
+                # by the journal's order is never cut off (Codex P2 on #205).
+                # ``LIMIT NULL`` is no limit.
+                "limit": None if key is not None else limits.MAX_HELD_ITEMS,
             },
         )
         latest: dict[str, _Held] = {}

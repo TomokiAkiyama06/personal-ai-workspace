@@ -9,6 +9,7 @@ applied without an explicit acknowledgement and never changes a permission.
 
 import json
 from datetime import timedelta
+from unittest.mock import patch
 from uuid import uuid4
 
 from paw_backend.authz import Principal, ProjectRole, SystemRole
@@ -29,6 +30,7 @@ from paw_backend.memory.preferences import (
     StructuredPreference,
     TargetScope,
 )
+from paw_backend.memory.preferences import limits as preference_limits
 from paw_backend.memory.versioning import (
     InputProblem,
     InvalidMemoryInputError,
@@ -193,6 +195,41 @@ class CandidatesTest(PostgresPreferenceTestCase):
         )
         (found,) = await self.preferences.candidates(me)
         self.assertEqual((found.entry_id, found.content), (newer, "newer"))
+
+    async def test_a_confirmation_checks_every_held_item_of_its_key(self):
+        # Codex P2 on #205: the cap on the listing must not decide which held item
+        # of a key is the latest one when the person answers it.
+        me = self.user()
+        conversation = self.execute(
+            "INSERT INTO conversations (owner_user_id) VALUES (:o) RETURNING id",
+            o=me.user_id,
+        ).scalar_one()
+        older = self.observe(
+            me.user_id,
+            "k",
+            result="held_high_risk",
+            content="older",
+            conversation=conversation,
+            sequence=1,
+            at=T0 + timedelta(minutes=10),
+        )
+        newer = self.observe(
+            me.user_id,
+            "k",
+            result="held_high_risk",
+            content="newer",
+            conversation=conversation,
+            sequence=2,
+            at=T0,
+        )
+        answer = Confirmation(scope=TargetScope.USER, acknowledge_high_risk=True)
+        with patch.object(preference_limits, "MAX_HELD_ITEMS", 1):
+            with self.assertRaises(PreferenceCandidateChangedError):
+                await self.preferences.confirm(me, HeldCandidateRef(older, 0), answer)
+            written = await self.preferences.confirm(
+                me, HeldCandidateRef(newer, 0), answer
+            )
+        self.assertEqual(written.content, "newer")
 
     async def test_a_conflict_is_shown_but_not_asked(self):
         me = self.user()
