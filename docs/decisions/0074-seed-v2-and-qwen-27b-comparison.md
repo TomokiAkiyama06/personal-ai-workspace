@@ -64,7 +64,7 @@ Human の目安（約 50）より 1 少ない。予備の Run で外した後に
 - 49 Task のうち解けた数。v1 の 24 Task の部分は 2 Model とも毎回 14 で、差はすべて新しい 25 Task で出た（Qwen3.6-27B-FP8 18 / 19 / 20、Qwen3.8-27B-FP8 23 / 23 / 23）。
 - Resolved@3 の差は +1（Qwen3.8-27B-FP8 だけが解いた bug-14-health-outage-changes・spec-16-task-timeline-replay と、Qwen3.6-27B-FP8 だけが解いた spec-12-projection-readback）。平均の差は +4.0。
 - **Human の選び方（3）を当てはめると、平均の差は 2 以上だが Resolved@3 の差が 1 で、両方ではない。したがって Main は Qwen3.6-27B-FP8 のまま**（Decision 0040 の 1 は変えない）。この Decision はこの規則の結果をそのまま記録し、規則を変える提案はしない。
-- 事実として: Qwen3.8-27B-FP8 は 3 回とも同じ 37 Task を解き、Run の揺れがなかった（Qwen3.6-27B-FP8 は 32〜34）。一方で、Run の所要と出力 token はどちらも約 2.8 倍だった（生成速度は同じで、出す token が多い）。Context 不足の 9 回のうち 8 回は、2 Model とも解けない v1 の Historical。時間は規則の条件ではない。
+- 事実として: Qwen3.8-27B-FP8 は 3 回とも同じ 37 Task を解き、Run の揺れがなかった（Qwen3.6-27B-FP8 は 32〜34）。一方で、Run の所要と出力 token はどちらも約 2.8 倍だった（生成速度は同じで、出す token が多い）。Context の上限は 2 Model で同じ（`--max-model-len 131072`、Harness の Prompt の上限 120,000 token、`max_tokens` 16,384）。Qwen3.8-27B-FP8 だけの Context 不足 9 回は、Reasoning を履歴に残す Harness で 1 step あたり約 3 倍（中央値 766 / 241 token）書く振る舞いから出たもので、8 回は 2 Model ともどの Run でも解けない v1 の Historical、1 回（spec-11）は解けていた。Context の上限はどの Resolved の数も変えていない。時間は規則の条件ではない。
 - 部分点・難易度別・Task ごとの差・timeout は報告の 3。機械で読める集計は Server の `/data/results/paw-bench-2026-10-05/aggregate_198.json`。
 
 ### 5. Decision 0073 の 1（保留）の扱い
@@ -83,6 +83,7 @@ Decision 0073 の 1（共存の確認 Run の採用条件を「Resolved@3 と平
 
 ## リスク
 
+- 131k の設定では、Qwen3.8-27B-FP8 は長い Task で Context の余裕が小さい（Task ごとの Prompt の最大は p90 107k・最大 115k、Qwen3.6-27B-FP8 は 69k・85k）。Qwen3.8-27B-FP8 を将来採る場合は、古い Reasoning を履歴から落とす、または `max-model-len` を大きくすることを Context の大きさの設計で考える（この比較では試していない）。
 - 新しい Task の作者は Agent（Claude）で、Golden・Hidden test も同じ作者が書いた。Issue の本文で読み取れない期待が残っている可能性がある（予備の Run で 3 Model が同じ test case だけを落とした Task は、本文に書かれていることを確かめて残した）。
 - 予備の Run の 3 Model は候補より弱い。予備の Run で残した Task が、候補にとっても差が出るとは限らない。
 - 1 回目の結果を見て 2 回目の Task を作ったため、Task の作り方自体は予備の Run の 3 Model に合わせている（候補の 2 Model には合わせていない）。
