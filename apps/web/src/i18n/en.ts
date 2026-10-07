@@ -1,3 +1,4 @@
+import { healthEn } from "./health";
 import type { MessageKey } from "./ja";
 import { memoryEn } from "./memory.en";
 import { tasksEn } from "./tasks";
@@ -446,6 +447,8 @@ export const en: Record<MessageKey, string> = {
   "notifications.severity.critical": "CRITICAL",
 
   ...tasksEn,
+
+  ...healthEn,
 
   "common.cancel": "Cancel",
   "common.close": "Close",

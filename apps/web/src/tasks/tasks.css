@@ -897,6 +897,533 @@
   color: color-mix(in srgb, var(--warning) 45%, var(--text));
 }
 
+/* The PR screen's records of the delivered pull request (issue #185 item 6):
+   変更されたファイル, レビューの要点, 監査 (PullRequest board). */
+.files-head {
+  align-items: center;
+}
+
+.files-head .mono {
+  font-size: 11.5px;
+}
+
+.files-open {
+  font-size: 12px;
+  color: var(--link);
+  text-decoration: underline;
+}
+
+/* Two actions to a row: 差分を見る / GitHub で開く, then タスクを開く. */
+.merge-panel .actions .button-link {
+  flex: 1 1 calc(50% - 4px);
+  white-space: nowrap;
+}
+
+.panel-note {
+  margin: 0;
+  padding: 11px 16px;
+}
+
+.file-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.file-row:last-child {
+  border-bottom: 0;
+}
+
+.file-path {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.file-path a {
+  color: var(--text);
+  text-decoration: none;
+}
+
+.file-path a:hover {
+  color: var(--link-hover);
+  text-decoration: underline;
+}
+
+.line-add,
+.line-delete {
+  flex-shrink: 0;
+  font-size: 11px;
+}
+
+.line-add {
+  color: var(--ok);
+}
+
+.line-delete {
+  color: var(--error);
+}
+
+.files-head .line-add,
+.files-head .line-delete,
+.diff-stats .line-add,
+.diff-stats .line-delete {
+  font-size: 11.5px;
+}
+
+.review-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 16px;
+}
+
+.review-panel h3 {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.reviewer {
+  display: flex;
+  gap: 11px;
+}
+
+.reviewer-avatar {
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 7px;
+  background: var(--input);
+  color: var(--text-2);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.reviewer-line {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.reviewer .small {
+  font-size: 11.5px;
+  line-height: 1.75;
+  color: var(--text-2);
+}
+
+.audit-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px;
+  border-radius: 13px;
+}
+
+.audit-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.audit-row {
+  font-size: 11px;
+  line-height: 1.7;
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+
+.audit-row.decision-deny {
+  color: var(--error);
+}
+
+.audit-row .muted {
+  color: var(--text-3);
+}
+
+/* 差分 (MobileDiff board). */
+.diff-view {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.diff-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.diff-head .icon-button {
+  width: 44px;
+  height: 44px;
+  flex-shrink: 0;
+  color: var(--text);
+}
+
+.diff-title-block {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.diff-title-block h2 {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.diff-title-block .small {
+  font-size: 10.5px;
+}
+
+.diff-stats {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 32px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.diff-stats .small {
+  font-size: 11px;
+}
+
+.diff-lines {
+  margin: 0;
+  overflow-x: auto;
+  border-radius: 10px;
+  border: 1px solid var(--border-soft);
+  background: var(--bg);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+
+.diff-line {
+  display: block;
+  min-width: max-content;
+  padding: 4px 14px;
+  white-space: pre;
+  color: var(--text-3);
+}
+
+.diff-add {
+  background: var(--ok-bg);
+  color: color-mix(in srgb, var(--ok) 55%, var(--text));
+}
+
+.diff-delete {
+  background: var(--error-bg);
+  color: color-mix(in srgb, var(--error) 55%, var(--text));
+}
+
+.diff-note {
+  margin: 0;
+  line-height: 1.7;
+}
+
+.diff-nav {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.button-link.square {
+  flex: 0 0 48px;
+  min-height: 48px;
+  padding: 0;
+  border-radius: 12px;
+}
+
+.button-link.strong {
+  min-height: 48px;
+  border-radius: 12px;
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+.button-link.disabled {
+  color: var(--text-disabled);
+  background: var(--surface);
+  border-color: var(--border);
+}
+
+/* 承認待ち and the approval sheet (MobileApproval board). */
+.approvals-screen {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+}
+
+.approvals-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 56px;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.approvals-head .icon-button {
+  width: 44px;
+  height: 44px;
+}
+
+.approvals-head h1 {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.approvals-body {
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+  width: 100%;
+  max-width: 640px;
+  padding: 14px;
+}
+
+.approval-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+}
+
+.approval-card {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 13px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  text-decoration: none;
+}
+
+.approval-card.level-approval {
+  border-color: color-mix(in srgb, var(--warning) 22%, var(--border));
+  background: color-mix(in srgb, var(--warning-bg) 55%, var(--bg));
+}
+
+.approval-level {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+
+.level-approval .approval-level {
+  color: var(--warning);
+}
+
+.level-strong_approval .approval-level {
+  color: var(--error);
+}
+
+.approval-tool {
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+.approval-card .small {
+  font-size: 11px;
+}
+
+.sheet-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+
+.sheet-backdrop {
+  position: absolute;
+  inset: 0;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: rgba(0, 0, 0, 0.55);
+  cursor: default;
+}
+
+.sheet {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  width: 100%;
+  max-width: 480px;
+  max-height: 90vh;
+  overflow-y: auto;
+  padding: 10px 16px 24px;
+  border-radius: 20px 20px 0 0;
+  border-top: 1px solid var(--border-strong);
+  background: var(--surface);
+}
+
+.sheet-grip {
+  width: 40px;
+  height: 4px;
+  margin: 0 auto 4px;
+  border-radius: var(--r-chip);
+  background: var(--border-strong);
+}
+
+.sheet-meta {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.sheet-meta .small {
+  font-size: 11px;
+}
+
+.approval-badge {
+  padding: 3px 9px;
+  border-radius: var(--r-badge);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.approval-badge.level-approval {
+  background: var(--warning-bg);
+  color: var(--warning);
+}
+
+.approval-badge.level-strong_approval {
+  background: var(--error-bg);
+  color: var(--error);
+}
+
+.sheet h2 {
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+/* The heading takes the focus when the sheet opens (for screen readers); it is
+   not a control, so it gets no ring. */
+.sheet h2:focus-visible {
+  box-shadow: none;
+}
+
+.approval-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 13px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--nav);
+  font-size: 11.5px;
+}
+
+.approval-detail .strong {
+  font-size: 13px;
+}
+
+.approval-command {
+  padding: 9px 11px;
+  border-radius: 8px;
+  background: var(--bg);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.approval-fact {
+  display: flex;
+  gap: 10px;
+  line-height: 1.6;
+}
+
+.approval-fact > :first-child {
+  width: 76px;
+  flex-shrink: 0;
+}
+
+.approval-fact code,
+.approval-fact .mono {
+  font-family: var(--font-mono);
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+
+.sheet-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.sheet-actions button.wide {
+  min-height: 50px;
+  border-radius: 12px;
+  font-size: 15px;
+}
+
+.sheet-actions button.danger.wide {
+  min-height: 48px;
+  font-size: 14px;
+}
+
+.sheet-note {
+  display: flex;
+  gap: 10px;
+  padding: 11px 13px;
+  border-radius: 11px;
+  background: var(--nav);
+  color: var(--text-3);
+}
+
+.sheet-note svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.sheet-note p {
+  font-size: 11px;
+  line-height: 1.75;
+}
+
+.approval-notice {
+  border-color: color-mix(in srgb, var(--warning) 30%, var(--border));
+}
+
+.approval-open {
+  flex-shrink: 0;
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  min-height: 36px;
+  padding: 0 14px;
+  border-radius: 9px;
+  background: var(--warning);
+  color: var(--on-accent);
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+}
+
 /* 768–1279px (Tablet): the list narrows; the PR's side panel goes below. */
 @media (max-width: 1279px) {
   .task-list-pane {

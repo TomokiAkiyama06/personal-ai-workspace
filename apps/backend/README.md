@@ -53,7 +53,7 @@ Python 側の Package（`pgvector-python`）は使わず、`paw_backend/memory/v
 apps/backend/
 ├─ pyproject.toml          # 依存（完全一致で固定）と Ruff 設定
 ├─ alembic.ini             # Alembic 設定（DB URL は持たない）
-├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0022 は Password / Session / Login Throttle / 認証 Policy、0023 は Passkey / Passkey の Challenge / Session の Gate、0026 は Project、0027 は Repository 登録・Remote・Checkout、0030 は Shared Connection・Quota・Usage、0031 は Tool Approval、0033 は Queue / Budget / Loop、0034 は DAG Agent Orchestrator（Plan・DAG・Node の試行）、0040 は Memory Schema、0041 は Memory Journal / Consolidation Queue、0042 は Memory の鮮度の Job の Index、0043 は `memory_versions` の全文検索の Index、0046 は Shared Memory Candidate、0050 は Research Scratch、0052 は Evidence / Claim Provenance、0071 は Memory の Status / Stale 状態の変更履歴、0083 は `tasks (project_id, state)` の Index、0085 は Task の Working Set、0087 は外部送信の Audit の `audit_events.details`、0108 は他の Account の Passkey の Reset（`admin_reset`）と 1 回限りの Password 再設定 Token（`password_reset`）とその発行の関数、0124 は招待・端末の Pairing・User の状態の履歴、0133 は Node の試行の Placement（Local / Cloud と Agent・Model）と Cloud の外部送信の Audit の対応、0147 は `memory_versions.content` の長さの上限（20,000 文字）、0154 は承認つきの Pairing の Session の Passkey の登録（`device_pairings.passkey_allowance_ended_at`）、0066 は System Health の時系列・Event と `connection_usage` の実行中の行の部分 Index、0183 は System Health が数える Agent の OOM と Escalation（`agent_incidents`）、0188 は保存される通知と User ごとの既読・非表示
+├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0022 は Password / Session / Login Throttle / 認証 Policy、0023 は Passkey / Passkey の Challenge / Session の Gate、0026 は Project、0027 は Repository 登録・Remote・Checkout、0030 は Shared Connection・Quota・Usage、0031 は Tool Approval、0033 は Queue / Budget / Loop、0034 は DAG Agent Orchestrator（Plan・DAG・Node の試行）、0040 は Memory Schema、0041 は Memory Journal / Consolidation Queue、0042 は Memory の鮮度の Job の Index、0043 は `memory_versions` の全文検索の Index、0046 は Shared Memory Candidate、0050 は Research Scratch、0052 は Evidence / Claim Provenance、0071 は Memory の Status / Stale 状態の変更履歴、0083 は `tasks (project_id, state)` の Index、0085 は Task の Working Set、0087 は外部送信の Audit の `audit_events.details`、0108 は他の Account の Passkey の Reset（`admin_reset`）と 1 回限りの Password 再設定 Token（`password_reset`）とその発行の関数、0124 は招待・端末の Pairing・User の状態の履歴、0133 は Node の試行の Placement（Local / Cloud と Agent・Model）と Cloud の外部送信の Audit の対応、0147 は `memory_versions.content` の長さの上限（20,000 文字）、0154 は承認つきの Pairing の Session の Passkey の登録（`device_pairings.passkey_allowance_ended_at`）、0066 は System Health の時系列・Event と `connection_usage` の実行中の行の部分 Index、0183 は System Health が数える Agent の OOM と Escalation（`agent_incidents`）、0188 は保存される通知と User ごとの既読・非表示、0189 は Local の Model での実行の使用量（`local_usage`）と `agent_incidents.task_id`
 ├─ paw_backend/
 │  ├─ app.py               # create_app(settings)
 │  ├─ config.py            # PAW_ 環境変数から読む Settings
@@ -2096,16 +2096,17 @@ CHECK 制約が、状態と終了・時間・Token・失敗の種類の対応（
 
 | Endpoint | 認可 | 内容 |
 | --- | --- | --- |
-| `GET /api/v1/usage?scope=self\|workspace&range=last14\|last30\|month` | `self`: `agent.use`、`workspace`: `admin.usage.view` | 合計（Task・Token・前の期間の Task）、日別 × 種類、種類別、用途別、Quota。`workspace` は User 別（Task・Token・Quota）も。Local・GPU 時間・Escalation は `null`（記録なし） |
+| `GET /api/v1/usage?scope=self\|workspace&range=last14\|last30\|month` | `self`: `agent.use`、`workspace`: `admin.usage.view` | 合計（Task・Token・前の期間の Task）、日別 × Agent、Agent 別、用途別、Quota、Local の Token、GPU 時間、Escalation した Task。`workspace` は User 別（Task・Token・Quota）も |
 | `GET /api/v1/quotas/me` | `agent.use` | 自分の Quota と現在の Window の使用量 |
 | `GET /api/v1/users/{id}/quotas` | 自分: `agent.use`、他の User: `admin.usage.view` | 同上。存在しない User は 404（見てよい人にだけ。それ以外は 403） |
 | `PUT /api/v1/users/{id}/quotas/{kind}/{metric}/{period}` | `admin.quota.manage` + **Passkey Step-up** | Body `{"limit": 整数 \| "unlimited"}`。Owner の Quota は Owner だけ |
 | `DELETE` 同上 | 同上 | 1 つの上限を消す（未設定は無制限）。無ければ 404 |
 | `GET /api/v1/admin/users` | `admin.users.manage` | 削除済みでない User（ID・Login 名・Role・状態・作成日時）。`/api/v1/users` そのものは、初回 Setup の URL として推測される Path なので 404 のまま（`tests/test_owner_no_web_path.py`） |
 
-- 集計（`connections/report.py`、`ConnectionStore.usage_report`）は `connection_usage` だけを 1 つの Transaction・Database の 1 つの時刻で読みます。「Task」は期間内に呼び出しのある Task の数、「Token」は期間内に始まった呼び出しの入力 + 出力です。期間は Quota と同じ時間帯（既定 `Asia/Tokyo`）の暦日で、`month` の前の期間は前月の同じ日までです。
+- 集計（`connections/report.py`、`ConnectionStore.usage_report`）は `connection_usage`・`local_usage`・`agent_incidents` を 1 つの Transaction・Database の 1 つの時刻で読みます。「Task」は期間内に Codex / Claude の呼び出しか Local の実行のある Task の数（両方は 1）、「Token」（`tokens.external`）は期間内に始まった呼び出しの入力 + 出力です。期間は Quota と同じ時間帯（既定 `Asia/Tokyo`）の暦日で、`month` の前の期間は前月の同じ日までです。
+- Local（Issue #187 の 5、Decision 0077）: `tokens.local` は Local の Runtime が実行中に Task の Budget へ報告した `TOKENS` の合計、`gpu_seconds` は `local_gpu` に置かれた実行が Lease を持った秒数（Budget の `GPU_SECONDS` と同じ切り上げ。CPU への Fallback は数えない）、`daily[].local` と `agents` の `local` は Local の実行のある Task です。用途別は Codex / Claude だけです（Local の実行には用途の Category がない）。`escalations` は期間内に Escalation した Task の数で、Orchestrator の Escalation はすべて Loop 検知からなので `loop_detected` に数え、`failed` は 0 です。User 別の Task・Token は両方の合計です。
 - Quota の変更は、Capability → Session の Passkey Step-up（`AuthService.require_passkey_step_up`、変更の直前の別 Transaction）→ Service の認可と Owner の規則、の順に確かめます。Step-up の拒否は `connection.quota.set` / `.remove` の Deny（reason `step_up_required` / `step_up_method_insufficient`）として Audit に残します。
-- Test: `tests/test_connections_report.py`（期間と集計、認可）、`tests/test_usage_api.py`（HTTP、Step-up、認可の否定）。
+- Test: `tests/test_connections_report.py`（期間と集計、認可）、`tests/test_local_usage_report.py`（Local・GPU 時間・Escalation の集計）、`tests/test_usage_api.py`（HTTP、Step-up、認可の否定）。
 
 ### Test
 
@@ -4143,6 +4144,7 @@ completed（Merge Ready。Human が Merge を判断する）/ 通らなければ
 | `host.py` | ホストの `MemAvailable`（`/proc/meminfo`）の読み取り（Issue #182） |
 | `scheduler.py` | `ComputeScheduler`: Admission と待ち行列、縮退と常駐、Exclusive |
 | `runtimes.py` | `HybridRuntime`（Orchestrator の Runtime。Local / Cloud）、`ScheduledMemoryWorker`、`PlacedEmbedder` |
+| `usage.py`、`models.py`、Migration `0189` | `local_usage`（Local の Model での実行の使用量。Application の Role は SELECT / INSERT）と `PostgresLocalUsage`（Decision 0077） |
 | `wiring.py` | Application への組み込み（Issue #165）: `ComputeSetup`、`LocalRuntime`、VRAM の警告の Sink `RecentVramWarnings`、HTTP の経路が使う `FullGpuController` |
 
 ### Admission（KV Cache に応じた動的な並列数）
@@ -4182,7 +4184,7 @@ Scheduler の外で動く Process（他の User の vLLM など）は Lease の�
 
 ### Local / Cloud の振り分けと、他の領域との接続
 
-- `HybridRuntime(scheduler, local_runtime, deployment="main", cloud=cloud_runtime, cloud_policy=policy)` を Orchestrator の `runtimes` に渡すと、Node ごとに Lease を取ってから Local の Model で走らせます。Local に入れず、`CloudPolicy.allows(assignment)` が許すときは Cloud の Runtime で走らせます（Policy が Task の Permission・Quota・依存を判断します。Policy が無ければ Cloud へは回しません）。Local で待てる上限を超えると Node は `ComputeUnavailable`（Retry 可）で失敗します。Local の Lease を持っていた秒数は Task の Budget の `GPU_SECONDS` に計上します（Local の Runtime が例外を投げた・Cancel されたときも計上し、そのときは Runtime の例外の方を伝えます）。Task の `GPU_SECONDS` が残っていなければ Local では始めず、同じ Task の Local の呼び出しが同時に走っているときはそれらが合わせて使った秒数を残りから引き、残りを使い切った時点で走っているものをすべて Cancel します（どちらも `NodeStopped(BUDGET_EXCEEDED)`。遅い呼び出しや並列の呼び出しで上限を超え続けないため。同じプロセス内の `HybridRuntime` の間で共有します）。Cancel しても止まらない Local の Runtime は、止まるまで Lease を持ったままにし、その GPU の容量を他へ渡しません（その待ちがもう一度 Cancel されても同じ）。止まるまでに使った秒数も Meter に数え、止まったときに計上します。そのころには Orchestrator が Node の Attempt を閉じて Node の Budget が計上を断るので、`late_gpu_charge=TrackerLateGpuCharge(budget_tracker)` を渡すと Task の Budget へ直接（Attempt と Run の Fence なしに、実際に使った時間として）計上します。渡さなければその秒数は Log に残るだけです。Background の Class で使うときは、VRAM pressure で Lease が `revoked` になると Local の呼び出しを Cancel し、`ComputeUnavailable`（Retry 可）で終えます。`CloudPolicy` は Cloud で走らせる直前にもう一度尋ね（待つ間に Permission や Quota が変わりうるため）、Policy が例外を投げたときは Local に留めます。
+- `HybridRuntime(scheduler, local_runtime, deployment="main", cloud=cloud_runtime, cloud_policy=policy)` を Orchestrator の `runtimes` に渡すと、Node ごとに Lease を取ってから Local の Model で走らせます。Local に入れず、`CloudPolicy.allows(assignment)` が許すときは Cloud の Runtime で走らせます（Policy が Task の Permission・Quota・依存を判断します。Policy が無ければ Cloud へは回しません）。Local で待てる上限を超えると Node は `ComputeUnavailable`（Retry 可）で失敗します。Local の Lease を持っていた秒数は Task の Budget の `GPU_SECONDS` に計上します（Local の Runtime が例外を投げた・Cancel されたときも計上し、そのときは Runtime の例外の方を伝えます）。Task の `GPU_SECONDS` が残っていなければ Local では始めず、同じ Task の Local の呼び出しが同時に走っているときはそれらが合わせて使った秒数を残りから引き、残りを使い切った時点で走っているものをすべて Cancel します（どちらも `NodeStopped(BUDGET_EXCEEDED)`。遅い呼び出しや並列の呼び出しで上限を超え続けないため。同じプロセス内の `HybridRuntime` の間で共有します）。Cancel しても止まらない Local の Runtime は、止まるまで Lease を持ったままにし、その GPU の容量を他へ渡しません（その待ちがもう一度 Cancel されても同じ）。止まるまでに使った秒数も Meter に数え、止まったときに計上します。そのころには Orchestrator が Node の Attempt を閉じて Node の Budget が計上を断るので、`late_gpu_charge=TrackerLateGpuCharge(budget_tracker)` を渡すと Task の Budget へ直接（Attempt と Run の Fence なしに、実際に使った時間として）計上します。渡さなければその秒数は Log に残るだけです。`usage=PostgresLocalUsage(database)`（`compute/usage.py`、Decision 0077）を渡すと、Local の実行ごとに、終わったときに `local_usage` へ 1 行（Task とその作成者、`local_gpu` / `local_cpu`、計上した秒数、その間に Local の Runtime が Budget へ報告した `TOKENS`）を書き、止まらなかった呼び出しの遅れた秒数は止まったときに回数 0 の行で足します。書けなかったときは例外の Class 名を Log に残すだけで、Node の結果は変えません。Background の Class で使うときは、VRAM pressure で Lease が `revoked` になると Local の呼び出しを Cancel し、`ComputeUnavailable`（Retry 可）で終えます。`CloudPolicy` は Cloud で走らせる直前にもう一度尋ね（待つ間に Permission や Quota が変わりうるため）、Policy が例外を投げたときは Local に留めます。
 - **Placement の記録（Issue #133、Decision 0037 の 14、提案は Decision 0048）**: `HybridRuntime` は、Node をどこで走らせるか（`local_gpu` / `local_cpu` / `cloud`）と Agent・Model を、走らせる**前に** `assignment.placement.record(...)` で記録します。Local は Ladder の Label と `local_model`（既定は Deployment 名）、Cloud は `cloud_agent` と `cloud_model`（`cloud=` を渡すときは必須）です。Orchestrator はこれを Node の Attempt の行に書き、Cloud のときは同じ Transaction で `audit_events` に外部送信の行を足します（[DAG Agent Orchestrator](#dag-agent-orchestrator) の「Placement」）。記録できない Node はそこで走らせません（`ComputeUnavailable`、Retry 可。Cloud へは何も送りません）。`placement` の無い Assignment（Planner の呼び出しなど、記録する行がない）は Cloud へ回さず、Local では記録なしで走らせます。Local では GPU の時間の残り（Budget）を確かめてから記録します（始められない Node を「Local で走った」と残さない）。選んだ Runtime には記録済みの `placement` を渡すので、その Runtime が同じ場所・Agent・Model を記録し直しても拒否されません（違う Placement は `InvalidOrchestratorArgumentError`）。記録し直すときも試行がまだ動けるか（`ensure_active`: 見捨てた試行、止まった・置き換わった・終わった Run は `NodeStopped`）を毎回確かめるので、Cancel を無視して試行より長く生きた Runtime は送れません。
 - `ScheduledMemoryWorker` は Memory Worker（PAW-041）を包み、Background の Lease が取れないとき（Unload 中、縮退中、Exclusive）は `WorkerUnavailableError` を投げます。Consolidator はこれを失敗に数えずに延期します（Decision 0018）。走っている Job の Lease が `revoked` になったとき（VRAM pressure、Unload の前）も Job を Cancel して `WorkerUnavailableError` で延期し、縮退の次の段を止めません（Cancel しても止まらない Job は止まるまで Lease を持ったまま）。`PlacedEmbedder` の GPU の呼び出しも、Lease が `revoked` になると（CPU へ移す・Unload する段の前）Cancel して `ComputeUnavailableError` で終え、Retrieval は縮退します。
 - `PlacedEmbedder` は Embedding Model の GPU と CPU の Copy を包み、Scheduler が置いた方を使います（取れなければ `ComputeUnavailableError` で、Retrieval は Degrade します。Decision 0019）。
@@ -4251,7 +4253,7 @@ runtime = HybridRuntime(
 要件と Decision 0037 / 0042 / 0055 が決めていない選択（有効にする方法、警告の Sink、HTTP の経路の非同期の開始・取りやめ・認可・応答の形、Local の Runtime の配線、終了時）は **[Decision 0058（Proposed）](../../docs/decisions/0058-compute-scheduler-application-wiring.md)** にまとめ、実装はその推奨どおりです。
 
 - **有効にする**: `create_app(settings, compute=ComputeSetup(ComputeConfig(...), NvidiaSmiProbe(), control=CommandModelControl(...)))`。渡したときだけ `app.state.compute` に Scheduler（プロセスに 1 つ）ができ、Lifespan が `scheduler.serve`（既定 5 秒ごと、`refresh_seconds`）を動かします。Database があれば `FullGpuMode(scheduler, PostgresTaskHolds(...), authorizer)` も作って `serve` を動かします（Database がなければ Scheduler だけ）。環境変数はありません（`ModelControl` の Command を設定から読む形式と保護は Runtime の Adapter の Issue で決めます）。
-- **Local の Runtime**: `create_app(..., compute=..., local_runtimes={"local": LocalRuntime(runtime, deployment="main", local_model="...")}, orchestrator_config=...)`。組み立て（`build_task_execution`）が `HybridRuntime(scheduler, runtime, deployment=..., late_gpu_charge=TrackerLateGpuCharge(budget))` で包み、`agent_runtimes` と同じ Label の集合に入れます（重複は `TypeError`）。`CloudPolicy` は渡しません（Decision 0037 の 14）。`local_runtimes` は `compute`・Database・`orchestrator_config` がないと `TypeError` です。
+- **Local の Runtime**: `create_app(..., compute=..., local_runtimes={"local": LocalRuntime(runtime, deployment="main", local_model="...")}, orchestrator_config=...)`。組み立て（`build_task_execution`）が `HybridRuntime(scheduler, runtime, deployment=..., late_gpu_charge=TrackerLateGpuCharge(budget), usage=PostgresLocalUsage(database))` で包み、`agent_runtimes` と同じ Label の集合に入れます（重複は `TypeError`）。`CloudPolicy` は渡しません（Decision 0037 の 14）。`local_runtimes` は `compute`・Database・`orchestrator_config` がないと `TypeError` です。
 - **VRAM の警告の Sink**（Decision 0042 の 6）: `RecentVramWarnings` が最新 50 件（`kept_vram_warnings`）をプロセス内に持ち、下の `GET` に出します。Log は Scheduler 自身が出します。DB・Audit・Event Bus には書きません（System Health（PAW-066）ができたらその Event に差し替えます）。
 - **HTTP の経路** `/api/v1/admin/compute/full-gpu`（3 つとも `admin.compute.full_gpu`: Owner / Admin、委任不可、Audit 必須。Step-up なし）:
   - `GET`: 状態（`off` / `starting` / `on` / `resuming`）、`start_pending`、`held_tasks`、`preempted`、`on_seconds`、`last_failure`、`needs_human`、`gpu`（Scheduler の `mode`、`probe_ok`、VRAM の Byte 数、`vram_waiting`、`exclusive_waiting_for_vram`）、`vram_warnings`、`vram_warnings_total`。Task の ID・PID・Model の名前は出しません。
@@ -4328,7 +4330,7 @@ Issue [#183](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/183
 
 - Agent の Runtime（Adapter）は、Model の Server が GPU の Memory 不足（CUDA OOM）を返したとき、または Process が Memory 不足で落とされた（Kernel の OOM Killer）ときに、`NodeOutcome.failed("AgentOutOfMemory")` を返します（`orchestrator.errors.AGENT_OUT_OF_MEMORY`。Runtime が名乗れる閉じた Error Class の一覧に加えた）。Runtime が Python の `MemoryError` を上げた場合も OOM として数えます（`OUT_OF_MEMORY_CLASSES`）。
 - Orchestrator は、Node の失敗を記録する Transaction（`DagStore.fail_node`）の中で、OOM の Class なら `agent_incidents` に `out_of_memory` を、次の手が `escalate` なら `escalation` を 1 行ずつ入れます。古い Epoch・Attempt の報告は拒まれ、何も残しません。Planner（Node がない）の OOM は `DagStore.record_incident` で別に残します（失敗しても Log だけで、Run は止めない）。
-- `agent_incidents` は種類と DB の時刻だけを持ち、Task・Node・Agent・文は持ちません（失敗した試行そのものは `agent_dag_node_attempts` の `error_class` に残る）。集約せず、`PAW_HEALTH_RETENTION_DAYS` を過ぎた行は時系列の Roll-up と一緒に消します。
+- `agent_incidents` は種類と DB の時刻と、Migration `0189` からは Task（`task_id`。使用状況の集計が User の Escalation した Task を数えるため。Decision 0077。それより前の行は NULL）を持ち、Node・Agent・文は持ちません（失敗した試行そのものは `agent_dag_node_attempts` の `error_class` に残る）。集約せず、`PAW_HEALTH_RETENTION_DAYS` を過ぎた行は時系列の Roll-up と一緒に消します。
 - 実際の Runtime の Adapter（vLLM / Codex CLI など）が OOM を見分ける実装は、まだありません（Adapter と同じ Issue で作る）。
 
 ### Endpoint と権限
@@ -4346,7 +4348,7 @@ Issue [#183](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/183
 
 Migration `0066` が `health_metric_samples`（Application の Role に SELECT / INSERT / UPDATE / DELETE）と `health_events`（SELECT / INSERT / DELETE。更新はできない）を作り、`connection_usage (started_at) WHERE status = 'in_flight'` の部分 Index（#52 の Comment。Reaper と `connections` が使う）、`task_events (created_at) WHERE command IN ('retry', 'fail')` の部分 Index と `loop_failure_signatures (created_at)` の Index（`task_queue` の失敗・Retry・Loop）、`tasks (state)` の実行中の Task の部分 Index と `tasks (updated_at)` の完了・取消の Task の部分 Index（`task_queue` の状態別の数。終わって久しい Task を読まない）を加えます。Source が読むのは Application の Role が既に読める Table だけです。
 
-Migration `0183`（Issue #183）が `agent_incidents`（`kind` は `out_of_memory` / `escalation`、`occurred_at`。Application の Role に SELECT / INSERT / DELETE。更新はできない）と `ix_agent_incidents_occurred_at` を作ります。
+Migration `0183`（Issue #183）が `agent_incidents`（`kind` は `out_of_memory` / `escalation`、`occurred_at`。Application の Role に SELECT / INSERT / DELETE。更新はできない）と `ix_agent_incidents_occurred_at` を作ります。Migration `0189`（Issue #187）が `task_id`（`tasks` への外部 Key）と `ix_agent_incidents_task_id` を足します。
 
 ### 制限と未確認の点
 
@@ -4537,9 +4539,30 @@ PAW-062 の画面（`/agents`、`/pulls`、Web の `src/tasks/apiSource.ts`）�
 - 一覧の Project は Session の Membership から、Project ごとに Policy で `project.read` を判定します。Repository は、その ACL で `project.read` があるものだけを出し、ない Repository は名前も PR も出しません。
 - 存在しない Task と、読めない Project の Task はどちらも 403 です（Guard が区別しない）。
 - Task の入力、Log、Node の Goal / 結果、Event の詳細は返しません。
-- 未実装: 一覧の並列の上限 / VRAM、PR 画面・モバイルの Board（変更ファイル、Review の要約、Audit の行、Tool の承認、Diff）。Decision 0067 の 6・7。
+- 未実装: 一覧の並列の上限 / VRAM（Decision 0067 の 6）。
 
 Test: `tests/test_tasks_api.py`（PostgreSQL。見える範囲、ACL、操作の権限、Version、遷移表、Queue、Merge Ready）。
+
+### PR 画面とモバイルの Board（Issue #185 の 6、Decision 0078）
+
+PR 画面の「変更されたファイル」「レビューの要点」「監査」と、MobileDiff（差分）・MobileApproval（Tool の承認）の Board の接続先です。`paw_backend/api/v1/boards.py` が経路、`paw_backend/api/v1/board_views.py` が読み取りです。方針は [Decision 0078](../../docs/decisions/0078-pr-screen-and-mobile-board-api.md)（推奨どおりに実装）です。
+
+| Endpoint | Capability | 内容 |
+| --- | --- | --- |
+| `GET /api/v1/pull-requests/{record_id}/files` | `tasks.list` | PR を届けたときに記録した変更ファイル（Path・前の Path・状態・追加 / 削除の行数・Patch の有無）と合計。記録がなければ `recorded: false` |
+| `GET /api/v1/pull-requests/{record_id}/files/{index}` | `tasks.list` | 1 ファイルと、その Patch（Unified Diff。上限つき・Credential は Redact 済み）。ないファイルは 404 `file_not_found` |
+| `GET /api/v1/pull-requests/{record_id}/review` | `tasks.list` | 記録された Review / Evaluation と、その Attempt の DAG の Reviewer Node（Agent・Model・状態・終了時刻）。Check の本文は返さない |
+| `GET /api/v1/pull-requests/{record_id}/audit` | `tasks.list` | その Task と、その Task の Tool の承認の `audit_events` の行（新しい順、`limit` 1〜100、既定 50）。時刻・Action・allow / deny・理由・`agent` / `person` / `system` だけ |
+| `GET /api/v1/approvals` | `tasks.list` | 本人が決める（`requester_user_id` が本人の）、読める Project の `pending` で期限内の Tool の承認（`task_id` で絞れる、`limit` 1〜100）。`summary`・Level・Task の題名と Agent・読める Repository の名前・期限 |
+| `GET /api/v1/approvals/{approval_id}` | `tasks.list` | 上の 1 件（一覧の上限の外の承認を Sheet で開く）。本人のものでない・決定済み・期限切れ・ないものは同じ 404 `approval_not_found` |
+| `POST /api/v1/approvals/{approval_id}/decision` | 承認の Project の `project.task.run`（Audit 必須） | `{"decision": "approve" \| "reject"}` を `ApprovalService` で。本人以外は 404 `approval_not_found`、決定済みは 409 `approval_not_pending`、期限切れは 409 `approval_expired`。`strong_approval` の承認は 403 `strong_approval_unavailable`（Step-up は Fail closed のまま。拒否はできる） |
+
+- PR の 4 つの経路は、`GET /api/v1/pull-requests/{record_id}` と同じく、PR を読める人だけに答えます（Project と Repository の `project.read`。それ以外とない記録は 404 `pull_request_not_found`）。
+- 変更ファイルと差分は、Integration Gate が PR を記録し、Task を完了させた後で `integration/changes.py` の `ChangeRecorder` が（Gate が Task を完了させた後で）GitHub の `pulls/{n}/files` を作成者の `gh api` で読み、`pull_request_changes`（Migration `0190`）に保存したものです。ファイルは最大 300、Patch は先頭 50 ファイル・各 9,000 文字まで（Redact の後で行の切れ目で切る）、`gh` の出力の上限に最悪の名前でも収まる Page の大きさで読みます。全体で 120 秒、読む前と後に PR の Head が確認した Commit であることを確かめ、失敗しても Task は止めません（Best effort。完了の経路の外）。`IntegrationGate(changes=...)` に渡します（Gate の本番の組み立ては Gate を動かす Issue で行うため、それまで本番では「記録されていません」）。
+- Migration `0190` は `pull_request_changes`（Application の Role は SELECT・INSERT・記録の列の UPDATE）と、Index `ix_audit_events_resource (resource_id, occurred_at)`・`ix_tool_approvals_pending_requester`（`pending` の行だけ）を足します。
+- Merge の経路はありません。
+
+Test: `tests/test_pull_request_boards_api.py`（PostgreSQL。見える範囲、差分、Reviewer、Audit の行の範囲と形、承認の一覧と承認・拒否・Strong Approval・本人以外）、`tests/test_pull_request_changes.py`（GitHub の Fake と実際の `jq`: 上限・Redact・出力の上限・途中で変わった PR、Recorder の Best effort、Migration 0190 と Model の一致）、`tests/test_worktrees_gate.py`（PR の記録の後にだけ読み、失敗しても Task は完了する）。
 
 ## 依存 Package
 

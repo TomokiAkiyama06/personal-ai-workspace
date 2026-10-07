@@ -128,12 +128,14 @@ class PlannerTest(PostgresOrchestratorTestCase):
             "local", script={"plan": [fail("AgentOutOfMemory"), MemoryError()]}
         )
         h = self.harness(runtimes={"local": planner})
-        await self.prepare(h)
+        task_id = await self.prepare(h)
 
         report = await h.orchestrator.run_once("w1")
 
         self.assertEqual(report.outcome, Out.PLAN_FAILED)
         self.assertEqual(await self.incidents(), ["out_of_memory"] * 2)
+        # With the task (Decision 0077).
+        self.assertEqual(await self.incident_tasks(), [task_id] * 2)
 
     async def test_a_planner_failure_of_another_kind_is_no_incident(self):
         planner = FakeRuntime("local", script={"plan": [CYCLE, fail("Down")]})

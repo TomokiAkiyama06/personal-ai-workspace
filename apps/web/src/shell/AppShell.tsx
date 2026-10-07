@@ -7,6 +7,7 @@
 import { type ReactNode, useCallback, useEffect, useId, useRef, useState } from "react";
 import { authApi } from "../api/auth";
 import { showsAdmin, useSession, useSignedIn } from "../auth/session";
+import { HealthChip } from "../health/HealthChip";
 import { useI18n } from "../i18n";
 import { errorMessage } from "../i18n/errors";
 import {
@@ -339,6 +340,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           <kbd>⌘K</kbd>
         </div>
         <div className="header-actions">
+          <HealthChip />
           <ThemeToggle />
           {phoneNotifications ? <MarkAllReadButton /> : <NotificationBell />}
           <UserMenu />

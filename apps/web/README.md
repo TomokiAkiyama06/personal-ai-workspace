@@ -39,6 +39,7 @@ Data は `ProjectsSource`（`src/projects/model.ts`）で受けます。本番�
 - タスク: 状態（Queued / Running / Waiting for User・Approval・Resource / Paused / Evaluating / Completed / Failed / Cancelled）の絞り込みと一覧、Resource 待ちのキューの注記、Agent / Model・現在のステップ・ブランチ・worktree・試行・予算、依存グラフ（ノードを選ぶと試行・Placement・エラーの種類・ツール呼び出し）、リポジトリごとの役割・テスト・レビュー・PR。操作は Backend の遷移表（`tasks/domain.py`）が受け付けるものだけを出し（Pause / Resume / Cancel / Retry / Restart / Stop Now）、結果の状態は Backend の応答で表示する。Stop Now は理由の入力を必須にし（Backend が求め、監査に残る）、Retry / Restart は別の Agent / Model を指定できる。操作には表示中のタスクの Version を添える。終わっていないタスク・タスクの一覧・PR の一覧は表示中 5 秒ごとに読み直す（Push の経路がまだないため。読み直しの失敗は表示を保つ）
 - プルリクエスト: 完了条件（PR・テスト / Evaluator・レビュー・人によるマージ承認）、Merge は人だけという注記。Merge Ready は Backend の判定をそのまま表示する
 - スマートフォンは一覧からタスクの画面へ階層遷移し、依存グラフはステップの一覧、操作は下部タブの上に固定する。タブレットは一覧を狭めた 2 ペイン、PR の操作欄は下に回す
+- PR 画面の「変更されたファイル」「レビューの要点」「監査」、差分（MobileDiff: `/pulls/<id>/files/<n>`、ファイル一覧は `/pulls/<id>/files`）、承認待ち（MobileApproval: `/approvals` と `/approvals/<id>` の Sheet。承認待ちのタスクの「確認」から開く）は、Backend の `/api/v1/pull-requests/{id}/files|review|audit` と `/api/v1/approvals`（Issue #185 の 6、[Decision 0078](../../docs/decisions/0078-pr-screen-and-mobile-board-api.md)）を読む。変更ファイルと差分は PR を届けたときの記録だけを出し、記録がなければそう表示する。承認は「今回だけ許可」と「拒否する」だけで（Backend の承認は 1 回の呼び出しごと）、`STRONG_APPROVAL` は拒否だけ（Passkey での再認証が要るため、この画面では許可しない）
 
 **Backend にタスク・DAG・PR の HTTP API がまだありません**（`/api/v1` は health / events / auth / passkeys / accounts だけ）。画面のデータは `TaskSource`（`src/tasks/source.tsx`）で受け、今は接続していないので、両画面とも「タスクの状態はまだ表示できません」を表示します（Notification Center の `NotificationSource` と同じ扱い）。マージの API もないため、マージのボタンは無効にして GitHub の PR へ誘導します。
 
@@ -56,6 +57,7 @@ apps/web/
 │  ├─ auth/                    # Session の状態、WebAuthn の変換、Step-up
 │  ├─ i18n/                    # Catalog（ja / en）、translate、エラーの文言
 │  ├─ notifications/           # Notification Center の状態と Bell / Banner
+│  ├─ health/                  # 管理 › サーバー監視と Header の状態 Chip、HealthSource
 │  ├─ memory/                  # メモリ画面（3 ペイン・履歴 Graph・差分）と MemorySource
 │  ├─ shell/                   # Header・Navigation（Sidebar / Rail / Drawer / 下部 Tab）・User Menu・Icon・QR Code
 │  ├─ pages/                   # サインイン、Passkey Gate、設定（プロフィール / 端末とセッション / 言語と外観）、Pairing、Placeholder
@@ -75,7 +77,8 @@ Test は各 Module の隣の `*.test.ts(x)` です。
 - 既読（項目を開く・Banner を閉じる）と「すべて既読」は `POST /api/v1/notifications/read` で Backend にも送り、端末をまたいで保ちます。他の端末で既読になった通知は、ここでも既読で Banner を出しません
 - `POST /api/v1/notifications/{id}/dismiss`（一覧から非表示）は Backend にありますが、Design に一覧から消す操作がないため、まだ使いません
 - 承認待ちの端末の通知は、これまでどおりこの Tab の中だけです（保存は後続）
-- まだない通知の元: Task の状態と `needs_human`、Tool の承認待ち。Header の「Backup 異常」の Chip（`GET /api/v1/system/health/summary`）も後続です
+- System Health の通知（`system_health.component_changed`）の状態・理由は [サーバー監視](#サーバー監視paw-067) と同じ Catalog で文にし、「詳細を見る」は `管理 › サーバー監視` を開きます
+- まだない通知の元: Task の状態と `needs_human`、Tool の承認待ち
 
 ## 開発
 
@@ -113,4 +116,15 @@ GitHub Actions では必須です。ローカルで `npm` がなければ、警�
 
 **Backend に使用状況と上限の HTTP API がまだありません**（`ConnectionService.quota_status` / `list_usage` は Service 層だけ）。そのため画面は `UsageSource`（`src/usage/model.tsx`）でデータを受け、今は接続していないので「使用状況はまだ表示できません」を表示します（通知の `NotificationSource` と同じ扱い）。API ができたら、その応答を `UsageReport` に変換する `UsageSource` を `UsageSourceProvider` に渡します。
 
-Design Canvas との差分（Backend が優先）: 上限の「GPU 時間（今月）」と「同時実行」は Backend に無い指標（Decision 0016 §5 で未実装）なので、上限には Backend の指標（呼び出し・タスク・トークン・実行時間）× 期間（直近 5 時間・今日・今週・今月）だけを出します。Local の使用量・GPU 時間・エスカレーションは記録が無ければ「—」「記録なし」と表示します。管理の他のタブ（概要・ユーザー・サーバー監視・上限と課金・モデルとルーター・バックアップ・監査ログ）は後続の Issue の Placeholder です。
+Design Canvas との差分（Backend が優先）: 上限の「GPU 時間（今月）」と「同時実行」は Backend に無い指標（Decision 0016 §5 で未実装）なので、上限には Backend の指標（呼び出し・タスク・トークン・実行時間）× 期間（直近 5 時間・今日・今週・今月）だけを出します。Local の使用量・GPU 時間・エスカレーションは記録が無ければ「—」「記録なし」と表示します。管理の他のタブ（概要・ユーザー・上限と課金・モデルとルーター・バックアップ・監査ログ）は後続の Issue の Placeholder です（サーバー監視は PAW-067）。
+
+## サーバー監視（PAW-067）
+
+[PAW-067](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/53) で、Design Canvas の Monitoring Board を `管理 › サーバー監視`（`/admin/monitoring`、Owner / Admin）に、ShellDark の Header の状態 Chip を全画面に実装しました（`src/health/`）。データは System Health の API（PAW-066、[Decision 0059](../../docs/decisions/0059-system-health-observability.md)）で、Board と Backend の対応・Chip の出し分け・更新の間隔は [Decision 0080](../../docs/decisions/0080-system-health-ui.md)（推奨どおりに実装）です。
+
+- Board の Host と温度は Backend に Source がないため、UI_DESIGN.md の領域（GPU / VRAM・タスクキュー・PostgreSQL・Recovery Repository・外部エージェント）を Chip にし、Card は VRAM・GPU 使用率・タスクキュー・受信、グラフは GPU / VRAM の推移（%、`表で見る` で同じ値の表）、アラートは Severity の変化（`GET /system/health/events`）です
+- 通常時は「すべて正常です」の 1 行と、Component ごとの閉じた 1 行だけ。異常時は Banner を出し、最も悪い領域を選び、異常な Component の理由と数値を自動で開きます。理由・Status は Code から Catalog で文にし、知らない Code はそのまま出します
+- 15 秒ごとに `GET /system/health` を読み（Tab が隠れている間は読まない）、推移とアラートは期間の変更と 60 秒ごと。失敗しても前の表示を残し「受信」を「途切れています」にします
+- Header の Chip: Owner / Admin は `GPU 38% · Queue 3`（異常時は「Backup 異常 +1」）で、押すとサーバー監視。一般の User は `GET /system/health/summary` の全体の Severity と「Codex · Claude 利用可 / Claude 利用不可」だけ（押しても開かない）。スマートフォンでは点だけ
+- 画面は読み取りのみで、モデルや GPU・サービスの操作はしません
+- Data は `HealthSource`（`src/health/model.tsx`）で受け、本番は `apiHealthSource`（`src/health/api.ts`）を `main.tsx` で渡します。Source がないとき（Test）は Chip を出さず、画面は「サーバー監視はまだ表示できません」を表示します
