@@ -80,6 +80,48 @@ class UsageHttpCase(HttpTestCase):
                 },
             )
 
+    def local(
+        self,
+        user_id: uuid.UUID,
+        task_id: uuid.UUID,
+        *,
+        tokens: int = 0,
+        seconds: int = 0,
+        placement: str = "local_gpu",
+        calls: int = 1,
+        ago: timedelta = timedelta(minutes=1),
+    ) -> None:
+        """A call of a local model (``local_usage``, Decision 0077)."""
+        with self.engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO local_usage (user_id, task_id, placement, calls,"
+                    " tokens, seconds, started_at) VALUES (:user, :task, :placement,"
+                    " :calls, :tokens, :seconds, now() - :ago)"
+                ),
+                {
+                    "user": user_id,
+                    "task": task_id,
+                    "placement": placement,
+                    "calls": calls,
+                    "tokens": tokens,
+                    "seconds": seconds,
+                    "ago": ago,
+                },
+            )
+
+    def escalation(
+        self, task_id: uuid.UUID | None, ago: timedelta = timedelta(minutes=1)
+    ) -> None:
+        with self.engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO agent_incidents (kind, task_id, occurred_at)"
+                    " VALUES ('escalation', :task, now() - :ago)"
+                ),
+                {"task": task_id, "ago": ago},
+            )
+
     def quota(self, user_id: uuid.UUID, limit: int | None) -> None:
         with self.engine.begin() as connection:
             connection.execute(
@@ -119,9 +161,10 @@ class UsageRoutesTest(UsageHttpCase):
         self.assertEqual((body["scope"], body["range"]), ("self", "last14"))
         self.assertEqual(body["tasks"], 1)
         self.assertEqual(body["previous_tasks"], 0)
-        self.assertEqual(body["tokens"], {"local": None, "external": 16})
-        self.assertIsNone(body["gpu_seconds"])
-        self.assertIsNone(body["escalations"])
+        # No local call and no escalation: zero, recorded (Decision 0077).
+        self.assertEqual(body["tokens"], {"local": 0, "external": 16})
+        self.assertEqual(body["gpu_seconds"], 0)
+        self.assertEqual(body["escalations"], {"failed": 0, "loop_detected": 0})
         self.assertEqual(len(body["daily"]), 14)
         self.assertEqual(
             body["daily"][-1],
@@ -149,6 +192,73 @@ class UsageRoutesTest(UsageHttpCase):
         self.assertEqual(quota["used"], 1)
         self.assertEqual(body["users"], [])
         self.assertNotIn("secret-model-name", response.text)
+
+    def test_the_local_calls_gpu_time_and_escalations(self):
+        # Decision 0077: alice's task ran on Codex and locally, another only
+        # locally (on the CPU: no GPU time), and one escalated twice; bob's is not
+        # hers, nor is an escalation without a task (before revision 0189).
+        both, local_only = self.task(self.user_id), self.task(self.user_id)
+        self.usage(self.user_id, both, tokens=10)
+        self.local(self.user_id, both, tokens=100, seconds=90)
+        self.local(self.user_id, both, seconds=5, calls=0)  # the late time
+        self.local(
+            self.user_id, local_only, tokens=7, seconds=30, placement="local_cpu"
+        )
+        self.escalation(both)
+        self.escalation(both)
+        bob = self.task(self.other_id)
+        self.local(self.other_id, bob, tokens=1000, seconds=1000)
+        self.escalation(bob)
+        self.escalation(None)
+        # Before the period: not counted.
+        self.local(self.user_id, both, tokens=1, seconds=1, ago=timedelta(days=20))
+        self.escalation(local_only, ago=timedelta(days=20))
+
+        response = self.call("GET", "/api/v1/usage", token=self.user)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(body["tasks"], 2)  # one task with Codex and local is one
+        self.assertEqual(body["tokens"], {"local": 107, "external": 11})
+        self.assertEqual(body["gpu_seconds"], 95)
+        self.assertEqual(body["escalations"], {"failed": 0, "loop_detected": 1})
+        self.assertEqual(
+            body["daily"][-1],
+            {"date": self.today(), "local": 2, "codex": 1, "claude": 0},
+        )
+        self.assertEqual(
+            body["agents"],
+            [
+                {"agent": "local", "tasks": 2, "tokens": 107},
+                {"agent": "codex", "tasks": 1, "tokens": 11},
+            ],
+        )
+        # The categories are the shared connections' only.
+        self.assertEqual(
+            body["purposes"], [{"purpose": "coding", "tasks": 1, "tokens": 11}]
+        )
+
+        workspace = self.call(
+            "GET", "/api/v1/usage?scope=workspace", token=self.admin
+        ).json()
+
+        self.assertEqual(workspace["tasks"], 3)
+        self.assertEqual(workspace["tokens"], {"local": 1107, "external": 11})
+        self.assertEqual(workspace["gpu_seconds"], 1095)
+        # alice's task, bob's and the one without a task.
+        self.assertEqual(workspace["escalations"], {"failed": 0, "loop_detected": 3})
+        self.assertEqual(
+            [
+                (user["login_name"], user["tasks"], user["tokens"])
+                for user in workspace["users"]
+            ],
+            [
+                ("owner-one", 0, 0),
+                ("admin-one", 0, 0),
+                ("alice", 2, 118),
+                ("bob", 1, 1000),
+            ],
+        )
 
     def test_the_workspace_needs_admin_usage_view(self):
         self.usage(self.user_id, self.task(self.user_id))

@@ -20,7 +20,12 @@
   with no GPU time left does not start locally, and the task's local calls are
   stopped when together they have held the GPU for the time that was left
   (``NodeStopped`` on the budget in both cases), so slow calls cannot overrun
-  the budget.
+  the budget. With a :class:`LocalUsageSink` (``usage``), every local call is
+  also recorded when it ended (issue #187 item 5, Decision 0077 Proposed): where
+  it ran, the seconds charged as its GPU time and the tokens the local runtime
+  reported to the budget while it ran; the late time of a call that outlived
+  its node is recorded when it ends. A record that cannot be written is logged
+  and changes nothing else.
 * :class:`ScheduledMemoryWorker` wraps a Memory Worker (PAW-041). A job runs only
   under a Background lease on the Memory Worker's model; when there is none (the
   model is unloaded, background work is stopped under pressure, an Exclusive job
@@ -41,7 +46,7 @@ import logging
 import math
 import uuid
 import weakref
-from collections.abc import Callable, Coroutine, Sequence
+from collections.abc import Callable, Coroutine, Mapping, Sequence
 from typing import Protocol
 
 from paw_backend.compute.domain import (
@@ -57,12 +62,14 @@ from paw_backend.compute.limits import (
     DEFAULT_NODE_WAIT_SECONDS,
     DEFAULT_OUTPUT_TOKENS,
 )
+from paw_backend.compute.models import MAX_LOCAL_TOKENS
 from paw_backend.compute.scheduler import (
     ComputeLease,
     ComputeRequest,
     ComputeScheduler,
     check_seconds,
 )
+from paw_backend.compute.usage import LocalUsageSink
 from paw_backend.memory.journal.errors import WorkerUnavailableError
 from paw_backend.memory.journal.worker import check_worker
 from paw_backend.orchestrator.config import Clock, SystemClock
@@ -76,6 +83,7 @@ from paw_backend.orchestrator.result import upstream_size
 from paw_backend.orchestrator.runtime import (
     AgentRuntime,
     NodeAssignment,
+    NodeBudget,
     NodeOutcome,
     NodePlacement,
     validate_runtime,
@@ -172,7 +180,8 @@ class HybridRuntime:
     ``local_model``: the model id recorded for a local attempt (default: the
     deployment's name). ``cloud_agent`` / ``cloud_model``: the cloud agent's name
     (``codex``, ``claude``) and model id, recorded for a cloud attempt and in the
-    audit of the send; required with ``cloud``."""
+    audit of the send; required with ``cloud``. ``usage``: where every local
+    call is recorded (``None``: nowhere)."""
 
     def __init__(
         self,
@@ -191,6 +200,7 @@ class HybridRuntime:
         cloud_after_seconds: float = 0.0,
         charge_gpu_seconds: bool = True,
         late_gpu_charge: "LateGpuCharge | None" = None,
+        usage: "LocalUsageSink | None" = None,
         clock: Clock | None = None,
     ) -> None:
         if not isinstance(scheduler, ComputeScheduler):
@@ -216,6 +226,8 @@ class HybridRuntime:
             raise TypeError("estimate must be callable")
         if late_gpu_charge is not None:
             require_async_method(late_gpu_charge, "charge", 2)
+        if usage is not None:
+            require_async_method(usage, "record", 1)
         # Checked the way the scheduler checks them.
         ComputeRequest(resource_class, deployment=deployment)
         self._scheduler = scheduler
@@ -235,6 +247,7 @@ class HybridRuntime:
         self._cloud_after = check_seconds("cloud_after_seconds", cloud_after_seconds)
         self._charge = bool(charge_gpu_seconds)
         self._late = late_gpu_charge
+        self._usage = usage
         self._clock = clock or SystemClock()
 
     async def run_node(self, assignment: NodeAssignment) -> NodeOutcome:
@@ -260,6 +273,7 @@ class HybridRuntime:
         seconds = 0
         outcome = None
         meter: _GpuMeter | None = None
+        usage: _LocalCall | None = None
         run = object()
         held: list[asyncio.Future] = []  # the local call, when it outlives us
         try:
@@ -292,6 +306,9 @@ class HybridRuntime:
                 if placed is None:
                     outcome = _UNPLACED
                 else:
+                    if self._usage is not None:
+                        usage = _LocalCall(lease.placement, placed.budget)
+                        placed = dataclasses.replace(placed, budget=usage)
                     started = self._clock.monotonic()
                     try:
                         outcome = await self._run_local(placed, lease, meter, held)
@@ -302,7 +319,7 @@ class HybridRuntime:
                             # Still running (it did not stop when it was cancelled):
                             # the meter keeps counting it, and the time it goes on
                             # using is charged when it ends.
-                            self._meter_held(assignment, meter, held[0], now)
+                            self._meter_held(assignment, meter, held[0], now, usage)
                         if meter is not None:
                             meter.stop(run, now)
         except BaseException:
@@ -310,10 +327,10 @@ class HybridRuntime:
             # charged too, or failing nodes that are retried would bypass the
             # budget's max GPU time. The runtime's error is what propagates.
             with contextlib.suppress(Exception):
-                await self._settle(assignment, meter, run, seconds)
+                await self._settle(assignment, meter, run, seconds, usage)
             raise
         # Raises NodeStopped when the budget is now used up: it passes.
-        await self._settle(assignment, meter, run, seconds)
+        await self._settle(assignment, meter, run, seconds, usage)
         if outcome is _UNPLACED:
             # Its placement could not be recorded: it did not run (fail closed).
             return NodeOutcome.failed(COMPUTE_UNAVAILABLE, retryable=True)
@@ -419,24 +436,52 @@ class HybridRuntime:
         seconds: int,
         *,
         late: bool = False,
+        usage: "_LocalCall | None" = None,
     ) -> None:
-        """Charge the call's GPU time and take it out of the meter, together.
-        ``late``: the call ended after its node (see ``_meter_held``)."""
-        if meter is None:
-            if self._charge and seconds > 0:
-                await self._charge_gpu(assignment, seconds, late)
+        """Charge the call's GPU time and take it out of the meter, together;
+        then record the call's usage (whether or not the charge went through: the
+        time was used). ``late``: the call ended after its node (see
+        ``_meter_held``)."""
+        try:
+            if meter is None:
+                if self._charge and seconds > 0:
+                    await self._charge_gpu(assignment, seconds, late)
+                return
+            try:
+                async with meter.lock:
+                    try:
+                        if seconds > 0:
+                            await self._charge_gpu(assignment, seconds, late)
+                    finally:
+                        meter.finish(run, seconds)
+            finally:
+                if run in meter.runs:  # the lock was never taken (cancelled)
+                    meter.finish(run, seconds)
+                self._drop_user(assignment, meter)
+        finally:
+            if usage is not None:
+                await self._record_usage(assignment, usage, seconds, late)
+
+    async def _record_usage(
+        self, assignment: NodeAssignment, usage: "_LocalCall", seconds: int, late: bool
+    ) -> None:
+        """One row of the local usage: the call (``late``: the time it went on
+        using after its node, with the tokens reported since). Never raises."""
+        tokens = usage.take_tokens()
+        if late and seconds == 0 and tokens == 0:
             return
         try:
-            async with meter.lock:
-                try:
-                    if seconds > 0:
-                        await self._charge_gpu(assignment, seconds, late)
-                finally:
-                    meter.finish(run, seconds)
-        finally:
-            if run in meter.runs:  # the lock was never taken (cancelled)
-                meter.finish(run, seconds)
-            self._drop_user(assignment, meter)
+            await self._usage.record(
+                assignment.task_id,
+                placement=usage.placement,
+                calls=0 if late else 1,
+                tokens=tokens,
+                seconds=seconds,
+            )
+        except Exception as error:
+            logger.error(
+                "The usage of a local call was not recorded (%s)", type(error).__name__
+            )
 
     async def _settle(
         self,
@@ -444,13 +489,14 @@ class HybridRuntime:
         meter: "_GpuMeter | None",
         run: object,
         seconds: int,
+        usage: "_LocalCall | None" = None,
     ) -> None:
         """``_settle_charge`` in a task of its own: a cancellation that reaches
         the node while the charge is being written (a task stop and a shutdown at
-        once) does not interrupt it; the charge completes and the time stays
-        counted by the meter until then."""
+        once) does not interrupt it; the charge (and the usage record) completes
+        and the time stays counted by the meter until then."""
         settle = asyncio.ensure_future(
-            self._settle_charge(assignment, meter, run, seconds)
+            self._settle_charge(assignment, meter, run, seconds, usage=usage)
         )
         _CHARGES.add(settle)
         settle.add_done_callback(_charge_done)
@@ -480,6 +526,7 @@ class HybridRuntime:
         meter: "_GpuMeter | None",
         work: asyncio.Future,
         since: float,
+        usage: "_LocalCall | None" = None,
     ) -> None:
         """Keep metering ``work`` (a local call that did not stop when it was
         cancelled; it holds its lease until it ends) from ``since``, and charge
@@ -496,7 +543,9 @@ class HybridRuntime:
                 meter.stop(run, end)
             seconds = math.ceil(max(0.0, end - since))
             charge = asyncio.ensure_future(
-                self._settle_charge(assignment, meter, run, seconds, late=True)
+                self._settle_charge(
+                    assignment, meter, run, seconds, late=True, usage=usage
+                )
             )
             _CHARGES.add(charge)
             charge.add_done_callback(_charge_done)
@@ -588,6 +637,48 @@ class _Recorded:
         await self._recorder.ensure_active()
         if (placement, agent, model) != self._placement:
             raise InvalidOrchestratorArgumentError("placement")
+
+
+class _LocalCall:
+    """The ``budget`` a local runtime is given when its usage is recorded: every
+    call goes to the node's budget as it is, and the tokens the budget took are
+    counted for the record (``take_tokens``). A report the budget refuses (a
+    wrong kind or amount, an attempt that can no longer act) is not counted; one
+    that stops the node on the budget is (it was recorded, and the tokens were
+    used)."""
+
+    __slots__ = ("_budget", "_tokens", "placement")
+
+    def __init__(self, placement: Placement, budget: NodeBudget) -> None:
+        self.placement = placement
+        self._budget = budget
+        self._tokens = 0
+
+    async def charge(self, kind: BudgetKind, amount: int) -> None:
+        try:
+            await self._budget.charge(kind, amount)
+        except NodeStopped as stopped:
+            if stopped.reason is StopReason.BUDGET_EXCEEDED:
+                self._count(kind, amount)
+            raise
+        self._count(kind, amount)
+
+    async def remaining(self) -> Mapping[BudgetKind, int | None]:
+        return await self._budget.remaining()
+
+    def _count(self, kind: object, amount: object) -> None:
+        if (
+            kind is BudgetKind.TOKENS
+            and isinstance(amount, int)
+            and not isinstance(amount, bool)
+            and amount > 0
+        ):
+            self._tokens = min(MAX_LOCAL_TOKENS, self._tokens + amount)
+
+    def take_tokens(self) -> int:
+        """The tokens counted since the last take."""
+        tokens, self._tokens = self._tokens, 0
+        return tokens
 
 
 class _GpuMeter:

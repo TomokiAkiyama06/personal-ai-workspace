@@ -39,7 +39,9 @@ objects that run tasks, each wired to the others the way production needs:
   ``HybridRuntime`` on the process's scheduler, so a node takes a lease before it
   uses the GPU and holds a Full GPU Mode off, and the GPU time is charged to the
   task (also late, through ``TrackerLateGpuCharge`` on the same
-  ``BudgetTracker``). No ``CloudPolicy`` is injected (Decision 0037, 14);
+  ``BudgetTracker``); every local call is recorded in ``local_usage``
+  (``PostgresLocalUsage``, Decision 0077 Proposed). No ``CloudPolicy`` is injected
+  (Decision 0037, 14);
 * what the maintenance loop (``freshness_loop.build_freshness_loop``) runs: the
   freshness jobs and the task-end sweep (the application's lifespan starts it).
 
@@ -51,7 +53,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from paw_backend.authz import Authorizer, PostgresAuditSink
-from paw_backend.compute import ComputeScheduler, HybridRuntime, TrackerLateGpuCharge
+from paw_backend.compute import (
+    ComputeScheduler,
+    HybridRuntime,
+    PostgresLocalUsage,
+    TrackerLateGpuCharge,
+)
 from paw_backend.compute.wiring import LocalRuntime
 from paw_backend.config import Settings
 from paw_backend.db import Database
@@ -173,13 +180,16 @@ def _with_local_runtimes(
     local_runtimes: Mapping[str, LocalRuntime],
     scheduler: ComputeScheduler,
     budget: BudgetTracker,
+    database: Database,
 ) -> dict[str, AgentRuntime]:
     """``runtimes`` and each local runtime in a ``HybridRuntime`` on
-    ``scheduler`` (module docstring). A label given twice is a ``TypeError``."""
+    ``scheduler`` (module docstring), whose calls are recorded in ``local_usage``
+    (Decision 0077). A label given twice is a ``TypeError``."""
     if not isinstance(local_runtimes, Mapping):
         raise TypeError("local_runtimes must be a mapping")
     combined: dict[str, AgentRuntime] = dict(runtimes or {})
     late_charge = TrackerLateGpuCharge(budget)
+    usage = PostgresLocalUsage(database)
     for label, local in local_runtimes.items():
         if not isinstance(local, LocalRuntime):
             raise TypeError("each local runtime must be a LocalRuntime")
@@ -193,6 +203,7 @@ def _with_local_runtimes(
             resource_class=local.resource_class,
             wait_seconds=local.wait_seconds,
             late_gpu_charge=late_charge,
+            usage=usage,
         )
     return combined
 
@@ -268,7 +279,9 @@ def build_task_execution(
     orchestrator = None
     worktrees = None
     if local_runtimes is not None and scheduler is not None:
-        runtimes = _with_local_runtimes(runtimes, local_runtimes, scheduler, budget)
+        runtimes = _with_local_runtimes(
+            runtimes, local_runtimes, scheduler, budget, database
+        )
     if runtimes is not None and orchestrator_config is not None:
         worktrees = build_worktrees(
             settings, database, git_runner=git_runner, accounts=accounts

@@ -382,6 +382,11 @@ class PostgresOrchestratorTestCase(PostgresTaskTestCase):
         rows = await self.rows("SELECT kind FROM agent_incidents ORDER BY id")
         return [row["kind"] for row in rows]
 
+    async def incident_tasks(self) -> list[uuid.UUID | None]:
+        """The tasks of the agent incidents recorded so far (Decision 0077)."""
+        rows = await self.rows("SELECT task_id FROM agent_incidents ORDER BY id")
+        return [row["task_id"] for row in rows]
+
     async def states_of(self, task_id, attempt: int = 1) -> dict[str, str]:
         dag = await self.store.get(task_id, attempt)
         return {n.key: n.state.value for n in dag.nodes}

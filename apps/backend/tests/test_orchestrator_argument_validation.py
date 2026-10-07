@@ -280,8 +280,11 @@ class StoreArgumentTest(unittest.IsolatedAsyncioTestCase):
                 },
             ),
             "record_incident": (
-                {"kind": IncidentKind.OUT_OF_MEMORY},
-                {"kind": [None, "", "oom", "Escalation", 1, CANARY, object()]},
+                {"kind": IncidentKind.OUT_OF_MEMORY, "task_id": DAG},
+                {
+                    "kind": [None, "", "oom", "Escalation", 1, CANARY, object()],
+                    "task_id": not_a_uuid(),
+                },
             ),
             "interrupt": (
                 {"dag_id": DAG, "epoch": 1},

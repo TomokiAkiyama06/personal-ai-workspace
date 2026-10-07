@@ -1,22 +1,29 @@
-"""The usage report of the Usage screen (issue #187, Decision 0069, Proposed).
+"""The usage report of the Usage screen (issue #187, Decisions 0069 and 0077).
 
 A read model over ``connection_usage`` (the calls through the shared Codex / Claude
-connections): totals, tasks per calendar day and connection kind, per kind, per
-usage category and, for the whole workspace, per user. It holds counts, closed
-enums, ids and login names only: no prompt, answer, model name or text (Decision
-0016, section 6).
+connections), ``local_usage`` (the calls of the local models, Decision 0077
+Proposed) and the escalations of ``agent_incidents``: totals, tasks per calendar
+day and agent, per agent, per usage category and, for the whole workspace, per
+user. It holds counts, closed enums, ids and login names only: no prompt, answer,
+model name or text (Decision 0016, section 6).
 
 What it counts (the quota metrics of Decision 0016, section 5)
 -------------------------------------------------------------
-* ``tasks``: distinct tasks with at least one call in the period (every status,
-  ``in_flight`` too: the ``tasks`` metric of a quota). A task that used both kinds is
-  one task in the total and one in each kind; a task with calls on two days is one
-  on each day.
+* ``tasks``: distinct tasks with at least one call in the period, of a shared
+  connection (every status, ``in_flight`` too: the ``tasks`` metric of a quota) or
+  of a local model (Decision 0077, point 5). A task that used several agents is one
+  task in the total and one in each agent; a task with calls on two days is one on
+  each day.
 * ``tokens``: input plus output tokens the adapters reported (an unknown count is
-  0), of the calls that STARTED in the period.
-
-The local agent records no usage yet (issue #187, item 5): the report has no local
-figure, and the HTTP layer says "not recorded" for it.
+  0), of the calls that STARTED in the period; ``local.tokens`` the tokens the
+  local runtimes reported to the task budgets (Decision 0077, point 2).
+* ``local.gpu_seconds``: the seconds the local calls placed on the GPU held their
+  lease (Decision 0077, point 3).
+* ``escalations``: distinct tasks with an escalation in the period (a row of
+  ``agent_incidents`` written before revision 0189 has no task: one each, in the
+  workspace's figure only). Every escalation of the orchestrator comes from the
+  loop detector (Decision 0007), so ``failed`` is 0 (Decision 0077, point 5).
+* The usage categories are the shared connections' only: a local call has none.
 
 The periods (Decision 0069, point 2)
 ------------------------------------
@@ -128,6 +135,32 @@ class PurposeTotal:
 
 
 @dataclass(frozen=True, slots=True)
+class LocalDailyTasks:
+    """The tasks of one calendar day with a call of a local model."""
+
+    day: date
+    tasks: int
+
+
+@dataclass(frozen=True, slots=True)
+class LocalTotal:
+    """The calls of the local models over the period (Decision 0077)."""
+
+    tasks: int
+    tokens: int
+    gpu_seconds: int
+    daily: tuple[LocalDailyTasks, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class EscalationTotal:
+    """The escalated tasks of the period, by cause (Decision 0077, point 5)."""
+
+    failed: int
+    loop_detected: int
+
+
+@dataclass(frozen=True, slots=True)
 class UserTotal:
     """One user of the workspace report: totals of the period and current quotas."""
 
@@ -144,9 +177,12 @@ class UserTotal:
 class UsageReport:
     """The usage of one user (``users`` is ``None``) or of the workspace.
 
-    ``daily`` lists only the (day, kind) pairs with a task; ``days`` every day of
-    the period, in order. ``quotas`` are the quotas of the user the report is of,
-    or, for the workspace, of the user who asked.
+    ``tasks`` / ``previous_tasks`` count the shared connections' and the local
+    calls' tasks; ``tokens``, ``daily``, ``kinds`` and ``purposes`` are the shared
+    connections' (``daily`` lists only the (day, kind) pairs with a task), ``local``
+    the local models'. ``days`` is every day of the period, in order. ``quotas`` are
+    the quotas of the user the report is of, or, for the workspace, of the user
+    who asked. A user's ``tasks`` / ``tokens`` count both.
     """
 
     range: UsageRange
@@ -161,3 +197,5 @@ class UsageReport:
     purposes: tuple[PurposeTotal, ...]
     quotas: tuple[QuotaUsage, ...]
     users: tuple[UserTotal, ...] | None
+    local: LocalTotal
+    escalations: EscalationTotal
