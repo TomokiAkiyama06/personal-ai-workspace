@@ -578,6 +578,19 @@ class RollbackTest(ReleaseToolTestCase):
         self.assertEqual((self.current(), self.world.revision), ("r3", "0003"))
         self.assertEqual(self.world.calls[-1], "notify")
 
+    def test_the_default_is_the_known_good_release_before_the_current_one(self):
+        # Codex review #204 (ad3c59c): r1 -> r2 -> r3, back to r2, then the
+        # default rollback goes to r1, not forward to r3.
+        self.installed()
+        self.assertEqual(self.run_tool("update", "r2")[0], 0)
+        self.assertEqual(self.run_tool("update", "r3")[0], 0)
+        (point,) = [p.stem for p in self.points.glob("r2-to-r3-*.json")]
+        code, out = self.run_tool("rollback", "--to", "r2", "--restore-point", point)
+        self.assertEqual(code, 0, out)
+        code, out = self.run_tool("rollback")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.current(), "r1")
+
     def test_only_to_a_known_good_release(self):
         self.installed()
         code, out = self.run_tool("rollback", "--to", "r3")

@@ -836,7 +836,13 @@ class Tool:
                 raise ReleaseError("no current release")
             known_good = list(self.state.read()["known_good"])
             if to is None:
-                earlier = [v for v in known_good if v != current_name]
+                # The one that became known-good just before the current one
+                # (after a rollback, never forward to the release left).
+                earlier = (
+                    known_good[: known_good.index(current_name)]
+                    if current_name in known_good
+                    else known_good
+                )
                 if not earlier:
                     raise ReleaseError("no earlier known-good release to roll back to")
                 to = earlier[-1]
