@@ -80,7 +80,7 @@ Log・作業 Directory・Evaluator の結果は Repository の外（`/data/resul
 ### 5. 記録の形式と値の決め方（この PR で `benchmarks/human_correction.py` を実装）
 
 - **Event log**（JSON Lines、追記のみ、`0600`）: 1 行 1 Event で、`v`・`event`（`start` / `pause` / `resume` / `finish` / `abandon` / `unchanged`）・`session`（`<model>/<task>/<run>`）・`at`（UTC、ミリ秒）と、`start` / `unchanged` だけ `task_id`・`model`・`run`。**Code・test の出力・メモは書かない**（Hidden check の内容を Log に漏らさないため）。
-- CLI は書く前に Log 全体と新しい Event を読み直して検査し、あり得ない遷移（`running` でないのに `pause`、閉じた Session への Event、同じ Session の 2 回目の `start`、時刻の逆行）は書かずに終了 code 1 にする。
+- CLI は Log に排他 lock を掛けたまま Log 全体と新しい Event を読み直して検査・追記し（既存の file も `0600` にし、symlink と他の User の file は拒否する）、あり得ない遷移（`running` でないのに `pause`、閉じた Session への Event、同じ Session の 2 回目の `start`、時刻の逆行）は書かずに終了 code 1 にする。
 - **作業時間**: `start` から `finish` / `abandon` までのうち、`pause`〜`resume` を除いた時間。`pause` 中に `finish` したら、`pause` の時刻で終わる。
 - **値**（`human_correction_ms`）:
 

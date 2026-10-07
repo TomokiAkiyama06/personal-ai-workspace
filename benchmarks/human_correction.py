@@ -33,8 +33,10 @@ session's ``human_correction_ms`` into ``metrics`` of an evaluator Result (schem
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
+import stat
 import sys
 import tempfile
 from collections.abc import Callable, Iterable
@@ -234,25 +236,46 @@ class CorrectionLog:
             return {}
         return replay(text.splitlines())
 
-    def _append(self, event: dict[str, Any]) -> None:
-        line = json.dumps(event, ensure_ascii=False) + "\n"
+    def _open_locked(self) -> int:
+        """Open the log for appending, refuse anything but the caller's regular file,
+        make it private and hold an exclusive lock until the descriptor is closed."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        descriptor = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
-        with os.fdopen(descriptor, "a", encoding="utf-8") as handle:
-            handle.write(line)
+        flags = os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW
+        try:
+            descriptor = os.open(self.path, flags, 0o600)
+        except OSError:
+            raise CorrectionLogError(
+                "log must be a regular file (not a link)"
+            ) from None
+        try:
+            status = os.fstat(descriptor)
+            if not stat.S_ISREG(status.st_mode):
+                raise CorrectionLogError("log must be a regular file (not a link)")
+            if status.st_uid != os.geteuid():
+                raise CorrectionLogError("log must be owned by the current user")
+            os.fchmod(descriptor, 0o600)
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+        except BaseException:
+            os.close(descriptor)
+            raise
+        return descriptor
 
     def record(self, kind: str, name: str, **fields: str) -> Session:
-        """Validate the event against the current log, append it and return the session."""
-        event = {"v": LOG_VERSION, "event": kind, "session": name}
-        event["at"] = _format(self.clock())
-        event.update(fields)
-        # Replaying the log plus the new line applies exactly the rules a reader applies,
-        # so an event the reader would reject is never written.
-        lines = []
-        if self.path.exists():
-            lines = self.path.read_text(encoding="utf-8").splitlines()
-        sessions = replay([*lines, json.dumps(event)])
-        self._append(event)
+        """Validate the event against the current log, append it and return the session.
+
+        The read, the validation and the append run under one exclusive lock, so two
+        commands on the same log cannot both validate against the same snapshot."""
+        descriptor = self._open_locked()
+        with os.fdopen(descriptor, "r+", encoding="utf-8") as handle:
+            handle.seek(0)
+            lines = handle.read().splitlines()
+            event = {"v": LOG_VERSION, "event": kind, "session": name}
+            event["at"] = _format(self.clock())
+            event.update(fields)
+            # Replaying the log plus the new line applies exactly the rules a reader
+            # applies, so an event the reader would reject is never written.
+            sessions = replay([*lines, json.dumps(event)])
+            handle.write(json.dumps(event, ensure_ascii=False) + "\n")
         return sessions[name]
 
     def resolve(self, name: str | None) -> str:

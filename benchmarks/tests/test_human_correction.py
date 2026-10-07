@@ -1,8 +1,10 @@
 """Tests for the human correction time stopwatch (Decision 0041 8, Decision 0082)."""
 
+import fcntl
 import io
 import json
 import tempfile
+import threading
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import UTC, datetime, timedelta
@@ -154,7 +156,7 @@ class StopwatchTest(unittest.TestCase):
         code, _, err = self.run_cli("start", "--task", "a/b", "--model", MODEL)
         self.assertIn("without", err)
         self.assertEqual(code, 1)
-        self.assertFalse(self.log.exists())
+        self.assertEqual(self.log.read_text(encoding="utf-8"), "")
 
     def test_clock_going_backwards_is_rejected(self):
         self.start()
@@ -172,6 +174,41 @@ class StopwatchTest(unittest.TestCase):
                 set(json.loads(line)),
                 {"v", "event", "session", "at", "task_id", "model", "run"},
             )
+
+    def test_existing_log_is_made_private(self):
+        self.log.parent.mkdir(parents=True)
+        self.log.touch(mode=0o644)
+        self.log.chmod(0o644)
+        self.start()
+        self.assertEqual(self.log.stat().st_mode & 0o777, 0o600)
+
+    def test_symlinked_log_is_refused(self):
+        target = Path(self.directory.name) / "elsewhere.txt"
+        target.write_text("", encoding="utf-8")
+        self.log.parent.mkdir(parents=True)
+        self.log.symlink_to(target)
+        code, _, err = self.run_cli("start", "--task", TASK, "--model", MODEL)
+        self.assertEqual(code, 1)
+        self.assertIn("regular file", err)
+        self.assertEqual(target.read_text(encoding="utf-8"), "")
+
+    def test_validation_and_append_hold_an_exclusive_lock(self):
+        self.start()
+        self.log.touch()
+        with self.log.open("a") as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            outcome = {}
+            worker = threading.Thread(
+                target=lambda: outcome.setdefault("code", self.run_cli("pause")[0])
+            )
+            worker.start()
+            worker.join(0.3)
+            # The second writer waits for the lock instead of validating a stale log.
+            self.assertTrue(worker.is_alive())
+            self.assertEqual(len(self.log.read_text(encoding="utf-8").splitlines()), 1)
+        worker.join(5)
+        self.assertEqual(outcome["code"], 0)
+        self.assertEqual(len(self.log.read_text(encoding="utf-8").splitlines()), 2)
 
     def test_summary_counts_outcomes(self):
         self.start(run="run1")
