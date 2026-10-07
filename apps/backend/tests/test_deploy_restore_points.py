@@ -331,3 +331,11 @@ class PostgresRestorePointTest(unittest.TestCase):
             ("added_by_the_migration",),
             self.sql("SELECT tablename FROM pg_tables WHERE schemaname = 'public'"),
         )
+
+    def test_a_dump_that_failed_after_writing_leaves_nothing(self):
+        # Codex review #204 (80d3189): the partial file holds personal data.
+        (self.tools / "pg_dump.fail_after_writing").touch()
+        with self.assertRaises(RestorePointError) as caught:
+            self.points.create(self.url, "p1")
+        self.assertEqual(caught.exception.code, "dump_failed")
+        self.assertEqual(list((self.root / "points").iterdir()), [])

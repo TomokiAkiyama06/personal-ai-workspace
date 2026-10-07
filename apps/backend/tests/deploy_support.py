@@ -48,6 +48,9 @@ def log(name):
 _DUMP = """
 log("pg_dump")
 target = next(a.split("=", 1)[1] for a in sys.argv[1:] if a.startswith("--file="))
+if (HERE / "pg_dump.fail_after_writing").exists():
+    Path(target).write_text("part of a dump")  # a disk-full error, a kill
+    sys.exit(1)
 with connect() as connection:
     (revision,) = connection.execute(
         "SELECT version_num FROM alembic_version"

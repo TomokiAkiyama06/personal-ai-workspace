@@ -34,6 +34,7 @@ contains them. ``pg_dump`` / ``pg_restore`` must be of the server's major versio
 or newer.
 """
 
+import contextlib
 import hashlib
 import json
 import os
@@ -235,33 +236,41 @@ class RestorePoints:
         # The database's clock: what ``restore`` compares the deletions with.
         taken_at = self._scalar(_sync_url(url), "SELECT now()")
         partial = directory / f".{label}.dump.partial"
-        self._run(
-            [
-                self._pg_dump,
-                "--format=custom",
-                "--no-password",
-                f"--file={partial}",
-            ],
-            pg_environment(url),
-            "dump_failed",
-        )
-        if not partial.is_file() or partial.stat().st_size == 0:
-            raise RestorePointError("dump_failed")
-        os.chmod(partial, 0o600)
-        with partial.open("rb") as stream:
-            os.fsync(stream.fileno())
-        os.replace(partial, dump)
-        point = RestorePoint(
-            label=label,
-            database=url.database,
-            revision=revision,
-            created_at=taken_at.isoformat(),
-            size=dump.stat().st_size,
-            sha256=_sha256(dump),
-            verified=None,
-            metadata_path=metadata,
-        )
-        _write_private(metadata, json.dumps(point.as_json(), indent=2) + "\n")
+        try:
+            self._run(
+                [
+                    self._pg_dump,
+                    "--format=custom",
+                    "--no-password",
+                    f"--file={partial}",
+                ],
+                pg_environment(url),
+                "dump_failed",
+            )
+            if not partial.is_file() or partial.stat().st_size == 0:
+                raise RestorePointError("dump_failed")
+            os.chmod(partial, 0o600)
+            with partial.open("rb") as stream:
+                os.fsync(stream.fileno())
+            os.replace(partial, dump)
+            point = RestorePoint(
+                label=label,
+                database=url.database,
+                revision=revision,
+                created_at=taken_at.isoformat(),
+                size=dump.stat().st_size,
+                sha256=_sha256(dump),
+                verified=None,
+                metadata_path=metadata,
+            )
+            _write_private(metadata, json.dumps(point.as_json(), indent=2) + "\n")
+        except BaseException:
+            # A failed or cut-off dump holds personal data: nothing of it stays
+            # (prune only sees finished points).
+            for leftover in (partial, dump, metadata):
+                with contextlib.suppress(FileNotFoundError):
+                    leftover.unlink()
+            raise
         return point
 
     # -- load ------------------------------------------------------------------
