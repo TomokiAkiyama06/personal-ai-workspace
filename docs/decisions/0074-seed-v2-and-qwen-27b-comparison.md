@@ -84,7 +84,7 @@ Decision 0073 の 1（共存の確認 Run の採用条件を「Resolved@3 と平
 ## リスク
 
 - 131k の設定では、Qwen3.8-27B-FP8 は長い Task で Context の余裕が小さい（Task ごとの Prompt の最大は p90 107k・最大 115k、Qwen3.6-27B-FP8 は 69k・85k）。Qwen3.8-27B-FP8 を将来採る場合は、古い Reasoning を履歴から落とす、または `max-model-len` を大きくすることを Context の大きさの設計で考える（この比較では試していない）。
-- 共存時（Decision 0073 の 2、Main を 0.51）は Main の KV Pool が約 303k token、Coding の予約が約 259k token を最大 4 Agent で分ける。2 Model は同じ構造で 1 token あたりの KV は同じだが、Task ごとの Prompt の最大の中央値で数えると 4 並列で Qwen3.6-27B-FP8 は約 170k で収まり、Qwen3.8-27B-FP8 は約 270k（p90 で約 430k）で予約を超え、Admission の待ちで実際の並列が 2〜3 に下がると見込まれる（実測していない。選び方の結果は変えない）。対策の候補は、古い Reasoning を履歴から落とす、Main に GPU Memory を多く与える（Embedding / Reranker を CPU に置くなど）、並列の Agent を減らすこと。
+- 共存時（Decision 0073 の 2、Main を 0.51）は Main の KV Pool が約 303k token、Coding の予約が約 259k token を最大 4 Agent で分ける。2 Model は同じ構造で 1 token あたりの KV は同じだが、KV の必要量の粗い見積もり（Task ごとの Prompt の最大の中央値 × 4 並列、応答の分は含まない）は Qwen3.6-27B-FP8 が約 170k で収まり、Qwen3.8-27B-FP8 は約 270k（p90 で約 430k）で超える（実測していない。選び方の結果は変えない）。今の Scheduler は Node の開始時の見積もりで Lease を 1 回取るだけで会話の伸びを予約に反映しないため、この超過は Admission では止まらず vLLM の KV Pool の中での待ち・Preemption として現れると見込まれる。対策の候補は、古い Reasoning を履歴から落とす、Main に GPU Memory を多く与える（Embedding / Reranker を CPU に置くなど）、並列の Agent を減らすこと。
 - 新しい Task の作者は Agent（Claude）で、Golden・Hidden test も同じ作者が書いた。Issue の本文で読み取れない期待が残っている可能性がある（予備の Run で 3 Model が同じ test case だけを落とした Task は、本文に書かれていることを確かめて残した）。
 - 予備の Run の 3 Model は候補より弱い。予備の Run で残した Task が、候補にとっても差が出るとは限らない。
 - 1 回目の結果を見て 2 回目の Task を作ったため、Task の作り方自体は予備の Run の 3 Model に合わせている（候補の 2 Model には合わせていない）。
