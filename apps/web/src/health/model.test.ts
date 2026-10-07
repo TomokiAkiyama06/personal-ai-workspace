@@ -94,6 +94,30 @@ describe("System Health model", () => {
     expect(percentPoints({ gpu: [], used: [], reserved: [], total: [] })).toEqual([]);
   });
 
+  it("keeps a bucket where every series is missing as a gap (Codex P2)", () => {
+    const point = (bucket_start: string, mean: number) => ({
+      bucket_start,
+      mean,
+      min: mean,
+      max: mean,
+    });
+    const points = percentPoints(
+      {
+        gpu: [point("2026-10-07T04:00:00Z", 40), point("2026-10-07T04:36:00Z", 60)],
+        used: [],
+        reserved: [],
+        total: [],
+      },
+      720,
+    );
+    expect(points.map((entry) => [entry.at, entry.gpu])).toEqual([
+      ["2026-10-07T04:00:00.000Z", 40],
+      ["2026-10-07T04:12:00.000Z", null],
+      ["2026-10-07T04:24:00.000Z", null],
+      ["2026-10-07T04:36:00.000Z", 60],
+    ]);
+  });
+
   it("asks for about 120 points per period, never finer than 10 seconds", () => {
     expect(chartStepSeconds("last1h")).toBe(30);
     expect(chartStepSeconds("last24h")).toBe(720);

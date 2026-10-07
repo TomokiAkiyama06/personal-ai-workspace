@@ -297,23 +297,39 @@ export interface PercentPoint {
 /**
  * The buckets of the four series as percentages: GPU utilization as it is, VRAM
  * used and reserved of the total of the same bucket (else the latest total
- * before it). A bucket with no value of a series leaves a gap in that line.
+ * before it). A bucket with no value of a series leaves a gap in that line; with
+ * `stepSeconds`, so does a bucket missing from every series.
  */
-export function percentPoints(series: {
-  gpu: readonly SeriesPoint[];
-  used: readonly SeriesPoint[];
-  reserved: readonly SeriesPoint[];
-  total: readonly SeriesPoint[];
-}): PercentPoint[] {
+export function percentPoints(
+  series: {
+    gpu: readonly SeriesPoint[];
+    used: readonly SeriesPoint[];
+    reserved: readonly SeriesPoint[];
+    total: readonly SeriesPoint[];
+  },
+  stepSeconds?: number,
+): PercentPoint[] {
   const byTime = (points: readonly SeriesPoint[]) =>
     new Map(points.map((point) => [Date.parse(point.bucket_start), point.mean]));
   const gpu = byTime(series.gpu);
   const used = byTime(series.used);
   const reserved = byTime(series.reserved);
   const total = byTime(series.total);
-  const times = [...new Set([...gpu.keys(), ...used.keys(), ...reserved.keys()])]
+  const recorded = [...new Set([...gpu.keys(), ...used.keys(), ...reserved.keys()])]
     .filter((time) => !Number.isNaN(time))
     .sort((a, b) => a - b);
+  // A bucket where nothing was sampled has no point at all in any series: it is
+  // put back (empty), so the lines break there and keep their time scale
+  // (Codex P2, PR #203).
+  const times: number[] = [];
+  const step = (stepSeconds ?? 0) * 1000;
+  for (const time of recorded) {
+    const previous = times[times.length - 1];
+    if (step > 0 && previous !== undefined) {
+      for (let gap = previous + step; time - gap >= step / 2; gap += step) times.push(gap);
+    }
+    times.push(time);
+  }
   const totals = [...total.entries()].sort((a, b) => a[0] - b[0]);
   const totalAt = (time: number): number | null => {
     let found: number | null = null;

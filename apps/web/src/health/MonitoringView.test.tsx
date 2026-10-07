@@ -11,7 +11,7 @@ import {
 } from "../test/healthFixture";
 import { mockApi, Providers, reply, session } from "../test/helpers";
 import { REFRESH_SECONDS } from "./MonitoringView";
-import { type HealthSource, HealthSourceProvider } from "./model";
+import { type HealthReport, type HealthSource, HealthSourceProvider } from "./model";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -149,13 +149,16 @@ describe("サーバー監視", () => {
     await user.click(screen.getByRole("button", { name: "表で見る" }));
     const table = screen.getByRole("table", { name: "GPU / VRAM の推移" });
     const rows = within(table).getAllByRole("row");
-    // The header and two buckets: GPU, VRAM used and reserved of 48 GB.
-    expect(rows).toHaveLength(3);
-    expect(
-      within(rows[1] as HTMLElement)
+    // The header and the buckets of 12 minutes from 04:00 to 05:00: the two that
+    // were sampled (GPU, VRAM used and reserved of 48 GB) and the empty ones between.
+    const cells = (row: number) =>
+      within(rows[row] as HTMLElement)
         .getAllByRole("cell")
-        .map((cell) => cell.textContent),
-    ).toEqual(["40%", "25%", "38%"]);
+        .map((cell) => cell.textContent);
+    expect(rows).toHaveLength(7);
+    expect(cells(1)).toEqual(["40%", "25%", "38%"]);
+    expect(cells(2)).toEqual(["—", "—", "—"]);
+    expect(cells(6)).toEqual(["50%", "50%", "38%"]);
   });
 
   it("reads the history of the chosen period", async () => {
@@ -222,6 +225,47 @@ describe("サーバー監視", () => {
     if (backup) backup.reasons = ["failing", "a_code_from_later"];
     renderMonitoring(fakeHealthSource(report, { events: async () => healthEvents().slice(0, 1) }));
     expect(await screen.findByText("a_code_from_later")).toBeVisible();
+  });
+
+  it("does not show numbers a failed check did not read (Codex P2)", async () => {
+    const report = normalReport();
+    report.severity = "warning";
+    report.components = report.components.map((entry) =>
+      entry.component === "task_queue" || entry.component === "memory_worker"
+        ? {
+            ...entry,
+            severity: "warning",
+            status: "check_failed",
+            reasons: ["check_timeout"],
+            metrics: {},
+          }
+        : entry,
+    );
+    renderMonitoring(fakeHealthSource(report));
+    const areas = await screen.findByRole("group", { name: "監視の対象" });
+    expect(within(areas).getByRole("button", { name: /タスクキュー/ })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    const detail = screen.getByRole("region", { name: "タスクキュー" });
+    expect(within(detail).getAllByText("確認が時間内に終わりませんでした")).toHaveLength(2);
+    expect(within(detail).queryByText(/実行 0/)).not.toBeInTheDocument();
+    expect(within(detail).queryByText(/失敗 0/)).not.toBeInTheDocument();
+    expect(within(detail).queryByText(/待ち 0/)).not.toBeInTheDocument();
+  });
+
+  it("never lets an older answer replace a newer one: one read at a time (Codex P2)", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const pending: ((report: HealthReport) => void)[] = [];
+    const report = vi.fn(() => new Promise<HealthReport>((resolve) => pending.push(resolve)));
+    renderMonitoring(fakeHealthSource(normalReport(), { report }));
+    await waitFor(() => expect(pending.length).toBeGreaterThan(0));
+    const before = report.mock.calls.length;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(REFRESH_SECONDS * 1000 * 2);
+    });
+    // The page's read is still pending: no second one started behind it.
+    expect(report.mock.calls.length).toBe(before);
   });
 
   it("is not shown to a Member", async () => {

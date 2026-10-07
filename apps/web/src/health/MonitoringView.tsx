@@ -571,6 +571,17 @@ function componentLines(t: Translate, health: ComponentHealth): string[] {
   const m = health.metrics;
   const n = (name: string) => numberOf(m, name);
   const lines: string[] = [];
+  // A line only when every number in it was read: a check that failed or timed
+  // out reports no metrics, and a missing count is not zero (Codex P2, PR #203).
+  const metricLine = (key: MessageKey, names: Record<string, string>) => {
+    const params: Record<string, number> = {};
+    for (const [param, name] of Object.entries(names)) {
+      const value = n(name);
+      if (value === null) return;
+      params[param] = value;
+    }
+    lines.push(t(key, params));
+  };
   switch (health.component) {
     case "database": {
       const latency = n("latency_ms");
@@ -589,51 +600,37 @@ function componentLines(t: Translate, health: ComponentHealth): string[] {
           }),
         );
       }
-      if (n("leases") !== null) {
-        lines.push(
-          t("health.metric.lease", {
-            leases: n("leases") ?? 0,
-            waiting: n("waiting") ?? 0,
-            vram: n("waiting_for_vram") ?? 0,
-          }),
-        );
-      }
+      metricLine("health.metric.lease", {
+        leases: "leases",
+        waiting: "waiting",
+        vram: "waiting_for_vram",
+      });
       if (typeof m.mode === "string") lines.push(t("health.metric.mode", { mode: m.mode }));
       break;
     }
     case "task_queue":
-      lines.push(
-        t("health.metric.queue", {
-          running: n("running") ?? 0,
-          queued: n("queued") ?? 0,
-          waiting: n("waiting") ?? 0,
-        }),
-        t("health.metric.failures", {
-          hour: n("failed_last_hour") ?? 0,
-          day: n("failed_last_day") ?? 0,
-        }),
-        t("health.metric.retriesLoops", {
-          retries: n("retries_last_hour") ?? 0,
-          loops: n("loops_last_hour") ?? 0,
-        }),
-        t("health.metric.oom", {
-          hour: n("oom_last_hour") ?? 0,
-          escalations: n("escalations_last_hour") ?? 0,
-        }),
-      );
+      metricLine("health.metric.queue", {
+        running: "running",
+        queued: "queued",
+        waiting: "waiting",
+      });
+      metricLine("health.metric.failures", { hour: "failed_last_hour", day: "failed_last_day" });
+      metricLine("health.metric.retriesLoops", {
+        retries: "retries_last_hour",
+        loops: "loops_last_hour",
+      });
+      metricLine("health.metric.oom", {
+        hour: "oom_last_hour",
+        escalations: "escalations_last_hour",
+      });
       break;
     case "memory_worker":
-      lines.push(
-        t("health.metric.memoryQueue", {
-          pending: n("pending") ?? 0,
-          claimed: n("claimed") ?? 0,
-          deferred: n("waiting_for_worker") ?? 0,
-        }),
-        t("health.metric.memoryDead", {
-          expired: n("expired_leases") ?? 0,
-          dead: n("dead_last_day") ?? 0,
-        }),
-      );
+      metricLine("health.metric.memoryQueue", {
+        pending: "pending",
+        claimed: "claimed",
+        deferred: "waiting_for_worker",
+      });
+      metricLine("health.metric.memoryDead", { expired: "expired_leases", dead: "dead_last_day" });
       break;
     case "connections":
       for (const part of health.parts) {
@@ -652,12 +649,10 @@ function componentLines(t: Translate, health: ComponentHealth): string[] {
       }
       break;
     case "connection_reaper":
-      lines.push(
-        t("health.metric.reaper", {
-          failures: n("consecutive_failures") ?? 0,
-          reaped: n("total_reaped") ?? 0,
-        }),
-      );
+      metricLine("health.metric.reaper", {
+        failures: "consecutive_failures",
+        reaped: "total_reaped",
+      });
       break;
     case "recovery_backup":
     case "memory_projection":
@@ -806,9 +801,15 @@ export function MonitoringView() {
     }
     void attempt;
     let cancelled = false;
+    // One read at a time: a slow answer must never land after (and over) a
+    // newer one (Codex P2, PR #203). A read still pending skips the tick.
+    let reading = false;
     const read = () => {
+      if (reading) return;
+      reading = true;
       source.report().then(
         (report) => {
+          reading = false;
           if (cancelled) return;
           setLoad({ status: "ready", report });
           setReceivedAt(new Date().toISOString());
@@ -820,6 +821,7 @@ export function MonitoringView() {
           }
         },
         (error: unknown) => {
+          reading = false;
           if (cancelled) return;
           setFailures((value) => value + 1);
           setReceivedOk(false);
@@ -843,11 +845,15 @@ export function MonitoringView() {
   useEffect(() => {
     if (!source) return;
     let cancelled = false;
+    // One history read at a time, like the report (an older answer never lands last).
+    let reading = false;
     const read = () => {
+      if (reading) return;
+      reading = true;
       const until = new Date();
       const since = new Date(until.getTime() - RANGE_SECONDS[range] * 1000);
       const step = chartStepSeconds(range);
-      Promise.all([
+      const chartRead = Promise.all([
         source.series(CHART_METRICS.gpu, since, until, step),
         source.series(CHART_METRICS.used, since, until, step),
         source.series(CHART_METRICS.reserved, since, until, step),
@@ -855,7 +861,10 @@ export function MonitoringView() {
       ]).then(
         ([gpu, used, reserved, total]) => {
           if (!cancelled) {
-            setChart({ status: "ready", value: percentPoints({ gpu, used, reserved, total }) });
+            setChart({
+              status: "ready",
+              value: percentPoints({ gpu, used, reserved, total }, step),
+            });
           }
         },
         () => {
@@ -863,7 +872,7 @@ export function MonitoringView() {
             setChart((previous) => (previous.status === "ready" ? previous : { status: "error" }));
         },
       );
-      source.events(since).then(
+      const eventsRead = source.events(since).then(
         (value) => {
           if (!cancelled) setEvents({ status: "ready", value });
         },
@@ -872,6 +881,9 @@ export function MonitoringView() {
             setEvents((previous) => (previous.status === "ready" ? previous : { status: "error" }));
         },
       );
+      void Promise.all([chartRead, eventsRead]).then(() => {
+        reading = false;
+      });
     };
     setChart({ status: "loading" });
     setEvents({ status: "loading" });

@@ -39,17 +39,23 @@ function useChipState(admin: boolean): State {
     setState({ kind: "none" });
     if (!source) return;
     let cancelled = false;
+    // One read at a time, so an older answer never replaces a newer one.
+    let reading = false;
     const read = () => {
+      if (reading) return;
       if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      reading = true;
       const request: Promise<State> = admin
         ? source.report().then((report) => ({ kind: "admin", report }))
         : source.summary().then((summary) => ({ kind: "user", summary }));
       request.then(
         (next) => {
+          reading = false;
           if (!cancelled) setState(next);
         },
         () => {
           // Only a hint: the last state stays (or nothing is shown).
+          reading = false;
         },
       );
     };
