@@ -1,9 +1,10 @@
 // 管理 (the design's Admin / Usage boards): the title with the role badge and
-// the admin tabs, then the chosen tab. This issue (PAW-064) fills 使用状況; the
-// other tabs belong to later issues and are placeholders. The navigation shows 管理
+// the admin tabs, then the chosen tab. PAW-064 fills 使用状況 and PAW-067 サーバー
+// 監視; the other tabs belong to later issues and are placeholders. The navigation shows 管理
 // to an Owner / Admin only; the Backend enforces every permission.
 import { useEffect } from "react";
 import { showsAdmin, useSignedIn } from "../auth/session";
+import { MonitoringView } from "../health/MonitoringView";
 import { type MessageKey, useI18n } from "../i18n";
 import { Link, useRouter } from "../router";
 import { RoleBadge } from "../shell/common";
@@ -61,6 +62,8 @@ export function AdminPage() {
       </div>
       {tab?.path === "/admin/usage" ? (
         <UsageView title="usage.title" scopes={["self", "workspace"]} />
+      ) : tab?.path === "/admin/monitoring" ? (
+        <MonitoringView />
       ) : (
         <AdminPlaceholder label={tab?.label ?? "admin.tab.overview"} />
       )}

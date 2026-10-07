@@ -1,0 +1,714 @@
+/* 管理 › サーバー監視 and the header's health chip (PAW-067: the design's
+   Monitoring board and the ShellDark header chip). Severity is never conveyed by
+   color alone: every dot sits next to its words. */
+
+:root {
+  /* The Monitoring board's WARNING banner. */
+  --warning-border: #66512a;
+  --warning-text: #f0dcb4;
+  --warning-soft: #c6a874;
+}
+
+:root[data-theme="light"] {
+  --warning-border: #e8cf9f;
+  --warning-text: #5e3d08;
+  --warning-soft: #7d5a1c;
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --warning-border: #e8cf9f;
+    --warning-text: #5e3d08;
+    --warning-soft: #7d5a1c;
+  }
+}
+
+/* ---------- Severity marks ---------- */
+
+.health-dot-mark {
+  flex-shrink: 0;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ok);
+}
+
+.health-dot-mark.sev-warning {
+  background: var(--warning);
+}
+
+.health-dot-mark.sev-error {
+  background: var(--error);
+}
+
+.health-dot-mark.sev-critical {
+  background: var(--critical);
+}
+
+.sev-text-warning {
+  color: var(--warning);
+}
+
+.sev-text-error {
+  color: var(--error);
+}
+
+.sev-text-critical {
+  color: var(--critical-soft);
+}
+
+.health-pill {
+  flex-shrink: 0;
+  padding: 3px 9px;
+  border-radius: var(--r-badge);
+  background: var(--info);
+  color: var(--on-accent);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.health-pill.sev-warning {
+  background: var(--warning);
+  color: var(--bg);
+}
+
+.health-pill.sev-error {
+  background: var(--error);
+  color: #ffffff;
+}
+
+.health-pill.sev-critical {
+  background: var(--critical);
+  color: #ffffff;
+}
+
+.health-tag {
+  flex-shrink: 0;
+  align-self: flex-start;
+  padding: 1px 7px;
+  border-radius: 5px;
+  background: var(--info-bg);
+  color: var(--info-text);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 700;
+  line-height: 1.8;
+}
+
+.health-tag.sev-info {
+  background: var(--ok-bg);
+  color: var(--ok);
+}
+
+.health-tag.sev-warning {
+  background: var(--warning-bg);
+  color: var(--warning);
+}
+
+.health-tag.sev-error {
+  background: var(--error-bg);
+  color: var(--error);
+}
+
+.health-tag.sev-critical {
+  background: var(--critical-bg);
+  color: var(--critical-soft);
+}
+
+/* ---------- The header chip (ShellDark: "● GPU 38% · Queue 2") ---------- */
+
+.header-health {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 11px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--input);
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+a.header-health:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+.header-health.sev-warning {
+  border-color: var(--warning-border);
+  color: var(--warning);
+}
+
+.header-health.sev-error {
+  border-color: var(--danger-border);
+  color: var(--error);
+}
+
+.header-health.sev-critical {
+  border-color: var(--critical-border);
+  color: var(--critical-soft);
+}
+
+/* ---------- The screen ---------- */
+
+.health .usage-toolbar select {
+  margin-left: auto;
+}
+
+.health-source {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 3px 10px;
+  border-radius: var(--r-chip);
+  background: var(--input);
+  color: var(--text-2);
+  font-size: 11.5px;
+}
+
+.health-source svg {
+  color: var(--text-3);
+}
+
+.health-refresh {
+  font-size: 11.5px;
+  color: var(--text-3);
+}
+
+.health .usage-body {
+  gap: 10px;
+}
+
+.health-normal {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 16px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  font-size: 12.5px;
+}
+
+.health-normal .muted {
+  font-size: 11.5px;
+}
+
+.health-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 11px 16px;
+  border-radius: 12px;
+  border: 1px solid var(--warning-border);
+  background: var(--warning-bg);
+}
+
+.health-banner-text {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--warning-text);
+}
+
+.health-banner-more {
+  font-size: 11.5px;
+  color: var(--warning-soft);
+}
+
+.health-banner-link {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--warning-text);
+}
+
+.health-banner.sev-error {
+  border-color: var(--danger-border);
+  background: var(--error-bg);
+}
+
+.health-banner.sev-error .health-banner-text,
+.health-banner.sev-error .health-banner-link {
+  color: var(--danger-title);
+}
+
+.health-banner.sev-error .health-banner-more {
+  color: var(--error);
+}
+
+.health-banner.sev-critical {
+  border-color: var(--critical-border);
+  background: var(--critical-bg);
+}
+
+.health-banner.sev-critical .health-banner-text,
+.health-banner.sev-critical .health-banner-link {
+  color: var(--critical-text);
+}
+
+.health-banner.sev-critical .health-banner-more {
+  color: var(--critical-soft);
+}
+
+.health-chips-scroll {
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.health-chips {
+  display: flex;
+  gap: 10px;
+}
+
+.health-chip {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 10px;
+  height: 44px;
+  padding: 0 14px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--surface);
+  color: var(--text);
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.health-chip[aria-pressed="true"] {
+  border-color: var(--selected-border);
+  background: var(--selected);
+}
+
+.health-chip-name {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.health-chip-name .mono {
+  font-size: 10px;
+  font-weight: 400;
+}
+
+.health-chip-value {
+  margin-left: 10px;
+  font-size: 12px;
+  color: var(--ok);
+}
+
+.health-chip-value.sev-text-warning {
+  color: var(--warning);
+}
+
+.health-chip-value.sev-text-error {
+  color: var(--error);
+}
+
+.health-chip-value.sev-text-critical {
+  color: var(--critical-soft);
+}
+
+.health-stat.sev-border-warning {
+  border-color: var(--warning-border);
+}
+
+.health-stat.sev-border-error {
+  border-color: var(--danger-border);
+}
+
+.health-stat.sev-border-critical {
+  border-color: var(--critical-border);
+}
+
+.health-columns {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.health-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+
+.health-chart-card {
+  gap: 8px;
+  padding: 14px 16px 6px;
+}
+
+.health-chart-card .chart-legend {
+  margin-left: auto;
+}
+
+.health-chart {
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.health-line {
+  fill: none;
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.line-gpu {
+  stroke: var(--series-claude);
+}
+
+.line-vramUsed {
+  stroke: var(--series-codex);
+}
+
+.line-vramReserved {
+  stroke: var(--series-local);
+}
+
+.health-dot {
+  stroke: var(--nav);
+  stroke-width: 2;
+}
+
+.dot-gpu,
+.swatch-gpu {
+  fill: var(--series-claude);
+  background: var(--series-claude);
+}
+
+.dot-vramUsed,
+.swatch-vramUsed {
+  fill: var(--series-codex);
+  background: var(--series-codex);
+}
+
+.dot-vramReserved,
+.swatch-vramReserved {
+  fill: var(--series-local);
+  background: var(--series-local);
+}
+
+.chart-end-name {
+  font-size: 11px;
+  font-weight: 600;
+  fill: var(--text);
+}
+
+.chart-cursor {
+  stroke: var(--text-disabled);
+  stroke-width: 1;
+  stroke-dasharray: 4 3;
+}
+
+.health-table-wrap {
+  max-height: 260px;
+  overflow: auto;
+}
+
+.health-empty {
+  padding: 18px 0;
+}
+
+.health-alerts-card {
+  gap: 6px;
+  padding: 14px 16px;
+}
+
+.health-alerts {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.health-alerts li {
+  display: flex;
+  gap: 10px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.health-alerts time {
+  flex-shrink: 0;
+  width: 42px;
+  font-size: 10.5px;
+  color: var(--text-3);
+  line-height: 1.8;
+}
+
+.health-alert-text {
+  flex: 1;
+  min-width: 0;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--text-2);
+}
+
+.health-panel {
+  width: 332px;
+  flex-shrink: 0;
+  gap: 14px;
+}
+
+.health-panel-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 9px;
+}
+
+.health-panel-head h2 {
+  white-space: nowrap;
+}
+
+.health-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  padding: 2px 9px;
+  border-radius: var(--r-chip);
+  background: var(--ok-bg);
+  color: var(--ok);
+  font-size: 10.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.health-state .health-dot-mark {
+  width: 6px;
+  height: 6px;
+}
+
+.health-state.sev-warning {
+  background: var(--warning-bg);
+  color: var(--warning);
+}
+
+.health-state.sev-error {
+  background: var(--error-bg);
+  color: var(--error);
+}
+
+.health-state.sev-critical {
+  background: var(--critical-bg);
+  color: var(--critical-soft);
+}
+
+.health-meter {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.health-meter-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+.health-meter-head .mono {
+  font-size: 11.5px;
+  color: var(--text);
+}
+
+.health-meter .meter {
+  height: 7px;
+}
+
+.meter-fill.tone-gpu {
+  background: var(--series-claude);
+}
+
+.meter-fill.tone-used {
+  background: var(--series-codex);
+}
+
+.meter-fill.tone-reserved {
+  background: var(--series-local);
+}
+
+.health-figures {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin: 0;
+}
+
+.health-figures div {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.health-figures dt {
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.health-figures dd {
+  margin: 0;
+  font-size: 13px;
+}
+
+.health-panel hr {
+  margin: 0;
+  border-color: var(--border-soft);
+}
+
+.health-section-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  color: var(--text-3);
+}
+
+.health-models,
+.health-components {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.health-models li,
+.health-component-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 11.5px;
+}
+
+.health-models .health-dot-mark,
+.health-component-head .health-dot-mark {
+  width: 6px;
+  height: 6px;
+}
+
+.health-row-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+.health-toggle {
+  width: 24px;
+  height: 24px;
+  margin: -4px -4px -4px 0;
+  color: var(--text-3);
+}
+
+.health-component.problem .health-row-name {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.health-component-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 7px 0 2px 15px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--surface);
+  font-size: 11px;
+  color: var(--text-2);
+}
+
+.health-component-detail .mono {
+  font-size: 10.5px;
+  color: var(--text-3);
+}
+
+.health-reasons {
+  margin: 0;
+  padding: 0 0 0 14px;
+  color: var(--text);
+}
+
+.health-readonly {
+  margin-top: auto;
+  padding: 11px 12px;
+  color: var(--text-3);
+}
+
+.health-readonly p {
+  font-size: 10.5px;
+  line-height: 1.75;
+  color: var(--text-3);
+}
+
+@media (max-width: 1279px) {
+  .health-columns {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .health-panel {
+    width: auto;
+  }
+
+  .health-refresh {
+    flex-basis: 100%;
+  }
+}
+
+@media (max-width: 767px) {
+  .header-health {
+    width: var(--tap);
+    height: var(--tap);
+    padding: 0;
+    justify-content: center;
+    border: 0;
+    background: transparent;
+  }
+
+  .header-health .health-chip-text {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .header-health .health-dot-mark {
+    width: 9px;
+    height: 9px;
+  }
+
+  .health .usage-toolbar {
+    gap: 8px 10px;
+  }
+
+  .health .usage-toolbar select {
+    margin-left: 0;
+  }
+
+  .health-chip {
+    padding: 0 12px;
+  }
+}
