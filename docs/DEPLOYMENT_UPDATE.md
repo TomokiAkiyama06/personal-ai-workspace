@@ -1,6 +1,6 @@
 # Deployment / Update / Rollback
 
-更新日: 2026-10-07
+更新日: 2026-10-08
 Status: [FIXED DIRECTION]
 
 ## Principles
@@ -124,8 +124,8 @@ the load) + 2 GiB`. vLLM exceeded its `gpu-memory-utilization` budget by up to 8
 
 ## Implementation (Issue #54, Decision 0079)
 
-[Decision 0079](decisions/0079-deploy-update-rollback.md) proposes the mechanism; until it is
-approved, no production update or rollback is run with it. Operator steps are in the
+[Decision 0079](decisions/0079-deploy-update-rollback.md) (Approved 2026-10-08) decides the
+mechanism. Operator steps are in the
 [backend README](../apps/backend/README.md#deploy--update--rollbackpaw-068).
 
 - **Versioned release**: `paw-release build` makes one immutable directory per commit,

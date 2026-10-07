@@ -679,6 +679,16 @@ class RepositoryTest(unittest.TestCase):
                 with self.subTest(unit=unit):
                     self.assertIn(unit.removesuffix(".timer") + ".service", stopped)
 
+    def test_the_deployment_document_follows_the_decisions_status(self):
+        # Codex review #204 (ad3c59c): no "until it is approved" once it is.
+        docs = Path(__file__).resolve().parents[3] / "docs"
+        decision = (docs / "decisions" / "0079-deploy-update-rollback.md").read_text()
+        document = (docs / "DEPLOYMENT_UPDATE.md").read_text()
+        if "- Status: Approved" in decision:
+            for obsolete in ("proposes the mechanism", "until it is"):
+                with self.subTest(obsolete=obsolete):
+                    self.assertNotIn(obsolete, document)
+
 
 class PruneTest(ReleaseToolTestCase):
     def point(self, label: str, created_at: str) -> None:
