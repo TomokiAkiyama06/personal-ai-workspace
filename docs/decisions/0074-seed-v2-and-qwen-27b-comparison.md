@@ -1,9 +1,10 @@
 # paw-seed-v2 の構成と、Qwen3.6-27B-FP8 / Qwen3.8-27B-FP8 の比較の結果の扱い
 
-- Status: Proposed
+- Status: Approved
+- Approval: 2026-10-07、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで直接回答して承認（1 は推奨どおり承認。2 は推奨と異なり、Main を Qwen3.8-27B-FP8 にする（Run の順番の違いは受け入れる）。3 は (b) と (c) を推奨どおり承認し、(a) は Qwen3.6-27B-FP8 ではなく Qwen3.8-27B-FP8 の採用とする。末尾の「承認時の決定」）
 - Date: 2026-10-05
 - Scope: Issue [#198](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/198)（PAW-017 の後続）。根拠は [paw-seed-v2 の比較 Run の報告](../benchmarks/paw-017-seed-v2-2026-10.md)。[Decision 0073](0073-main-coexistence-confirmation.md) で保留になった 1（Main の採用の確定と、共存の確認 Run の採用条件の読み方）もここで決める（下の 5）
-- Supersedes: なし。[Decision 0041](0041-seed-benchmark-dataset.md) の 2（v2 は新しい版として作り、v1 の Task は書き換えない）に従う。[Decision 0040](0040-main-coding-model-selection.md) の 1（Main は Qwen3.6-27B-FP8）は、下の 4 の結果（Qwen3.6-27B-FP8 のまま）により変えない
+- Supersedes: [Decision 0040](0040-main-coding-model-selection.md) の 1（Main は Qwen3.6-27B-FP8）を、Human の承認時の決定（末尾）により Qwen3.8-27B-FP8 に置き換える。[Decision 0041](0041-seed-benchmark-dataset.md) の 2（v2 は新しい版として作り、v1 の Task は書き換えない）に従う
 
 ## 背景
 
@@ -99,3 +100,14 @@ Decision 0073 の 1（共存の確認 Run の採用条件を「Resolved@3 と平
 
 承認されたら `Approval` に記録し、Status を Approved に改める。3 が承認されたら、Decision 0073 の 1 はこの Decision の 5 で決まったものとして扱う（0073 は書き換えない）。0.51 の確認 Run と Deployment の設定は別の Issue で行う。
 paw-seed-v2 を比較 Run に使った後は、v2 の Task を書き換えない（Decision 0041 の 2）。
+
+## 承認時の決定（2026-10-07）
+
+Human は、作業 Session で判断が必要な点について推奨つきの説明を受け、直接回答して承認した（1 は推奨どおり承認。2 は推奨と異なり、Main を Qwen3.8-27B-FP8 にする（Run の順番の違いは受け入れる）。3 は (b) と (c) を推奨どおり承認し、(a) は Qwen3.6-27B-FP8 ではなく Qwen3.8-27B-FP8 の採用とする）。Human は、2026-10-05 に決めた選び方（Resolved@3 と平均の両方で 2 Task 以上）では Qwen3.6-27B-FP8 のままになることを示されたうえで、平均の差（+4.0）と 3 回とも 37 で揺れがないことを重く見て、Qwen3.8-27B-FP8 を選んだ。所要と出力 token が約 2.8 倍になること、共存時に KV が足りなくなりやすいこと（リスク）も示したうえでの判断である。
+
+これにより次のとおり扱う。
+
+- Decision 0040 の 1（Main は Qwen3.6-27B-FP8）を、Qwen3.8-27B-FP8 に置き換える（Supersedes）。Qwen3.6-27B-FP8 は次点とし、KAT-Coder-V2.5-Dev はその次とする（0073 の 3 の「次点」は、この順に読み替える）。
+- Decision 0073 の 1 は、この Decision の 5 の (b) と (c) で決まり、(a) は Qwen3.8-27B-FP8 の採用として決まる。0073 の 2 の 0.51 の確認 Run は Qwen3.8-27B-FP8 で行う。2 つの Model は構成（層・KV の Head・Weight 27.64 GiB）が同じため、0.51 の Footprint の見積もりはそのまま使える。
+- 0.51 の確認 Run の基準は、Qwen3.8-27B-FP8 の単独の paw-seed-v1 の部分（今回の 3 回の Run の v1 の 24 Task: 14 / 14 / 14、Resolved@3 14、平均 14.0）とする。10-01 の Qwen3.6-27B-FP8 の単独と同じ値のため、合格は (c) のとおり Resolved@3 13 以上かつ平均 13.0 以上。
+- 共存時の KV の不足（リスク）への対策（古い reasoning を履歴から外す・Main の割り当てを増やす・同時に動かす Agent を減らす・会話の伸びを予約に反映する Scheduler）は、確認 Run の結果を見て別の Issue / Decision で決める。MODEL_CANDIDATES.md と Deployment の設定の更新も別の PR で行う。
