@@ -1,4 +1,4 @@
-"""Tests of the public seed dataset (paw-seed-v1) and its evaluator-side helpers."""
+"""Tests of the public seed datasets (paw-seed-v1, v2) and their evaluator-side helpers."""
 
 import contextlib
 import io
@@ -22,6 +22,7 @@ from benchmarks.seed_dataset import (
     dataset_summary,
     hidden_command,
     load_manifest,
+    manifest_path,
     snapshot_commit,
 )
 
@@ -92,6 +93,46 @@ class PublicDatasetTest(unittest.TestCase):
                 self.assertNotIn("golden.patch", text)
                 document = json.loads(text)
                 self.assertNotIn("known_good_commit", document["repository"])
+
+
+class PublicDatasetV2Test(unittest.TestCase):
+    """paw-seed-v2 (Issue #198, Decision 0074): v1 listed unchanged plus new tasks."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.path = manifest_path("paw-seed-v2")
+        cls.manifest, cls.entries = load_manifest(cls.path)
+
+    def test_manifest_and_tasks_are_consistent(self):
+        manifest = json.loads(self.path.read_text(encoding="utf-8"))
+        self.assertEqual(check_manifest(manifest, self.path.parent), [])
+
+    def test_every_v1_task_is_listed_unchanged(self):
+        _, v1 = load_manifest()
+        listed = {e.task_id: e for e in self.entries if e.dataset == "paw-seed-v1"}
+        self.assertEqual(set(listed), {e.task_id for e in v1})
+        for entry in v1:
+            with self.subTest(task=entry.task_id):
+                self.assertEqual(listed[entry.task_id].path, entry.path)
+                self.assertEqual(listed[entry.task_id].document, entry.document)
+
+    def test_new_tasks_are_spec_or_injected_bug_of_medium_or_hard(self):
+        new = [e for e in self.entries if e.dataset == "paw-seed-v2"]
+        self.assertGreaterEqual(len(new), 20)
+        for entry in new:
+            with self.subTest(task=entry.task_id):
+                self.assertIn(entry.kind, ("spec", "injected_bug"))
+                self.assertIn(entry.difficulty, ("medium", "hard"))
+                for check in entry.document["hidden_checks"]:
+                    self.assertRegex(check["reference_id"], r"^seed-v2-[0-9a-f]{12}$")
+
+    def test_public_files_do_not_name_private_material(self):
+        for path in (self.path.parent / "tasks").glob("*.json"):
+            text = path.read_text(encoding="utf-8")
+            with self.subTest(path=path.name):
+                self.assertNotIn("/data/datasets", text)
+                self.assertNotIn("golden.patch", text)
+                self.assertNotIn("known_good_commit", json.loads(text)["repository"])
 
 
 class CheckManifestTest(unittest.TestCase):
@@ -192,6 +233,141 @@ class CheckManifestTest(unittest.TestCase):
             load_manifest(self.directory / "manifest.json")
 
 
+def _task_document(dataset, task_id, reference):
+    return {
+        "schema_version": "1.0",
+        "task_id": task_id,
+        "kind": "spec",
+        "repository": {
+            "locator": f"paw-dataset://{dataset}/{task_id}",
+            "starting_commit": "1" * 40,
+        },
+        "issue_text": "Add a feature.",
+        "visible_checks": [],
+        "hidden_checks": [{"id": "h", "type": "acceptance", "reference_id": reference}],
+    }
+
+
+def _entry(task_id):
+    return {
+        "task_id": task_id,
+        "file": f"tasks/{task_id}.json",
+        "kind": "spec",
+        "difficulty": "medium",
+        "categories": ["feature"],
+        "source": {},
+    }
+
+
+class EarlierVersionTasksTest(unittest.TestCase):
+    """A later version lists tasks of an earlier version unchanged (Decision 0041 2)."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.old_id = "paw-seed-v1-spec-01-old"
+        self.new_id = "paw-seed-v2-spec-01-new"
+        self.v1 = self.root / "paw-seed-v1"
+        self.v2 = self.root / "paw-seed-v2"
+        for directory in (self.v1, self.v2):
+            (directory / "tasks").mkdir(parents=True)
+        self.write(
+            self.v1 / "tasks" / f"{self.old_id}.json",
+            _task_document("paw-seed-v1", self.old_id, "seed-v1-0123456789ab"),
+        )
+        self.write(
+            self.v1 / "manifest.json",
+            {
+                "dataset": "paw-seed-v1",
+                "base_commit": "1" * 40,
+                "tasks": [_entry(self.old_id)],
+            },
+        )
+        self.new_task = _task_document(
+            "paw-seed-v2", self.new_id, "seed-v2-0123456789ab"
+        )
+        self.manifest = {
+            "dataset": "paw-seed-v2",
+            "base_commit": "2" * 40,
+            "tasks": [
+                {**_entry(self.old_id), "dataset": "paw-seed-v1"},
+                _entry(self.new_id),
+            ],
+        }
+
+    def write(self, path, document):
+        path.write_text(json.dumps(document), encoding="utf-8")
+
+    def errors(self):
+        self.write(self.v2 / "tasks" / f"{self.new_id}.json", self.new_task)
+        return check_manifest(self.manifest, self.v2)
+
+    def test_valid_and_loaded_from_the_owning_version(self):
+        self.assertEqual(self.errors(), [])
+        self.write(self.v2 / "manifest.json", self.manifest)
+        _, entries = load_manifest(self.v2 / "manifest.json")
+        self.assertEqual(
+            [(entry.task_id, entry.dataset) for entry in entries],
+            [(self.old_id, "paw-seed-v1"), (self.new_id, "paw-seed-v2")],
+        )
+        self.assertEqual(entries[0].path, self.v1 / "tasks" / f"{self.old_id}.json")
+        self.assertEqual(summary_total(entries), 2)
+
+    def test_an_earlier_task_must_be_listed_unchanged(self):
+        self.manifest["tasks"][0]["difficulty"] = "hard"
+        self.assertIn(
+            "$.tasks[0]: differs from the entry of the earlier version", self.errors()
+        )
+
+    def test_an_unknown_earlier_task_is_refused(self):
+        self.manifest["tasks"][0] = {
+            **_entry("paw-seed-v1-spec-02-missing"),
+            "dataset": "paw-seed-v1",
+        }
+        self.assertIn(
+            "$.tasks[0]: differs from the entry of the earlier version", self.errors()
+        )
+
+    def test_only_earlier_versions_can_be_listed(self):
+        for dataset in ("paw-seed-v2", "paw-seed-v3", "other"):
+            with self.subTest(dataset=dataset):
+                self.manifest["tasks"][0]["dataset"] = dataset
+                errors = self.errors()
+                if dataset == "paw-seed-v2":
+                    # Listed as its own task: the v1 name does not fit the v2 rule.
+                    self.assertIn(
+                        "$.tasks[0].task_id: does not follow the naming rule", errors
+                    )
+                else:
+                    self.assertIn(
+                        "$.tasks[0].dataset: must name an earlier version", errors
+                    )
+
+    def test_own_tasks_follow_the_version_naming(self):
+        self.new_task["hidden_checks"][0]["reference_id"] = "seed-v1-0123456789ab"
+        self.new_task["repository"]["locator"] = "paw-dataset://paw-seed-v1/x"
+        errors = self.errors()
+        self.assertIn(
+            f"tasks/{self.new_id}.json: hidden reference_id must be opaque", errors
+        )
+        self.assertTrue(any("locator must be" in error for error in errors))
+
+    def test_dataset_name_is_checked(self):
+        self.manifest["dataset"] = "seed-two"
+        self.assertEqual(self.errors(), ["$.dataset: must be named paw-seed-v<N>"])
+
+    def test_files_of_the_earlier_version_are_not_unlisted_files_here(self):
+        self.write(self.v2 / "tasks" / "stray.json", {})
+        self.assertEqual(
+            self.errors(),
+            ["tasks/stray.json: task file is not listed in the dataset index"],
+        )
+
+
+def summary_total(entries):
+    return dataset_summary(entries)["total"]
+
+
 class HiddenCommandTest(unittest.TestCase):
     def test_unittest_command_uses_the_evaluator_helper(self):
         private = Path("/private/root")
@@ -254,6 +430,20 @@ class SnapshotCommitTest(unittest.TestCase):
             )
             self.assertEqual(git(repo, "show", f"{first}:a.py"), "x = 2\n")
             self.assertEqual((repo / "a.py").read_text(), "x = 1\n")
+            later = snapshot_commit(
+                repo,
+                base,
+                patch,
+                "paw-seed-v2-bug-01-x",
+                "paw-seed-v2",
+                "2026-10-05T00:00:00+00:00",
+            )
+            self.assertNotEqual(later, first)
+            self.assertEqual(
+                git(repo, "log", "-1", "--format=%an %at %s", later).strip(),
+                "paw-seed-v2 1791158400 "  # 2026-10-05T00:00:00+00:00
+                "paw-seed-v2 starting state of paw-seed-v2-bug-01-x",
+            )
 
 
 class SeedCheckTest(unittest.TestCase):

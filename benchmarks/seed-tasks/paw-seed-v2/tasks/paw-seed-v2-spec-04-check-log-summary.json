@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "task_id": "paw-seed-v2-spec-04-check-log-summary",
+  "kind": "spec",
+  "repository": {
+    "locator": "paw-dataset://paw-seed-v2/paw-seed-v2-spec-04-check-log-summary",
+    "starting_commit": "3df6f807a92497ba24366d47259b16e18e8136be"
+  },
+  "issue_text": "# TestRunnerのcheck logを検査して集計する\n\n`benchmarks.test_runner.TestRunner`は、実行したcheckごとに1行のJSON record（check log）を追記します（`TestRunner._write_record`、README「Test / hidden acceptance runner」）。\nRunの後に、このlogだけから結果を確かめられるように、logを厳密に読み、集計するmoduleとCLIを追加してください。\n\n## 仕様\n\n新しいmodule `benchmarks/check_log.py`:\n\n- `CheckLogError`: `ValueError`のsubclass。\n- `CheckLog`: frozenなdataclass。field `records: tuple[dict, ...]`と`incomplete_tail: bool`。\n- `is_valid_record(record) -> bool`: `record`が次のすべてを満たすときだけ`True`。\n  - dictで、keyがちょうど`duration_ms`・`exit_code`・`id`・`status`・`stderr`・`stdout`・`timed_out`・`type`・`visibility`（過不足なし）。\n  - `duration_ms`は0以上の整数（`bool`は不可）。`exit_code`は整数（`bool`は不可。負も可）か`None`。`id`は空でない文字列。\n  - `status`は`passed`・`failed`・`timed_out`・`error`のいずれか。`type`はEvaluator Result schemaのcheck種別（`build`・`syntax`・`unit`・`integration`・`lint`・`type`・`regression`・`acceptance`・`security`・`forbidden_changes`）のいずれか。`visibility`は`visible`か`hidden`。\n  - `timed_out`は`bool`で、`status`が`timed_out`のときだけ`True`（それ以外のstatusでは`False`）。\n  - `stdout`と`stderr`は、keyがちょうど`captured_bytes`（0以上の整数、`bool`不可）・`sha256`（小文字16進64文字）・`truncated`（`bool`）のdict。\n- `parse_check_log(text: str) -> CheckLog`:\n  - `text`を`\"\\n\"`で行に分けます。空白だけの行は飛ばします。行番号は1始まりで、飛ばした行も数えます。\n  - 各行を`benchmarks.json_input.decode_json`で読みます。読めなければ`CheckLogError(\"line <N>: not valid JSON\")`。ただし、`text`が空でも`\"\\n\"`で終わってもいない（書き込み途中で止まった）ときの**最後の行**が読めない場合だけは、例外にせず無視して`incomplete_tail=True`にします（最後の行が読めれば通常どおりrecordにします）。\n  - 読めた値が`is_valid_record`を満たさなければ`CheckLogError(\"line <N>: invalid record\")`。messageに行の内容を含めません。\n  - `records`はlogの順。\n- `read_check_log(path: Path) -> CheckLog`: fileをUTF-8で読んで`parse_check_log`。\n- `summarize(records: Sequence[dict]) -> dict`（logの順のrecord）:\n  - `checks`: record数\n  - `by_status`: `{\"passed\": n, \"failed\": n, \"timed_out\": n, \"error\": n}`（0も含め常に4つのkey）\n  - `by_visibility`: `{\"visible\": <by_statusと同じ形>, \"hidden\": <同じ形>}`\n  - `duration_ms_total`: `duration_ms`の合計\n  - `slowest`: `duration_ms`が最大のrecordの`id`（同じ値なら先に出たもの）。recordがなければ`None`\n  - `truncated_streams`: `truncated`が`True`のstreamの数（1 recordで`stdout`と`stderr`の両方なら2）\n  - `rerun_ids`: 2回以上出た`id`の昇順list\n  - `final_status`: `id`ごとの最後のrecordの`status`（`id`の昇順のdict）\n- CLI `python -m benchmarks.check_log LOG`:\n  - 読めない（存在しない・UTF-8でない）なら、stderrへ`<LOG>: cannot read`、終了code 2。`CheckLogError`ならstderrへ`<LOG>: <message>`（例: `<LOG>: line 3: invalid record`）、終了code 2。\n  - `incomplete_tail`なら、stderrへ`<LOG>: ignored an incomplete last line`を出して続けます。\n  - recordが1つもなければ、stderrへ`<LOG>: no check records`、終了code 1。\n  - それ以外は`summarize`の結果をJSON（`indent=2`、`sort_keys=True`）でstdoutへ出し、`final_status`の値がすべて`passed`なら終了code 0、そうでなければ1。\n  - 終了code 2・1（record 0件）のときはstdoutに何も出しません。\n- `benchmarks/README.md`に説明を足してください。\n\n## 作業の条件\n\n- 作業はこのRepositoryのstarting commitから始めます。既存のTestを削除・無効化したり、期待値を不当に緩めたりしてはいけません。\n- 評価はExecutable Evaluatorが行います。公開されたcheck（visible checks）に加えて、候補から見えないHidden checkがあります。\n- Credential・秘密情報をcode・log・commitへ入れないでください（SECURITY.md）。\n",
+  "visible_checks": [
+    {
+      "id": "lint",
+      "type": "lint",
+      "command": [
+        "python",
+        "-m",
+        "ruff",
+        "check",
+        "benchmarks"
+      ]
+    }
+  ],
+  "hidden_checks": [
+    {
+      "id": "hidden-acceptance",
+      "type": "acceptance",
+      "reference_id": "seed-v2-b0964433b785"
+    },
+    {
+      "id": "hidden-regression",
+      "type": "regression",
+      "reference_id": "seed-v2-494defc18abf"
+    }
+  ]
+}

@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "task_id": "paw-seed-v2-spec-01-result-compare",
+  "kind": "spec",
+  "repository": {
+    "locator": "paw-dataset://paw-seed-v2/paw-seed-v2-spec-01-result-compare",
+    "starting_commit": "3df6f807a92497ba24366d47259b16e18e8136be"
+  },
+  "issue_text": "# 2つの候補のEvaluator ResultをTaskごとに対にして比べる（McNemar検定）\n\nResolved@1が同じでも、解けたTaskが違えば候補の差は見えます。逆に、2〜3 Taskの差が偶然の範囲かどうかも知りたいです。\n2つの候補のEvaluator Result v1（`benchmarks/schemas/result-v1.schema.json`）を、両方が試したTaskについて対にして比べるmoduleとCLIを追加してください。\n\n## 仕様\n\n新しいmodule `benchmarks/result_compare.py`:\n\n- `is_resolved(result: dict) -> bool`: `test_outcomes.fail_to_pass`と`test_outcomes.pass_to_pass`がともに`\"passed\"`で、かつ`check_results`のすべての`status`が`\"passed\"`のときだけ`True`（`check_results`が空なら、outcomeだけで決まります）。\n- `candidate_key(result: dict) -> str`: `candidate`の`\"<model>/<runtime>/<quantization>\"`。\n- `mcnemar_exact_p(a_only: int, b_only: int) -> float`: 正確な両側McNemar検定のp値。`n = a_only + b_only`が0なら`1.0`。それ以外は`min(1.0, 2 * Σ_{i=0}^{min(a_only, b_only)} C(n, i) / 2**n)`。\n- `compare(results_a, results_b) -> dict`: 候補A・候補BそれぞれのResultの列（list）を比べます。\n  - 検査は次の順で行い、最初に見つかった問題で`ValueError`にします（messageは下のとおり。文書の値を含めない）。\n    1. `results_a`について: 空なら`\"results_a: no results\"`。各要素を先頭から見て、Result schema（`benchmarks.validate_result.validate_document`）に適合しなければ`\"results_a[<index>]: invalid result\"`、それより前に出た`task_id`なら`\"results_a[<index>]: duplicate task_id\"`。全要素を見たあと、候補key（`candidate_key`）が2種類以上あれば`\"results_a: more than one candidate\"`。\n    2. `results_b`について同じ検査（messageの`results_a`を`results_b`にする）。\n    3. AとBの候補keyが同じなら`\"both sides are the same candidate\"`。\n  - 両方にある`task_id`を対のTaskとし、Taskごとに`\"both\"`（両方が解決）・`\"a\"`（Aだけ）・`\"b\"`（Bだけ）・`\"neither\"`（どちらも未解決）に分けます。\n  - 戻り値（keyはすべて必須）:\n    - `candidate_a` / `candidate_b`: 候補key\n    - `tasks`: 対のTaskの数\n    - `a_only_resolved` / `b_only_resolved` / `both_resolved` / `neither_resolved`: 各分類のTask数\n    - `only_a` / `only_b`: 片方にしかない`task_id`のlist（昇順）。集計には入れません\n    - `p_value`: `mcnemar_exact_p(a_only_resolved, b_only_resolved)`\n    - `per_task`: `{task_id: 分類}`（対のTaskだけ）\n  - 引数の列や文書を変更しません。\n- CLI `python -m benchmarks.result_compare DIR_A DIR_B`:\n  - それぞれのdirectoryの下の`*.json`（再帰的、pathのsort順）を候補A・候補BのResultとして読み、`compare`の結果をJSON（`indent=2`、`sort_keys=True`）でstdoutへ出して終了code 0。\n  - 引数がdirectoryでなければ、stderrへ`<path>: not a directory`を出して終了code 2。\n  - `*.json`が1つもないdirectoryは、stderrへ`<directory>: no result files`、終了code 1。\n  - 読めない・strictなJSONでない（`benchmarks.json_input.decode_json`）・Result schemaに適合しないfileがあれば、stderrへ`<path>: invalid result`、終了code 1。\n  - `compare`の`ValueError`は、stderrへ`error: <message>`、終了code 1。\n  - 失敗したときはstdoutに何も出しません。DIR_Aを先に、DIR_Bを後に検査します。\n- `benchmarks/README.md`にCLIの説明を足してください。\n\n## 作業の条件\n\n- 作業はこのRepositoryのstarting commitから始めます。既存のTestを削除・無効化したり、期待値を不当に緩めたりしてはいけません。\n- 評価はExecutable Evaluatorが行います。公開されたcheck（visible checks）に加えて、候補から見えないHidden checkがあります。\n- Credential・秘密情報をcode・log・commitへ入れないでください（SECURITY.md）。\n",
+  "visible_checks": [
+    {
+      "id": "lint",
+      "type": "lint",
+      "command": [
+        "python",
+        "-m",
+        "ruff",
+        "check",
+        "benchmarks"
+      ]
+    }
+  ],
+  "hidden_checks": [
+    {
+      "id": "hidden-acceptance",
+      "type": "acceptance",
+      "reference_id": "seed-v2-7adef2873fa0"
+    },
+    {
+      "id": "hidden-regression",
+      "type": "regression",
+      "reference_id": "seed-v2-99f846c28d9e"
+    }
+  ]
+}

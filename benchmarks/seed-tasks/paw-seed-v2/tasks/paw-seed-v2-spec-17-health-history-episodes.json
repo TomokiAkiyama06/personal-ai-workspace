@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "task_id": "paw-seed-v2-spec-17-health-history-episodes",
+  "kind": "spec",
+  "repository": {
+    "locator": "paw-dataset://paw-seed-v2/paw-seed-v2-spec-17-health-history-episodes",
+    "starting_commit": "3df6f807a92497ba24366d47259b16e18e8136be"
+  },
+  "issue_text": "# System HealthのReportの列から、ComponentごとのEpisodeとFlappingを求める\n\nSystem Health（PAW-066、`paw_backend/health/`）のReport（`HealthReport`）の列から、Componentごとに「同じ状態が続いた区間」（Episode）を作り、Severityが短い時間に何度も変わるComponent（Flapping）を見分け、画面に出すための要約を返す純粋な関数を足してください。DBも時計も使いません。\n\n## 仕様\n\n新しいmodule `paw_backend/health/history.py`を作り、package `paw_backend.health`から`Episode`、`episodes`、`severity_changes`、`is_flapping`、`summarize`をimportできるようにします（`__all__`にも足す）。\n\n### `Episode`（frozenなdataclass）\n\nfield: `component`、`severity`、`status`、`start`（Episodeが始まったReportの`checked_at`）、`end`（Episodeが続かなくなった最初のReportの`checked_at`。最後のReportまで続いていれば`None`）、`reports`（Episodeに入るReportの数）。property `duration`は`end - start`（`end`が`None`なら`None`）。\n\n### Reportの列の検査（`episodes`と`summarize`に共通）\n\n`reports`は任意のiterable（1回だけ読む）。前から順に、各Reportについて次の順で検査し、最初に見つかった問題で止めます（`<i>`は列での位置）。\n\n1. `HealthReport`でなければ`TypeError(\"reports[<i>] must be a HealthReport\")`\n2. `checked_at`がtimezone付きの`datetime`でなければ`ValueError(\"reports[<i>].checked_at must be timezone-aware\")`\n3. 直前のReportの`checked_at`より後（同じ時刻も不可）でなければ`ValueError(\"reports[<i>] is not after the report before it\")`\n4. 同じComponentが2回入っていれば`ValueError(\"reports[<i>] has a component twice\")`\n\n### `episodes(reports) -> Mapping[Component, tuple[Episode, ...]]`\n\n- Episodeは、連続するReportでComponentのSeverityとStatusが**両方**同じである最長の区間です。SeverityかStatusが変わったReport、またはそのComponentを含まないReportで終わり（`end`はそのReportの`checked_at`）、次にComponentが現れたReportで新しいEpisodeが始まります。\n- 戻り値は読み取り専用のmapping。keyは1度でも現れたComponentだけで、`Component`の宣言順。値はEpisodeを古い順に並べたtuple。\n\n### `severity_changes(component_episodes) -> tuple[datetime, ...]`\n\n1つのComponentのEpisodeの列（古い順）で、Severityが変わった時刻（後のEpisodeの`start`）。前のEpisodeの`end`と後のEpisodeの`start`が同じで（間にComponentのないReportがない）、Severityが違うときだけ数えます。Statusだけの変化は数えません。\n\n### `is_flapping(component_episodes, *, window=timedelta(minutes=30), changes=4) -> bool`\n\nSeverityの変化の時刻のうち`changes`個以上が、長さ`window`の範囲（両端を含む）に入ることがあれば`True`。\n\n- `window`が`timedelta`でなければ`TypeError(\"window must be a timedelta\")`、0以下なら`ValueError(\"window must be positive\")`。\n- `changes`が整数でない（`bool`も不可）なら`TypeError(\"changes must be an integer\")`、2未満なら`ValueError(\"changes must be at least 2\")`。\n- 検査の順は`window`、`changes`。\n\n### `summarize(reports, *, window=timedelta(minutes=30), changes=4) -> dict`\n\n最初に`window`と`changes`を`is_flapping`と同じく検査し、次にReportの列を検査します。JSONにできるdictを返します。\n\n- Reportが1つもなければ`{\"from\": None, \"to\": None, \"reports\": 0, \"components\": {}}`。\n- それ以外は`{\"from\": 最初のReportのchecked_at, \"to\": 最後のReportのchecked_at, \"reports\": Report数, \"components\": {...}}`（時刻は`isoformat()`）。\n- `components`のkeyはComponentの値（`\"database\"`など）で、`episodes`と同じ順。値は:\n  - `\"episodes\"`: Episodeの数\n  - `\"worst\"`: そのComponentの全EpisodeのうちもっともひどいSeverityの値（`domain.worst`の順）\n  - `\"current\"`: 最後のReportにそのComponentがあれば`{\"severity\", \"status\", \"since\": 続いているEpisodeのstartのisoformat}`、なければ`None`\n  - `\"time_in_severity\"`: 4つのSeverityすべてをkeyに（`Severity`の宣言順）、**閉じた**Episode（`end`が`None`でない）の長さの秒（float）を合計したもの。開いているEpisodeは数えない\n  - `\"flapping\"`: そのComponentのEpisodeに`is_flapping`（同じ`window`・`changes`）を当てた結果\n\n`apps/backend/README.md`のSystem Healthの節にも短い説明を足してください。\n\n## 作業の条件\n\n- 作業はこのRepositoryのstarting commitから始めます。既存のTestを削除・無効化したり、期待値を不当に緩めたりしてはいけません。\n- 評価はExecutable Evaluatorが行います。公開されたcheck（visible checks）に加えて、候補から見えないHidden checkがあります。\n- Credential・秘密情報をcode・log・commitへ入れないでください（SECURITY.md）。\n",
+  "visible_checks": [
+    {
+      "id": "lint",
+      "type": "lint",
+      "command": [
+        "python",
+        "-m",
+        "ruff",
+        "check",
+        "apps/backend"
+      ]
+    }
+  ],
+  "hidden_checks": [
+    {
+      "id": "hidden-acceptance",
+      "type": "acceptance",
+      "reference_id": "seed-v2-f6ea74eaebf2"
+    },
+    {
+      "id": "hidden-regression",
+      "type": "regression",
+      "reference_id": "seed-v2-52fc92c1a321"
+    }
+  ]
+}

@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "task_id": "paw-seed-v2-spec-14-run-plan",
+  "kind": "spec",
+  "repository": {
+    "locator": "paw-dataset://paw-seed-v2/paw-seed-v2-spec-14-run-plan",
+    "starting_commit": "3df6f807a92497ba24366d47259b16e18e8136be"
+  },
+  "issue_text": "# 比較Runの計画（Run plan）から、実行するRunの一覧を作る\n\nResolved@Nの比較では、複数の候補 × 複数のTask × 複数回の試行を、決まった順で走らせ、途中で止まったら残りだけを再開します。\nその一覧を、計画のJSONから作るmoduleとCLIを追加してください。このmoduleは何も実行しません（一覧を作るだけです）。\n\n## 1. 計画のSchema: `benchmarks/schemas/run-plan-v1.schema.json`（新規、Draft 2020-12）\n\ntop levelはobjectで、次以外のpropertyは許しません。\n\n| property | 必須 | 値 |\n| --- | --- | --- |\n| `plan_version` | 必須 | `1`（const） |\n| `candidates` | 必須 | 文字列の配列（1件以上）。各要素は`^[A-Za-z0-9][A-Za-z0-9._-]*$`に合うこと（directory名に使うため） |\n| `tasks` | 必須 | 同上（Task id） |\n| `attempts` | 必須 | 整数、1以上10以下 |\n| `order` | 任意 | `\"interleaved\"`か`\"grouped\"`（既定は`\"interleaved\"`） |\n| `shards` | 任意 | 整数、1以上（既定は1） |\n\n## 2. Module: `benchmarks/run_plan.py`（新規）\n\n### `validate_plan(document) -> list[str]`\n\n- まずschemaで検査します。messageは既存のvalidatorと同じ、値を含まない共通の報告（`benchmarks.schema_validation.validate_document`）の形式・順序です。たとえば: `$: unexpected property is not allowed`、`$: required property is missing: attempts`、`$.attempts: expected integer`（`true`も整数ではない）、`$.attempts: number must be at least 1`、`$.attempts: validation failed (maximum)`、`$.candidates[1]: validation failed (pattern)`、`$.order: value is not an allowed enum member`、`$.plan_version: value does not match the supported schema version`、`$.tasks: array must contain at least one item`。\n- schemaのerrorが1つでもあれば、それだけを返します。schemaに適合したときだけ、続けて次を検査し、この順で返します。\n  1. `candidates`で、既に出た値を再び使う要素ごとに`$.candidates[<index>]: duplicate candidate`（2回目以降の要素の位置。3回出れば2件）。\n  2. `tasks`も同様に`$.tasks[<index>]: duplicate task`。\n  3. `shards`がRunの総数（候補の数 × Taskの数 × `attempts`）より大きければ`$.shards: must not exceed the number of runs`（等しいのはよい）。\n- messageに入力の値を含めません。入力を変更しません。\n\n### `PlanError`、`RunPlan`、`RunItem`\n\n- `PlanError`は`ValueError`のsubclassで、`errors`属性（messageのlist）を持ち、`str()`はmessageを`\"; \"`でつないだもの。\n- `RunPlan`はfrozen dataclass: `candidates: tuple[str, ...]`、`tasks: tuple[str, ...]`、`attempts: int`、`order: str = \"interleaved\"`、`shards: int = 1`。\n  `RunPlan.from_document(document)`（classmethod）は`validate_plan`のerrorがあれば`PlanError`、なければ既定値を補った`RunPlan`を返します（後で入力のlistを変えても`RunPlan`は変わらない）。\n- `RunItem`はfrozen dataclass: `candidate: str`、`task_id: str`、`attempt: int`（1始まり）、`shard: int`（0始まり）。property `key`は`\"<candidate>/attempt-<attempt>/<task_id>\"`。\n\n### `expand(plan) -> tuple[RunItem, ...]`\n\n- (候補, Task, 試行)の組をちょうど1回ずつ、次の順で並べます。\n  - `interleaved`: 試行（1, 2, …）→ Task（計画の順）→ 候補（計画の順）の入れ子。つまり、全候補が同じTaskの同じ試行を続けて走らせます。\n  - `grouped`: 候補 → 試行 → Taskの入れ子。\n- `shard`は、この並びの位置（0始まり）を`shards`で割った余りです。\n\n### `pending(plan, results_dir) -> tuple[RunItem, ...]`\n\n- `expand(plan)`のうち、結果のfile `results_dir/<candidate>/attempt-<attempt>/<task_id>.json`が「使える」ものを除いた残りを、同じ順で返します（`shard`もそのまま）。\n- 「使える」のは、通常のfileで、UTF-8として読め、厳格なdecoder（`benchmarks.json_input.decode_json`。重複したkeyや`NaN`は失敗）で読めて、値がobjectで、その`task_id`がそのRunのTask idに等しいときだけです。それ以外（fileがない、directoryである、読めない、壊れている、配列、`task_id`が違う）は未完了です。`results_dir`自体がなければ全件が未完了です。\n\n## 3. CLI: `python -m benchmarks.run_plan PLAN [--results DIR] [--shard N]`\n\n- PLANを`decode_json`で読みます。読めない（存在しない、UTF-8でない、JSONとして不正、重複key・`NaN`など）ときは、stderrへ`<PLAN>: cannot read the plan`を出して終了code 1。\n- 計画が不正なら、`validate_plan`の各messageを`<PLAN>:<message>`（PLANの直後にmessage。validatorと同じ形）として1行ずつstderrへ出し、stdoutには何も出さず終了code 1。\n- `--shard`は0以上の整数です（負や整数でない値はargparseのusage error、終了code 2）。計画を読んだあとで、`--shard`が`shards`以上なら、argparseのusage errorとして`--shard must be below <shards>`を出して終了code 2。\n- `--results DIR`がありDIRが存在してdirectoryでなければ、stderrへ`<DIR>: not a directory`を出して終了code 1。`--results`があれば`pending`、なければ`expand`の各Runを、`--shard`があればそのshardのものだけ、`<shard>\\t<candidate>\\t<attempt>\\t<task_id>`の1行ずつstdoutへ出して終了code 0（stderrには何も出さない）。\n\n`benchmarks/README.md`にもRun planの説明を足してください。\n\n## 作業の条件\n\n- 作業はこのRepositoryのstarting commitから始めます。既存のTestを削除・無効化したり、期待値を不当に緩めたりしてはいけません。\n- 評価はExecutable Evaluatorが行います。公開されたcheck（visible checks）に加えて、候補から見えないHidden checkがあります。\n- Credential・秘密情報をcode・log・commitへ入れないでください（SECURITY.md）。\n",
+  "visible_checks": [
+    {
+      "id": "lint",
+      "type": "lint",
+      "command": [
+        "python",
+        "-m",
+        "ruff",
+        "check",
+        "benchmarks"
+      ]
+    }
+  ],
+  "hidden_checks": [
+    {
+      "id": "hidden-acceptance",
+      "type": "acceptance",
+      "reference_id": "seed-v2-95fd8efa3989"
+    },
+    {
+      "id": "hidden-regression",
+      "type": "regression",
+      "reference_id": "seed-v2-b1f9ea2d050b"
+    }
+  ]
+}

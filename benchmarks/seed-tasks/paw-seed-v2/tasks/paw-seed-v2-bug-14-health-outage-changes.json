@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "task_id": "paw-seed-v2-bug-14-health-outage-changes",
+  "kind": "injected_bug",
+  "repository": {
+    "locator": "paw-dataset://paw-seed-v2/paw-seed-v2-bug-14-health-outage-changes",
+    "starting_commit": "14688ae0e7f69197f21efad654256e36325f530a"
+  },
+  "issue_text": "# PostgreSQL が止まっていた間の System Health の変化が `health_events` に正しく残らない\n\nSystem Health の Sampling（`HealthMonitor.run`、PAW-066）は、Cycle ごとに Report を取り、Component の severity が変わったら `health_events` に記録します（`HealthStore.record_changes`）。PostgreSQL 自身が止まって記録できない間の Report は Monitor の中で待たせ、PostgreSQL が戻った Cycle で、**取った順に、その Report を取った時刻で** 記録する仕様です（`run_cycle` の docstring）。待たせる Report は最大 `MAX_UNRECORDED_REPORTS` 件で、超えたときは **最初の 1 件（停止の始まり）を残し**、その次に古いものから捨てます。\n\nところが、停止の後の `health_events` に次の問題があります。\n\n1. **停止中の変化が消える**: Database が `INFO` → （PostgreSQL 停止、記録に失敗）`CRITICAL` → （復旧）`INFO` と変わったとき、記録されるのは `INFO`, `INFO` だけで、`CRITICAL` がありません。記録が 2 回続けて失敗した場合も同じです。期待: `INFO`, `CRITICAL`, `INFO`。\n2. **時刻が復旧の時刻になる**: 停止中の変化が記録されるときの `occurred_at` が、その Report を取った時刻ではなく、復旧した Cycle の Report の時刻になります（停止中に `CRITICAL` → `ERROR` と変わると、どちらも同じ時刻になります）。\n3. **長い停止で始まりが消える**: 待たせる Report が上限を超えるほど長い停止では、最初の変化（停止の始まり）が捨てられ、新しいものだけが残ります。\n\n同じ severity が続く間は、Report を何回取っても待たせるのは 1 件です（これは今も正しく動きます）。原因を調べて直してください。\n\n## 作業の条件\n\n- 作業はこのRepositoryのstarting commitから始めます。既存のTestを削除・無効化したり、期待値を不当に緩めたりしてはいけません。\n- 評価はExecutable Evaluatorが行います。公開されたcheck（visible checks）に加えて、候補から見えないHidden checkがあります。\n- Credential・秘密情報をcode・log・commitへ入れないでください（SECURITY.md）。\n",
+  "visible_checks": [
+    {
+      "id": "lint",
+      "type": "lint",
+      "command": [
+        "python",
+        "-m",
+        "ruff",
+        "check",
+        "apps/backend"
+      ]
+    }
+  ],
+  "hidden_checks": [
+    {
+      "id": "hidden-acceptance",
+      "type": "acceptance",
+      "reference_id": "seed-v2-959e69988c92"
+    },
+    {
+      "id": "hidden-regression",
+      "type": "regression",
+      "reference_id": "seed-v2-93c1babe24fc"
+    }
+  ]
+}

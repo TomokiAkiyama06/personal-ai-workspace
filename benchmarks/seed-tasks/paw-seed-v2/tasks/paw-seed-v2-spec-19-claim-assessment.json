@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "task_id": "paw-seed-v2-spec-19-claim-assessment",
+  "kind": "spec",
+  "repository": {
+    "locator": "paw-dataset://paw-seed-v2/paw-seed-v2-spec-19-claim-assessment",
+    "starting_commit": "3df6f807a92497ba24366d47259b16e18e8136be"
+  },
+  "issue_text": "# Provenance の追跡結果から、重複する Claim をまとめて支持・否定の Source を数える\n\n`ProvenanceStore.trace()` が返す `Trace`（`paw_backend/research/provenance/records.py`）は Claim ごとの Source と関係を並べるだけで、\n「同じことを言う Claim をまとめると、いくつの Source が支持し、いくつが否定しているか」を利用者が自分で数える必要があります。\nこれを数える純粋な関数を追加してください。真偽は決めません（REQUIREMENTS.md: Source の種類だけでは真偽を決めない）。記録された証拠の見え方を返すだけです。\n\n## 仕様\n\n新しい module `paw_backend/research/provenance/assessment.py` に次を置き、`paw_backend.research.provenance` から `ClaimGroup`・`Verdict`・`assess_trace` を export します（`__all__` にも）。`apps/backend/README.md` の Evidence / Claim Provenance の file の表にも 1 行足してください。\n\n- `Verdict`（`StrEnum`）: `SUPPORTED = \"supported\"`、`DISPUTED = \"disputed\"`、`CONTRADICTED = \"contradicted\"`、`UNSUPPORTED = \"unsupported\"`。\n- `ClaimGroup`: frozen な dataclass。field はこの順で `representative: UUID`、`claim_ids: tuple[UUID, ...]`、`supporting_sources: int`、`contradicting_sources: int`、`contradicts: tuple[UUID, ...]`、`verdict: Verdict`。\n- `assess_trace(trace: Trace, source_relations=()) -> tuple[ClaimGroup, ...]`:\n  - `trace` が `Trace` でなければ `TypeError`。`source_relations` が `list` / `tuple` でない、または `Relation` でない要素を含めば `TypeError`。\n  - **Claim**: `trace.claims` の各 `TracedClaim.claim`。同じ id の Claim が 2 回出たら 1 つとして扱います（その `links` は両方とも数えます。同じ Source は下の規則で 1 つになります）。\n  - **Claim の関係**: 全ての `TracedClaim.relations` のうち、`entity` が `EntityKind.CLAIM` で、両端が trace の Claim であるものだけを使います（片方でも trace にない Claim なら無視）。\n  - **Group**: `DUPLICATE` の関係でつながる Claim を、推移的に 1 つの Group にまとめます（関係のない Claim はそれだけで 1 Group）。\n    - `claim_ids`: Group の Claim の id を `UUID.int` の昇順に並べたもの。\n    - `representative`: Group の中で `created_at` が最も古い Claim の id（同じなら `UUID.int` が小さい方）。\n  - **Source**: Group の Claim の `links` の Source（`link.source.id`）。`source_relations` のうち `entity` が `EntityKind.SOURCE` で `kind` が `DUPLICATE`、かつ両端が trace に現れる Source であるものでつながる Source は、推移的に **1 つの Source** として数えます。それ以外の `source_relations`（`CONTRADICTION`、Claim の関係、trace にない Source）は無視します。\n    - Group ごとに、1 つの Source（まとめた後）が Group のどれかの Claim を `CONTRADICTS` で指していれば **否定の Source**、そうでなく `SUPPORTS` だけなら **支持の Source** として 1 回だけ数えます（同じ Source が支持と否定の両方をしていれば否定だけに数える）。`supporting_sources` / `contradicting_sources` はその数です。\n  - **`contradicts`**: `CONTRADICTION` の Claim の関係で、この Group の Claim とつながる **別の** Group の `representative` を、重複なく `UUID.int` の昇順に並べたもの。同じ Group の中の 2 つの Claim の `CONTRADICTION` は無視します。\n  - **`verdict`**（上から順に最初に当てはまるもの）:\n    1. 支持も否定も 0 → `UNSUPPORTED`（`contradicts` があっても）\n    2. 否定 > 支持 → `CONTRADICTED`\n    3. 否定 > 0、または `contradicts` が空でない → `DISPUTED`\n    4. それ以外 → `SUPPORTED`\n  - 戻り値は Group の tuple で、`representative` の Claim の `(created_at, UUID.int)` の昇順。Claim がなければ `()`。引数を変更しません。\n\n## 作業の条件\n\n- 作業はこのRepositoryのstarting commitから始めます。既存のTestを削除・無効化したり、期待値を不当に緩めたりしてはいけません。\n- 評価はExecutable Evaluatorが行います。公開されたcheck（visible checks）に加えて、候補から見えないHidden checkがあります。\n- Credential・秘密情報をcode・log・commitへ入れないでください（SECURITY.md）。\n",
+  "visible_checks": [
+    {
+      "id": "lint",
+      "type": "lint",
+      "command": [
+        "python",
+        "-m",
+        "ruff",
+        "check",
+        "apps/backend"
+      ]
+    }
+  ],
+  "hidden_checks": [
+    {
+      "id": "hidden-acceptance",
+      "type": "acceptance",
+      "reference_id": "seed-v2-1d33ad72007f"
+    },
+    {
+      "id": "hidden-regression",
+      "type": "regression",
+      "reference_id": "seed-v2-01ad8ef1f96a"
+    }
+  ]
+}

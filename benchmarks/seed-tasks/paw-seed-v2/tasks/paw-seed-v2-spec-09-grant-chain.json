@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "task_id": "paw-seed-v2-spec-09-grant-chain",
+  "kind": "spec",
+  "repository": {
+    "locator": "paw-dataset://paw-seed-v2/paw-seed-v2-spec-09-grant-chain",
+    "starting_commit": "3df6f807a92497ba24366d47259b16e18e8136be"
+  },
+  "issue_text": "# Sub-agent の Grant の連鎖を検査し、連鎖の末端の Agent の操作を判定する\n\nPAW-034 で、子 Agent の Grant は `paw_backend.authz.delegation.derive_child_grant` が親の Grant から**狭める方向にだけ**作るようになりました。\nしかし Orchestrator が保存した Grant の連鎖（root Agent → 子 → 孫 …）を読み直したとき、それが本当に「各段が前の段から導出できる」連鎖かを確かめる関数がなく、\n連鎖の末端の Agent の操作を、途中のすべての段で判定する関数もありません。この 2 つを追加してください。\n\n## 仕様\n\n### `paw_backend.authz.delegation.check_grant_chain(chain) -> None`（`paw_backend.authz` からも import できるようにする）\n\n- `chain` は `AgentGrant` の列（list や tuple などの `Sequence`）。`chain[0]` は root Agent の Grant で、それ自体は検査しない（委任できない Capability を持っていてもよい）。\n- `i = 1, 2, …` の順に、`chain[i]`（子）を `chain[i-1]`（親）と比べ、次の順で検査する。最初に失敗したところで `GrantEscalationError` を送出する:\n  1. 子の `agent_id` が、連鎖の**それより前のどれか**（親に限らない）の `agent_id` と同じ → 理由 `EscalationReason.SAME_AGENT`\n  2. 子の Capability が親の Capability の部分集合でない → `EscalationReason.CAPABILITY`\n  3. 子が委任できない Capability（`CAPABILITIES[c].delegable` が偽）を持つ → `EscalationReason.NOT_DELEGABLE`\n  4. 子の Project が親の Project の範囲を超える（`ALL_PROJECTS` は親が `ALL_PROJECTS` のときだけ。`projects_within` と同じ規則） → `EscalationReason.PROJECT`\n- `GrantEscalationError` に属性 `index` を足す: 連鎖で検査に失敗した Grant の位置（上の `i`）。`derive_child_grant` が送出するときは `None`。Message は今と同じ固定の文（id・Capability 名・Project を含めない）。`GrantEscalationError(reason)` は今までどおり書ける。\n- `chain` が `Sequence` でない（文字列・bytes・generator などを含む）、または `AgentGrant` でない要素がある → `TypeError`。空の列 → `ValueError`。長さ 1 の列は何もしない（正常）。\n\n### `paw_backend.authz.policy.decide_agent_chain(delegator, chain, capability, resource, *, policy=DEFAULT_POLICY) -> Decision`\n\n- 連鎖の**末端**の Agent が `delegator` の代わりに行う操作の判定。`decide_agent` と同じく、記録はしない内部の関数（`paw_backend.authz` からは export しない）。\n- 判定の順:\n  1. `capability` が `Capability` でなければ `Decision.deny(Reason.UNKNOWN_CAPABILITY, None)`。\n  2. `check_grant_chain(chain)` が失敗する（`GrantEscalationError`・`TypeError`・`ValueError`）なら `Decision.deny(Reason.AGENT_CHAIN_INVALID, capability)`。`Reason` に `AGENT_CHAIN_INVALID = \"agent_chain_invalid\"` を追加する。\n  3. root から順に、各 Grant で `decide_agent(delegator, grant, capability, resource, policy=policy)` を判定し、最初の拒否をそのまま返す。\n  4. すべて許可なら、末端の Grant の判定を返す。\n\n## 作業の条件\n\n- 作業はこのRepositoryのstarting commitから始めます。既存のTestを削除・無効化したり、期待値を不当に緩めたりしてはいけません。\n- 評価はExecutable Evaluatorが行います。公開されたcheck（visible checks）に加えて、候補から見えないHidden checkがあります。\n- Credential・秘密情報をcode・log・commitへ入れないでください（SECURITY.md）。\n",
+  "visible_checks": [
+    {
+      "id": "lint",
+      "type": "lint",
+      "command": [
+        "python",
+        "-m",
+        "ruff",
+        "check",
+        "apps/backend"
+      ]
+    }
+  ],
+  "hidden_checks": [
+    {
+      "id": "hidden-acceptance",
+      "type": "acceptance",
+      "reference_id": "seed-v2-95b39014b20f"
+    },
+    {
+      "id": "hidden-regression",
+      "type": "regression",
+      "reference_id": "seed-v2-be173b6220a8"
+    }
+  ]
+}

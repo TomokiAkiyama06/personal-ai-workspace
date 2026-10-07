@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "task_id": "paw-seed-v2-spec-15-task-json-patch",
+  "kind": "spec",
+  "repository": {
+    "locator": "paw-dataset://paw-seed-v2/paw-seed-v2-spec-15-task-json-patch",
+    "starting_commit": "3df6f807a92497ba24366d47259b16e18e8136be"
+  },
+  "issue_text": "# Task JSONにJSON Patchを当てて検証するツールを作る\n\nSeed datasetのTask manifestを少しずつ直すとき、手で編集すると壊しやすいので、JSON Patch（RFC 6902）で変更を書いて当て、結果をTask schemaで検証できるようにします。\n外部のlibraryは使わずに実装してください（CIの依存に入っていません）。\n\n## 1. `benchmarks/json_patch.py`（新規）\n\n### `JsonPatchError`\n\n`ValueError`のsubclass。属性`message`（理由）と`index`（失敗した操作の位置、0始まり。操作に結び付かないerrorでは`None`）を持ちます。\n`str()`は、`index`があれば`operation <index>: <message>`、なければ`<message>`です。messageに文書やpatchの値を含めません。\n\n### `parse_pointer(pointer: str) -> tuple[str, ...]`（JSON Pointer、RFC 6901）\n\n- `\"\"`は文書全体（root）で`()`を返します。それ以外は`/`で始まり、`/`で区切った各tokenについて`~1`を`/`に、続けて`~0`を`~`に戻します（`\"/~01\"`は`(\"~1\",)`）。空のtokenもtokenです（`\"/\"`は`(\"\",)`、`\"/a//b\"`は`(\"a\", \"\", \"b\")`）。\n- `/`で始まらない、`0`・`1`以外が続く`~`がある（`\"/a~\"`、`\"/a~2\"`）、文字列でない → `JsonPatchError(\"invalid JSON pointer\")`（`index`は`None`）。\n\n### `apply_patch(document, patch)`\n\n- `patch`がlistでなければ`JsonPatchError(\"patch must be an array of operations\")`（`index`は`None`）。\n- 入力の`document`と`patch`を変更しません。`document`のdeep copyに操作を順に当てて、それを返します。途中の操作が失敗したら、その位置を`index`にした`JsonPatchError`を出します（入力は変わっていないので、半端に当たった状態は残りません）。戻り値は`patch`の中の値と共有しません（`value`はcopyして入れる）。\n- 各操作は次の順で検査します（最初に当たったものを報告）。\n  1. objectでない → `operation must be an object`\n  2. `op`が`add` / `remove` / `replace` / `move` / `copy` / `test`のどれでもない（ない場合も） → `unknown operation`\n  3. `path`がない・文字列でない → `missing path`。`path`がpointerとして不正 → `invalid JSON pointer`\n  4. `add` / `replace` / `test`で`value`がない → `missing value`（`null`は値です）\n  5. `move` / `copy`で`from`がない・文字列でない → `missing from`。`from`がpointerとして不正 → `invalid JSON pointer`\n  6. 以下の操作の意味に従った失敗\n  操作objectの、それ以外のmemberは無視します。\n- 位置の解決: objectではmember名、arrayでは`0`または先頭が0でない10進の数字列（`01`は不可）だけが要素の位置です。存在しないmember・範囲外の位置・数字でないtoken・objectでもarrayでもない値の中へ進むことは、すべて`path does not exist`です。`-`（arrayの末尾の次）は`add`の最後のtoken（とmoveの行き先）でだけ使えます。\n- 操作の意味:\n  - `add`: 親（最後のtokenを除いたpointer）が存在しなければならない。親がobjectなら、memberを追加または置換（既存のmemberは元の位置のまま）。親がarrayなら、位置`i`（`0`〜`len`、`-`は`len`）に挿入。pathが`\"\"`なら文書全体を`value`にする。\n  - `remove`: 対象が存在しなければならない。objectのmemberまたはarrayの要素を取り除く。pathが`\"\"`なら`cannot remove the root`。\n  - `replace`: 対象が存在しなければならない。その場で値を置き換える（objectのmemberは元の位置のまま、arrayの長さは変わらない）。pathが`\"\"`なら文書全体を置き換える。\n  - `move`: `from`の値を取り除いて`path`へ`add`する。`path`が`from`の真の子孫（`from`に`/`とtokenを足したもの）なら`cannot move a value into itself`。`path`と`from`が同じなら（存在すれば）何もしない。\n  - `copy`: `from`の値のdeep copyを`path`へ`add`する。\n  - `test`: 対象の値が`value`とJSONとして等しくなければ`test failed`。等しさ: 数は値で比べる（`1`と`1.0`は等しい）が、真偽値は数と等しくない（`true`と`1`は違う）。文字列・`null`は同じ型の同じ値、objectは同じkeyの集合で各値が等しい（keyの順は問わない）、arrayは同じ長さで順に等しい。\n- 例: `apply_patch({\"a\": [1, 2]}, [{\"op\": \"add\", \"path\": \"/a/-\", \"value\": 3}])`は`{\"a\": [1, 2, 3]}`、`[{\"op\": \"remove\", \"path\": \"/a/2\"}]`は`operation 0: path does not exist`。\n\n## 2. CLI: `python -m benchmarks.patch_task TASK PATCH [--output FILE]`（新規 `benchmarks/patch_task.py`）\n\n- TASK、続いてPATCHを厳格なdecoder（`benchmarks.json_input.decode_json`）で読みます。読めない（存在しない、UTF-8でない、JSONとして不正、重複key・`NaN`など）最初のfileについて、stderrへ`<path>: cannot read JSON`を出して終了code 1。\n- `apply_patch`が失敗したら、stderrへ`<PATCH>: <str(error)>`（例: `patch.json: operation 1: path does not exist`）を出して終了code 1。\n- 当てた結果をTask schemaで検証し（`benchmarks.validate_task.validate_document`）、errorがあれば各errorを`patched task:<error>`の1行ずつstderrへ出して終了code 1（何も出力しない）。\n- 成功したら、結果を`json.dumps(..., ensure_ascii=False, indent=2)`と改行1つの形で、`--output`があればそのfile（UTF-8）へ、なければstdoutへ出して終了code 0（stderrには何も出さない）。`--output`へ書けなければ、stderrへ`cannot write the output (<例外の型名>)`を出して終了code 2。\n- TASKのfileはどの場合も変更しません。\n\n`benchmarks/README.md`にも説明を足してください。\n\n## 作業の条件\n\n- 作業はこのRepositoryのstarting commitから始めます。既存のTestを削除・無効化したり、期待値を不当に緩めたりしてはいけません。\n- 評価はExecutable Evaluatorが行います。公開されたcheck（visible checks）に加えて、候補から見えないHidden checkがあります。\n- Credential・秘密情報をcode・log・commitへ入れないでください（SECURITY.md）。\n",
+  "visible_checks": [
+    {
+      "id": "lint",
+      "type": "lint",
+      "command": [
+        "python",
+        "-m",
+        "ruff",
+        "check",
+        "benchmarks"
+      ]
+    }
+  ],
+  "hidden_checks": [
+    {
+      "id": "hidden-acceptance",
+      "type": "acceptance",
+      "reference_id": "seed-v2-030c17b3736b"
+    },
+    {
+      "id": "hidden-regression",
+      "type": "regression",
+      "reference_id": "seed-v2-931fda8454a1"
+    }
+  ]
+}

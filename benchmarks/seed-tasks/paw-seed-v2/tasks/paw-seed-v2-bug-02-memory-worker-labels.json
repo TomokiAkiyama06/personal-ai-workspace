@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "task_id": "paw-seed-v2-bug-02-memory-worker-labels",
+  "kind": "injected_bug",
+  "repository": {
+    "locator": "paw-dataset://paw-seed-v2/paw-seed-v2-bug-02-memory-worker-labels",
+    "starting_commit": "ce9dfd7f461e1d3de1a31cc993d2f11202a884b9"
+  },
+  "issue_text": "# Memory Worker benchmarkの採点が、同じkeyの重複予測と未labelの衝突でREADMEと食い違う\n\nMemory Worker benchmark（`python -m benchmarks.run_memory_worker_benchmark`）のReportに、READMEの「Memory Worker benchmark」の節と合わない値が出ます。2つの症状があります。\n\n## 症状1: 同じkeyを2回出すと、後の予測で採点される\n\nREADMEでは、Goldに一致する予測のうち採点に使うのは**そのkeyの最初の予測**で、同じkeyの2回目以降の予測は`unneeded`として数えるだけです。\nところが、Workerが同じkeyを2回出すと、`scope` / `state` / `supersedes` / `content` / `conflicts_with`の正解の判定が**後の予測**で行われます。\n\n例: Goldが`{\"key\": \"k\", \"scope\": \"user\", ...}`のとき、Workerが`k`を`scope: \"repo\"`で出した後に`scope: \"user\"`でもう一度出すと、`scope_accuracy`は0.0のはずですが1.0になります（逆の順なら1.0のはずが0.0になります）。\n\n## 症状2: `conflicts_with`のないGoldが「衝突なし」として採点される\n\nREADMEでは、Goldの`conflicts_with`がない（省略した）recordは**未label**で、`conflict_accuracy`の採点対象にしません。Goldの空配列（`[]`）だけが「衝突なし」というlabelです。\nGoldのどのrecordにも`conflicts_with`がなければ、`conflict_accuracy`は`null`になるはずです。\n\nところが、`conflicts_with`を書いていないcase fileでも`conflict_accuracy`に数値が出て、Workerが関係を出力すると不正解に数えられます。\ncase fileから読んだGold recordでは、`conflicts_with`の省略は`None`、`[]`は`()`として区別されるはずです（`benchmarks.memory_worker_metrics.MemoryRecord`の説明）。\n\n両方の原因を調べて直してください。\n\n## 作業の条件\n\n- 作業はこのRepositoryのstarting commitから始めます。既存のTestを削除・無効化したり、期待値を不当に緩めたりしてはいけません。\n- 評価はExecutable Evaluatorが行います。公開されたcheck（visible checks）に加えて、候補から見えないHidden checkがあります。\n- Credential・秘密情報をcode・log・commitへ入れないでください（SECURITY.md）。\n",
+  "visible_checks": [
+    {
+      "id": "lint",
+      "type": "lint",
+      "command": [
+        "python",
+        "-m",
+        "ruff",
+        "check",
+        "benchmarks"
+      ]
+    }
+  ],
+  "hidden_checks": [
+    {
+      "id": "hidden-acceptance",
+      "type": "acceptance",
+      "reference_id": "seed-v2-e2ecf11c384c"
+    },
+    {
+      "id": "hidden-regression",
+      "type": "regression",
+      "reference_id": "seed-v2-5bd6f603fabb"
+    }
+  ]
+}

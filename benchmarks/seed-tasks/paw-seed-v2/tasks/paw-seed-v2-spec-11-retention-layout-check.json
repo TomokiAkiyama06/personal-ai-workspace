@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "task_id": "paw-seed-v2-spec-11-retention-layout-check",
+  "kind": "spec",
+  "repository": {
+    "locator": "paw-dataset://paw-seed-v2/paw-seed-v2-spec-11-retention-layout-check",
+    "starting_commit": "3df6f807a92497ba24366d47259b16e18e8136be"
+  },
+  "issue_text": "# 監査 Log の Partition の並び（重複・名前の誤り・重なり・隙間）を検査し、定期の保守で失敗にする\n\n`audit_events` の Partition（Decision 0027、`paw_backend.authz.retention`）は、Bookkeeping の表から読んだ `PartitionWindow` の列で表されます。今の定期の保守（`run_scheduled_maintenance`、Issue #117）は、Live な Partition が先の月まで埋まっているか（`first_uncovered_moment`）しか確かめないため、手作業の復旧などで Partition の並びが壊れても気付けません。並びを検査する純粋な関数を追加し、定期の保守の確認に組み込んでください。\n\n## 仕様\n\n### 値（`paw_backend/authz/retention/records.py`）\n\n- `LayoutProblemCode`（`StrEnum`）: `DUPLICATE_NAME = \"duplicate_name\"`、`LEGACY_MISPLACED = \"legacy_misplaced\"`、`NOT_A_MONTH = \"not_a_month\"`、`NAME_MISMATCH = \"name_mismatch\"`、`OVERLAP = \"overlap\"`、`GAP = \"gap\"`。\n- `LayoutProblem`: frozen な dataclass。`code: LayoutProblemCode` と `names: tuple[str, ...]`（関係する Partition の名前）。\n\n### `check_layout(existing: Sequence[PartitionWindow]) -> tuple[LayoutProblem, ...]`（`rules.py`）\n\n問題がなければ `()`。入力は変更しない。\n\n1. 引数の検査（ほかのどの判定よりも先に、全要素について）: `PartitionWindow` でない要素は `TypeError`。`lower`（`None` 以外）と `upper` は、このモジュールのほかの関数と同じく aware な `datetime` でなければならない（`datetime` でなければ `TypeError`、naive なら `ValueError`）。\n2. `PURGED` の Window はもう存在しないので、以下のどの検査の対象にもしない。ただし、名前が `LEGACY_PARTITION_NAME` の Window の `upper`（cutover）は、status に関係なく（`PURGED` でも）下の 4 で使う。\n3. `DUPLICATE_NAME`: 2 つ以上の Window が使っている名前ごとに 1 つ（`names=(name,)`）。その名前の Window は、以下の検査から外す。\n4. Window ごとの検査（次のうち最初に当てはまる 1 つだけ。`names=(name,)`）:\n   - `LEGACY_MISPLACED`: `lower` が `None` なのに名前が `LEGACY_PARTITION_NAME` でない、または名前が `LEGACY_PARTITION_NAME` なのに `lower` が `None` でない。\n   - （legacy 以外）`NOT_A_MONTH`: `upper` が `next_month_start(lower)` でない、または `lower` が月の始まり（`month_start(lower)`）でなく、しかも cutover（2 の legacy の `upper` のいずれか）でもない。Migration 0086 の最初の月の Partition は cutover から始まるので、月の途中から始まってよい。\n   - （legacy 以外）`NAME_MISMATCH`: 名前が `partition_name(month_start(lower))` でない。\n   - legacy の Window の `upper` は、どの時刻でもよい。\n   - 時刻はすべて瞬間として比べる（Timezone の違う aware な値でも同じ瞬間なら等しい）。\n5. 隣どうしの検査: 3・4 で問題のなかった Window を、legacy（`lower` が `None`）を先頭に、残りを `lower` の順に並べ（Live と Archived を区別しない）、隣り合う 2 つ（前 `a`・後 `b`）ごとに、`a.upper > b.lower` なら `OVERLAP`、`a.upper < b.lower` なら `GAP`。どちらも `names=(a.name, b.name)`。\n6. 戻り値は `(code の文字列値, names)` の昇順に並べた tuple。\n\n### 定期の保守（`runner.py`）\n\n- 定数 `LAYOUT_PROBLEM = \"layout_problem\"` を追加する。\n- `run_scheduled_maintenance` は、Coverage の確認で抜けがなかったときに限り、同じ `existing_partitions()` の結果に `check_layout` を行う。問題が 1 つでもあれば失敗: `failed_step` は `MaintenanceStep.VERIFY_COVERAGE`、`error_type` は `LAYOUT_PROBLEM`、`uncovered_from` は `None`。記録する理由はこれまでと同じ形（`\"verify_coverage:layout_problem\"`）。\n- `MaintenanceRunResult` に `layout_problems: tuple[LayoutProblem, ...]`（既定値 `()`）を追加し、見つかった問題を入れる。抜けがあった場合（`coverage_gap`）は並びを検査せず `()`。\n\n### 公開\n\n`paw_backend.authz.retention` から `check_layout`・`LayoutProblem`・`LayoutProblemCode`・`LAYOUT_PROBLEM` を import できるようにし、package の docstring の説明も更新してください。\n\n## 作業の条件\n\n- 作業はこのRepositoryのstarting commitから始めます。既存のTestを削除・無効化したり、期待値を不当に緩めたりしてはいけません。\n- 評価はExecutable Evaluatorが行います。公開されたcheck（visible checks）に加えて、候補から見えないHidden checkがあります。\n- Credential・秘密情報をcode・log・commitへ入れないでください（SECURITY.md）。\n",
+  "visible_checks": [
+    {
+      "id": "lint",
+      "type": "lint",
+      "command": [
+        "python",
+        "-m",
+        "ruff",
+        "check",
+        "apps/backend"
+      ]
+    }
+  ],
+  "hidden_checks": [
+    {
+      "id": "hidden-acceptance",
+      "type": "acceptance",
+      "reference_id": "seed-v2-3906e7265e1d"
+    },
+    {
+      "id": "hidden-regression",
+      "type": "regression",
+      "reference_id": "seed-v2-dcf1b42de342"
+    }
+  ]
+}

@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "task_id": "paw-seed-v2-spec-06-plan-schedule-simulation",
+  "kind": "spec",
+  "repository": {
+    "locator": "paw-dataset://paw-seed-v2/paw-seed-v2-spec-06-plan-schedule-simulation",
+    "starting_commit": "3df6f807a92497ba24366d47259b16e18e8136be"
+  },
+  "issue_text": "# DAG の Plan の実行を見積もる（Schedule の Simulation と Critical path）\n\nDAG Agent Orchestrator（PAW-034、`apps/backend/paw_backend/orchestrator`）で、Planner が提案した Plan を実行する前に、\nNode ごとの所要時間の見積もりから「全体でどれだけ掛かるか」「どの Node が失敗すると何が止まるか」を確かめたい。\n実際の Scheduler と同じ規則（`scheduling.py` の `settle_states`・`ready_batch`・`dag_verdict`）で Plan を紙の上で走らせる、\nDB も時計も使わない純粋関数を追加してください。\n\n## 仕様\n\n新しい module `paw_backend/orchestrator/simulation.py`:\n\n### `SimulatedNode` と `Simulation`\n\n- `SimulatedNode`: `frozen=True` の dataclass。field は順に `key: str`、`state: NodeState`、`start: int | None`、`end: int | None`。\n  `state` は `NodeState.SUCCEEDED`・`FAILED`・`BLOCKED` のいずれか。一度も開始しなかった（blocked の）Node は `start` と `end` が `None`。\n- `Simulation`: `frozen=True` の dataclass。field は `nodes: tuple[SimulatedNode, ...]`（**`plan.nodes` の順**、つまり Plan が受理時に並べた位相順）、\n  `verdict: DagVerdict`、`makespan: int`、`peak_parallelism: int`。\n  - method `node(key) -> SimulatedNode`: その key の Node。無い key は `KeyError`。\n\n### `simulate(plan, durations, *, capacity, failures=()) -> Simulation`\n\n時刻は整数（単位は任意）。時刻 0 から次を繰り返します。\n\n1. 各 Node の状態を `settle_states` で決める（`NodeView` の `ordinal` は `plan.nodes` での位置、`required` は Node の `required`）。\n2. `ready_batch` で、`capacity - 実行中の Node の数` 個まで Ready の Node を（ordinal の小さい順に）**今の時刻**に開始する。開始した Node の終了時刻は `開始 + durations[key]`。\n3. 実行中の Node がなければ終わる。\n4. 実行中の Node の終了時刻の最小値まで時刻を進め、その時刻に終わる Node を**すべて**終わらせてから（同時に終わる Node の一部だけを終わらせて開始を挟まない）1 に戻る。終わった Node は、`failures` に含まれていれば `FAILED`、そうでなければ `SUCCEEDED`。\n\n- 所要 0 の Node も許します（開始した時刻に終わり、その依存先は同じ時刻に開始できる）。\n- 失敗した Node に（直接または間接に）依存する Node は `settle_states` の規則で `BLOCKED` になり、開始しません。依存しない Node は走り続けます。\n- `verdict`: 最後の状態に対する `dag_verdict`。\n- `makespan`: 開始した Node の終了時刻の最大値（開始した Node がなければ 0）。\n- `peak_parallelism`: 手順 2 の直後の、実行中の Node の数の最大値（所要 0 の Node も数える）。\n- 引数（`durations`・`failures`）を変更しません。\n\n検証（何かを計算する前に）:\n\n- `plan` が `Plan` でなければ `TypeError`。\n- `durations` が `Mapping` でなければ `TypeError`。key の集合が Plan の Node の key の集合と一致しなければ（足りない・余分がある）`ValueError`。\n  値が `int` でない（`bool`・`float`・`str` を含む）なら `TypeError`、負なら `ValueError`。\n- `capacity` が `int` でない（`bool`・`float`・`None` を含む）なら `TypeError`、1 未満なら `ValueError`。\n- `failures` は Node の key（`str`）の集まり（list・tuple・set など）。`str` そのものや Iterable でないもの、`str` でない要素は `TypeError`、Plan にない key は `ValueError`。\n\n### `critical_path(plan, durations) -> tuple[tuple[str, ...], int]`\n\n所要の合計が最大の依存の鎖と、その合計を返します。`plan` と `durations` の検証は `simulate` と同じです。\n\n- `plan.nodes` の順に、各 Node について `best = durations[key] + max(依存先の best, 依存がなければ 0)`。その Node の前の Node は、\n  `best` が最大の依存先（同点なら `plan.nodes` で先に来る方）。\n- 鎖の最後は `best` が最大の Node（同点なら `plan.nodes` で先に来る方）。前の Node をたどり、依存のない Node から最後の Node までの key を順に並べた tuple と、最後の Node の `best` を返します。\n\n### 公開\n\n`SimulatedNode`・`Simulation`・`simulate`・`critical_path` を `paw_backend.orchestrator` からも import できるようにし、`__all__` に加えてください。\n`apps/backend/README.md` の DAG Agent Orchestrator の module の表にも `simulation.py` を足してください。\n\n## 例\n\n`a -> (b, c) -> d` と独立した `e`、所要 `a=1, b=2, c=3, d=1, e=10`、`capacity=8`、`failures=[\"b\"]` なら:\n`a` は 0〜1、`b` は 1〜3 で失敗、`c` は 1〜4、`d` は blocked（開始しない）、`e` は 0〜10。`verdict` は `FAILED`（d は required）、`makespan` は 10、`peak_parallelism` は 3。\n\n## 作業の条件\n\n- 作業はこのRepositoryのstarting commitから始めます。既存のTestを削除・無効化したり、期待値を不当に緩めたりしてはいけません。\n- 評価はExecutable Evaluatorが行います。公開されたcheck（visible checks）に加えて、候補から見えないHidden checkがあります。\n- Credential・秘密情報をcode・log・commitへ入れないでください（SECURITY.md）。\n",
+  "visible_checks": [
+    {
+      "id": "lint",
+      "type": "lint",
+      "command": [
+        "python",
+        "-m",
+        "ruff",
+        "check",
+        "apps/backend"
+      ]
+    }
+  ],
+  "hidden_checks": [
+    {
+      "id": "hidden-acceptance",
+      "type": "acceptance",
+      "reference_id": "seed-v2-8cb21572ac27"
+    },
+    {
+      "id": "hidden-regression",
+      "type": "regression",
+      "reference_id": "seed-v2-07ce02abc247"
+    }
+  ]
+}

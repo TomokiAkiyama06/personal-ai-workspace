@@ -410,6 +410,14 @@ repository (11 historical from merged PRs, 6 spec, 7 injected bugs), each with i
 categories in `manifest.json`.  Only task manifests are public; hidden tests, golden patches and the
 per-task repositories live in the evaluator-private `/data/datasets/paw-seed-v1`.
 
+[`seed-tasks/paw-seed-v2`](seed-tasks/paw-seed-v2/README.md) (Issue #198, Decision 0074) lists the 24
+v1 tasks unchanged (manifest entries with `"dataset": "paw-seed-v1"`, which must equal the v1 entries;
+their files and private material stay in v1) and adds new medium / hard spec and injected-bug tasks
+whose private material lives in `/data/datasets/paw-seed-v2`.  Every command below takes
+`--dataset NAME` before the subcommand (default `paw-seed-v1`); task ids, `reference_id`s and
+locators follow the version that owns the task (`paw-seed-vN-...`, `seed-vN-...`,
+`paw-dataset://paw-seed-vN/...`).
+
 - `python -m benchmarks.seed_dataset check` validates the index and every task (schema, naming,
   opaque `reference_id`, no public `known_good_commit`, no credential-shaped strings).
 - `build` recreates the private per-task repositories (starting commit and its ancestors only;
