@@ -424,6 +424,62 @@ class RejectTest(PostgresPreferenceTestCase):
         self.assertEqual(self.relations()[0][2:], ("supersedes", "preference rejected"))
         self.assertEqual(await self.preferences.candidates(me), ())
 
+    async def test_a_rejected_version_keeps_the_provenance(self):
+        # Codex P1 on #205: the deletion flow finds a version through its sources.
+        me = self.user()
+        memory_id = self.seed_candidate(me.user_id, "k", "use tabs")
+        (old,) = self.versions(memory_id)
+        self.execute(
+            "INSERT INTO memory_sources (memory_version_id, source_type, source_ref)"
+            " VALUES (:v, 'task', 'task-1')",
+            v=old.id,
+        )
+        written = await self.preferences.reject_candidate(
+            me, MemoryCandidateRef(memory_id, 1)
+        )
+        # The same sources, and no confirmation: the person did not confirm it.
+        self.assertEqual(self.sources(written.version_id), [("task", "task-1")])
+
+    async def test_a_held_candidate_after_a_rejection_can_be_confirmed(self):
+        # Codex P2 on #205: the journal holds a high-risk candidate of a key the
+        # person rejected before; it is offered and can be confirmed.
+        me = self.user()
+        memory_id = self.seed_candidate(me.user_id, "k", "use tabs")
+        await self.preferences.reject_candidate(me, MemoryCandidateRef(memory_id, 1))
+        entry = self.observe(me.user_id, "k", result="held_high_risk", content="m")
+        (found,) = await self.preferences.candidates(me)
+        self.assertEqual(found.entry_id, entry)
+        self.assertEqual([o.scope for o in found.options], [TargetScope.USER])
+        await self.preferences.confirm(
+            me,
+            HeldCandidateRef(entry, 0),
+            Confirmation(scope=TargetScope.USER, acknowledge_high_risk=True),
+        )
+        versions = self.versions(memory_id)
+        self.assertEqual(
+            [(v.status, v.confirmation_state) for v in versions],
+            [
+                ("superseded", "inferred"),
+                ("superseded", "rejected"),
+                ("active", "confirmed"),
+            ],
+        )
+        # A rejection is not "confirmed from".
+        kinds = [r[2] for r in self.relations() if r[0] == versions[2].id]
+        self.assertEqual(kinds, ["supersedes"])
+        self.assertEqual(await self.preferences.candidates(me), ())
+
+    async def test_a_held_candidate_of_a_retired_memory_is_only_rejected(self):
+        me = self.user()
+        memory_id = self.seed_candidate(
+            me.user_id, "k", "use tabs", status="superseded"
+        )
+        entry = self.observe(me.user_id, "k", result="held_high_risk", content="m")
+        (found,) = await self.preferences.candidates(me)
+        self.assertEqual((found.memory_id, found.options), (memory_id, ()))
+        await self.preferences.reject_candidate(me, HeldCandidateRef(entry, 0))
+        self.assertEqual(await self.preferences.candidates(me), ())
+
     async def test_rejecting_a_held_candidate_answers_it_until_a_newer_one(self):
         me = self.user()
         first = self.observe(me.user_id, "k", result="held_high_risk")

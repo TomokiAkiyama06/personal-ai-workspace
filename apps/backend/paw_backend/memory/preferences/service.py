@@ -66,7 +66,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import bindparam, insert, select, text, update
+from sqlalchemy import bindparam, insert, literal, select, text, update
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import sqltypes
@@ -138,10 +138,13 @@ from paw_backend.memory.versioning import limits as version_limits
 from paw_backend.memory.versioning.errors import (
     InputProblem,
     MemoryPermissionError,
+    MemoryStateError,
+    StateProblem,
 )
 from paw_backend.memory.versioning.records import FreshnessSpec, MemoryVersionView
-from paw_backend.memory.versioning.rules import check_active, check_manual_freshness
+from paw_backend.memory.versioning.rules import check_manual_freshness
 from paw_backend.memory.versioning.service import (
+    _COPIED_SOURCE_COLUMNS,
     _LOCK_SQL,
     _MEMORIES,
     _SOURCES,
@@ -171,6 +174,8 @@ _KEYS = ConsolidationKey.__table__
 _RESOLUTIONS = PreferenceResolution.__table__
 _REPOSITORIES = RepositoryRow.__table__
 
+# The current statuses a held candidate can be written over.
+_ANSWERABLE = frozenset({MemoryStatus.ACTIVE, MemoryStatus.DEPRECATED})
 _UNCONFIRMED = (ConfirmationState.OBSERVED.value, ConfirmationState.INFERRED.value)
 _WRITTEN = (
     ItemResult.CREATED.value,
@@ -283,6 +288,8 @@ class _Audience:
     owner_user_id: UUID | None = None
     project_id: UUID | None = None
     repo_id: UUID | None = None
+    # The version's status, where it was read (``_latest_audiences``).
+    status: MemoryStatus | None = None
 
     @classmethod
     def of(cls, version: Any) -> "_Audience":
@@ -291,6 +298,7 @@ class _Audience:
             version.owner_user_id,
             version.project_id,
             version.repo_id,
+            MemoryStatus(version.status),
         )
 
     def columns(self) -> dict[str, Any]:
@@ -531,6 +539,7 @@ class PreferenceConfirmationService(MemoryVersioningService):
                 _VERSIONS.c.owner_user_id,
                 _VERSIONS.c.project_id,
                 _VERSIONS.c.repo_id,
+                _VERSIONS.c.status,
             )
             .where(_VERSIONS.c.memory_id.in_(sorted(memory_ids)))
             .distinct(_VERSIONS.c.memory_id)
@@ -625,6 +634,10 @@ class PreferenceConfirmationService(MemoryVersioningService):
                 audience.scope is MemoryScope.USER and audience.owner_user_id == owner
             ):
                 offered = _options_for_widened(audience)
+            if audience is not None and audience.status not in _ANSWERABLE:
+                # Retired by another memory (``superseded`` / ``history``): only
+                # [保存しない] is left (Codex P2 on #205).
+                offered = ()
             found.append(
                 PreferenceCandidate(
                     kind=CandidateKind.HELD,
@@ -885,7 +898,7 @@ class PreferenceConfirmationService(MemoryVersioningService):
         )
         if (
             new.confirmation_state is ConfirmationState.CONFIRMED
-            and current.confirmation_state is not ConfirmationState.CONFIRMED
+            and current.confirmation_state.value in _UNCONFIRMED
         ):
             await self._relate(
                 session,
@@ -1028,7 +1041,11 @@ class PreferenceConfirmationService(MemoryVersioningService):
         """The held candidate as the next version of its key's memory."""
         await self._lock_memory(session, memory_id)
         current = await self._current(session, actor, memory_id, write=True)
-        check_active(current)
+        # A deprecated memory (the person rejected or retired it) can be written
+        # again by the person's explicit answer, as a restore would (Codex P2 on
+        # #205); one retired by another memory cannot.
+        if current.status not in _ANSWERABLE:
+            raise MemoryStateError(StateProblem.NOT_ACTIVE)
         if _own(current, actor.user_id):
             audience = await self._own_or_target(session, actor, confirmation)
         else:
@@ -1203,7 +1220,7 @@ class PreferenceConfirmationService(MemoryVersioningService):
             race=(ref.memory_id, ref.expected_version)
         ) as session:
             key, current = await self._own_candidate(session, actor, ref)
-            return await self._next_version(
+            new = await self._next_version(
                 session,
                 actor,
                 current,
@@ -1229,6 +1246,26 @@ class PreferenceConfirmationService(MemoryVersioningService):
                 now=now,
                 reason=REJECT_REASON,
             )
+            # The same content, so the same sources: the deletion flow finds the
+            # rejected copy through them (Decision 0045; Codex P1 on #205). No
+            # ``user_confirmation``: the person did not confirm it.
+            await session.execute(
+                insert(_SOURCES).from_select(
+                    ["memory_version_id", *(c.name for c in _COPIED_SOURCE_COLUMNS)],
+                    select(
+                        literal(new.version_id, _SOURCES.c.memory_version_id.type),
+                        *_COPIED_SOURCE_COLUMNS,
+                    ).where(
+                        _SOURCES.c.memory_version_id == current.version_id,
+                        ~(
+                            (_SOURCES.c.source_type == SourceType.CONVERSATION.value)
+                            & _SOURCES.c.conversation_id.is_(None)
+                            & _SOURCES.c.message_id.is_(None)
+                        ),
+                    ),
+                )
+            )
+            return new
 
 
 def _check_ref(ref: object) -> None:

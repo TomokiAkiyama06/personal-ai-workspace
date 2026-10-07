@@ -60,7 +60,7 @@ Observation は、本人の Consolidated な Journal Entry（`memory_journal_ent
 ### 5. 確認（Confirmation）の書き方
 
 - **memory 候補**: 同じ Memory の `n + 1` を `active`・`confirmed`・本人が Actor で、選んだ Scope に書く。`n` は `superseded`。`supersedes` と `confirmed_from` を `n + 1` から `n` に張り、出典は Decision 0045 のとおり写して本人の `user_confirmation` を足す。`memory_type = preference`、鮮度は `permanent`（要件: User Preference は permanent）、構造に期限があれば `expiring`。`attributes.preference` に key・選択・対象・Risk・確認したか・`policy_effect: "none"`・構造（11）を残す。
-- **held 候補**: key の Memory があれば、その次の Version として同じ規則で書く（内容は保留された候補、出典はその観測の会話と `user_confirmation`）。なければ新しい Memory の Version 1 を書き、key に登録する（以後 Worker の同じ key の候補は Decision 0018 の規則で保留される）。key の順序の印は、保留された観測の方が新しければ進める。保留項目には答え（`memory_preference_resolutions`）を残す。
+- **held 候補**: key の Memory があれば、その次の Version として同じ規則で書く（内容は保留された候補、出典はその観測の会話と `user_confirmation`）。なければ新しい Memory の Version 1 を書き、key に登録する（以後 Worker の同じ key の候補は Decision 0018 の規則で保留される）。key の順序の印は、保留された観測の方が新しければ進める。key の Memory が `deprecated`（本人が保存しない・廃止にした）なら、本人の明示の確定でその次の Version を書いてよい（復元と同じ）。他の Memory に置き換えられた（`superseded` / `history`）Memory への保留は「保存しない」だけを出す。保留項目には答え（`memory_preference_resolutions`）を残す。
 - 広げる前の Private な Version は Private のまま（Decision 0034 の `history` のとおり、広げた後の読者には見えない）。
 - 楽観 Lock: memory 候補は `expected_version`、held 候補は `(entry_id, item_index)` が key の最新の未回答の保留であること（違えば 409 `preference_candidate_changed`）。
 - Lock の順: Journal の key の Advisory Lock → Memory の Advisory Lock → 行。
@@ -82,7 +82,7 @@ Repository の Scope に確定するには、その Repository の登録済み�
 
 ### 8. 保存しない（Reject）
 
-- **memory 候補**: `n + 1` を `confirmation_state = rejected`・`status = deprecated`（内容は同じ）で書き、`n` を `superseded`、`supersedes`（理由 `preference rejected`）を張る。以後 Journal は同じ key を作り直さない（Decision 0018 の `blocked_by_user`）。
+- **memory 候補**: `n + 1` を `confirmation_state = rejected`・`status = deprecated`（内容は同じ）で書き、`n` を `superseded`、`supersedes`（理由 `preference rejected`）を張る。内容が同じなので出典も写す（会話の削除の Flow が見つけられるように。確認ではないので `user_confirmation` は足さない）。以後 Journal は同じ key を作り直さない（Decision 0018 の `blocked_by_user`）。
 - **held 候補**: その key の未回答の保留項目すべてに `rejected` を記録する。後で新しい保留項目が来たら、新しい質問として出す。
 
 **推奨: これ。** 代替案は `deprecate_memory`（今の版の状態だけを変える）で、`rejected`（「保存しないと判断済み」、MEMORY_ARCHITECTURE.md の 9）が記録に残らない。
