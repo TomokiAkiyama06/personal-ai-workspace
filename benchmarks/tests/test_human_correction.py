@@ -227,6 +227,20 @@ class StopwatchTest(unittest.TestCase):
             {"accepted": 1, "unchanged": 0, "capped": 0, "abandoned": 1},
         )
 
+    def test_summary_never_overwrites_the_log(self):
+        self.start()
+        before = self.log.read_text(encoding="utf-8")
+        alias = Path(self.directory.name) / "alias.json"
+        hard = Path(self.directory.name) / "hard.json"
+        alias.symlink_to(self.log)
+        hard.hardlink_to(self.log)
+        for output in (self.log, alias, hard):
+            with self.subTest(output=output.name):
+                code, _, err = self.run_cli("summary", "--output", str(output))
+                self.assertEqual(code, 1)
+                self.assertIn("event log", err)
+                self.assertEqual(self.log.read_text(encoding="utf-8"), before)
+
     def write_result(self, task=TASK, model=MODEL):
         result = json.loads(FIXTURE.read_text(encoding="utf-8"))
         result["task_id"] = task

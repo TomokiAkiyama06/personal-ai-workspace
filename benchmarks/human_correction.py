@@ -318,6 +318,22 @@ def apply_to_result(session: Session, result_path: Path) -> dict[str, Any]:
     return document
 
 
+def write_summary(output: Path, log: Path, text: str) -> None:
+    """Write the summary without ever touching the event log (also via a link)."""
+    try:
+        same = output.exists() and log.exists() and os.path.samefile(output, log)
+    except OSError:
+        same = True
+    if same or output.absolute() == log.absolute():
+        raise CorrectionLogError("--output must not be the event log")
+    # A new file replaces the directory entry: a link at the output path is replaced,
+    # not written through.
+    handle, temporary = tempfile.mkstemp(dir=output.absolute().parent, suffix=".tmp")
+    with os.fdopen(handle, "w", encoding="utf-8") as stream:
+        stream.write(text)
+    os.replace(temporary, output)
+
+
 def summary(sessions: dict[str, Session], now: datetime) -> dict[str, Any]:
     reports = []
     for session in sessions.values():
@@ -391,7 +407,7 @@ def main(
                 summary(log.sessions(), clock()), indent=2, ensure_ascii=False
             )
             if arguments.output:
-                arguments.output.write_text(text + "\n", encoding="utf-8")
+                write_summary(arguments.output, arguments.log, text + "\n")
             else:
                 print(text)
             return 0
