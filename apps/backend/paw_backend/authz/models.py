@@ -41,7 +41,7 @@ creates, archives and purges partitions) and
 import uuid
 from datetime import datetime
 
-from sqlalchemy import CheckConstraint, DateTime, Text, Uuid, text
+from sqlalchemy import CheckConstraint, DateTime, Index, Text, Uuid, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -159,6 +159,9 @@ class AuditEventRecord(Base):
         CheckConstraint("decision IN ('allow', 'deny')", name="decision_valid"),
         CheckConstraint(DETAILS_REGISTERED_CHECK, name="details_registered"),
         CheckConstraint(external_send_check_sql(), name="external_send_details"),
+        # The rows of one resource (a task, a tool approval) in time order: the PR
+        # screen's audit rows (revision 0190, issue #185 item 6).
+        Index("ix_audit_events_resource", "resource_id", "occurred_at"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)

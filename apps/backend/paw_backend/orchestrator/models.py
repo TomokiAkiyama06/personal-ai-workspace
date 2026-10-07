@@ -15,14 +15,16 @@
   or CPU, or the cloud), on which agent and model, and, for the cloud, the
   fingerprint and size of the content that was sent and the id of its row in
   ``audit_events``. Recorded once (a trigger refuses a change) and never text.
-* ``agent_incidents`` (revision ``0183``, issue #183, Decision 0071 Proposed): an
-  agent ran out of memory or a node was escalated to the next agent, one row
-  each, for System Health. Only the kind and the time: no task, node or agent
-  (the failed attempt itself is in ``agent_dag_node_attempts``).
+* ``agent_incidents`` (revision ``0183``, issue #183, Decision 0071): an agent
+  ran out of memory or a node was escalated to the next agent, one row each, for
+  System Health. The kind, the time and, since revision ``0189`` (issue #187,
+  Decision 0077), the task (for the usage report of its user): no node,
+  agent or text (the failed attempt itself is in ``agent_dag_node_attempts``).
 
-Every table but ``agent_incidents`` references ``tasks.id`` (or a node) with a
-real foreign key. The tables deliberately do not start with ``task``: the PAW-032
-tests inspect every table with that prefix. Enum-like columns are text with CHECK
+Every table references ``tasks.id`` (or a node) with a real foreign key
+(``agent_incidents.task_id`` is NULL for the rows written before ``0189``). The
+tables deliberately do not start with ``task``: the PAW-032 tests inspect every
+table with that prefix. Enum-like columns are text with CHECK
 constraints whose value lists the migration writes out.
 """
 
@@ -381,9 +383,16 @@ class AgentIncidentRow(Base):
     occurred_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()")
     )
+    # The task the incident happened in (revision 0189, Decision 0077): the usage
+    # report counts a user's escalated tasks. NULL for the rows written before.
+    task_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("tasks.id", ondelete="RESTRICT")
+    )
 
     __table_args__ = (
         _in("kind", IncidentKind, "kind_valid"),
         # System Health counts the incidents of the last hour / day.
         Index("ix_agent_incidents_occurred_at", "occurred_at"),
+        # The usage report of one user: the incidents of the user's tasks.
+        Index("ix_agent_incidents_task_id", "task_id"),
     )

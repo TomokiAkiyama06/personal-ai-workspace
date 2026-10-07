@@ -14,6 +14,7 @@ from paw_backend.auth import models as auth_models  # noqa: F401
 from paw_backend.auth.onboarding import models as onboarding_models  # noqa: F401
 from paw_backend.auth.passkeys import models as passkey_models  # noqa: F401
 from paw_backend.authz import models as authz_models  # noqa: F401
+from paw_backend.compute import models as compute_models  # noqa: F401
 from paw_backend.config import Settings
 from paw_backend.connections import models as connection_models  # noqa: F401
 from paw_backend.db import Base

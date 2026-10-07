@@ -5,6 +5,7 @@ from fastapi import APIRouter
 from paw_backend.api.v1 import (
     accounts,
     auth,
+    boards,
     compute,
     events,
     health,
@@ -27,6 +28,7 @@ router.include_router(accounts.router)
 router.include_router(system_health.router)
 router.include_router(compute.router)
 router.include_router(tasks.router)
+router.include_router(boards.router)
 router.include_router(memory.router)
 router.include_router(memory_preferences.router)
 router.include_router(projects.router)

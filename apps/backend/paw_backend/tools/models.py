@@ -145,6 +145,14 @@ class ToolApprovalRow(Base):
             postgresql_where=text("status IN ('pending', 'approved')"),
         ),
         Index("ix_tool_approvals_task_id", "task_id", "created_at"),
+        # The pending approvals one person is asked for (revision 0190, the
+        # approval screen of issue #185 item 6).
+        Index(
+            "ix_tool_approvals_pending_requester",
+            "requester_user_id",
+            "created_at",
+            postgresql_where=text("status = 'pending'"),
+        ),
         # The cooldown after a rejection looks calls up by their hash.
         Index("ix_tool_approvals_call_hash", "call_hash", "status"),
     )

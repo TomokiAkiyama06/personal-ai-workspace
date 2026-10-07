@@ -18,6 +18,12 @@ from paw_backend.integration import (
     PublishProblem,
     PullRequestNotPublishedError,
 )
+from paw_backend.integration.changes import (
+    ChangedFile,
+    ChangeRecorder,
+    PullRequestChanges,
+    PullRequestChangeStore,
+)
 from paw_backend.orchestrator.store import DagStore
 from paw_backend.tasks import (
     EvaluationResult,
@@ -425,6 +431,39 @@ class FakePublisher:
         return result
 
 
+class FakeChangeReader:
+    """Answers one changed file (or raises ``error``); records what it read."""
+
+    def __init__(self, log, error=None, state_of=None) -> None:
+        self.log = log
+        self.error = error
+        self.calls = []
+        self.state_of = state_of
+        self.states = []
+
+    async def read(self, request, pull_request):
+        self.calls.append((request, pull_request))
+        if self.state_of is not None:
+            self.states.append(await self.state_of(request.task.id))
+        self.log.append("changes")
+        if self.error is not None:
+            raise self.error
+        return PullRequestChanges(
+            request.target.head,
+            (
+                ChangedFile(
+                    "src/app.py", None, "modified", 1, 1, patch="@@ -1 +1 @@\n-a\n+b\n"
+                ),
+            ),
+            False,
+        )
+
+
+class ChangeRecorderStub:
+    async def record(self, request, pull_request):
+        return True
+
+
 @requires_postgres
 class PublishingGateTest(PostgresOrchestratorTestCase):
     """Issue #132: once every check passed, the gate has the pull request of each
@@ -448,7 +487,7 @@ class PublishingGateTest(PostgresOrchestratorTestCase):
             role=role,
         )
 
-    def gate(self, **verdicts) -> IntegrationGate:
+    def gate(self, changes=None, **verdicts) -> IntegrationGate:
         self.checks = {
             kind: Check(kind.value, self.order, verdicts.get(kind.value, True))
             for kind in CHECK_ORDER
@@ -465,6 +504,7 @@ class PublishingGateTest(PostgresOrchestratorTestCase):
             worktrees=self.targets,
             checks={kind: [check] for kind, check in self.checks.items()},
             publisher=self.publisher,
+            changes=changes,
         )
 
     async def snapshot(self, task_id):
@@ -498,6 +538,88 @@ class PublishingGateTest(PostgresOrchestratorTestCase):
             " https://github.com/octo/repo/pull/1",
             await self.messages(task_id),
         )
+
+    async def test_the_changes_are_recorded_once_the_pull_request_is(self):
+        # Issue #185 item 6: the PR screen's changed files, read when the pull
+        # request was delivered and stored with its record.
+        task_id = await self.task_in_state(TaskState.EVALUATING)
+
+        async def state_of(task):
+            return (await self.snapshot(task)).state
+
+        reader = FakeChangeReader(self.order, state_of=state_of)
+        recorder = ChangeRecorder(reader, PullRequestChangeStore(self.database))
+
+        report = await self.gate(changes=recorder).evaluate(task_id)
+
+        self.assertEqual(report.outcome, GateOutcome.COMPLETED)
+        # Read only once the task completed: never on its way (Codex review of
+        # #206).
+        self.assertEqual(reader.states, [TaskState.COMPLETED])
+        self.assertEqual(
+            self.order, ["test", "evaluator", "review", "publish", "changes"]
+        )
+        ((request, pull_request_read),) = reader.calls
+        self.assertEqual(request, self.publisher.requests[0])
+        self.assertEqual(pull_request_read, pull_request())
+        (row,) = await self.rows(
+            "SELECT c.head_commit, c.files, c.patches"
+            " FROM pull_request_changes c"
+            " JOIN task_attempt_repositories r ON r.id = c.record_id"
+            " WHERE r.task_id = :t",
+            t=task_id,
+        )
+        self.assertEqual(row["head_commit"], "a" * 40)
+        self.assertEqual([item["path"] for item in row["files"]], ["src/app.py"])
+        self.assertEqual(row["patches"], ["@@ -1 +1 @@\n-a\n+b\n"])
+
+    async def test_changes_that_cannot_be_read_do_not_hold_the_task(self):
+        task_id = await self.task_in_state(TaskState.EVALUATING)
+        reader = FakeChangeReader(self.order, error=RuntimeError("gh is down"))
+        recorder = ChangeRecorder(reader, PullRequestChangeStore(self.database))
+
+        report = await self.gate(changes=recorder).evaluate(task_id)
+
+        self.assertEqual(report.outcome, GateOutcome.COMPLETED)
+        self.assertEqual((await self.snapshot(task_id)).state, TaskState.COMPLETED)
+        self.assertEqual(
+            await self.rows(
+                "SELECT c.record_id FROM pull_request_changes c"
+                " JOIN task_attempt_repositories r ON r.id = c.record_id"
+                " WHERE r.task_id = :t",
+                t=task_id,
+            ),
+            [],
+        )
+
+    async def test_no_changes_are_read_for_a_pull_request_not_made(self):
+        task_id = await self.task_in_state(TaskState.EVALUATING)
+        self.publisher.result = PullRequestNotPublishedError(
+            PublishProblem.GITHUB_FAILED
+        )
+        reader = FakeChangeReader(self.order)
+        recorder = ChangeRecorder(reader, PullRequestChangeStore(self.database))
+
+        report = await self.gate(changes=recorder).evaluate(task_id)
+
+        self.assertEqual(report.outcome, GateOutcome.NOT_PUBLISHED)
+        self.assertEqual(reader.calls, [])
+
+    def test_changes_need_a_publisher_and_an_async_record(self):
+        for publisher, changes in (
+            (None, ChangeRecorderStub()),
+            (FakePublisher([]), object()),
+        ):
+            with self.assertRaises(TypeError):
+                IntegrationGate(
+                    tasks=self.service,
+                    store=DagStore(self.database),
+                    authority=FakeAuthority(),
+                    worktrees=self.targets,
+                    checks={kind: [Check(kind.value, [])] for kind in CHECK_ORDER},
+                    publisher=publisher,
+                    changes=changes,
+                )
 
     async def test_nothing_is_published_when_a_check_did_not_pass(self):
         for kind in CHECK_ORDER:

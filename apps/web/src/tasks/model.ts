@@ -291,3 +291,106 @@ export function decodeSegment(segment: string): string | null {
     return null;
   }
 }
+
+// -- The PR screen's panels and the mobile boards (issue #185 item 6, Decision
+// 0078): the Backend's /api/v1/pull-requests/{id}/files|review|audit and
+// /api/v1/approvals.
+
+/** A file the pull request changes, as recorded when it was delivered. */
+export interface ChangedFile {
+  index: number;
+  path: string;
+  /** The path before a rename or copy. */
+  previousPath: string | null;
+  /** GitHub's: added, removed, modified, renamed, copied, changed, unchanged. */
+  status: string;
+  additions: number;
+  deletions: number;
+  /** Whether its diff was kept (none for a binary or very large file). */
+  hasPatch: boolean;
+  patchTruncated: boolean;
+}
+
+export interface ChangedFiles {
+  /** False: the files were not read when the pull request was delivered. */
+  recorded: boolean;
+  /** GitHub listed more files than were kept. */
+  truncated: boolean;
+  additions: number;
+  deletions: number;
+  files: readonly ChangedFile[];
+}
+
+/** One changed file with its unified diff (the MobileDiff board). */
+export interface FileDiff extends ChangedFile {
+  /** How many files were kept ("1 / 4"). */
+  count: number;
+  patch: string | null;
+}
+
+/** A reviewer node of the DAG of the pull request's attempt. */
+export interface Reviewer {
+  key: string;
+  title: string;
+  state: NodeState;
+  agent: string | null;
+  model: string | null;
+  finishedAt: string | null;
+}
+
+export interface ReviewSummary {
+  review: ReviewStatus;
+  evaluation: EvaluationResult;
+  reviewers: readonly Reviewer[];
+}
+
+/** One audit row of the pull request's task (a closed projection). */
+export interface AuditRow {
+  occurredAt: string;
+  action: string;
+  decision: "allow" | "deny";
+  reason: string;
+  actor: "agent" | "person" | "system";
+}
+
+/** tools/approval_types.py: the levels a human approves. */
+export type ApprovalLevel = "approval" | "strong_approval";
+
+/** A pending tool approval the person is asked for (the MobileApproval board). */
+export interface ToolApproval {
+  id: string;
+  taskId: string;
+  taskTitle: string;
+  agent: string | null;
+  tool: string;
+  level: ApprovalLevel;
+  /** Every argument of the call as the approver sees it (bounded, redacted). */
+  summary: readonly { name: string; kind: string; value: string }[];
+  /** The repositories the call names that the person may read. */
+  repositories: readonly string[];
+  createdAt: string;
+  expiresAt: string;
+}
+
+export type ApprovalDecision = "approve" | "reject";
+
+export type DiffLineKind = "hunk" | "add" | "delete" | "context" | "note";
+
+/** A unified diff's lines, by kind (the MobileDiff board's colours). */
+export function diffLines(patch: string): { kind: DiffLineKind; text: string }[] {
+  const lines = patch.endsWith("\n") ? patch.slice(0, -1).split("\n") : patch.split("\n");
+  return lines.map((text) => {
+    if (text.startsWith("@@")) return { kind: "hunk", text };
+    if (text.startsWith("+")) return { kind: "add", text };
+    if (text.startsWith("-")) return { kind: "delete", text };
+    if (text.startsWith("\\")) return { kind: "note", text };
+    return { kind: "context", text };
+  });
+}
+
+/** The approvals screen (MobileApproval) and one approval's sheet on it. */
+export const APPROVALS_PATH = "/approvals";
+
+export function approvalPath(id: string): string {
+  return `${APPROVALS_PATH}/${encodeURIComponent(id)}`;
+}

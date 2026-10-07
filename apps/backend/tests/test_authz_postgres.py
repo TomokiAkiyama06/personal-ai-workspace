@@ -133,12 +133,14 @@ class MigrationTest(AuditPostgresTestCase):
             "ck_audit_events_decision_valid,ck_audit_events_details_registered,"
             "ck_audit_events_external_send_details,pk_audit_events",
         )
+        # The second is revision 0190's (issue #185 item 6: the audit rows of a
+        # task on the PR screen).
         self.assertEqual(
             await self.scalar(
-                "SELECT indexname FROM pg_indexes WHERE tablename = 'audit_events' "
-                "AND indexname LIKE 'ix_%'"
+                "SELECT string_agg(indexname, ',' ORDER BY indexname) FROM pg_indexes"
+                " WHERE tablename = 'audit_events' AND indexname LIKE 'ix_%'"
             ),
-            "ix_audit_events_occurred_at",
+            "ix_audit_events_occurred_at,ix_audit_events_resource",
         )
         triggers = await self.scalar(
             "SELECT string_agg(tgname || ':' || tgenabled::text, ',' ORDER BY tgname) "
