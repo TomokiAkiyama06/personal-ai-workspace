@@ -1,4 +1,4 @@
-# 共存時（Main Qwen3.8-27B-FP8、0.51）の 4 つの Deployment の Footprint と、Scheduler の予約の勘定で足りない 0.4 GiB の扱い
+# 共存時（Main Qwen3.8-27B-FP8、0.51）の 4 つの Deployment の Footprint と、Scheduler の予約の勘定で足りない 0.5 GiB の扱い
 
 - Status: Proposed
 - Date: 2026-10-08
@@ -16,7 +16,7 @@ Decision 0074 の承認時の決定で、0.51 の確認 Run は Qwen3.8-27B-FP8�
 - Deployment ごとの Peak（Load と Run の全体、Process ごと）: Main 52,104・Memory Worker 13,948（Load の途中。Run 中は 13,456）・Embedding 2,002・Reranker 12,286 MiB。
 - Main の KV Pool（305,081 token）は 3 回とも使い切り、Preemption 計 40 回、待ちの最大 2 Request。Run は単独より約 1.3 倍遅かった（正解数は変わらない）。
 
-Decision 0039 の 1（Footprint = 実測のピーク + 2 GiB）で数えると計 88,532 MiB になり、Decision 0037 の 3 の予約の勘定（最後に Load する `IF_ROOM` の Model の Load 後に、Headroom の外にもう 1 つ `restore_margin_bytes` が残ること。既定は Headroom と同じ 4,894 MiB）では 88,532 + 4,894 + 4,894 = 98,320 MiB となり、GPU を **433 MiB 超える**。そのままでは Scheduler は Load 順で最後の Reranker を GPU に Load しない。
+Decision 0039 の 1（Footprint = 実測のピーク + 2 GiB）で数えると計 88,532 MiB になり、Decision 0037 の 3 の予約の勘定（最後に Load する `IF_ROOM` の Model の Load 後に、Headroom の外にもう 1 つ `restore_margin_bytes` が残ること。既定は Headroom と同じ 4,894 MiB）では、Probe に見える他の使用（`external`。この Run では 20〜44 MiB、`compute/accounting.py` の `account`）も足して 88,532 + 44 + 4,894 + 4,894 = 98,364 MiB となり、GPU を **477 MiB 超える**。そのままでは Scheduler は Load 順で最後の Reranker を GPU に Load しない。
 
 次の 3 点は承認済みの Decision が決めていない。
 
@@ -35,10 +35,11 @@ Decision 0039 の 1（Footprint = 実測のピーク + 2 GiB）で数えると�
 - Decision 0039 の 1 の推奨の式は「Run 中のピーク」だが、Scheduler は Load するときにその分が空いていることを求めるので、Load の途中の一時的な使用（Memory Worker の 13,948 MiB、vLLM の Profiling）も含める（安全側）。
 - 値は、この Run の設定（Model・vLLM の引数・batch の大きさ）に対するもの。設定を変えたら測り直す。
 
-### 2. 足りない 433 MiB は、`restore_margin_bytes` を 4 GiB（4,096 MiB）にして解く
+### 2. 足りない 477 MiB は、`restore_margin_bytes` を 4 GiB（4,096 MiB）にして解く
 
 - `ComputeConfig.restore_margin_bytes` を `None`（Headroom と同じ 4,894 MiB）から 4,096 MiB にする。Headroom（4 GiB と GPU の 5% の大きい方）は変えない。
-- 勘定: 88,532 + 4,894 + 4,096 = 97,522 MiB ≤ 97,887 MiB（365 MiB の余裕）。
+- 勘定: 88,532 + `external` 44 + 4,894 + 4,096 = 97,566 MiB ≤ 97,887 MiB（321 MiB の余裕）。
+- Scheduler は `memory.total`（97,887 MiB）と `memory.used` で数える。何も起動していない GPU でも `memory.free` は 97,231 MiB で、差のうち 636 MiB は Driver が取り `memory.used` に出ない分（勘定に入らず、Safety Headroom が吸収する）。この分を引いても、実際に Load できる空きは Footprint の計より大きい（Peak の計 80,340 MiB に対して 97,231 − 20 MiB）。
 - `restore_margin_bytes` は Pressure と復帰の往復を防ぐためのもので（Decision 0037 の 3）、798 MiB 小さくしても、復帰の後に Headroom の外に 4 GiB が残る。実際の使用のピーク（79,892 MiB）では GPU に 18 GiB 近い空きがあった。
 - 設定（Deployment と `ComputeConfig`）への反映は、Decision 0073 の「承認後の扱い」のとおり別の Issue で行う（この PR は docs だけ）。
 
@@ -50,7 +51,7 @@ Decision 0039 の 1（Footprint = 実測のピーク + 2 GiB）で数えると�
 
 ## 代替案
 
-- **1 で Memory Worker の Peak を Run 中の値（13,456 MiB）にする**: 計 88,040 MiB で、`restore_margin_bytes` を変えずに 59 MiB だけ収まる。Load の途中の使用を数えないことになり、余裕も小さすぎる。採らない。
+- **1 で Memory Worker の Peak を Run 中の値（13,456 MiB）にする**: 計 88,040 MiB で、`restore_margin_bytes` を変えずに 15 MiB だけ収まる。Load の途中の使用を数えないことになり、余裕も小さすぎる。採らない。
 - **2 を Main の `gpu-memory-utilization` を 0.50 にして解く**: 約 1 GiB 減るが、KV Pool は 3 回とも使い切っており、さらに減らすと Preemption と待ちが増える。採らない。
 - **2 を Reranker（または Embedding）を `ALWAYS` にして解く**: `ALWAYS` の Load は Margin を求めないので収まるが、縮退の 3 段目（Embedding / Reranker を CPU へ移す・Unload する）で `ALWAYS` かつ CPU の Copy がないものは残るため、Pressure のときに GPU を空けられなくなる。採らない。
 - **2 を Embedding / Reranker を CPU に置いて解く**（Decision 0073 の代替案）: GPU に約 18 GiB 空き、Main の KV にも回せるが、CPU での Retrieval の Latency は測っていない。#200 の「Main に GPU Memory を多く与える」で比べる。
@@ -60,13 +61,13 @@ Decision 0039 の 1（Footprint = 実測のピーク + 2 GiB）で数えると�
 ## リスク
 
 - Footprint は 1 回の Run（3 回 × 24 Task、約 7.5 時間）の Peak。Context の長い Task（paw-seed-v2 の新しい Task など）では、Main の予算を超える分がもっと大きくなる可能性がある。
-- 2 の後も、Footprint で数えた余裕は 365 MiB しかない。Model・Runtime の版や設定が変わったら測り直す必要がある。
+- 2 の後も、Footprint で数えた余裕は 321 MiB しかない（`external` が 300 MiB ほど増えると、Reranker は Load されない）。Model・Runtime の版や設定が変わったら測り直す必要がある。
 - KV の不足（Preemption と待ち、約 1.3 倍の遅さ）はこの Decision では解かない（#200）。Interactive の応答の速さへの影響は測っていない。
 
 ## 決めてほしいこと
 
 1. **4 つの Deployment の Footprint を、Load の途中を含む Process ごとの Peak + 2 GiB（Main 54,152・Memory Worker 15,996・Embedding 4,050・Reranker 14,334 MiB）にする**（1）か。推奨: はい。
-2. **Scheduler の予約の勘定で足りない 433 MiB を、`restore_margin_bytes` を 4 GiB（4,096 MiB）にして解く**（2）か。推奨: はい（Headroom は変えない。代わりの案は Main を 0.50 にする・Reranker を `ALWAYS` にする・Embedding / Reranker を CPU に置く）。
+2. **Scheduler の予約の勘定で足りない 477 MiB を、`restore_margin_bytes` を 4 GiB（4,096 MiB）にして解く**（2）か。推奨: はい（Headroom は変えない。代わりの案は Main を 0.50 にする・Reranker を `ALWAYS` にする・Embedding / Reranker を CPU に置く）。
 3. **Scheduler の Admission を通さず vLLM の `/metrics` で待ちを記録したこの Run を、Decision 0073 の 2 の確認 Run として受け入れる**（3）か。推奨: はい（今の Scheduler の Lease の取り方では Admission で待つことはない見込み。Admission を通した確認は、会話の伸びを予約に反映する変更（#200）の確認で行う）。
 
 ## 承認後の扱い

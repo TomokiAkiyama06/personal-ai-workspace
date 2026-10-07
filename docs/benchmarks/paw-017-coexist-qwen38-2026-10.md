@@ -5,7 +5,7 @@
 - 合否の規則: [Decision 0074](../decisions/0074-seed-v2-and-qwen-27b-comparison.md) の 5 と承認時の決定（Main は Qwen3.8-27B-FP8。paw-seed-v1 で 3 回。Resolved@3 13 以上かつ平均 13.0 以上で合格。基準は Qwen3.8-27B-FP8 の単独の v1 の部分 14 / 14 / 14）
 - 前の報告: [PAW-017 の報告](paw-017-main-coding-2026-09.md) の 6（10-01 の確認 Run、0.61）、[paw-seed-v2 の比較 Run の報告](paw-017-seed-v2-2026-10.md)
 - 生の結果（Trace・Patch・Server の Log・VRAM と `/metrics` の記録）は Repository に入れない（Hidden check の内容を含むため。Decision 0041 の 4）。Server の `/data/results/paw-bench-2026-10-07` にある。機械で読める集計は `aggregate_180b.json`
-- Footprint の値と、Scheduler の予約の勘定で足りない 0.4 GiB の扱いは [Decision 0075](../decisions/0075-coexistence-footprints-qwen38.md)（Proposed）で判断を求める
+- Footprint の値と、Scheduler の予約の勘定で足りない 0.5 GiB（477 MiB） の扱いは [Decision 0075](../decisions/0075-coexistence-footprints-qwen38.md)（Proposed）で判断を求める
 
 ## 1. 条件
 
@@ -92,7 +92,7 @@ Main の KV Pool は 19.4 GiB・**305,081 token**（vLLM の Log。単独の 0.9
 - **GPU 全体の Peak は 79,892 MiB（78.0 GiB）**。Safety Headroom（4 GiB と GPU の 5% の大きい方 = 4,894 MiB、4.8 GiB）を足して 82.8 GiB で、GPU に収まる（OOM なし。Decision 0040 の VRAM の条件を満たす）。
 - Main の Peak は `gpu-memory-utilization` の予算（0.51 × 95.6 = 48.7 GiB）を 2.1 GiB 上回った（Decision 0039 の 1 の「予算を超える分」。10-01 の 0.61 では 1.4 GiB）。Peak は run3 の途中（10-08 01:01、KV の使用率は 47〜85% の時間。原因は特定していない）。
 - Embedding と Reranker を別々の Process にしたことで、2 つの Peak の和（14.3 GiB）は 10-01 の 1 つの Process（13.1 GiB）より 1.2 GiB 大きい（CUDA Context が 2 つになるため）。
-- **Scheduler の予約の勘定（Decision 0037 の 3）**: 最後に Load する `IF_ROOM` の Model（Load 順で Reranker）は、Load 後に Headroom の外にもう 1 つ `restore_margin_bytes`（既定は Headroom と同じ 4,894 MiB）が残ることを求める（`compute/scheduler.py` の `_fill`）。Footprint の計 88,532 + Headroom 4,894 + Margin 4,894 = 98,320 MiB で、GPU の 97,887 MiB を **433 MiB（0.4 GiB）超える**。つまり上の Footprint をそのまま与えると、Scheduler は 4 つ目（Reranker）を Load しない。Memory Worker の Peak を Run 中の値（13,456 MiB）で数えると 59 MiB だけ収まる。扱いは [Decision 0075](../decisions/0075-coexistence-footprints-qwen38.md) で判断を求める。
+- **Scheduler の予約の勘定（Decision 0037 の 3）**: 最後に Load する `IF_ROOM` の Model（Load 順で Reranker）は、Load 後に Headroom の外にもう 1 つ `restore_margin_bytes`（既定は Headroom と同じ 4,894 MiB）が残ることを求める（`compute/scheduler.py` の `_fill`）。Footprint の計 88,532 + `external` 44 + Headroom 4,894 + Margin 4,894 = 98,364 MiB で、GPU の 97,887 MiB を **477 MiB（0.5 GiB）超える**。つまり上の Footprint をそのまま与えると、Scheduler は 4 つ目（Reranker）を Load しない。Memory Worker の Peak を Run 中の値（13,456 MiB）で数えると 15 MiB だけ収まる。Scheduler の勘定には、Probe（`nvidia-smi` の `memory.used`）に見える自分の Deployment 以外の使用（`external`、`compute/accounting.py` の `account`）も入る。この Run では、何も起動していない GPU の `memory.used` が 20 MiB（Desktop の Process 8 MiB を含む）、4 つを置いた後は `memory.used` 76,912 MiB に対して 4 つの Process の計が 76,868 MiB で、`external` は 20〜44 MiB だった（下の勘定は 44 MiB で数える）。なお、何も起動していない GPU の空き（`memory.free`）は 97,231 MiB で、`memory.total` との差 656 MiB のうち 636 MiB は Driver が取る分で `memory.used` に出ない。Scheduler は `memory.total` と `memory.used` で数えるため、この分は勘定に入らず、Safety Headroom が吸収する。扱いは [Decision 0075](../decisions/0075-coexistence-footprints-qwen38.md) で判断を求める。
 
 ### Memory Worker と Retrieval（同時に動かしている間、Run ごとの平均）
 
@@ -106,7 +106,7 @@ Main の KV Pool は 19.4 GiB・**305,081 token**（vLLM の Log。単独の 0.9
 ## 3. 読み方
 
 - **Decision 0074 の規則では合格**（Resolved@3 14、平均 14.0。単独と同じ 14 Task の集合を 3 回とも解いた）。Decision 0074 の承認時の決定どおり、合格したので 4 つの Deployment の Footprint を与える段階に進める（値は Decision 0075）。
-- **VRAM の実際の使用**（Peak 78.0 GiB + Headroom 4.8 GiB = 82.8 GiB）は GPU に収まる。一方、**Footprint（Peak + 2 GiB）と Scheduler の復帰の Margin で数える予約の勘定では 0.4 GiB 足りない**。10-01 からの見積もり（Decision 0073 の 2 では 1.1 GiB の余裕）より、Main が 0.7 GiB、Embedding と Reranker を別々にした分が 0.9 GiB 大きかった。
+- **VRAM の実際の使用**（Peak 78.0 GiB + Headroom 4.8 GiB = 82.8 GiB）は GPU に収まる。一方、**Footprint（Peak + 2 GiB）と Scheduler の復帰の Margin で数える予約の勘定では 0.5 GiB（477 MiB）足りない**。10-01 からの見積もり（Decision 0073 の 2 では 1.1 GiB の余裕）より、Main が 0.7 GiB、Embedding と Reranker を別々にした分が 0.9 GiB 大きかった。
 - **0.51 の KV Pool（305k token）は Qwen3.8-27B-FP8 の 4 並列には足りない**。3 回とも Pool を使い切り、計 40 回の Preemption と最大 2 Request の待ちが起きた。正解数は変わらなかったが、1 回の Run は単独より約 1.3 倍遅く、45 分の timeout に当たる Task が増えた（解けない Task だけ）。Interactive の応答の速さへの影響は測っていない。対策（古い reasoning を履歴から外す・Main の割り当てを増やす・同時に動かす Agent を減らす・会話の伸びを予約に反映する Scheduler）は #200 で比べる。
 - 3 回 × 24 Task で、v1 の Historical の 10 Task はどの構成でも解けず、Model の差を測れない（Decision 0074 のリスクと同じ）。Context の長い Task での影響は、v2 の新しい Task（長い Spec）で測る方が見えやすい（この Run では測っていない）。
 
