@@ -553,6 +553,23 @@ class PullRequestBoardsApiTest(PostgresRepositoryTestCase):
         self.assertEqual([a["task_id"] for a in listed], [str(task_id)])
         self.assertNotIn(str(mine), str(listed))
 
+        # A repository of another project the person may read is named too; one
+        # of a project they are not in is not.
+        cross = await self.open_approval(task_id, repositories=(self.other_repo,))
+        self.sign_in(
+            self.creator,
+            {
+                self.project: ProjectRole.CONTRIBUTOR,
+                self.other_project: ProjectRole.VIEWER,
+            },
+        )
+        item = (await self.get(f"/approvals/{cross}")).json()
+        self.assertEqual(item["repositories"], ["beta-repo"])
+        self.as_creator()
+        self.assertEqual(
+            (await self.get(f"/approvals/{cross}")).json()["repositories"], []
+        )
+
     async def test_one_approval_by_its_id(self):
         task_id = await self.running_task()
         mine = await self.open_approval(task_id, repositories=(self.repo,))

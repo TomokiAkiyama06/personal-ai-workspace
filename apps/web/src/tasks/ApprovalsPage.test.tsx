@@ -60,6 +60,19 @@ describe("Approvals page", () => {
     expect(screen.getAllByRole("link", { name: /APPROVAL/ })).toHaveLength(1);
   });
 
+  it("keeps the name of an argument that is not the command", async () => {
+    const { source } = fakeTaskSource();
+    const [first] = await source.listApprovals();
+    if (!first) throw new Error("no sample");
+    vi.spyOn(source, "listApprovals").mockResolvedValue([
+      { ...first, summary: [{ name: "package", kind: "text", value: "pyjwt" }] },
+    ]);
+    renderAt(`/approvals/${first.id}`, source);
+    const sheet = await screen.findByRole("dialog", { name: "この操作を許可しますか" });
+    expect(within(sheet).getByText("package")).toBeInTheDocument();
+    expect(within(sheet).getByText("pyjwt")).toBeInTheDocument();
+  });
+
   it("only rejects a strong approval here", async () => {
     const { source, decisions } = fakeTaskSource();
     renderAt("/approvals/approval-2", source);

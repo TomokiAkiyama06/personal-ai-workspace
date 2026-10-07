@@ -267,10 +267,17 @@ async def pending_approvals(
     found = await views.repositories(
         session, {repository for ids in named.values() for repository in ids}
     )
+    # Each repository against its OWN project (a Working Set may hold another
+    # project's repository; Codex review of #206): one the principal may not
+    # read, or of a project they may not read, is left out.
+    readable = {
+        repository_id: repository
+        for repository_id, repository in found.items()
+        if (owner := projects.get(repository.project_id)) is not None
+        and views.may_read_repository(principal, owner, repository, policy)
+    }
     items = []
     for row in rows:
-        project = projects[row.project_id]
-        readable = views.readable_repositories(principal, project, found, policy)
         items.append(
             ApprovalView(
                 id=row.id,

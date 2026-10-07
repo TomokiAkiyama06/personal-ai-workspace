@@ -228,8 +228,10 @@ function ApprovalSheet({
         setPending(null);
       });
   };
-  const [command, ...others] = approval.summary;
-  const single = others.length === 0 && command !== undefined;
+  // The command line of a call is shown as one block (the board's); every other
+  // argument keeps its name, so the value is never shown without what it is.
+  const command = approval.summary.find((item) => item.name === "command");
+  const facts = approval.summary.filter((item) => item !== command);
 
   return (
     <div className="sheet-layer">
@@ -256,16 +258,13 @@ function ApprovalSheet({
         </h2>
         <div className="approval-detail">
           <span className="strong">{approval.tool}</span>
-          {single ? (
-            <code className="approval-command">{command.value}</code>
-          ) : (
-            approval.summary.map((item) => (
-              <div key={item.name} className="approval-fact">
-                <span className="muted">{item.name}</span>
-                <code>{item.value}</code>
-              </div>
-            ))
-          )}
+          {command && <code className="approval-command">{command.value}</code>}
+          {facts.map((item) => (
+            <div key={item.name} className="approval-fact">
+              <span className="muted">{item.name}</span>
+              <code>{item.value}</code>
+            </div>
+          ))}
           {approval.repositories.length > 0 && (
             <div className="approval-fact">
               <span className="muted">{t("approvals.repository")}</span>
