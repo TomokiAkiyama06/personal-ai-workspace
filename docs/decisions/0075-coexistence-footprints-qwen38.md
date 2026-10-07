@@ -1,6 +1,7 @@
 # 共存時（Main Qwen3.8-27B-FP8、0.51）の 4 つの Deployment の Footprint と、Scheduler の予約の勘定で足りない 0.5 GiB の扱い
 
-- Status: Proposed
+- Status: Approved
+- Approval: 2026-10-08、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで直接回答して承認（すべての判断点を推奨どおり承認。末尾の「承認時の決定」）
 - Date: 2026-10-08
 - Scope: Issue [#180](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/180)（[Decision 0073](0073-main-coexistence-confirmation.md) の 2 の確認 Run の結果）。根拠は [共存の確認 Run（0.51）の報告](../benchmarks/paw-017-coexist-qwen38-2026-10.md)。KV の不足への対策は [#200](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/200) で別に決める
 - Supersedes: [Decision 0073](0073-main-coexistence-confirmation.md) の 2 のうち、「確認 Run は Scheduler の Admission（`kv_safety` と Class の上限）を通した構成で行い、待ちの時間も記録する」の部分だけ（承認されたら、この Decision の 3 で置き換える: Admission を通さず、vLLM の `/metrics` で KV の使用率・待ち・Preemption を記録した 2026-10-07 の Run を 0073 の 2 の確認 Run とし、Admission を通した確認は会話の伸びを予約に反映する変更（#200）の確認で行う）。0073 のほかの点（0.51 にすること、Embedding と Reranker を別々の Runtime にすること、3 回の Run の後に Footprint を与えること、1 と 3）は変えない。[Decision 0037](0037-gpu-compute-scheduler.md)・[Decision 0039](0039-compute-scheduler-calibration.md)・[Decision 0074](0074-seed-v2-and-qwen-27b-comparison.md) は変えない（この Decision はそれらの規則で値を決める。2 の `restore_margin_bytes` は 0037 が「既定は Headroom と同じ」とし、Benchmark 後に見直すとした値で、0037 の方針は変えない）
@@ -74,3 +75,7 @@ Decision 0039 の 1（Footprint = 実測のピーク + 2 GiB）で数えると�
 
 承認されたら `Approval` に記録し、Status を Approved に改める。Footprint と `restore_margin_bytes` を Deployment と `ComputeConfig` の設定に入れるのは別の Issue で行う（Model の Path、vLLM の引数を含む）。
 方針を変えるときは、この Decision を書き換えず、新しい Decision から `Supersedes` する。
+
+## 承認時の決定（2026-10-08）
+
+Human は、作業 Session で判断が必要な点について推奨つきの説明を受け、直接回答して承認した（すべての判断点を推奨どおり承認）。
