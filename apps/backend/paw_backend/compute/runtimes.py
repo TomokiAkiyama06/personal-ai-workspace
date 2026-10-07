@@ -21,7 +21,7 @@
   stopped when together they have held the GPU for the time that was left
   (``NodeStopped`` on the budget in both cases), so slow calls cannot overrun
   the budget. With a :class:`LocalUsageSink` (``usage``), every local call is
-  also recorded when it ended (issue #187 item 5, Decision 0077 Proposed): where
+  also recorded when it ended (issue #187 item 5, Decision 0077): where
   it ran, the seconds charged as its GPU time and the tokens the local runtime
   reported to the budget while it ran; the late time of a call that outlived
   its node is recorded when it ends. A record that cannot be written is logged

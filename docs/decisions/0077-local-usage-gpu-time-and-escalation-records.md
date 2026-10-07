@@ -1,6 +1,7 @@
 # Local の使用量・GPU 時間・Escalation の記録と使用状況の集計への反映（記録の単位と場所、トークンと GPU 時間の数え方、Escalation の User への帰属と原因の分け方、集計の合計への Local の加え方）
 
-- Status: Proposed
+- Status: Approved
+- Approval: 2026-10-08、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで直接回答して承認（すべての判断点を推奨どおり承認。末尾の「承認時の決定」）
 - Date: 2026-10-07
 - Scope: Issue [#187](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/187) の 5（Local の使用量・GPU 時間・Escalation の記録）。`apps/backend/paw_backend/compute/usage.py`（`LocalUsageSink`・`PostgresLocalUsage`・`LocalUsageRow`）、`compute/runtimes.py`（`HybridRuntime` の `usage`）、`orchestrator/composition.py`（`_with_local_runtimes`）、`orchestrator/store.py`（`fail_node`・`record_incident` の `task_id`）、`orchestrator/models.py`（`AgentIncidentRow.task_id`）、`connections/store.py`・`connections/report.py`（集計）、`api/v1/usage.py`（`GET /api/v1/usage`）、Migration `0189`
 - Supersedes: [Decision 0069](0069-usage-quota-http-api.md)（Approved）の 1 のうち「Local は記録なし（`tokens.local`・`gpu_seconds`・`escalations` は `null`、日別の `local` は 0）」と 8（Item 5 は後続）を、下の 5 で置き換える。[Decision 0071](0071-agent-oom-and-escalation-records.md)（Approved）の 3 のうち「Task は持たない」を、下の 4 で置き換える（種類・時刻・保存期間・権限・System Health の数え方は変えない）。それ以外の 0069・0071 と [Decision 0016](0016-shared-connection-adapter-policy.md) の Quota の規則はそのまま
@@ -81,3 +82,7 @@ Decision 0069（Approved）は使用状況の HTTP API を Codex / Claude の呼
 承認されたら `Approval` に記録し、Status を Approved に改める。
 方針を変えるときは、この Decision を書き換えず、新しい Decision から `Supersedes` する。
 [REQUIREMENTS.md](../../REQUIREMENTS.md) の原文は書き換えない。
+
+## 承認時の決定（2026-10-08）
+
+Human は、作業 Session で判断が必要な点について推奨つきの説明を受け、直接回答して承認した（すべての判断点を推奨どおり承認）。

@@ -1,4 +1,4 @@
-"""The record of the local usage (issue #187 item 5, Decision 0077 Proposed).
+"""The record of the local usage (issue #187 item 5, Decision 0077).
 
 :class:`HybridRuntime` (``runtimes.py``) tells a :class:`LocalUsageSink` about
 every call of a local model when it ended: the task, where the scheduler placed

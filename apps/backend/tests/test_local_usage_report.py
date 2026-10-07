@@ -1,5 +1,5 @@
 """The local usage, its GPU time and the escalations in the usage report (issue
-#187 item 5, Decision 0077 Proposed), on a real PostgreSQL.
+#187 item 5, Decision 0077), on a real PostgreSQL.
 
 * ``PostgresLocalUsage`` writes one row of ``local_usage`` for a local call,
   attributed to the task's creator, and nothing for a task that does not exist;

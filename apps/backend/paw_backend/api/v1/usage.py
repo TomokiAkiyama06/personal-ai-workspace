@@ -24,7 +24,7 @@ role, for the reads the service authorizes itself; the administrator's capabilit
 for the rest), and the ``ConnectionService`` authorizes again and audits. The
 answers hold counts, enums, ids and login names: never a prompt, an answer, a model
 name or a credential. The local models' calls, their GPU time and the escalated
-tasks are in the report (issue #187 item 5, Decision 0077 Proposed).
+tasks are in the report (issue #187 item 5, Decision 0077).
 
 Without a database the routes answer 503 ``service_unavailable``.
 """

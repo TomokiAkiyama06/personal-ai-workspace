@@ -21,7 +21,7 @@ count, and the report of the old run (which is still executing somewhere) is a
 **Incidents.** ``fail_node`` also writes the agent incidents of the failure in its
 transaction (Decision 0071): ``out_of_memory`` for a failure class of
 ``errors.OUT_OF_MEMORY_CLASSES``, ``escalation`` for the step ``escalate``, with
-the DAG's task (Decision 0077, Proposed: the usage report counts a user's
+the DAG's task (Decision 0077: the usage report counts a user's
 escalated tasks). A refused report (a stale epoch or attempt) records neither.
 ``record_incident`` writes one for a failure outside a DAG (the planner's).
 

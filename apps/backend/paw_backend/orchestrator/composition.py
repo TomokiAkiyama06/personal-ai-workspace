@@ -40,7 +40,7 @@ objects that run tasks, each wired to the others the way production needs:
   uses the GPU and holds a Full GPU Mode off, and the GPU time is charged to the
   task (also late, through ``TrackerLateGpuCharge`` on the same
   ``BudgetTracker``); every local call is recorded in ``local_usage``
-  (``PostgresLocalUsage``, Decision 0077 Proposed). No ``CloudPolicy`` is injected
+  (``PostgresLocalUsage``, Decision 0077). No ``CloudPolicy`` is injected
   (Decision 0037, 14);
 * what the maintenance loop (``freshness_loop.build_freshness_loop``) runs: the
   freshness jobs and the task-end sweep (the application's lifespan starts it).

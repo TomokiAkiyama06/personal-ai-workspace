@@ -18,7 +18,7 @@
 * ``agent_incidents`` (revision ``0183``, issue #183, Decision 0071): an agent
   ran out of memory or a node was escalated to the next agent, one row each, for
   System Health. The kind, the time and, since revision ``0189`` (issue #187,
-  Decision 0077 Proposed), the task (for the usage report of its user): no node,
+  Decision 0077), the task (for the usage report of its user): no node,
   agent or text (the failed attempt itself is in ``agent_dag_node_attempts``).
 
 Every table references ``tasks.id`` (or a node) with a real foreign key

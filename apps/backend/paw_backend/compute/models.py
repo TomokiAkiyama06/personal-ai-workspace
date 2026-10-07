@@ -1,5 +1,5 @@
 """ORM model of the local usage (Alembic revision ``0189``, issue #187 item 5,
-Decision 0077 Proposed).
+Decision 0077).
 
 * ``local_usage``: one row per call of a local model through ``HybridRuntime`` (a
   node's attempt or a planner call that held a local lease), written when the
