@@ -120,6 +120,7 @@
 /* ---------- The header chip (ShellDark: "● GPU 38% · Queue 2") ---------- */
 
 .header-health {
+  position: relative;
   display: inline-flex;
   align-items: center;
   gap: 8px;
@@ -269,6 +270,8 @@ a.header-health:hover {
 }
 
 .health-chip {
+  /* Holds its visually hidden severity inside the scroll container. */
+  position: relative;
   display: flex;
   flex-shrink: 0;
   align-items: center;
