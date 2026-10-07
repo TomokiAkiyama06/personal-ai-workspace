@@ -57,7 +57,9 @@ function useChipState(admin: boolean): State {
           setState(next);
         },
         () => {
-          // Only a hint: the last state stays (or nothing is shown).
+          // Only a hint: the last state stays (or nothing is shown). A failure is
+          // an answer too: older answers arriving later are dropped.
+          if (!cancelled && request >= shown) shown = request;
         },
       );
     };

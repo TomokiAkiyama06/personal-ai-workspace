@@ -276,6 +276,37 @@ describe("サーバー監視", () => {
     expect(screen.queryByText("すべて正常です")).not.toBeInTheDocument();
   });
 
+  it("drops an older answer that arrives after a newer failure (Codex P2)", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const pending: { resolve: (report: HealthReport) => void; reject: (error: unknown) => void }[] =
+      [];
+    const report = vi.fn(
+      () => new Promise<HealthReport>((resolve, reject) => pending.push({ resolve, reject })),
+    );
+    renderMonitoring(fakeHealthSource(normalReport(), { report }));
+    await waitFor(() => expect(pending.length).toBe(2)); // the page and the header chip
+    await act(async () => pending[0]?.resolve(normalReport()));
+    await act(async () => pending[1]?.resolve(normalReport()));
+    expect(await screen.findByText("すべて正常です")).toBeVisible();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(REFRESH_SECONDS * 1000);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(REFRESH_SECONDS * 1000);
+    });
+    // Two page reads (and one of the chip's) are pending; the newer page read fails first.
+    const pageReads = pending.slice(2);
+    expect(pageReads.length).toBeGreaterThanOrEqual(2);
+    await act(async () =>
+      pageReads[pageReads.length - 1]?.reject(new ApiError(503, "service_unavailable", "x")),
+    );
+    expect(await screen.findByText("途切れています")).toBeVisible();
+    await act(async () => {
+      for (const read of pageReads.slice(0, -1)) read.resolve(normalReport());
+    });
+    expect(screen.getByText("途切れています")).toBeVisible();
+  });
+
   it("does not word unread job times as never recorded (Codex P2)", async () => {
     const report = normalReport();
     report.severity = "warning";

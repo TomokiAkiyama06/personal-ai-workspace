@@ -827,6 +827,8 @@ export function MonitoringView() {
         },
         (error: unknown) => {
           if (cancelled || request < shown) return;
+          // A failure is an answer too: older answers arriving later are dropped.
+          shown = request;
           setFailures((value) => value + 1);
           setReceivedOk(false);
           // A failed refresh keeps the last report on screen (受信 says it is stale).
@@ -875,8 +877,9 @@ export function MonitoringView() {
           }
         },
         () => {
-          if (!cancelled && request >= chartShown)
-            setChart((previous) => (previous.status === "ready" ? previous : { status: "error" }));
+          if (cancelled || request < chartShown) return;
+          chartShown = request;
+          setChart((previous) => (previous.status === "ready" ? previous : { status: "error" }));
         },
       );
       source.events(since).then(
@@ -886,8 +889,9 @@ export function MonitoringView() {
           setEvents({ status: "ready", value });
         },
         () => {
-          if (!cancelled && request >= eventsShown)
-            setEvents((previous) => (previous.status === "ready" ? previous : { status: "error" }));
+          if (cancelled || request < eventsShown) return;
+          eventsShown = request;
+          setEvents((previous) => (previous.status === "ready" ? previous : { status: "error" }));
         },
       );
     };
