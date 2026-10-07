@@ -247,7 +247,10 @@ class CorrectionLog:
         """Open without following a link and refuse anything but the caller's own
         regular file (reads and writes alike)."""
         try:
-            descriptor = os.open(self.path, flags | os.O_NOFOLLOW, 0o600)
+            # O_NONBLOCK: a FIFO at the path is rejected below instead of blocking the open.
+            descriptor = os.open(
+                self.path, flags | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600
+            )
         except OSError:
             raise CorrectionLogError(
                 "log must be a regular file (not a link)"

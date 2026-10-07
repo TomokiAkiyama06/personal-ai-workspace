@@ -3,6 +3,7 @@
 import fcntl
 import io
 import json
+import os
 import tempfile
 import threading
 import unittest
@@ -206,6 +207,27 @@ class StopwatchTest(unittest.TestCase):
                 self.assertEqual(code, 1)
                 self.assertIn("regular file", err)
                 self.assertNotIn(TASK, out)
+
+    def test_fifo_log_is_refused_without_blocking(self):
+        self.log.parent.mkdir(parents=True)
+        os.mkfifo(self.log)
+        for argv in (
+            ("summary",),
+            ("status",),
+            ("start", "--task", TASK, "--model", MODEL),
+        ):
+            with self.subTest(argv=argv[0]):
+                outcome = {}
+                worker = threading.Thread(
+                    target=lambda a=argv, o=outcome: o.setdefault(
+                        "code", self.run_cli(*a)[0]
+                    ),
+                    daemon=True,
+                )
+                worker.start()
+                worker.join(5)
+                self.assertFalse(worker.is_alive())
+                self.assertEqual(outcome["code"], 1)
 
     def test_validation_and_append_hold_an_exclusive_lock(self):
         self.start()
