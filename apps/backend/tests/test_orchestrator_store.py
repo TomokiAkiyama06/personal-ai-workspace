@@ -492,17 +492,28 @@ class NodeLifecycleTest(PostgresOrchestratorTestCase):
             await self.incidents(),
             ["out_of_memory", "out_of_memory", "escalation", "out_of_memory"],
         )
+        # Each with the DAG's task (Decision 0077: the usage report of its user).
+        self.assertEqual(await self.incident_tasks(), [dag.task_id] * 4)
 
     async def test_an_incident_is_recorded_on_its_own_only_of_a_known_kind(self):
-        await self.store.record_incident(IncidentKind.OUT_OF_MEMORY)
-        await self.store.record_incident("escalation")  # its exact value
+        task_id = await self.create_task()
+        await self.store.record_incident(IncidentKind.OUT_OF_MEMORY, task_id=task_id)
+        # Its exact value.
+        await self.store.record_incident("escalation", task_id=task_id)
         for kind in ("OOM", "Escalation", None, 1):
             with (
                 self.subTest(kind=kind),
                 self.assertRaises(InvalidOrchestratorArgumentError),
             ):
-                await self.store.record_incident(kind)
+                await self.store.record_incident(kind, task_id=task_id)
+        for task in (None, str(task_id), 1):
+            with (
+                self.subTest(task=task),
+                self.assertRaises(InvalidOrchestratorArgumentError),
+            ):
+                await self.store.record_incident(IncidentKind.ESCALATION, task_id=task)
         self.assertEqual(await self.incidents(), ["out_of_memory", "escalation"])
+        self.assertEqual(await self.incident_tasks(), [task_id, task_id])
 
     async def test_a_node_that_gives_up_blocks_only_its_dependents(self):
         dag = await self.taken_dag()

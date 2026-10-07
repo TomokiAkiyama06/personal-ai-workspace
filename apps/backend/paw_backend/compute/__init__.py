@@ -81,6 +81,7 @@ from paw_backend.compute.scheduler import (
     ComputeStatus,
     DeploymentStatus,
 )
+from paw_backend.compute.usage import LocalUsageSink, PostgresLocalUsage
 
 __all__ = [
     "HOLD_REASON",
@@ -115,12 +116,14 @@ __all__ = [
     "HybridRuntime",
     "InvalidComputeArgumentError",
     "LateGpuCharge",
+    "LocalUsageSink",
     "ModelControl",
     "ModelControlError",
     "ModelRole",
     "NvidiaSmiProbe",
     "Placement",
     "PlacedEmbedder",
+    "PostgresLocalUsage",
     "PostgresTaskHolds",
     "ProbeUnavailableError",
     "Refusal",
