@@ -284,3 +284,50 @@ class PostgresRestorePointTest(unittest.TestCase):
         with self.assertRaises(RestorePointError) as caught:
             self.points.restore(self.points.load("p1"), self.url, self.admin_url)
         self.assertEqual(caught.exception.code, "users_deleted_since_the_point")
+
+    def test_a_failed_second_rename_puts_the_workspace_database_back(self):
+        # Codex review #204 (ad3c59c): after the first rename the workspace
+        # database must not be left without its name.
+        self.points.verify(self.points.create(self.url, "p1"), self.url, self.admin_url)
+        name = self.name
+
+        class Failing:
+            """The engine of the admin connection, failing the second rename."""
+
+            def __init__(self, engine):
+                self._engine = engine
+
+            def connect(self):
+                connection = self._engine.connect()
+                execute = connection.execute
+
+                def guarded(statement, *args, **kwargs):
+                    sql = str(statement)
+                    if f'RENAME TO "{name}"' in sql and "_restore_" in sql:
+                        raise RuntimeError("rename refused")
+                    return execute(statement, *args, **kwargs)
+
+                connection.execute = guarded
+                return connection
+
+            def dispose(self):
+                self._engine.dispose()
+
+        def engine(url, **kwargs):
+            return Failing(create_engine(url, **kwargs))
+
+        points = RestorePoints(
+            self.root / "points",
+            pg_dump=str(self.tools / "pg_dump"),
+            pg_restore=str(self.tools / "pg_restore"),
+            engine=engine,
+        )
+        self.sql("CREATE TABLE added_by_the_migration (id int)")
+        with self.assertRaises(RestorePointError) as caught:
+            points.restore(points.load("p1"), self.url, self.admin_url)
+        self.assertEqual(caught.exception.code, "rename_failed")
+        self.assertEqual(self.databases(), {self.name})
+        self.assertIn(
+            ("added_by_the_migration",),
+            self.sql("SELECT tablename FROM pg_tables WHERE schemaname = 'public'"),
+        )

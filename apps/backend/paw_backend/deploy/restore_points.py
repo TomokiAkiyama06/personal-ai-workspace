@@ -374,12 +374,31 @@ class RestorePoints:
                     text(f"DROP DATABASE IF EXISTS {_quote(incoming)} WITH (FORCE)")
                 )
                 raise RestorePointError("database_in_use_or_not_allowed") from None
-            connection.execute(
-                text(
-                    f"ALTER DATABASE {_quote(incoming)} "
-                    f"RENAME TO {_quote(point.database)}"
+            try:
+                connection.execute(
+                    text(
+                        f"ALTER DATABASE {_quote(incoming)} "
+                        f"RENAME TO {_quote(point.database)}"
+                    )
                 )
-            )
+            except Exception:
+                # The workspace database must not stay without its name: put
+                # it back as it was and drop the restored copy.
+                try:
+                    connection.execute(
+                        text(
+                            f"ALTER DATABASE {_quote(replaced)} "
+                            f"RENAME TO {_quote(point.database)}"
+                        )
+                    )
+                except Exception:
+                    # Both the original (under ``replaced``) and the restored
+                    # copy are kept for the operator.
+                    raise RestorePointError("rename_failed_not_put_back") from None
+                connection.execute(
+                    text(f"DROP DATABASE IF EXISTS {_quote(incoming)} WITH (FORCE)")
+                )
+                raise RestorePointError("rename_failed") from None
         return replaced
 
     # -- helpers ---------------------------------------------------------------
