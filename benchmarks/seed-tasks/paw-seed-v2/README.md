@@ -1,7 +1,7 @@
 # paw-seed-v2 — Seed Benchmark Dataset（第 2 版）
 
 paw-seed-v1 では上位の Model の差を測れなかった（Historical の 11 Task のうち 10 Task をどの Model も解けず、Injected Bug の 7 Task は 11 Model が全問を解いた）ため、
-差が出る中〜難の Task を足した第 2 版です（Issue #198、[Decision 0074](../../../docs/decisions/0074-seed-v2-and-qwen-27b-comparison.md)（Proposed）。版の規則は [Decision 0041](../../../docs/decisions/0041-seed-benchmark-dataset.md) の 2）。
+差が出る中〜難の Task を足した第 2 版です（Issue #198、[Decision 0074](../../../docs/decisions/0074-seed-v2-and-qwen-27b-comparison.md)（Approved）。版の規則は [Decision 0041](../../../docs/decisions/0041-seed-benchmark-dataset.md) の 2）。
 
 - [`manifest.json`](manifest.json): 索引。`"dataset": "paw-seed-v1"` の entry は v1 の Task を**書き換えずに**載せたもので、Task file・Hidden check・非公開の material は v1 のもの（`../paw-seed-v1/tasks`、`/data/datasets/paw-seed-v1`）を使います。entry は v1 の索引と同じでなければなりません（`check` が確かめます）。
 - `tasks/*.json`: v2 で足した Task（[Task schema v1](../../schemas/task-v1.schema.json)）。base commit は `3df6f80`（2026-10-01 の `main`）。
