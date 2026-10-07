@@ -1,7 +1,34 @@
 # Personal AI Workspace - Model Candidates
 
-更新日: 2026-09-16\
-Status: [BENCHMARK]
+更新日: 2026-10-07\
+Status: [BENCHMARK]（Main Coding Agent は採用済み。下の「採用の結果」）
+
+## 採用の結果（Main Coding Agent、2026-10-07）
+
+| 順 | Model | 扱い |
+| ---: | --- | --- |
+| 1 | **Qwen3.8-27B-FP8**（vLLM、FP8） | **Main Coding Model として採用** |
+| 2 | Qwen3.6-27B-FP8 | 次点 |
+| 3 | KAT-Coder-V2.5-Dev | その次 |
+
+- 決定: [Decision 0074](decisions/0074-seed-v2-and-qwen-27b-comparison.md)（Approved、2026-10-07）。[Decision 0040](decisions/0040-main-coding-model-selection.md) の 1（Main は Qwen3.6-27B-FP8）を置き換えた。[Decision 0073](decisions/0073-main-coexistence-confirmation.md) の 3 の「次点」も上の順に読み替える。
+- 根拠（[paw-seed-v2 の比較 Run の報告](benchmarks/paw-017-seed-v2-2026-10.md)。49 Task、Coding Model だけを GPU に置いて同じ設定で 3 回ずつ）:
+
+  | Model | run1 / run2 / run3 | 平均 | Resolved@3 | 3 回とも解けた Task | Run の所要（平均） | 出力 token（Run の平均） |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+  | Qwen3.8-27B-FP8 | 37 / 37 / 37 | 37.0 | 37 | 37 | 257 分 | 1.70 M |
+  | Qwen3.6-27B-FP8 | 32 / 33 / 34 | 33.0 | 36 | 30 | 92 分 | 0.61 M |
+
+  - 平均の差は +4.0、Resolved@3 の差は +1。2026-10-05 に決めた選び方（両方で 2 Task 以上）では Qwen3.6-27B-FP8 のままだったが、Human は平均の差と、3 回とも同じ 37 Task を解いて揺れがないことを重く見て Qwen3.8-27B-FP8 を選んだ（Decision 0074 の「承認時の決定」）。
+  - 代わりに、Run の所要と出力 token は**約 2.8 倍**（生成速度は同じで、出す token が多い）。Reasoning を履歴に残す Harness では Prompt が早く伸び、131k の設定で Context の上限に 9 回達した（正解数は変えていない）。
+  - paw-seed-v1 の 24 Task の部分は 2 Model とも毎回 14 で、差はすべて v2 で足した 25 Task で出た。
+- 2 つの Model は構成（層・KV の Head・Weight 27.6 GiB）が同じで、1 token あたりの KV も同じ。共存時の割り当て（Decision 0073 の 2: Main の `gpu-memory-utilization` 0.51）の見積もりはそのまま使える。
+
+### 残っていること
+
+- **共存の確認 Run（[#180](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/180)）**: Qwen3.8-27B-FP8 を 0.51 で Memory Worker・Embedding・Reranker（別々の Runtime）と同時に動かし、paw-seed-v1 で 3 回走らせる。合格は Resolved@3 13 以上かつ平均 13.0 以上（基準は Qwen3.8-27B-FP8 の単独の v1 の部分: 14 / 14 / 14、Resolved@3 14）。4 つの Deployment の Footprint（Decision 0039 の 1）はこの Run の実測から与える。それまで Deployment の設定（Model の Path・vLLM の引数・Footprint）は変えない。
+- **共存時の KV / Context の不足への対策（[#200](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/200)）**: 共存時の Coding の予約（約 259k token）に対し、Qwen3.8-27B-FP8 を 4 並列で動かす KV の必要量の粗い見積もりは約 270k（p90 で約 430k）token で超える。古い Reasoning を履歴から外す・Main の割り当てを増やす・並列の Agent を減らす・会話の伸びを予約に反映する Scheduler の中から、#180 の結果を見て別の Decision で決める。
+- Human correction time（Decision 0040 の 5、#181）はまだ測っていない。
 
 ## 1. Selection policy
 
@@ -377,3 +404,6 @@ Main ModelがVRAMを使い切る構成は避ける。
 
 最終採用モデルは要件定義完了後にBenchmarkして決定する。
 要件定義中は特定モデルへArchitectureを固定しない。
+
+Main Coding Agent は Benchmark の結果から Qwen3.8-27B-FP8 に決まった（冒頭の「採用の結果」、Decision 0074）。
+上の 3〜5 の候補の説明と Benchmark の順は、選んだ時点の記録として残す。
