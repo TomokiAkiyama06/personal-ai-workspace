@@ -1,8 +1,8 @@
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApiError } from "../api/client";
 import { App } from "../App";
+import { ApiError } from "../api/client";
 import { mockApi, Providers, reply, session } from "../test/helpers";
 import { fakeTaskSource, TASK_204 } from "../test/tasks";
 import { type TaskSource, TaskSourceProvider } from "./source";
@@ -99,6 +99,18 @@ describe("Approvals page", () => {
     await screen.findByRole("dialog");
     await user.click(screen.getByRole("button", { name: "閉じる" }));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("opens an approval the bounded list does not hold", async () => {
+    const { source } = fakeTaskSource();
+    const [first, ...rest] = await source.listApprovals();
+    if (!first) throw new Error("no sample");
+    vi.spyOn(source, "listApprovals").mockResolvedValue(rest);
+    const one = vi.spyOn(source, "getApproval");
+    renderAt(`/approvals/${first.id}`, source);
+    const sheet = await screen.findByRole("dialog", { name: "この操作を許可しますか" });
+    expect(within(sheet).getByText(first.tool)).toBeInTheDocument();
+    expect(one).toHaveBeenCalledWith(first.id);
   });
 
   it("says an approval that is gone was not found", async () => {

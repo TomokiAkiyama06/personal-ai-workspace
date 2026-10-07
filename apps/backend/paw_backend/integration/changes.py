@@ -100,6 +100,14 @@ _LIST_ROW_OVERHEAD = 120  # keys, quotes, punctuation of one listed file
 _PATCH_ROW_OVERHEAD = 80
 
 
+# The head commit of the pull request (an object: gh prints a bare string raw).
+HEAD_JQ = "{sha: (.head.sha | tostring | .[:64])}"
+
+
+def _page(per_page: int, page: int) -> list[str]:
+    return ["-f", f"per_page={per_page}", "-f", f"page={page}"]
+
+
 def listing_jq() -> str:
     """One page of files, each field cut before gh prints it."""
     cut = f".[:{MAX_PATH_CHARS}]"
@@ -192,11 +200,16 @@ def _visible(text: str, *, keep: str = "") -> str:
     )
 
 
-def safe_patch(patch: str) -> str:
+def safe_patch(patch: str) -> tuple[str, bool]:
     """A patch as it may be stored and shown: credentials redacted, control
-    characters other than tab and line feed escaped."""
+    characters other than tab and line feed escaped, and still at most
+    :data:`MAX_PATCH_CHARS` characters (an escape makes one character six); and
+    whether that cut it (Codex review of #206)."""
     redacted, _ = redact_text(patch)
-    return _visible(redacted, keep="\t\n")
+    shown = _visible(redacted, keep="\t\n")
+    if len(shown) <= MAX_PATCH_CHARS:
+        return shown, False
+    return shown[:MAX_PATCH_CHARS], True
 
 
 def _count(value: object) -> int:
@@ -261,17 +274,21 @@ class GitHubChangeReader:
             account = await self.accounts.account_of(request.task.created_by)
         except LinuxAccountUnavailableError:
             raise ChangesNotReadError() from None
-        endpoint = (
-            f"repos/{github.owner}/{github.repo}/pulls/{pull_request.number}/files"
-        )
+        pull = f"repos/{github.owner}/{github.repo}/pulls/{pull_request.number}"
+        endpoint = f"{pull}/files"
+        # The pull request must still propose the checked commit before and after
+        # the files are read: what is stored is labelled with that commit, and a
+        # branch that moved in between would mix two commits (Codex review of
+        # #206).
+        await self._require_head(pull, request.target.head, github, account)
         listed: list[tuple[ChangedFile, bool]] = []
         truncated = False
         page = 1
         while True:
             answer = await self._gh_api(
-                endpoint, LIST_PAGE_SIZE, page, listing_jq(), github, account
+                endpoint, _page(LIST_PAGE_SIZE, page), listing_jq(), github, account
             )
-            if len(answer) > LIST_PAGE_SIZE:
+            if not isinstance(answer, list) or len(answer) > LIST_PAGE_SIZE:
                 raise ChangesNotReadError()
             if len(listed) >= MAX_FILES:
                 truncated = bool(answer)
@@ -289,7 +306,15 @@ class GitHubChangeReader:
                     endpoint, index, changed, github, account
                 )
             files.append(changed)
+        await self._require_head(pull, request.target.head, github, account)
         return PullRequestChanges(request.target.head, tuple(files), truncated)
+
+    async def _require_head(
+        self, pull: str, head: str, github: GitHubRepo, account: LinuxAccount
+    ) -> None:
+        answer = await self._gh_api(pull, [], HEAD_JQ, github, account)
+        if not isinstance(answer, dict) or answer.get("sha") != head:
+            raise ChangesNotReadError()
 
     async def _with_patch(
         self,
@@ -299,8 +324,12 @@ class GitHubChangeReader:
         github: GitHubRepo,
         account: LinuxAccount,
     ) -> ChangedFile:
-        answer = await self._gh_api(endpoint, 1, index + 1, patch_jq(), github, account)
-        if len(answer) != 1 or not isinstance(answer[0], dict):
+        answer = await self._gh_api(
+            endpoint, _page(1, index + 1), patch_jq(), github, account
+        )
+        if not isinstance(answer, list) or len(answer) != 1:
+            raise ChangesNotReadError()
+        if not isinstance(answer[0], dict):
             raise ChangesNotReadError()
         item = answer[0]
         filename = item.get("filename")
@@ -317,14 +346,15 @@ class GitHubChangeReader:
             or length < len(patch)
         ):
             raise ChangesNotReadError()
+        shown, cut = safe_patch(patch)
         return ChangedFile(
             changed.path,
             changed.previous_path,
             changed.status,
             changed.additions,
             changed.deletions,
-            patch=safe_patch(patch),
-            patch_truncated=length > len(patch),
+            patch=shown,
+            patch_truncated=cut or length > len(patch),
         )
 
     def _github_repository(self, remotes: Sequence[str]) -> GitHubRepo:
@@ -338,12 +368,11 @@ class GitHubChangeReader:
     async def _gh_api(
         self,
         endpoint: str,
-        per_page: int,
-        page: int,
+        fields: list[str],
         jq: str,
         github: GitHubRepo,
         account: LinuxAccount,
-    ) -> list:
+    ) -> object:
         try:
             result = await self.gh.run(
                 [
@@ -353,10 +382,7 @@ class GitHubChangeReader:
                     "--method",
                     "GET",
                     endpoint,
-                    "-f",
-                    f"per_page={per_page}",
-                    "-f",
-                    f"page={page}",
+                    *fields,
                     "--jq",
                     jq,
                 ],
@@ -370,12 +396,9 @@ class GitHubChangeReader:
         if result.returncode != 0:
             raise ChangesNotReadError()
         try:
-            answer = json.loads(result.stdout)
+            return json.loads(result.stdout)
         except ValueError:
             raise ChangesNotReadError() from None
-        if not isinstance(answer, list):
-            raise ChangesNotReadError()
-        return answer
 
 
 def files_json(changes: PullRequestChanges) -> tuple[list[dict], list[str | None]]:

@@ -553,6 +553,28 @@ class PullRequestBoardsApiTest(PostgresRepositoryTestCase):
         self.assertEqual([a["task_id"] for a in listed], [str(task_id)])
         self.assertNotIn(str(mine), str(listed))
 
+    async def test_one_approval_by_its_id(self):
+        task_id = await self.running_task()
+        mine = await self.open_approval(task_id, repositories=(self.repo,))
+        others = await self.open_approval(task_id, requester=uuid.uuid4())
+        expired = await self.open_approval(task_id, expires_in=timedelta(seconds=-30))
+        self.as_creator()
+
+        response = await self.get(f"/approvals/{mine}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            (response.json()["id"], response.json()["repositories"]),
+            (str(mine), ["web-app"]),
+        )
+        for approval_id in (others, expired, uuid.uuid4()):
+            response = await self.get(f"/approvals/{approval_id}")
+            self.assertEqual(response.status_code, 404)
+            self.assertEqual(response.json()["error"]["code"], "approval_not_found")
+        # Not a member any more: not found alike.
+        self.sign_in(self.creator, {self.other_project: ProjectRole.MANAGER})
+        self.assertEqual((await self.get(f"/approvals/{mine}")).status_code, 404)
+
     async def test_approve_and_reject_once(self):
         task_id = await self.running_task()
         approval = await self.open_approval(task_id)

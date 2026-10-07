@@ -411,6 +411,9 @@ export const apiTaskSource: TaskSource = {
     const body = await apiRequest<{ approvals: ApprovalWire[] }>("GET", `/approvals${query}`);
     return body.approvals.map(approval);
   },
+  async getApproval(id: string): Promise<ToolApproval> {
+    return approval(await apiRequest<ApprovalWire>("GET", `/approvals/${encodeURIComponent(id)}`));
+  },
   async decideApproval(id: string, decision: ApprovalDecision): Promise<void> {
     await apiRequest("POST", `/approvals/${encodeURIComponent(id)}/decision`, { decision });
   },

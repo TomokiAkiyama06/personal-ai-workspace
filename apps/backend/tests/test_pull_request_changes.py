@@ -97,6 +97,7 @@ class FakeGitHub:
         self.fail = False
         self.raises: Exception | None = None
         self.on_call = None
+        self.head = HEAD
 
     async def run(self, args, *, account, hostname, timeout_s):
         self.calls.append(tuple(args))
@@ -109,11 +110,20 @@ class FakeGitHub:
             return GhResult(1, "")
         assert args[:5] == ["api", "--hostname", HOST, "--method", "GET"]
         assert hostname == HOST
-        assert args[5] == f"repos/{OWNER}/{REPO}/pulls/{PULL_REQUEST.number}/files"
-        fields = dict(args[i + 1].split("=", 1) for i in (6, 8))
+        pull = f"repos/{OWNER}/{REPO}/pulls/{PULL_REQUEST.number}"
         jq = args[args.index("--jq") + 1]
+        if args[5] == pull:
+            answer = json.dumps(
+                {"number": PULL_REQUEST.number, "head": {"sha": self.head}}
+            )
+            return await self._projected(answer, jq)
+        assert args[5] == f"{pull}/files"
+        fields = dict(args[i + 1].split("=", 1) for i in (6, 8))
         size, page = int(fields["per_page"]), int(fields["page"])
         answer = json.dumps(self.files[(page - 1) * size : page * size])
+        return await self._projected(answer, jq)
+
+    async def _projected(self, answer, jq):
         projected = await asyncio.to_thread(
             subprocess.run,
             ["jq", "-c", jq],
@@ -128,7 +138,10 @@ class FakeGitHub:
         return GhResult(0, projected.stdout)
 
     def pages(self) -> list[tuple[str, str]]:
-        return [(call[7], call[9]) for call in self.calls]
+        return [(call[7], call[9]) for call in self.calls if call[5].endswith("/files")]
+
+    def head_reads(self) -> int:
+        return sum(1 for call in self.calls if not call[5].endswith("/files"))
 
 
 class Accounts:
@@ -209,9 +222,26 @@ class ReaderTest(unittest.IsolatedAsyncioTestCase):
                 ("per_page=1", "page=2"),
             ],
         )
+        # The pull request's head is checked before and after.
+        self.assertEqual(self.github.head_reads(), 2)
         self.assertEqual(
             {account.user_id for account in self.github.accounts}, {self.user_id}
         )
+
+    async def test_a_pull_request_whose_head_is_not_the_checked_commit(self):
+        # Codex review of #206: what is stored is labelled with the checked
+        # commit, so a branch that moved before or during the reading is refused.
+        self.github.head = "d" * 40
+        await self.not_read()
+        self.github.head = HEAD
+        calls = len(self.github.calls)
+
+        def move(number):
+            if number == calls + 3:  # the last call: the head read after the files
+                self.github.head = "d" * 40
+
+        self.github.on_call = move
+        await self.not_read()
 
     async def test_more_files_than_are_kept(self):
         self.github.files = [
@@ -260,7 +290,7 @@ class ReaderTest(unittest.IsolatedAsyncioTestCase):
         self.github.files = [github_file("a.py"), github_file("b.py")]
 
         def change(number):
-            if number == 2:  # after the listing
+            if number == 3:  # after the head and the listing
                 self.github.files.reverse()
 
         self.github.on_call = change
@@ -312,7 +342,13 @@ class ReaderTest(unittest.IsolatedAsyncioTestCase):
 
 class SafePatchTest(unittest.TestCase):
     def test_tabs_and_line_feeds_stay(self):
-        self.assertEqual(safe_patch("+\ta\n-b\r\n"), "+\ta\n-b\\u000d\n")
+        self.assertEqual(safe_patch("+\ta\n-b\r\n"), ("+\ta\n-b\\u000d\n", False))
+
+    def test_escapes_do_not_grow_it_past_the_limit(self):
+        # Codex review of #206: an escape makes one character six.
+        shown, cut = safe_patch("\x01" * MAX_PATCH_CHARS)
+        self.assertTrue(cut)
+        self.assertEqual(len(shown), MAX_PATCH_CHARS)
 
 
 class Reader:

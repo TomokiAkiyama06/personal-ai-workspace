@@ -346,11 +346,25 @@ describe("apiTaskSource", () => {
         ],
       }),
       "POST /approvals/a-1/decision": reply(200, { id: "a-1", outcome: "approved" }),
+      "GET /approvals/a-1": reply(200, {
+        id: "a-1",
+        task_id: TASK,
+        task_title: "Fix login",
+        agent: null,
+        project_id: "p-1",
+        tool: "package.add",
+        level: "strong_approval",
+        summary: [{ name: "command", kind: "text", value: "uv add x" }],
+        repositories: [],
+        created_at: "2026-10-01T09:00:00Z",
+        expires_at: "2026-10-01T10:00:00Z",
+      }),
     });
     const [item] = await apiTaskSource.listApprovals(TASK);
     expect(item).toMatchObject({ id: "a-1", taskId: TASK, level: "approval", tool: "package.add" });
     expect(String(fetchMock.mock.calls[0]?.[0])).toContain(`/approvals?task_id=${TASK}`);
     await apiTaskSource.decideApproval("a-1", "approve");
+    expect(await apiTaskSource.getApproval("a-1")).toMatchObject({ level: "strong_approval" });
     expect(calls[1]).toMatchObject({
       method: "POST",
       path: "/approvals/a-1/decision",

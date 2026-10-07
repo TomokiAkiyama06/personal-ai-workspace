@@ -16,7 +16,8 @@ boards).
   rows of the record's task and of its tool approvals, as a closed projection
   (``board_views.AuditRow``).
 * ``GET /approvals`` (``tasks.list``): the pending tool approvals the person is
-  asked for (of one task with ``task_id``).
+  asked for (of one task with ``task_id``); ``GET /approvals/{approval_id}`` one
+  of them (the sheet opens one the bounded list does not hold).
 * ``POST /approvals/{approval_id}/decision`` (``project.task.run`` on the
   approval's project, audited): approve or reject one, through
   ``ApprovalService`` (only the person the agent works for may decide; the
@@ -393,6 +394,37 @@ async def list_approvals(
             task_id=task_id,
         )
     return ApprovalListOut(approvals=[_approval_out(item) for item in items])
+
+
+@router.get(
+    "/approvals/{approval_id}",
+    response_model=ApprovalOut,
+    tags=["approvals"],
+    summary="One pending tool approval the person is asked for",
+)
+async def get_approval(
+    request: Request, principal: _LIST, approval_id: uuid.UUID
+) -> ApprovalOut:
+    """The sheet opens one the bounded list does not hold (Codex review of #206).
+    Another person's, a decided or an expired one, or none, are not found alike."""
+    _execution(request)
+    database: Database = request.app.state.database
+    policy = _policy(request)
+    async with database.session() as session, session.begin():
+        await _read_only(session)
+        projects = await views.readable_projects(session, principal, policy)
+        items = await boards.pending_approvals(
+            session,
+            principal,
+            projects,
+            policy,
+            now=datetime.now(UTC),
+            limit=1,
+            approval_ids=[approval_id],
+        )
+    if not items:
+        raise ApiError(404, "approval_not_found", "Approval not found")
+    return _approval_out(items[0])
 
 
 _DECISION_ERRORS = {

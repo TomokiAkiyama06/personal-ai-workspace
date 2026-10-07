@@ -17,9 +17,9 @@
 
 ### 1. 変更ファイルと差分の出所（PR を届けた時点で GitHub から 1 回読んで保存）
 
-Integration Gate が PR を作って Attempt に記録した直後に、**その PR の変更ファイルを GitHub の `pulls/{n}/files` から、Task の作成者の `gh api`（Publisher と同じ Identity）で読み、PR の記録（`task_attempt_repositories` の行）に保存する**（新しい Table `pull_request_changes`、Migration `0190`）。画面はこれだけを読む（閲覧のたびに GitHub や Worktree は読まない）。保存されるのは、確認した Commit（Merge Ready の Commit）を Default Branch に対して届けた差分そのものである。
+Integration Gate が PR を作って Attempt に記録し、Task の完了（または停止）を決めた後で、**その PR の変更ファイルを GitHub の `pulls/{n}/files` から、Task の作成者の `gh api`（Publisher と同じ Identity）で読み、PR の記録（`task_attempt_repositories` の行）に保存する**（新しい Table `pull_request_changes`、Migration `0190`）。画面はこれだけを読む（閲覧のたびに GitHub や Worktree は読まない）。保存されるのは、確認した Commit（Merge Ready の Commit）を Default Branch に対して届けた差分そのものである。
 
-- 読むのは Best effort で、Task を待たせない（失敗・時間切れでは何も保存せず、画面は「変更ファイルは記録されていません」）。同じ記録を読み直したら置き換える。
+- 読むのは Best effort で、Task の完了の経路の外で行う（失敗・時間切れでは何も保存せず、画面は「変更ファイルは記録されていません」）。読む前と後に PR の Head が確認した Commit であることを確かめ、違えば保存しない（別の Commit の差分を混ぜない）。同じ記録を読み直したら置き換える。
 - 代案 A: 閲覧時に Worktree で `git diff`。Wrapper の許可リストに `diff` を足す（Decision 0029・0036 の変更）必要があり、他の User の Linux Account の Worktree を閲覧のたびに読む。
 - 代案 B: 閲覧時に GitHub を読む。他の Member の閲覧で作成者の GitHub の Identity を使うことになり、5 秒ごとの再読み込みで Rate limit にかかる。
 
@@ -28,7 +28,7 @@ Integration Gate が PR を作って Attempt に記録した直後に、**その
 - ファイルは最大 300（GitHub は最大 3,000 を返す。超えた分は `truncated`）。Path は 300 文字で切る。
 - Patch は先頭の 50 ファイルだけ、1 ファイル 10,000 文字まで（超えたら `patch_truncated`）。GitHub が Patch を返さない Binary や巨大なファイルは Patch なし。
 - `gh` の出力の上限（64 KiB）に、最悪の名前でも収まるように Page の大きさと `--jq` の切り詰めを決める（読み切れずに失敗しない）。全体で 120 秒の期限。
-- Patch は Credential を Redact し（`tools.credentials.redact_text`）、Tab と改行以外の制御文字を見える Escape にする。Path も制御文字を Escape する。読んだ内容は Log に出さない。
+- Patch は Credential を Redact し（`tools.credentials.redact_text`）、Tab と改行以外の制御文字を見える Escape にし、その後でも 10,000 文字を超えないように切る。Path も制御文字を Escape する。読んだ内容は Log に出さない。
 - 保存した行は記録と一緒に消える（`ON DELETE CASCADE`）。Application の Role は SELECT・INSERT・UPDATE だけ。
 
 ### 3. 変更ファイル・差分・Review・Audit を見られる人
@@ -50,7 +50,7 @@ PR を見られる Member に、**その Task を Resource とする `audit_even
 
 ### 6. Tool の承認の一覧
 
-`GET /api/v1/approvals`（`tasks.list`、`task_id` で 1 つの Task に絞れる）は、**その人が決める承認だけ**（`requester_user_id` が本人。`ApprovalService` が決められるのも本人だけ）を、読める Project の、`pending` で期限内のものに限って返す。中身は承認を作ったときの `summary`（上限つき・Redact 済み）、Level、Task の題名と Agent、承認が指す Repository のうち本人が読めるものの名前、期限。他の Member には見せない。Partial Index `ix_tool_approvals_pending_requester` を足す（Migration `0190`）。
+`GET /api/v1/approvals`（`tasks.list`、`task_id` で 1 つの Task に絞れる）と `GET /api/v1/approvals/{id}`（一覧の上限の外の 1 件）は、**その人が決める承認だけ**（`requester_user_id` が本人。`ApprovalService` が決められるのも本人だけ）を、読める Project の、`pending` で期限内のものに限って返す。中身は承認を作ったときの `summary`（上限つき・Redact 済み）、Level、Task の題名と Agent、承認が指す Repository のうち本人が読めるものの名前、期限。他の Member には見せない。Partial Index `ix_tool_approvals_pending_requester` を足す（Migration `0190`）。
 
 ### 7. 承認・拒否の経路と Strong Approval
 

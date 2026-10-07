@@ -437,6 +437,11 @@ export function fakeTaskSource(
     async listApprovals(taskId) {
       return approvals.filter((item) => taskId === undefined || item.taskId === taskId);
     },
+    async getApproval(id) {
+      const item = approvals.find((entry) => entry.id === id);
+      if (!item) throw new ApiError(404, "approval_not_found", "not found");
+      return item;
+    },
     async decideApproval(id, decision) {
       decisions.push({ id, decision });
       const item = approvals.find((entry) => entry.id === id);

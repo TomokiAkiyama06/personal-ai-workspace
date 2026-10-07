@@ -77,7 +77,30 @@ function ApprovalsView({ source }: { source: TaskSource }) {
   }, [loaded, source]);
 
   const approvals = load.status === "ready" ? load.data : [];
-  const selected = approvals.find((item) => item.id === selectedId) ?? null;
+  // A selected approval the bounded list does not hold (an older one) is read by
+  // its id; one that is gone is "not found" (Codex review of #206).
+  const listed = !loaded || !selectedId || approvals.some((item) => item.id === selectedId);
+  const [single, setSingle] = useState<{ id: string; approval: ToolApproval | null } | null>(null);
+  useEffect(() => {
+    if (listed || !selectedId) return;
+    let current = true;
+    source
+      .getApproval(selectedId)
+      .then((approval) => {
+        if (current) setSingle({ id: selectedId, approval });
+      })
+      .catch(() => {
+        if (current) setSingle({ id: selectedId, approval: null });
+      });
+    return () => {
+      current = false;
+    };
+  }, [listed, selectedId, source]);
+  const selected =
+    approvals.find((item) => item.id === selectedId) ??
+    (single !== null && single.id === selectedId ? single.approval : null);
+  const missing =
+    loaded && selectedId !== null && !listed && single?.id === selectedId && !single.approval;
   const close = useCallback(() => navigate(APPROVALS_PATH), [navigate]);
 
   return (
@@ -133,7 +156,7 @@ function ApprovalsView({ source }: { source: TaskSource }) {
             </li>
           ))}
         </ul>
-        {load.status === "ready" && selectedId && !selected && (
+        {missing && (
           <p className="form-error" role="alert">
             {t("approvals.notFound")}
           </p>
@@ -151,6 +174,7 @@ function ApprovalsView({ source }: { source: TaskSource }) {
                 tool: selected.tool,
               }),
             );
+            setSingle(null);
             setLoad((current) =>
               current.status === "ready"
                 ? {

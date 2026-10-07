@@ -31,8 +31,9 @@ Complete is still refused (no publisher, a pull request that is a draft or was
 closed, a ``target`` without an integrated result) the task stays
 ``evaluating`` with its results recorded (``REQUIREMENTS_NOT_MET``). With ``changes``
 (a ``changes.ChangeRecorder``, issue #185 item 6) the changed files of each pull
-request are read from GitHub right after it was recorded, for the PR screen: best
-effort, bounded by their own deadline, never a reason to stop. When a
+request are read from GitHub once the gate has completed (or stopped) the task,
+for the PR screen: best effort, bounded by their own deadline, never on the path
+that completes the task. When a
 write the Tool Broker admitted may still be running on a repository, a passing
 result is not recorded and nothing is completed or failed (``NOT_RECORDED``):
 the gate may run again later.
@@ -316,14 +317,29 @@ class IntegrationGate:
         except StaleRunError:
             return GateReport(GateOutcome.SUPERSEDED, task_id, tuple(verdicts), targets)
         publications: tuple[Publication, ...] = ()
+        delivered: list[tuple[PublishRequest, PullRequestInfo]] = []
         if self._publisher is not None:
-            published = await self._publish(task, run, targets, verdicts)
+            published = await self._publish(task, run, targets, verdicts, delivered)
             if isinstance(published, GateReport):
+                await self._record_changes(delivered)
                 return published
             publications = published
-        return await self._end(
+        report = await self._end(
             task, run, GateOutcome.COMPLETED, verdicts, targets, publications
         )
+        await self._record_changes(delivered)
+        return report
+
+    async def _record_changes(
+        self, delivered: list[tuple[PublishRequest, PullRequestInfo]]
+    ) -> None:
+        """The changed files of every pull request that was recorded (issue #185
+        item 6), read only once the gate has decided: best effort, never on the
+        path that completes the task (Codex review of #206)."""
+        if self._changes is None:
+            return
+        for publish, pull_request in delivered:
+            await self._changes.record(publish, pull_request)
 
     async def _publish(
         self,
@@ -331,6 +347,7 @@ class IntegrationGate:
         run: TaskRun,
         targets: tuple[IntegrationTarget, ...],
         verdicts: list[tuple[CheckKind, bool, str]],
+        delivered: list[tuple[PublishRequest, PullRequestInfo]],
     ) -> tuple[Publication, ...] | GateReport:
         """Push and open the pull request of every checked repository whose
         Working Set role is ``target`` in the task's scope as it is now (read
@@ -418,10 +435,7 @@ class IntegrationGate:
                 return report(GateOutcome.SUPERSEDED)
             except RepositoryNotInAttemptError:
                 return report(GateOutcome.NOT_RECORDED)
-            if self._changes is not None:
-                # Best effort, bounded by its own deadline: the PR screen's changed
-                # files and diff (issue #185 item 6). Never fails the gate.
-                await self._changes.record(publish, pull_request)
+            delivered.append((publish, pull_request))
         if any(publication.problem is not None for publication in publications):
             return report(GateOutcome.NOT_PUBLISHED)
         return tuple(publications)

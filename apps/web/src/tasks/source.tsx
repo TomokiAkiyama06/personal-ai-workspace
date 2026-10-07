@@ -34,6 +34,8 @@ export interface TaskSource {
   getAudit(id: string): Promise<readonly AuditRow[]>;
   /** The pending tool approvals the person is asked for (of one task, if given). */
   listApprovals(taskId?: string): Promise<readonly ToolApproval[]>;
+  /** One of them by its id: the sheet opens one the bounded list does not hold. */
+  getApproval(id: string): Promise<ToolApproval>;
   /** Approve or reject one; resolves when the Backend stored the decision. */
   decideApproval(id: string, decision: ApprovalDecision): Promise<void>;
 }

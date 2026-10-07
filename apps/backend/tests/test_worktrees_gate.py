@@ -434,13 +434,17 @@ class FakePublisher:
 class FakeChangeReader:
     """Answers one changed file (or raises ``error``); records what it read."""
 
-    def __init__(self, log, error=None) -> None:
+    def __init__(self, log, error=None, state_of=None) -> None:
         self.log = log
         self.error = error
         self.calls = []
+        self.state_of = state_of
+        self.states = []
 
     async def read(self, request, pull_request):
         self.calls.append((request, pull_request))
+        if self.state_of is not None:
+            self.states.append(await self.state_of(request.task.id))
         self.log.append("changes")
         if self.error is not None:
             raise self.error
@@ -539,12 +543,19 @@ class PublishingGateTest(PostgresOrchestratorTestCase):
         # Issue #185 item 6: the PR screen's changed files, read when the pull
         # request was delivered and stored with its record.
         task_id = await self.task_in_state(TaskState.EVALUATING)
-        reader = FakeChangeReader(self.order)
+
+        async def state_of(task):
+            return (await self.snapshot(task)).state
+
+        reader = FakeChangeReader(self.order, state_of=state_of)
         recorder = ChangeRecorder(reader, PullRequestChangeStore(self.database))
 
         report = await self.gate(changes=recorder).evaluate(task_id)
 
         self.assertEqual(report.outcome, GateOutcome.COMPLETED)
+        # Read only once the task completed: never on its way (Codex review of
+        # #206).
+        self.assertEqual(reader.states, [TaskState.COMPLETED])
         self.assertEqual(
             self.order, ["test", "evaluator", "review", "publish", "changes"]
         )
