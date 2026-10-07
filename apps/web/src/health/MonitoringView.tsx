@@ -3,7 +3,7 @@
 // board's hosts and temperatures do not exist in the Backend, so its chips are
 // the watched areas of docs/UI_DESIGN.md (GPU / VRAM, Task Queue, PostgreSQL,
 // Recovery Repository, External Agent), its chart is GPU / VRAM and its alerts
-// are the severity changes (Decision 0080, Proposed).
+// are the severity changes (Decision 0080).
 //
 // Normal is compact: one quiet line, every component one row. Something
 // abnormal opens the details by itself: the banner, the worst area selected,

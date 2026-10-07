@@ -119,7 +119,7 @@ Design Canvas との差分（Backend が優先）: 上限の「GPU 時間（今�
 
 ## サーバー監視（PAW-067）
 
-[PAW-067](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/53) で、Design Canvas の Monitoring Board を `管理 › サーバー監視`（`/admin/monitoring`、Owner / Admin）に、ShellDark の Header の状態 Chip を全画面に実装しました（`src/health/`）。データは System Health の API（PAW-066、[Decision 0059](../../docs/decisions/0059-system-health-observability.md)）で、Board と Backend の対応・Chip の出し分け・更新の間隔は [Decision 0080](../../docs/decisions/0080-system-health-ui.md)（**Proposed**。推奨どおりに実装）です。
+[PAW-067](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/53) で、Design Canvas の Monitoring Board を `管理 › サーバー監視`（`/admin/monitoring`、Owner / Admin）に、ShellDark の Header の状態 Chip を全画面に実装しました（`src/health/`）。データは System Health の API（PAW-066、[Decision 0059](../../docs/decisions/0059-system-health-observability.md)）で、Board と Backend の対応・Chip の出し分け・更新の間隔は [Decision 0080](../../docs/decisions/0080-system-health-ui.md)（推奨どおりに実装）です。
 
 - Board の Host と温度は Backend に Source がないため、UI_DESIGN.md の領域（GPU / VRAM・タスクキュー・PostgreSQL・Recovery Repository・外部エージェント）を Chip にし、Card は VRAM・GPU 使用率・タスクキュー・受信、グラフは GPU / VRAM の推移（%、`表で見る` で同じ値の表）、アラートは Severity の変化（`GET /system/health/events`）です
 - 通常時は「すべて正常です」の 1 行と、Component ごとの閉じた 1 行だけ。異常時は Banner を出し、最も悪い領域を選び、異常な Component の理由と数値を自動で開きます。理由・Status は Code から Catalog で文にし、知らない Code はそのまま出します

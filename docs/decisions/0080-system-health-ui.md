@@ -1,6 +1,7 @@
 # System Health UI の方針（Monitoring Board と Backend の Component の対応、通常時の Compact と異常時の展開、Header の状態 Chip の出し分け、更新の間隔、通知からの導線）
 
-- Status: Proposed
+- Status: Approved
+- Approval: 2026-10-08、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで直接回答して承認（すべての判断点を推奨どおり承認。末尾の「承認時の決定」）
 - Date: 2026-10-07
 - Scope: PAW-067（[#53](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/53)）の `apps/web/src/health/`（`管理 › サーバー監視` の `MonitoringView`、Header の `HealthChip`、`HealthSource` と本番の `apiHealthSource`）、`apps/web/src/notifications/serverNotifications.ts`（System Health の通知の文言と Link）
 - Supersedes: なし。[Decision 0059](0059-system-health-observability.md)（Approved）の API・Capability・閾値、[Decision 0070](0070-stored-notifications-and-event-stream.md) の通知に従い、画面の見せ方だけを決める（書き換えない）。[Decision 0044](0044-web-app-serving-and-session.md) の「Design Canvas との差分」D8（Header の状態 Chip を出さない）は、API ができたのでこの Decision の 4 で埋める
@@ -83,3 +84,7 @@ Board の Layout（見出しの行・Banner・Chip の行・4 枚の Card・推�
 ## 承認後の扱い
 
 承認されたら `Approval` に記録し、Status を Approved に改める。方針を変えるときは、この Decision を書き換えず、新しい Decision から `Supersedes` する。
+
+## 承認時の決定（2026-10-08）
+
+Human は、作業 Session で判断が必要な点について推奨つきの説明を受け、直接回答して承認した（すべての判断点を推奨どおり承認）。
