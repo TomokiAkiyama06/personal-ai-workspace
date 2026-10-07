@@ -13,6 +13,7 @@ import { Icon } from "../shell/icons";
 import { DagGraph, NodeDetail } from "./DagGraph";
 import {
   ACCEPTED_CONTROLS,
+  approvalPath,
   type ControlCommand,
   type ControlOptions,
   type DagNode,
@@ -27,6 +28,7 @@ import {
   type TaskDetail,
   type TaskList,
   type TaskSummary,
+  type ToolApproval,
 } from "./model";
 import { CheckMark, nodeTone, StatePill, taskTone, useNow, useTaskStateLabel } from "./parts";
 import { type TaskSource, useTaskSource } from "./source";
@@ -452,11 +454,19 @@ function TaskDetailView({
         </p>
       )}
 
-      {data.state === "waiting" && data.waitReason && (
-        <div className={`wait-notice tone-${taskTone(data.state, data.waitReason)}`} role="status">
-          <Icon name="info" size={16} />
-          <span>{t(`tasks.waitNotice.${data.waitReason}`)}</span>
-        </div>
+      {data.state === "waiting" && data.waitReason === "approval" ? (
+        <ApprovalNotice source={source} taskId={data.id} version={data.version} />
+      ) : (
+        data.state === "waiting" &&
+        data.waitReason && (
+          <div
+            className={`wait-notice tone-${taskTone(data.state, data.waitReason)}`}
+            role="status"
+          >
+            <Icon name="info" size={16} />
+            <span>{t(`tasks.waitNotice.${data.waitReason}`)}</span>
+          </div>
+        )
       )}
 
       {data.currentStep && (
@@ -556,6 +566,55 @@ function TaskDetailView({
 
       <RepositoryTable task={data} />
     </article>
+  );
+}
+
+/**
+ * A task waiting for approval (the MobileTask board): what the person is asked
+ * to approve, with 確認 opening it (`/approvals/<id>`). Read again when the task
+ * changes; without an approval for this person (another member's task, or it
+ * was decided meanwhile) the plain notice stays.
+ */
+function ApprovalNotice({
+  source,
+  taskId,
+  version,
+}: {
+  source: TaskSource;
+  taskId: string;
+  version: number;
+}) {
+  const { t } = useI18n();
+  const [approval, setApproval] = useState<ToolApproval | null>(null);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: read again for a new version
+  useEffect(() => {
+    let current = true;
+    source
+      .listApprovals(taskId)
+      .then((items) => {
+        if (current) setApproval(items[0] ?? null);
+      })
+      .catch(() => {
+        if (current) setApproval(null);
+      });
+    return () => {
+      current = false;
+    };
+  }, [source, taskId, version]);
+  return (
+    <div className="wait-notice tone-warning approval-notice" role="status">
+      <Icon name="info" size={16} />
+      <span>
+        {approval
+          ? t("tasks.approvalNeeded", { tool: approval.tool })
+          : t("tasks.waitNotice.approval")}
+      </span>
+      {approval && (
+        <Link className="approval-open" to={approvalPath(approval.id)}>
+          {t("tasks.approvalOpen")}
+        </Link>
+      )}
+    </div>
   );
 }
 
