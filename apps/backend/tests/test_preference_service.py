@@ -438,11 +438,10 @@ class ConfirmHeldTest(PostgresPreferenceTestCase):
         (found,) = await self.preferences.candidates(me)
         self.assertEqual(found.memory_id, memory_id)
         self.assertIs(found.evidence.consistency, Consistency.CONFLICTING)
-        await self.preferences.confirm(
-            me,
-            HeldCandidateRef(entry, 0),
-            Confirmation(scope=TargetScope.USER, acknowledge_high_risk=True),
-        )
+        self.assertIs(found.evidence.risk_level, RiskLevel.LOW)
+        # Held because it contradicts a confirmed memory, not for risk: no
+        # acknowledgement needed.
+        await self.preferences.confirm(me, HeldCandidateRef(entry, 0), USER)
         old, new = self.versions(memory_id)
         self.assertEqual((old.status, new.content), ("superseded", "spaces"))
         self.assertEqual([r[2] for r in self.relations()], ["supersedes"])

@@ -980,7 +980,12 @@ class PreferenceConfirmationService(MemoryVersioningService):
             await lock_keys(session, owner, [held.key])
             # Read again under the key's lock: another answer may have come first.
             held = await self._held_ref(session, owner, ref)
-            risk = self._check_risk(confirmation, True, held.key, held.content)
+            risk = self._check_risk(
+                confirmation,
+                held.result is ItemResult.HELD_HIGH_RISK,
+                held.key,
+                held.content,
+            )
             content = (
                 confirmation.preference.content()
                 if confirmation.preference is not None
