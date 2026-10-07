@@ -4537,9 +4537,29 @@ PAW-062 の画面（`/agents`、`/pulls`、Web の `src/tasks/apiSource.ts`）�
 - 一覧の Project は Session の Membership から、Project ごとに Policy で `project.read` を判定します。Repository は、その ACL で `project.read` があるものだけを出し、ない Repository は名前も PR も出しません。
 - 存在しない Task と、読めない Project の Task はどちらも 403 です（Guard が区別しない）。
 - Task の入力、Log、Node の Goal / 結果、Event の詳細は返しません。
-- 未実装: 一覧の並列の上限 / VRAM、PR 画面・モバイルの Board（変更ファイル、Review の要約、Audit の行、Tool の承認、Diff）。Decision 0067 の 6・7。
+- 未実装: 一覧の並列の上限 / VRAM（Decision 0067 の 6）。
 
 Test: `tests/test_tasks_api.py`（PostgreSQL。見える範囲、ACL、操作の権限、Version、遷移表、Queue、Merge Ready）。
+
+### PR 画面とモバイルの Board（Issue #185 の 6、Decision 0078（Proposed））
+
+PR 画面の「変更されたファイル」「レビューの要点」「監査」と、MobileDiff（差分）・MobileApproval（Tool の承認）の Board の接続先です。`paw_backend/api/v1/boards.py` が経路、`paw_backend/api/v1/board_views.py` が読み取りです。方針は [Decision 0078](../../docs/decisions/0078-pr-screen-and-mobile-board-api.md)（**Proposed**。推奨どおりに実装）です。
+
+| Endpoint | Capability | 内容 |
+| --- | --- | --- |
+| `GET /api/v1/pull-requests/{record_id}/files` | `tasks.list` | PR を届けたときに記録した変更ファイル（Path・前の Path・状態・追加 / 削除の行数・Patch の有無）と合計。記録がなければ `recorded: false` |
+| `GET /api/v1/pull-requests/{record_id}/files/{index}` | `tasks.list` | 1 ファイルと、その Patch（Unified Diff。上限つき・Credential は Redact 済み）。ないファイルは 404 `file_not_found` |
+| `GET /api/v1/pull-requests/{record_id}/review` | `tasks.list` | 記録された Review / Evaluation と、その Attempt の DAG の Reviewer Node（Agent・Model・状態・終了時刻）。Check の本文は返さない |
+| `GET /api/v1/pull-requests/{record_id}/audit` | `tasks.list` | その Task と、その Task の Tool の承認の `audit_events` の行（新しい順、`limit` 1〜100、既定 50）。時刻・Action・allow / deny・理由・`agent` / `person` / `system` だけ |
+| `GET /api/v1/approvals` | `tasks.list` | 本人が決める（`requester_user_id` が本人の）、読める Project の `pending` で期限内の Tool の承認（`task_id` で絞れる、`limit` 1〜100）。`summary`・Level・Task の題名と Agent・読める Repository の名前・期限 |
+| `POST /api/v1/approvals/{approval_id}/decision` | 承認の Project の `project.task.run`（Audit 必須） | `{"decision": "approve" \| "reject"}` を `ApprovalService` で。本人以外は 404 `approval_not_found`、決定済みは 409 `approval_not_pending`、期限切れは 409 `approval_expired`。`strong_approval` の承認は 403 `strong_approval_unavailable`（Step-up は Fail closed のまま。拒否はできる） |
+
+- PR の 4 つの経路は、`GET /api/v1/pull-requests/{record_id}` と同じく、PR を読める人だけに答えます（Project と Repository の `project.read`。それ以外とない記録は 404 `pull_request_not_found`）。
+- 変更ファイルと差分は、Integration Gate が PR を記録した直後に `integration/changes.py` の `ChangeRecorder` が GitHub の `pulls/{n}/files` を作成者の `gh api` で読み、`pull_request_changes`（Migration `0190`）に保存したものです。ファイルは最大 300、Patch は先頭 50 ファイル・各 10,000 文字まで、`gh` の出力の上限に最悪の名前でも収まる Page の大きさで読みます。全体で 120 秒、失敗しても Task は止めません（Best effort）。`IntegrationGate(changes=...)` に渡します（Gate の本番の組み立ては Gate を動かす Issue で行うため、それまで本番では「記録されていません」）。
+- Migration `0190` は `pull_request_changes`（Application の Role は SELECT・INSERT・記録の列の UPDATE）と、Index `ix_audit_events_resource (resource_id, occurred_at)`・`ix_tool_approvals_pending_requester`（`pending` の行だけ）を足します。
+- Merge の経路はありません。
+
+Test: `tests/test_pull_request_boards_api.py`（PostgreSQL。見える範囲、差分、Reviewer、Audit の行の範囲と形、承認の一覧と承認・拒否・Strong Approval・本人以外）、`tests/test_pull_request_changes.py`（GitHub の Fake と実際の `jq`: 上限・Redact・出力の上限・途中で変わった PR、Recorder の Best effort、Migration 0190 と Model の一致）、`tests/test_worktrees_gate.py`（PR の記録の後にだけ読み、失敗しても Task は完了する）。
 
 ## 依存 Package
 

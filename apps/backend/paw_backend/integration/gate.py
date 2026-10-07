@@ -29,7 +29,10 @@ only then is the task completed. A pull request that could not be made keeps
 the task ``evaluating`` (``NOT_PUBLISHED``: the gate may run again). When
 Complete is still refused (no publisher, a pull request that is a draft or was
 closed, a ``target`` without an integrated result) the task stays
-``evaluating`` with its results recorded (``REQUIREMENTS_NOT_MET``). When a
+``evaluating`` with its results recorded (``REQUIREMENTS_NOT_MET``). With ``changes``
+(a ``changes.ChangeRecorder``, issue #185 item 6) the changed files of each pull
+request are read from GitHub right after it was recorded, for the PR screen: best
+effort, bounded by their own deadline, never a reason to stop. When a
 write the Tool Broker admitted may still be running on a repository, a passing
 result is not recorded and nothing is completed or failed (``NOT_RECORDED``):
 the gate may run again later.
@@ -208,6 +211,7 @@ class IntegrationGate:
         worktrees: GitWorktreeCoordinator,
         checks: Mapping[CheckKind, Sequence[object]],
         publisher: object | None = None,
+        changes: object | None = None,
     ) -> None:
         if not isinstance(tasks, TaskService):
             raise TypeError("tasks must be a TaskService")
@@ -229,12 +233,17 @@ class IntegrationGate:
             raise TypeError("checks must map each CheckKind to its checks")
         if publisher is not None:
             require_async_method(publisher, "publish", 1)
+        if changes is not None:
+            if publisher is None:
+                raise TypeError("changes are read only with a publisher")
+            require_async_method(changes, "record", 2)
         self._tasks = tasks
         self._store = store
         self._authority = authority
         self._worktrees = worktrees
         self._checks = ordered
         self._publisher = publisher
+        self._changes = changes
 
     async def evaluate(self, task_id: uuid.UUID) -> GateReport:
         """Run every check on the task's integrated result and complete or fail
@@ -361,17 +370,16 @@ class IntegrationGate:
             # right before the push (Codex review of #159).
             if not await self._still_evaluating(task.id, run):
                 return report(GateOutcome.SUPERSEDED)
+            publish = PublishRequest(
+                task=task,
+                run=run,
+                repository=repository,
+                project_state=scope.projects.get(repository.project_id),
+                target=target,
+                checks=checks,
+            )
             try:
-                pull_request = await self._publisher.publish(
-                    PublishRequest(
-                        task=task,
-                        run=run,
-                        repository=repository,
-                        project_state=scope.projects.get(repository.project_id),
-                        target=target,
-                        checks=checks,
-                    )
-                )
+                pull_request = await self._publisher.publish(publish)
                 if not isinstance(pull_request, PullRequestInfo):
                     raise TypeError("a publisher must return a PullRequestInfo")
             except PullRequestNotPublishedError as error:
@@ -410,6 +418,10 @@ class IntegrationGate:
                 return report(GateOutcome.SUPERSEDED)
             except RepositoryNotInAttemptError:
                 return report(GateOutcome.NOT_RECORDED)
+            if self._changes is not None:
+                # Best effort, bounded by its own deadline: the PR screen's changed
+                # files and diff (issue #185 item 6). Never fails the gate.
+                await self._changes.record(publish, pull_request)
         if any(publication.problem is not None for publication in publications):
             return report(GateOutcome.NOT_PUBLISHED)
         return tuple(publications)
