@@ -617,16 +617,39 @@ class CodingCapacityTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(scheduler.coding_capacity().limit, 3)
         coding = (await scheduler.try_acquire(request(CO, tokens=8_000))).lease
         capacity = scheduler.coding_capacity()
-        # The running agent and (112,066 - 8,000) // 32,768 = 3 more.
-        self.assertEqual((capacity.running, capacity.limit), (1, 4))
+        # The running agent counts as grown to a whole context (Codex review
+        # #212): (112,066 - 32,768) // 32,768 = 2 more.
+        self.assertEqual((capacity.running, capacity.limit), (1, 3))
         # A chat is not a coding agent, but its context takes room in the pool.
         chat = (await scheduler.try_acquire(request(IC, tokens=30_000))).lease
         capacity = scheduler.coding_capacity()
-        # (112,066 - 38,000) // 32,768 = 2 more.
-        self.assertEqual((capacity.running, capacity.limit), (1, 3))
+        # (112,066 - 32,768 - 30,000) // 32,768 = 1 more.
+        self.assertEqual((capacity.running, capacity.limit), (1, 2))
         await chat.release()
         await coding.release()
         self.assertEqual(scheduler.coding_capacity().limit, 3)
+
+    async def test_short_running_agents_are_counted_at_their_whole_context(self):
+        # Codex review #212: one short agent must not make room for a second
+        # whole context that the pool could not hold once both have grown.
+        scheduler, *_ = build()
+        await scheduler.refresh()
+        lease = (await scheduler.try_acquire(request(CO, tokens=8_000))).lease
+        capacity = scheduler.coding_capacity()
+        self.assertEqual((capacity.running, capacity.limit), (1, 1))
+        await lease.release()
+        # Many short agents: each is counted as a whole context, never fewer
+        # than run.
+        scheduler, *_ = build((main_spec(max_context_tokens=32_768),))
+        await scheduler.refresh()
+        leases = [
+            (await scheduler.try_acquire(request(CO, tokens=2_000))).lease
+            for _ in range(5)
+        ]
+        capacity = scheduler.coding_capacity()
+        self.assertEqual((capacity.running, capacity.limit), (5, 5))
+        for lease in leases:
+            await lease.release()
 
     async def test_a_context_longer_than_the_coding_share_counts_as_the_share(self):
         scheduler, *_ = build((main_spec(max_context_tokens=200_000),))

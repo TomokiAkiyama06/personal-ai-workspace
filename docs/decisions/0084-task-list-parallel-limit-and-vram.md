@@ -25,7 +25,8 @@ PAW-062 の Task の画面（`/agents`）は、一覧の見出しの右に「並
 
 - `running`: Main Model（Role が `main` の Deployment）の GPU で動いている Coding の Lease の数。
 - `more`: Main が **最も長い Context の Coding の要求**をいまあと何件受け付けるか（`ComputeScheduler.parallelism`）。最も長い Context は Main の `max_context_tokens` で、KV Pool の Coding の取り分（`kv_safety` × Coding の Ceiling）がそれより小さければ取り分まで（どちらも Config の値）。
-- 理由: Coding Agent の会話は Task の間に伸び、Main の最も長い Context に近づく（Issue #200 の KV の不足）。「最後まで並べて動かせる Agent の数」は 1 件を最も長い Context として数えた数で、Context が Pool を埋めるほど下がる（要件の「Context が長い Task が多ければ減らす」）。動いている Agent が短い Context でも、いまの Pool の空きで数えるので、Agent が増えると下がる。
+- 動いている Agent も最も長い Context まで伸びるとして数える（いまの予約が短くても、最も長い Context との差を予約に足してから `more` を数える）。短い Agent が 1 件動いただけで、伸びきった 2 件が Pool に入らないのに上限が 2 になる、ということを避ける（Codex の P2、PR #212）。
+- 理由: Coding Agent の会話は Task の間に伸び、Main の最も長い Context に近づく（Issue #200 の KV の不足）。「最後まで並べて動かせる Agent の数」は 1 件を最も長い Context として数えた数で、Chat などほかの要求の Context が Pool を埋めるほど下がる（要件の「Context が長い Task が多ければ減らす」）。動いている Agent の数より小さくはならない。
 - 読むだけで、何も受け付けず何も予約しない（`coding_capacity()` は `status()` と同じくメモリ上の値だけを読む）。
 - 代案 A: 動いている Lease の平均の Context の長さで数える。短い要求が 1 件動いただけで 1 から 14 のように跳ね、会話が伸びると守れない数を出す。
 - 代案 B: Main の `max_sequences`（Runtime が同時に動かす要求の数）。KV を見ない固定値で、要件の「固定値にしない」に合わない。
@@ -58,7 +59,7 @@ Migration は不要（メモリ上の Scheduler の値だけ）。予約され�
 
 ## 決めてほしいこと
 
-1. **並列の上限 = Main の GPU で動いている Coding の Agent の数 ＋ 最も長い Context（Main の `max_context_tokens`、KV の Coding の取り分まで）の Agent をあと何件受け付けるか**（1）でよいか。推奨: はい。代案 A: 動いている Lease の平均の長さで数える。代案 B: Main の `max_sequences`。代案 C: Worker 数の設定。
+1. **並列の上限 = Main の GPU で動いている Coding の Agent の数 ＋ 最も長い Context（Main の `max_context_tokens`、KV の Coding の取り分まで）の Agent をあと何件受け付けるか（動いている Agent も最も長い Context まで伸びるとして数える）**（1）でよいか。推奨: はい。代案 A: 動いている Lease の平均の長さで数える。代案 B: Main の `max_sequences`。代案 C: Worker 数の設定。
 2. **Local の GPU の Agent だけを数え、Cloud は数えない。Scheduler / Main がない構成では `capacity` を返さない**（2）でよいか。推奨: はい。
 3. **Main が受け付けられないとき（GPU にいない・Probe が古い・Exclusive・縮退の 4 段目以降）は `running` だけ（0 もありうる）を出す**（3）でよいか。推奨: はい。代案: 出さない。
 4. **VRAM は `admin.system_health.view`（Owner / Admin）にだけ返し、並列の上限は `tasks.list` の全員に返す。Audit はしない**（4）でよいか。推奨: はい（Decision 0059 の 3 のまま）。代案 A: 全員に VRAM（0059 の 3 を Supersedes）。代案 B: VRAM を出さない。

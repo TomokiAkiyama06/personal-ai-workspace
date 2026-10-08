@@ -230,12 +230,13 @@ class TasksApiTest(PostgresRepositoryTestCase):
         response = await self.client.get("/api/v1/tasks")
 
         self.assertEqual(response.status_code, 200)
-        # The running agent; (112,066 - 8,000) // 65,536 = 1 more of a whole
-        # context. A person without System Health's detail sees no VRAM.
+        # The running agent, counted as grown to a whole context: (112,066 -
+        # 65,536) // 65,536 = no more. A person without System Health's detail
+        # sees no VRAM.
         self.assertEqual(
             response.json()["capacity"],
             {
-                "parallel_limit": 2,
+                "parallel_limit": 1,
                 "running": 1,
                 "vram_used_bytes": None,
                 "vram_total_bytes": None,
