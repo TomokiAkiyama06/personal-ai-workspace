@@ -62,7 +62,7 @@ import logging
 import math
 import uuid
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from itertools import count
 
 from paw_backend.compute.accounting import (
@@ -312,6 +312,24 @@ class ComputeStatus:
             if deployment.name == name:
                 return deployment
         return None
+
+
+@dataclass(frozen=True, slots=True)
+class CodingCapacity:
+    """The parallel limit of the local coding agents now (Decision 0084,
+    Proposed; the task list of PAW-062 shows it).
+
+    ``running``: the Coding leases on the main models' GPU. ``limit``: those and
+    how many more agents of a whole context each (the main model's longest
+    context, within the Coding share of its KV pool) the scheduler would admit
+    now, the running agents counted as grown to a whole context each. A coding agent's
+    conversation grows towards that length, so this is the number that can run
+    side by side to the end; it falls as contexts fill the pool and is
+    ``running`` alone while the model is not on the GPU, the probe is stale, an
+    Exclusive job or a relief step holds Coding work back."""
+
+    running: int
+    limit: int
 
 
 @dataclass(eq=False, slots=True)
@@ -694,6 +712,62 @@ class ComputeScheduler:
             safety=self._config.kv_safety,
             ceilings=self._config.class_ceilings,
         )
+
+    def coding_capacity(self) -> CodingCapacity | None:
+        """The parallel limit of the local coding agents (see
+        :class:`CodingCapacity`) over every main model; ``None`` when none is
+        configured. Reads the state only: nothing is admitted or reserved."""
+        mains = [
+            entry
+            for entry in self._deployments.values()
+            if entry.spec.role is ModelRole.MAIN
+        ]
+        if not mains:
+            return None
+        running = more = 0
+        for entry in mains:
+            agent = self._agent_tokens(entry)
+            coding = [
+                lease
+                for lease in entry.leases
+                if lease.resource_class is ResourceClass.CODING
+            ]
+            running += len(coding)
+            # 0 while Coding work is held back (not on the GPU, a stale probe,
+            # Exclusive, relief): then no new agent starts at all.
+            if not self.parallelism(entry.spec.name, agent, ResourceClass.CODING):
+                continue
+            # The running agents count as grown to a whole context (Codex
+            # review #212): only what is left after that admits new ones.
+            growth = sum(max(0, agent - lease.tokens) for lease in coding)
+            kv = self._kv(entry)
+            more += parallelism(
+                replace(kv, reserved_tokens=kv.reserved_tokens + growth),
+                agent,
+                ResourceClass.CODING,
+                safety=self._config.kv_safety,
+                ceilings=self._config.class_ceilings,
+            )
+        return CodingCapacity(running=running, limit=running + more)
+
+    def _agent_tokens(self, entry: _Deployment) -> int:
+        """A whole context of ``entry`` that a Coding request may have now."""
+        spec = entry.spec
+        config = self._config
+        tokens = spec.max_context_tokens
+        if spec.kv_capacity_tokens:
+            tokens = min(
+                tokens,
+                usable_tokens(
+                    self._kv(entry),
+                    ResourceClass.CODING,
+                    safety=config.kv_safety,
+                    ceilings=config.class_ceilings,
+                ),
+            )
+        # The relief step 5's reduced context does not apply: from step 4 no
+        # Coding work is admitted at all.
+        return max(1, tokens)
 
     def status(self) -> ComputeStatus:
         fresh = self._fresh()

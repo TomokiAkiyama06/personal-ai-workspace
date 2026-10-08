@@ -872,7 +872,7 @@ export function MonitoringView() {
             chartShown = request;
             setChart({
               status: "ready",
-              value: percentPoints({ gpu, used, reserved, total }, step),
+              value: percentPoints({ gpu, used, reserved, total }, step, { since, until }),
             });
           }
         },

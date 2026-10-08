@@ -636,6 +636,59 @@ class RollbackTest(ReleaseToolTestCase):
         self.assertIn("source digest", out)
         self.assertFalse([c for c in self.world.calls if c.startswith("r1:")])
 
+    def test_status_does_not_run_a_changed_current_release(self):
+        # Codex review #204 (5450071434): status ran deploy-status of the current
+        # release without verifying it, with the deployment environment.
+        self.installed()
+        self.tamper("r1")
+        code, out = self.run_tool("status")
+        self.assertEqual(code, paw_release.EXIT_REFUSED, out)
+        self.assertIn("source digest", out)
+        self.assertFalse([c for c in self.world.calls if c.startswith("r1:")])
+
+    def test_a_current_link_outside_the_release_root_is_refused(self):
+        # Codex review #204 (5450071434): ``<anything>/releases/<version>`` was
+        # taken for ``<root>/releases/<version>``.
+        self.installed()
+        outside = self.tmp / "elsewhere" / "releases" / "r1"
+        outside.mkdir(parents=True)
+        link = self.root / "current"
+        for target in (outside, Path("..") / "elsewhere" / "releases" / "r1"):
+            with self.subTest(target=str(target)):
+                link.unlink()
+                link.symlink_to(target)
+                self.world.calls.clear()
+                code, out = self.run_tool("status")
+                self.assertEqual(code, paw_release.EXIT_ENVIRONMENT, out)
+                self.assertIn("outside releases/", out)
+                self.assertFalse(self.world.calls)
+        # Codex review of #213: a release directory that is itself a link out of
+        # the root is refused too, by ``current`` and by any other read.
+        copy = self.tmp / "other" / "r9"
+        shutil.copytree(self.root / "releases" / "r1", copy, symlinks=True)
+        manifest = copy / paw_release.MANIFEST
+        data = json.loads(manifest.read_text())
+        manifest.write_text(json.dumps({**data, "version": "r9"}))
+        (self.root / "releases" / "r9").symlink_to(copy)
+        link.unlink()
+        link.symlink_to(Path("releases") / "r9")
+        self.world.calls.clear()
+        code, out = self.run_tool("status")
+        self.assertEqual(code, paw_release.EXIT_ENVIRONMENT, out)
+        self.assertIn("outside releases/", out)
+        self.assertFalse(self.world.calls)
+        with self.assertRaises(paw_release.ReleaseError):
+            paw_release.load_release(paw_release.load_config(self.config), "r9")
+        # The forms the tool writes, and the absolute path of the same release.
+        for target in (Path("releases") / "r1", self.root / "releases" / "r1"):
+            with self.subTest(target=str(target)):
+                link.unlink()
+                link.symlink_to(target)
+                self.assertEqual(
+                    paw_release.current_version(paw_release.load_config(self.config)),
+                    "r1",
+                )
+
     def test_a_rollback_from_a_changed_release_runs_only_the_targets_tools(self):
         self.installed()
         self.assertEqual(self.run_tool("update", "r2")[0], 0)

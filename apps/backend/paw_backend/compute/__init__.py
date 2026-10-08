@@ -75,6 +75,7 @@ from paw_backend.compute.runtimes import (
 )
 from paw_backend.compute.scheduler import (
     Admission,
+    CodingCapacity,
     ComputeLease,
     ComputeRequest,
     ComputeScheduler,
@@ -88,6 +89,7 @@ __all__ = [
     "RESUME_REASON",
     "Admission",
     "CloudPolicy",
+    "CodingCapacity",
     "CommandModelControl",
     "ComputeConfig",
     "ComputeError",
