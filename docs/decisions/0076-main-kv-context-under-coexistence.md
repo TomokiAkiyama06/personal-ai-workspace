@@ -23,12 +23,12 @@ Issue #200 は次の 4 つの候補を比べて提案することを求めてい
 | 候補 | 0.51・4 並列での KV（Pool の 95% 以上の時間、v1 / v2） | 新しい Node が予約の上限で待つ時間（3 を入れた場合） | 費用・危険 |
 | --- | ---: | ---: | --- |
 | 何もしない | 6.3% / 10.1% | （予約に反映しない） | Preemption・待ち・約 1.3 倍の所要。Interactive も vLLM の中で待つ |
-| **古い Reasoning を外す（直近 2 Step を残す、32k から）** | **0% / 0%**（Peak 267k） | **6.8% / 3.1%** | 正解数への影響は未測定（GPU で約 13 時間の Run）。Prefix cache に乗らない Prefill が 1 呼び出しあたり約 0.8k → 3.2k token |
+| **古い Reasoning を外す（直近 2 Step を残す、32k から）** | **0% / 0%**（Peak 267k） | **23.6% / 10.3%** | 正解数への影響は未測定（GPU で約 13 時間の Run）。Prefix cache に乗らない Prefill が 1 呼び出しあたり約 0.8k → 3.2k token |
 | Main に割り当てを足す: Memory Worker の KV 4 → 2 GiB（0.53） | 0.4% / 5.2% | | Memory Worker の同時処理（16k × 4）が減る |
 | 同: Embedding を CPU へ（0.55） | 0.0% / 2.0% | | Embedding の CPU の Latency は未測定 |
 | 同: Embedding と Reranker を CPU へ（0.69） | 0% / 0% | | Reranker（4B）の CPU の Latency は未測定で、秒の単位になりうる（今は p95 約 460 ms） |
 | 並列を 3 に固定する | 0.0% / 0.7% | 3.3% / 5.6% | 要件（並列 Agent 数を固定値にしない）に反する。所要が延びる |
-| **会話の伸びを予約に反映する（Reasoning は残す）** | （Admission で抑える） | 32.7% / 31.2% | 実質 3 並列に近い。Interactive の分が Admission で守られる |
+| **会話の伸びを予約に反映する（Reasoning は残す）** | （Admission で抑える） | 51.1% / 49.2% | 実質 3 並列に近い。Interactive の分が Admission で守られる |
 
 ## 提案
 
@@ -51,11 +51,11 @@ Issue #200 は次の 4 つの候補を比べて提案することを求めてい
 
 ### 3. Scheduler は会話の伸びを予約に反映する（実行中の Node の予約は増やせるが待たせない。新しい Node は上限で待つ）
 
-- `ComputeLease` に予約の大きさを変える操作（例: `resize(context_tokens)`）を足す。Local の Agent の Runtime（Decision 0083 の `LocalAgentRuntime`）は、毎回の Request の前に「直前の `prompt_tokens` + 直前の出力 + 新しい Tool の結果の Byte ÷ 3 + 応答の予備 8,192」で予約を更新する（減らすこともある）。
+- `ComputeLease` に予約の大きさを変える操作（例: `resize(context_tokens)`）を足す。Local の Agent の Runtime（Decision 0083 の `LocalAgentRuntime`）は、毎回の Request の前に「直前の `prompt_tokens` + 直前の出力 + 新しい Tool の結果の Byte ÷ 3 + その Request の `max_tokens`」で予約を更新する（減らすこともある）。応答の分は Decision 0039 の 3 のとおり、Runtime が渡す `max_tokens`（Benchmark と同じなら 16,384）を使い、8,192 の既定は使わない。
 - **実行中の Node の予約の増加は待たせず、Class の上限と `kv_safety` を超えても認める**。増加を待たせると、4 つの Agent が互いの終わりを待って止まりうる（どれも予約を返さない）。超えた分は vLLM の中の Preemption として現れる（今と同じ）が、新しい Node の Admission は、予約の合計が上限を下回るまで待つ（0037 の 4 の待ち行列のまま）。このため 0037 の 2 の「`kv_safety` までしか予約できない」を、新しい Node の Admission に限る形に置き換える（Supersedes）。
-- 予約の増加は、Deployment の Context の上限（`max_context_tokens`、131,072）を超えたら断る（`CONTEXT_TOO_LONG`。Agent はその Node を Context 不足で終える）。
+- 予約の増加は、Prompt と `max_tokens` の和が Deployment の Context の上限（`max_context_tokens`、131,072）を超えたら断る（`CONTEXT_TOO_LONG`。Agent はその Node を Context 不足で終える。vLLM が断る Request を Scheduler も通さない）。
 - vLLM の `/metrics` の `vllm:kv_cache_usage_perc` を `ModelControl.kv_usage` に配線する（今の `CommandModelControl.kv_usage` は常に `None`）。0037 の 2 の「予約と観測の大きい方」が実際に効くようにする。
-- 見積もり（報告の 3）: 1 と組み合わせると、4 並列の上限のまま新しい Node が待つのは Run の 3〜7% の時間。1 なしでは約 31〜33%（実質 3 並列に近い）。Interactive の分（Pool × 0.90 のうち Coding の 95% を超える分）は Admission で残る。
+- 見積もり（報告の 3、`max_tokens` 16,384）: 1 と組み合わせると、4 並列の上限のまま新しい Node が待つのは Run の 10〜24% の時間。1 なしでは約 49〜51%（実質 3 並列に近い）。Interactive の分（Pool × 0.90 のうち Coding の 95% を超える分）は Admission で残る。
 - Decision 0075 の 3 のとおり、この変更の確認では Scheduler の Admission を通した共存の Run を行う（実装の PR で計画し、GPU を使う前に Human の許可を得る）。
 
 ### 4. Main の割り当て・Memory Worker・Embedding / Reranker の置き場所、並列の上限、Context の長さは変えない

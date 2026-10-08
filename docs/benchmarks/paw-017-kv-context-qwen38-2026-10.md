@@ -4,7 +4,7 @@
 - 材料（どれも既にある Run の記録で、この分析のために GPU は使っていない）:
   - 10-07 の共存の確認 Run（Qwen3.8-27B-FP8、0.51、paw-seed-v1 の 24 Task × 3 回。[#180 の報告](https://github.com/TomokiAkiyama06/personal-ai-workspace/pull/210) の `docs/benchmarks/paw-017-coexist-qwen38-2026-10.md`）: Trace と vLLM の `/metrics`（5 秒ごと）。`/data/results/paw-bench-2026-10-07`
   - 10-05 / 10-06 の paw-seed-v2 の比較 Run（Qwen3.8-27B-FP8、単独 0.90、49 Task × 3 回。[paw-seed-v2 の報告](paw-017-seed-v2-2026-10.md)）: Trace。`/data/results/paw-bench-2026-10-05`
-- 分析の Script と出力は Repository の外の `/data/results/paw-analysis-200-2026-10-08`（`load.py`・`a_tasks.py`・`b_sim.py`・`c_grid.py`・`d_resv.py`・`e_thr.py`、出力は `output.txt`）。Trace は Hidden check の内容を含むため Repository に入れない（Decision 0041 の 4）
+- 分析の Script と出力は Repository の外の `/data/results/paw-analysis-200-2026-10-08`（`load.py`・`a_tasks.py`・`b_sim.py`・`c_grid.py`・`d_resv.py`・`e_thr.py`・`f_resv16k.py`、出力は `output.txt`）。Trace は Hidden check の内容を含むため Repository に入れない（Decision 0041 の 4）
 
 ## 1. 何が足りないか
 
@@ -71,17 +71,17 @@ Pool の大きさ（Footprint の勘定は Decision 0075 と同じ。Main の予
 
 ### Scheduler が会話の伸びを予約に反映した場合
 
-各 Agent の予約を「今の Prompt + 応答の予備 8,192 token」とし、Node の開始から終わりまで（Tool の実行中も）持つとして、Coding の予約の上限（Pool × `kv_safety` 0.90 × Coding 0.95 = 260.8k token）を超える時間を数えた。超えている間は、新しい Node の Admission が待つ。
+各 Agent の予約を「今の Prompt + その Request の応答の上限（`max_tokens`）」とし、Node の開始から終わりまで（Tool の実行中も）持つとして、Coding の予約の上限（Pool × `kv_safety` 0.90 × Coding 0.95 = 260.8k token）を超える時間を数えた。超えている間は、新しい Node の Admission が待つ。応答の上限は Harness と同じ 16,384 token を主に示し、Runtime が 8,192 に絞った場合も参考に示す（Decision 0039 の 3: Runtime が `max_tokens` を渡せるときはその値で予約する）。
 
-| 並列の上限 | Reasoning | 予約の Peak（v1 共存 / v2） | 上限を超える時間（v1 共存 / v2） |
-| ---: | --- | ---: | ---: |
-| 4 | 残す | 406k / 431k | **32.7% / 31.2%** |
-| 4 | 直近 2 Step（32k から） | 317k / 308k | **6.8% / 3.1%** |
-| 3 | 残す | 299k / 332k | 3.3% / 5.6% |
-| 3 | 直近 2 Step | 237k / 252k | 0% / 0% |
+| 並列の上限 | Reasoning | 予約の Peak（v1 共存 / v2） | 上限を超える時間（`max_tokens` 16,384、v1 共存 / v2） | 参考: `max_tokens` 8,192 |
+| ---: | --- | ---: | ---: | ---: |
+| 4 | 残す | 455k / 472k | **51.1% / 49.2%** | 32.7% / 31.2% |
+| 4 | 直近 2 Step（32k から） | 366k / 349k | **23.6% / 10.3%** | 6.8% / 3.1% |
+| 3 | 残す | 324k / 357k | 14.2% / 12.7% | 3.3% / 5.6% |
+| 3 | 直近 2 Step（32k から） | 262k / 277k | 0.4% / 0.5% | 0% / 0% |
 
-- Reasoning を残したまま伸びを予約に反映すると、Run の約 3 割の時間は新しい Node が待つ（実質 3 並列に近い）。直近 2 Step にすると待つ時間は 3〜7% に減る。
-- 予約の Peak が上限を超えるのは、実行中の Node の伸びを止めない（3 の Decision の案）ため。そのとき vLLM の中では Pool に収まっている（上の表の Peak 267k < 305k）。
+- Reasoning を残したまま伸びを予約に反映すると、Run の約半分の時間は新しい Node が待つ（実質 3 並列に近い）。直近 2 Step にすると待つ時間は 10〜24% に減る。応答の上限を 8,192 にすれば 3〜7% だが、Qwen3.8 は 16,384 に達する応答もある（Decision 0039 の実測）ので、上限を絞るかどうかはこの分析では決めない。
+- 予約は応答の上限まで数えるので、実際の KV の使用（上の表の Peak 267k < 305k）より大きい。予約の Peak が上限を超えるのは、実行中の Node の伸びを止めない（Decision 0076 の 3 の案）ため。
 
 ## 4. 測っていないこと
 
