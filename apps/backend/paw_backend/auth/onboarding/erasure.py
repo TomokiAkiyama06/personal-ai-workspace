@@ -155,6 +155,8 @@ PERSONAL_TABLES: tuple[tuple[str, str], ...] = (
     ("user_invitations", "user_id"),
     ("setup_tokens", "user_id"),
     ("conversations", "owner_user_id"),
+    # Goes with its journal entry (cascade); listed so that it is verified too.
+    ("memory_preference_resolutions", "owner_user_id"),
     ("memory_journal_entries", "owner_user_id"),
     ("memory_consolidation_keys", "owner_user_id"),
     ("connection_quotas", "user_id"),
