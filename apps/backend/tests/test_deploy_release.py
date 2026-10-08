@@ -591,6 +591,21 @@ class RollbackTest(ReleaseToolTestCase):
         self.assertEqual(code, 0, out)
         self.assertEqual(self.current(), "r1")
 
+    def test_compatibility_is_read_from_the_release_that_knows_the_revision(self):
+        # Codex review #204 (80d3189): after r3 -> r2 (application only) the
+        # database is at r3's head, which r2's manifest does not know.
+        expand = 'paw_compatibility: str = "expand"'
+        self.build("r1", "0001", None)
+        self.build("r2", "0002", "0001", expand)
+        self.build("r3", "0003", "0002", expand)
+        self.assertEqual(self.run_tool("install", "r1")[0], 0)
+        self.assertEqual(self.run_tool("update", "r2")[0], 0)
+        self.assertEqual(self.run_tool("update", "r3")[0], 0)
+        self.assertEqual(self.run_tool("rollback", "--to", "r2")[0], 0)
+        code, out = self.run_tool("rollback")
+        self.assertEqual(code, 0, out)
+        self.assertEqual((self.current(), self.world.revision), ("r1", "0003"))
+
     def test_only_to_a_known_good_release(self):
         self.installed()
         code, out = self.run_tool("rollback", "--to", "r3")

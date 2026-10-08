@@ -778,11 +778,7 @@ class Tool:
                     "point is taken and verified first)",
                 )
             else:
-                steps = (
-                    current.path_between(revision, target.schema_head)
-                    if current.schema_head
-                    else None
-                )
+                steps = self.steps_between(revision, target.schema_head, current)
                 compatible = bool(steps) and all(
                     step.compatibility == EXPAND for step in steps
                 )
@@ -804,6 +800,26 @@ class Tool:
             "passed" if failed.code == 0 else f"failed: {failed.stderr}",
         )
         return Plan(current_name, target.version, revision, migration, checks)
+
+    def steps_between(
+        self, newer: str, older: str | None, first: Release
+    ) -> list[Migration] | None:
+        """The migrations from ``older`` up to ``newer``, read from the first
+        release whose manifest knows ``newer``: ``first``, else any built one
+        (after an application-only rollback the database is newer than the
+        current release, Codex review #204)."""
+        candidates = [first] + [
+            v for v in list_versions(self.config) if v != first.version
+        ]
+        for candidate in candidates:
+            release = (
+                candidate
+                if isinstance(candidate, Release)
+                else load_release(self.config, candidate)
+            )
+            if newer in release.migrations:
+                return release.path_between(newer, older)
+        return None
 
     def show_plan(self, plan: Plan) -> None:
         for entry in plan.checks:
@@ -871,7 +887,7 @@ class Tool:
                         "the schema revision is unknown: give --restore-point"
                     )
                 if revision != target.schema_head:
-                    steps = current.path_between(revision, target.schema_head)
+                    steps = self.steps_between(revision, target.schema_head, current)
                     if not steps or any(s.compatibility != EXPAND for s in steps):
                         raise ReleaseError(
                             f"the database ({revision}) is not backward compatible "
