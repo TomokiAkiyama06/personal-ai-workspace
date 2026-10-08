@@ -233,6 +233,7 @@ Endpoint は `/api/v1` 以下です。OpenAPI Schema は `/api/v1/openapi.json` 
 | `/api/v1/auth/invitations/*`、`/api/v1/auth/users/*`、`/api/v1/auth/pairing/*` | 招待、User の削除・復元、端末の Pairing（13 個の Endpoint。うち 3 個が公開）。[User Invite / Device Pairing / Lifecycle](#user-invite--device-pairing--lifecycle) |
 | `/api/v1/admin/compute/full-gpu` | Kaggle / Full GPU Mode の状態・開始・終了（`GET` / `POST` / `DELETE`、`admin.compute.full_gpu`。Scheduler がない構成は 503）。[Application への組み込み](#application-への組み込みissue-165decision-0058proposed) |
 | `/api/v1/memory/*` | Memory 画面の Scope の木と件数・一覧（検索）・履歴・出典、編集と復元（`expected_version`、衝突は 409 `memory_version_conflict`）。入口は本人の Memory への `memory.read`。[Memory の HTTP API](#memory-の-http-apiissue-186decision-0068proposed) |
+| `/api/v1/memory/preferences/*` | Inferred Preference の候補と根拠・推奨 Scope、確認（`acknowledge_high_risk` なしの高リスクは 409）・保存しない・自由入力の構造化プレビュー。入口は本人の Memory への `memory.read`。[Inferred Preference の確認 Flow](#inferred-preference-の確認-flowissue-38paw-044decision-0081) |
 | `/api/v1/usage`、`/api/v1/quotas/me`、`/api/v1/users/{id}/quotas*`、`/api/v1/admin/users` | 使用状況の集計、Quota の閲覧と変更（Passkey Step-up）、User の一覧。[使用状況と Quota の HTTP API](#使用状況と-quota-の-http-apiissue-187decision-0069proposed) |
 
 Readiness は 200 または 503 で、Body の形は同じです。
@@ -3701,6 +3702,29 @@ Service と Job は、Revision `0026` / `0040` / `0071` が与えた権限（`me
 - 手動の `supersedes` の取り消し（Decision 0065）は作っていません（Decision 0068 の 12。Domain の変更が要るため別の Issue）。
 
 Test は `tests/test_memory_board.py`（読み取りモデル。見えてはいけないもの: 他人の Private Memory、メンバーでない Project、`read` を外した Repository、広げる前の版、読めない辺、削除済みの Shared）、`tests/test_memory_http.py`（Session つきの HTTP。401、応答の形、404・409・422・403、Cross-origin の拒否、Audit）、`test_memory_versioning_grants.py`（読み取りモデルの Test を Application の Role で実行）です。
+
+## Inferred Preference の確認 Flow（Issue #38、PAW-044、Decision 0081）
+
+[Issue #38](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/38) で実装しました（`paw_backend/memory/preferences/`、`api/v1/memory_preferences.py`、Migration `0192`）。`Observation → Candidate → Confirmation → Confirmed`（REQUIREMENTS.md「Inferred Preference / Confirmation Flow」）の Backend と API です。UI は承認済みの Design board がないので、まだありません。
+要件と既存の Decision が決めていない選択は [Decision 0081](../../docs/decisions/0081-inferred-preference-confirmation-flow.md)の推奨どおりに実装しました。
+
+| Method / Path（`/api/v1/memory/preferences` 以下） | 内容 |
+| --- | --- |
+| `GET /candidates` | 本人の候補（未確認の Private な Memory と、Journal が保留した候補）と根拠（`frequency`・Project / Repository の数・言葉の強さ・一貫性・Risk）、推奨 Scope、ボタン、`ready`（いま聞くか） |
+| `POST /memories/{id}/confirm` | `expected_version` と、ボタン（`scope` = `repo` / `project` / `user` と ID）か `その他...` の構造（`preference`）、`acknowledge_high_risk` → confirmed の新しい Version |
+| `POST /memories/{id}/reject` | 保存しない（`rejected` + `deprecated` の新しい Version） |
+| `POST /memories/{id}/interpret` | 自由入力の構造化プレビュー（何も書かない） |
+| `POST /held/{entry_id}/{item_index}/confirm` / `reject` / `interpret` | 保留された候補（key ごとの最新の未回答の項目）への同じ操作 |
+
+- **観測**は Journal の Consolidated な Entry の `outcome` の項目です（新しく保存しない）。根拠は本人の行からその場で計算します。言葉の強さのために本人の Message を読みますが、返しません。
+- **推奨 Scope**: 同じ Repository だけ → Repo、同じ Project の中 → Project、複数の Project か Project の外 → User。`ready` は 3 回の観測か「今後」「基本的に」等の発言 1 回（全部「今回」なら聞かない。矛盾していても聞かない）。
+- **確認**は `MemoryVersioningService` と同じ Lock・認可・履歴の規則で書きます（`PreferenceConfirmationService` はその Subclass）。同じ Memory の `n + 1` を `confirmed` で選んだ Scope に書き、`supersedes` と `confirmed_from` を張り、出典を写して本人の `user_confirmation` を足します。Project / Repository に広げるにはそこでの `project.memory.use`（Repository は保存された ACL つき）が要ります。広げる前の Private な版は Private のままです。
+- **保留された候補**（`held_high_risk` / `held_confirmed` / `held_widened`）の確認は key の Memory の次の Version か新しい登録済みの Memory を書き、答えを `memory_preference_resolutions` に残します。保存しないも答えとして残り、同じ key の新しい保留が来たら新しい質問になります。
+- **高リスク**（Merge・削除・公開・ACL / 権限・Credential・外部送信、または「必須」の規則）は `acknowledge_high_risk: true` がなければ 409 `preference_high_risk_unacknowledged` で何も書きません。確定しても Memory だけで（`attributes.preference.policy_effect = "none"`）、権限・ACL・Merge Policy は何も変わりません。
+- **自由入力**は、`app.state.preference_interpreter`（`PreferenceInterpreter` の Port。`preference-interpretation-v1` の JSON を返すモデル）があればそれが、なければ・失敗したら規則の Interpreter が構造にします（`interpreted_by`）。モデルは ID を名指せず、Risk は Backend の判定より下げられません。`project_group` は本人の Memory に条件（`適用対象: …`）を書いて保存します。モデルの本番の配線はまだありません。
+- 誤り: 候補が答えられた・変わった 409 `preference_candidate_changed`、版の衝突 409 `memory_version_conflict`、書けない Scope 403 `forbidden`、広げた Memory を別の Project に移す 422 `validation_error`。入口は Memory 画面と同じ `memory.read`（本人の Memory）です。
+
+Test は `tests/test_preference_rules.py`・`test_preference_interpretation.py`（純粋な規則と構造）、`test_preference_service.py`（PostgreSQL。候補と根拠、確認・保存しない、権限、高リスク、自由入力）、`test_preference_flow.py`（Journal と Consolidator を通した end-to-end）、`test_preference_http.py`、`test_preference_grants.py`（Application の Role で実行）、`test_preference_migration.py` です。
 
 ## Memory Markdown Projection
 
