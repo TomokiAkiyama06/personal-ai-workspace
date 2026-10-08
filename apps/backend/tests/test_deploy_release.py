@@ -756,6 +756,18 @@ class RepositoryTest(unittest.TestCase):
         self.assertNotEqual(protect, "strict")
         self.assertNotEqual(values.get("ProtectHome"), "true")
 
+    def test_restore_points_are_pruned_on_a_schedule(self):
+        # Codex review #204 (baf009c): not only after the next deployment.
+        systemd = TOOL_PATH.parents[1] / "systemd"
+        service = (systemd / "paw-release-prune.service").read_text()
+        timer = (systemd / "paw-release-prune.timer").read_text()
+        self.assertRegex(
+            service, r"(?m)^ExecStart=\S*paw-release prune-restore-points$"
+        )
+        self.assertRegex(timer, r"(?m)^OnCalendar=daily$")
+        self.assertRegex(timer, r"(?m)^Persistent=true$")
+        self.assertRegex(timer, r"(?m)^WantedBy=timers.target$")
+
     def test_the_deployment_document_follows_the_decisions_status(self):
         # Codex review #204 (ad3c59c): no "until it is approved" once it is.
         docs = Path(__file__).resolve().parents[3] / "docs"

@@ -155,7 +155,7 @@ mechanism. Operator steps are in the
   into a scratch database; restored into a new database that then takes the workspace
   database's name (the replaced one is kept). A restore is refused when a user was deleted
   after the point was taken; `user-erasure-run` runs after a restore. Points are deleted
-  after 7 days.
+  after 7 days (after every update and rollback, and daily by `paw-release-prune.timer`).
 - **Known-good rollback**: a failed migration, start or health check rolls back automatically
   (restore point, previous release, health check, then resume). If that fails too, the system
   stays in maintenance and the configured notify commands run; `paw-release end-maintenance`

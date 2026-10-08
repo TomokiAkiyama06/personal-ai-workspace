@@ -3871,7 +3871,8 @@ paw-release build --repo /srv/paw/source --commit origin/main
 paw-release install <version>
 # Audit の保存期間（Decision 0031、Issue #54 のコメント）と他の定期実行
 systemctl enable --now paw-audit-retention.timer paw-recovery-backup.timer \
-  paw-memory-projection.timer paw-user-erasure.timer paw-backend.service
+  paw-memory-projection.timer paw-user-erasure.timer paw-release-prune.timer \
+  paw-backend.service
 python3 /usr/local/sbin/paw-release precheck <next version>   # Timer と Partition の確認を含む
 ```
 
