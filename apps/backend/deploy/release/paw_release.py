@@ -400,10 +400,19 @@ def source_digest(directory: Path) -> str:
     return digest.hexdigest()
 
 
+def _inside_releases(config: Config, version: str) -> bool:
+    """Whether ``releases/<version>`` stays under the releases directory once
+    links are followed (not itself a link out of the root, Codex review of #213)."""
+    path = config.releases / version
+    return path.resolve().parent == config.releases.resolve()
+
+
 def load_release(config: Config, version: str, *, verify: bool = False) -> Release:
     if not re.fullmatch(VERSION_PATTERN, version):
         raise ReleaseError("invalid release name")
     path = config.releases / version
+    if not _inside_releases(config, version):
+        raise ReleaseError(f"release {version} points outside releases/")
     try:
         data = json.loads((path / MANIFEST).read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -451,8 +460,18 @@ def current_version(config: Config) -> str | None:
             raise ReleaseError("current is not a symlink", EXIT_ENVIRONMENT)
         return None
     target = Path(os.readlink(link))
-    if target.parent.name != "releases" or not re.fullmatch(
-        VERSION_PATTERN, target.name
+    # Only ``releases/<version>`` (what switch_current writes) or the absolute path
+    # of the same directory: a ``releases/<version>`` elsewhere would be run by the
+    # service while this tool verifies and runs the one under the root (Codex
+    # review #204).
+    if (
+        not re.fullmatch(VERSION_PATTERN, target.name)
+        or target
+        not in (
+            Path("releases") / target.name,
+            config.releases / target.name,
+        )
+        or not _inside_releases(config, target.name)
     ):
         raise ReleaseError("current points outside releases/", EXIT_ENVIRONMENT)
     return target.name
@@ -1479,7 +1498,10 @@ def _show(tool: Tool, *, verbose: bool) -> int:
     if verbose:
         tool.say(f"in progress: {state['in_progress'] or 'none'}")
         if current is not None:
-            status = tool._status(load_release(tool.config, current))
+            # Verified first, as update and rollback do: its deploy-status runs
+            # with the deployment environment (Codex review #204).
+            release = load_release(tool.config, current, verify=True)
+            status = tool._status(release)
             tool.say(
                 "database: "
                 + (json.dumps(status, sort_keys=True) if status else "unavailable")

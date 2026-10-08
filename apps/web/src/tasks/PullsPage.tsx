@@ -6,6 +6,7 @@
 // Backend's records of the delivered pull request (issue #185 item 6, Decision
 // 0078); `/pulls/<id>/files` and `/pulls/<id>/files/<n>` are the MobileDiff board.
 import { useCallback, useEffect, useState } from "react";
+import { isApiError } from "../api/client";
 import { useI18n } from "../i18n";
 import { errorMessage } from "../i18n/errors";
 import { Link, useRouter } from "../router";
@@ -111,28 +112,43 @@ function PullsView({ source }: { source: TaskSource }) {
     return () => window.clearInterval(timer);
   }, [loaded, source]);
   // A selected record the bounded list does not hold (an older one a task links
-  // to) is read by its id; a refused or missing one is not shown.
+  // to) is read by its id; one that is gone is "not found", and a read that failed
+  // otherwise says so and can be retried (Codex review of #206).
   const listed = !loaded || !selectedId || all.some((pr) => pr.id === selectedId);
-  const [single, setSingle] = useState<PullRequestRecord | null>(null);
+  const [single, setSingle] = useState<{
+    id: string;
+    pr: PullRequestRecord | null;
+    error?: unknown;
+  } | null>(null);
+  const [attempt, setAttempt] = useState(0);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `attempt` reads it again
   useEffect(() => {
     if (listed || !selectedId) return;
     let current = true;
     source
       .getPullRequest(selectedId)
       .then((pr) => {
-        if (current) setSingle(pr);
+        if (current) setSingle({ id: selectedId, pr });
       })
-      .catch(() => {
-        if (current) setSingle(null);
+      .catch((error: unknown) => {
+        if (!current) return;
+        setSingle(
+          isApiError(error, "pull_request_not_found")
+            ? { id: selectedId, pr: null }
+            : { id: selectedId, pr: null, error },
+        );
       });
     return () => {
       current = false;
     };
-  }, [listed, selectedId, source]);
+  }, [listed, selectedId, source, attempt]);
   const visible = all.filter((pr) => matches(pr, filter));
   const shown =
     all.find((pr) => pr.id === (selectedId ?? visible[0]?.id)) ??
-    (single !== null && single.id === selectedId ? single : null);
+    (single !== null && single.id === selectedId ? single.pr : null);
+  const read = loaded && selectedId !== null && !listed && single?.id === selectedId;
+  const missing = read && !single.pr && single.error === undefined;
+  const failed = read && single.error !== undefined ? single.error : undefined;
 
   return (
     <div className={selectedId ? "tasks-screen has-selection" : "tasks-screen"}>
@@ -205,6 +221,23 @@ function PullsView({ source }: { source: TaskSource }) {
             <DiffView source={source} pr={shown} index={route.view} />
           ) : shown ? (
             <PullDetail source={source} pr={shown} />
+          ) : missing ? (
+            <p className="form-error" role="alert">
+              {t("pulls.notFound")}
+            </p>
+          ) : failed !== undefined ? (
+            <div className="stack">
+              <p className="form-error" role="alert">
+                {errorMessage(t, failed)}
+              </p>
+              <button
+                type="button"
+                className="secondary small-button"
+                onClick={() => setAttempt((count) => count + 1)}
+              >
+                {t("app.retry")}
+              </button>
+            </div>
           ) : (
             load.status === "ready" &&
             all.length > 0 && <p className="muted small">{t("pulls.select")}</p>

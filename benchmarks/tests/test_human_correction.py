@@ -208,6 +208,17 @@ class StopwatchTest(unittest.TestCase):
                 self.assertIn("regular file", err)
                 self.assertNotIn(TASK, out)
 
+    def test_invalid_utf8_log_is_a_validation_error(self):
+        # Codex P2 on PR #202: a decoding failure ended in a traceback, not exit 1.
+        self.start()
+        with self.log.open("ab") as handle:
+            handle.write(b"\xff\xfe not utf-8\n")
+        for argv in (("summary",), ("status",), ("pause",)):
+            with self.subTest(argv=argv[0]):
+                code, _, err = self.run_cli(*argv)
+                self.assertEqual(code, 1)
+                self.assertIn("UTF-8", err)
+
     def test_fifo_log_is_refused_without_blocking(self):
         self.log.parent.mkdir(parents=True)
         os.mkfifo(self.log)
