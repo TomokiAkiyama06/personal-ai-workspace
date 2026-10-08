@@ -47,7 +47,7 @@ Issue #200 は次の 4 つの候補を比べて提案することを求めてい
 - 置き場所と手順: `/data/results/paw-bench-2026-10-XX/_code` に 10-05 の `_code` を複製して上を変え、`run_198.sh` の `compare` の Qwen3.8-27B-FP8 の行だけを `PAW_REASONING_KEEP_LAST=2 PAW_REASONING_DROP_MIN_PROMPT=32768` 付きで run1〜run3 に走らせる（毎回 Server を起動し直す）。
 - 費用: 基準の 3 回は 250〜265 分ずつだったので、**GPU を単独で約 13 時間**（Load と Unload を含めて約 13.5 時間）。その間ほかの Model は GPU に置けない。Prompt が短くなる分だけ速くなる可能性があるが、Prefill が増える分と相殺するかは分からない。
 - 合格の規則（Decision 0074 の 5 の読み方と同じ）: 基準（37 / 37 / 37、Resolved@3 37）に対して **Resolved@3 36 以上かつ平均 36.0 以上**。あわせて、Task ごとの Prompt の最大（見積もりは中央値 48k / p90 71k）、`context_exhausted` の回数、出力 token、所要、Prefix cache の Hit 率を記録して報告する。
-- **KV の不足を解いたことの条件**（正解数とは別に、すべて満たすこと）: (a) Task ごとの Prompt の最大の p90 が 80k 以下（基準 107k）、(b) `context_exhausted` が基準の 9 回以下、(c) その Run の Trace で報告の 3 と同じ再現をしたとき、0.51 の Pool（305k）の 95% 以上の時間が 1% 以下、(d) 3 回の所要の平均が基準（約 258 分）の 1.15 倍以下。
+- **KV の不足を解いたことの条件**（正解数とは別に、すべて満たすこと）: (a) Task ごとの Prompt の最大の p90 が 80k 以下（基準 107k）、(b) `context_exhausted` が 0 回（見積もりでは Prompt の最大は約 84k で上限に達しない）、(c) その Run の Trace で報告の 3 と同じ再現をしたとき、0.51 の Pool（305k）の 95% 以上の時間が 1% 以下、(d) 3 回の所要の平均が基準（約 258 分）の 1.15 倍以下。
 - 正解数の規則と KV の条件の両方を満たしたら 1 を Main の既定にする。正解数は満たすが KV の条件のどれかを満たさないときは、既定にせず、結果を示して Human に別に判断を求める。正解数を満たさないなら 1 は採らず（`KeepAllReasoning` のまま）、3 だけで Admission により並列を抑え、4 の順で割り当ての変更を別に提案する。
 
 ### 3. Scheduler は会話の伸びを予約に反映する（実行中の Node の予約は増やせるが待たせない。新しい Node は上限で待つ）
@@ -56,7 +56,7 @@ Issue #200 は次の 4 つの候補を比べて提案することを求めてい
 - **実行中の Node の予約の増加は待たせず、Class の上限と `kv_safety` を超えても認める**。増加を待たせると、4 つの Agent が互いの終わりを待って止まりうる（どれも予約を返さない）。超えた分は vLLM の中の Preemption として現れる（今と同じ）が、新しい Node の Admission は、予約の合計が上限を下回るまで待つ（0037 の 4 の待ち行列のまま）。このため 0037 の 2 の「`kv_safety` までしか予約できない」を、新しい Node の Admission に限る形に置き換える（Supersedes）。
 - 予約の増加は、Prompt と `max_tokens` の和が Deployment の Context の上限（`max_context_tokens`、131,072）を超えたら断る（`CONTEXT_TOO_LONG`。Agent はその Node を Context 不足で終える。vLLM が断る Request を Scheduler も通さない）。
 - vLLM の `/metrics` の `vllm:kv_cache_usage_perc` を `ModelControl.kv_usage` に配線する（今の `CommandModelControl.kv_usage` は常に `None`）。0037 の 2 の「予約と観測の大きい方」が実際に効くようにする。
-- **Interactive の取り分は伸びでも減らさない**（Decision 0037 の 4 の Class の上限は変えない）: 実行中の Coding（と Support・Background）の Node の予約が伸びでその Class の上限を超えた分は、ほかの Class の新しい Request の Admission では数えない（その Class の上限までとして数える）。さらに Interactive の新しい Request の Admission では、Interactive 以外の Class の予約の**合計**を、Interactive 以外で最も高い上限（Coding の 95%）までとして数える（Support が先に予約し、その後 Coding が伸びた場合に、Class ごとに切っただけでは合計が 95% を超えて Interactive を締め出すため）。このため Interactive の新しい Request は、ほかの Class が伸びていても、少なくとも Pool × 0.90 × 5%（約 13.7k token）から Interactive の予約を引いた範囲で Admission を通る。同じ Class の新しい Request（新しい Coding の Node）は、超えた分も含めて数えて待つ。
+- **上の Class の取り分は、下の Class の伸びで減らさない**（Decision 0037 の 4 の Class の上限は変えない）: Class C の新しい Request の Admission では、C と同じか上の Class の予約はそのまま数え、C より下の Class の予約は (i) それぞれその Class の上限までとして数え（伸びで上限を超えた分は数えない）、(ii) その合計を下の Class の中で最も高い上限までとして数える（Interactive に対しては Coding・Support・Background の合計を 95%、Coding に対しては Support・Background の合計を 85%、Support に対しては Background を 70% まで）。Class ごとに切るだけでは、例えば Support と Background の伸びの合計が 155% と数えられ、上の Class を締め出すため。このため Interactive の新しい Request は、ほかの Class が伸びていても、少なくとも Pool × 0.90 × 5%（約 13.7k token）から Interactive の予約を引いた範囲で Admission を通る。同じ Class の新しい Request（新しい Coding の Node など）は、伸びて超えた分も含めて数えて待つ。
 - 観測した KV の使用率（`kv_usage`）が高いときは、0037 の 2 のとおり予約と観測の大きい方で判断するので、Interactive も Admission で待ちうる。そのときも 0037 の 4 の待ち行列で Interactive が先頭に並ぶ（Coding を追い越す）。
 - 見積もり（報告の 3、`max_tokens` 16,384）: 1 と組み合わせると、4 並列の上限のまま新しい Node が待つのは Run の 10〜24% の時間。1 なしでは約 49〜51%（実質 3 並列に近い）。
 - Decision 0075 の 3 のとおり、この変更の確認では Scheduler の Admission を通した共存の Run を行う（実装の PR で計画し、GPU を使う前に Human の許可を得る）。
@@ -96,8 +96,8 @@ Issue #200 は次の 4 つの候補を比べて提案することを求めてい
 ## 決めてほしいこと
 
 1. **Main の Local Agent の既定の Reasoning の履歴の方針を `DropOlderReasoning(keep_last=2, min_prompt_tokens=32_768)` にする（2 の Run に合格した場合に限る）**（1）か。推奨: はい。代わりの案は、残したまま（`KeepAllReasoning`）にして 4 の割り当ての変更で解く。
-2. **1 の正解数への影響を確かめる Run（paw-seed-v2 の 49 Task × 3 回、単独 0.90、GPU を約 13 時間）を行い、Resolved@3 36 以上かつ平均 36.0 以上、かつ KV の条件（Prompt の最大の p90 80k 以下・`context_exhausted` 9 回以下・再現で Pool の 95% 以上が 1% 以下・所要 1.15 倍以下）で合格とする**（2）か。推奨: はい（GPU を使う日時は Human が決める）。
-3. **Scheduler が会話の伸びを予約に反映し、実行中の Node の予約の増加は上限を超えても待たせず、新しい Node だけを上限で待たせる。上限を超えた分はほかの Class の Admission では数えず、Interactive の Admission ではほかの Class の予約の合計を 95% までとして数える。vLLM の `/metrics` の KV の使用率を `kv_usage` に配線する**（3。Decision 0037 の 2 の「`kv_safety` までしか予約できない」を新しい Node の Admission に限る形に `Supersedes`）か。推奨: はい（1 の結果に関係なく行う）。
+2. **1 の正解数への影響を確かめる Run（paw-seed-v2 の 49 Task × 3 回、単独 0.90、GPU を約 13 時間）を行い、Resolved@3 36 以上かつ平均 36.0 以上、かつ KV の条件（Prompt の最大の p90 80k 以下・`context_exhausted` 0 回・再現で Pool の 95% 以上が 1% 以下・所要 1.15 倍以下）で合格とする**（2）か。推奨: はい（GPU を使う日時は Human が決める）。
+3. **Scheduler が会話の伸びを予約に反映し、実行中の Node の予約の増加は上限を超えても待たせず、新しい Node だけを上限で待たせる。上の Class の Admission では、下の Class の予約をそれぞれの上限まで、かつ合計を下の Class の中で最も高い上限までとして数える。vLLM の `/metrics` の KV の使用率を `kv_usage` に配線する**（3。Decision 0037 の 2 の「`kv_safety` までしか予約できない」を新しい Node の Admission に限る形に `Supersedes`）か。推奨: はい（1 の結果に関係なく行う）。
 4. **共存時の Main 0.51・Memory Worker の KV 4 GiB・Embedding / Reranker は GPU・`max_parallel_nodes` 4・`--max-model-len` 131,072 は変えない**（4）か。推奨: はい（1 が不合格なら、Memory Worker の KV を 2 GiB にする案と Embedding / Reranker の CPU の Latency を測る案を別の Decision で提案する）。
 5. **実装は承認と 2 の結果の後に、`ReasoningHistoryPolicy` の PR と Scheduler の PR に分けて行う**（5）か。推奨: はい。
 
