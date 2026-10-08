@@ -294,11 +294,16 @@ export interface PercentPoint {
   vramReserved: number | null;
 }
 
+/** The Backend's bucket origin (`date_bin`'s, `health/store.py`). */
+const BUCKET_ORIGIN = Date.UTC(2000, 0, 1);
+
 /**
  * The buckets of the four series as percentages: GPU utilization as it is, VRAM
  * used and reserved of the total of the same bucket (else the latest total
  * before it). A bucket with no value of a series leaves a gap in that line; with
- * `stepSeconds`, so does a bucket missing from every series.
+ * `stepSeconds`, so does a bucket missing from every series, and with `range`
+ * also the whole buckets of the period before the first and after the last
+ * sample (when anything was sampled at all).
  */
 export function percentPoints(
   series: {
@@ -308,6 +313,7 @@ export function percentPoints(
     total: readonly SeriesPoint[];
   },
   stepSeconds?: number,
+  range?: { since: Date; until: Date },
 ): PercentPoint[] {
   const byTime = (points: readonly SeriesPoint[]) =>
     new Map(points.map((point) => [Date.parse(point.bucket_start), point.mean]));
@@ -323,6 +329,18 @@ export function percentPoints(
   // (Codex P2, PR #203).
   const times: number[] = [];
   const step = (stepSeconds ?? 0) * 1000;
+  // The period's own ends: monitoring that started late or stopped (an outage
+  // now) shows as an empty start or end, not as samples stretched over the chart
+  // (Codex P2, PR #203). Only whole buckets, so the one still filling is no gap.
+  const first = recorded[0];
+  const last = recorded[recorded.length - 1];
+  if (step > 0 && range && first !== undefined && last !== undefined) {
+    const since = range.since.getTime();
+    const until = range.until.getTime();
+    const start = BUCKET_ORIGIN + Math.ceil((since - BUCKET_ORIGIN) / step) * step;
+    for (let time = start; time < first - step / 2; time += step) times.push(time);
+    for (let time = last + step; time + step <= until; time += step) recorded.push(time);
+  }
   for (const time of recorded) {
     const previous = times[times.length - 1];
     if (step > 0 && previous !== undefined) {

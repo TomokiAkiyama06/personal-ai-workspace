@@ -1,8 +1,8 @@
 """Which module handles a ``python -m paw_backend.cli`` command line.
 
 ``owner`` (PAW-021), ``retention`` (Issue #117), ``erasure`` (Issue #127),
-``memory_projection`` (PAW-045) and ``recovery`` (PAW-047) keep their own
-parsers, exit codes and database URLs
+``memory_projection`` (PAW-045), ``recovery`` (PAW-047) and ``deploy`` (PAW-068)
+keep their own parsers, exit codes and database URLs
 (``PAW_OPERATOR_DATABASE_URL`` vs. ``PAW_MIGRATION_DATABASE_URL`` vs.
 ``PAW_DATABASE_URL``); ``compute`` (PAW-036) reads the GPU and uses no
 database: the first argument picks one.
@@ -14,6 +14,7 @@ from types import ModuleType
 
 from paw_backend.cli import (
     compute,
+    deploy,
     erasure,
     memory_projection,
     owner,
@@ -24,7 +25,8 @@ from paw_backend.cli import (
 
 def command_module(argv: Sequence[str]) -> ModuleType:
     """``retention`` / ``erasure`` / ``memory_projection`` / ``compute`` /
-    ``recovery`` for their commands, ``owner`` for everything else (and help)."""
+    ``recovery`` / ``deploy`` for their commands, ``owner`` for everything else
+    (and help)."""
     if argv and argv[0] in retention.COMMANDS:
         return retention
     if argv and argv[0] in erasure.COMMANDS:
@@ -35,6 +37,8 @@ def command_module(argv: Sequence[str]) -> ModuleType:
         return compute
     if argv and argv[0] in recovery.COMMANDS:
         return recovery
+    if argv and argv[0] in deploy.COMMANDS:
+        return deploy
     return owner
 
 

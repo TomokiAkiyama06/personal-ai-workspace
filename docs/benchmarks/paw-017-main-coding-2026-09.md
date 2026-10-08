@@ -149,6 +149,7 @@
 [Decision 0040](../decisions/0040-main-coding-model-selection.md)（Approved）の 1〜3 の条件を確かめる Run。
 
 - Issue: [#180](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/180)。生の結果は Server の `/data/results/paw-bench-2026-10-01`
+- Main を Qwen3.8-27B-FP8・`gpu-memory-utilization` 0.51 にした確認 Run（2026-10-07、Decision 0073 の 2 / 0074）は [別の報告](paw-017-coexist-qwen38-2026-10.md)
 - **条件は 1 と同じ**（Harness・Prompt・Tool・上限・Evaluator・固定した seed の snapshot `1d0f683`・vLLM 0.30.0）。違いは次のとおり:
   - Weight はすべて NVMe に Stage してから Load した（Decision 0040 の 6）。
   - JIT の並列数の上限（`MAX_JOBS=4`、`FLASHINFER_NVCC_THREADS=1`）と Host の空き RAM の確認（起動前に 32 GiB 以上、Run 中に 8 GiB を下回れば自分の Process group だけを止める）を、すべての起動に付けた（5 の 09-30 の再起動の対処）。Run 中に Watchdog が止めたことはなく、各 Run の開始時の空き RAM は 95 GiB 以上だった。

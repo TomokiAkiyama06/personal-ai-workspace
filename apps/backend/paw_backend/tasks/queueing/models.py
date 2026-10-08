@@ -225,3 +225,41 @@ class FailureSignatureRow(Base):
         ),
         CheckConstraint("signature ~ '^[0-9a-f]{64}$'", name="signature_format"),
     )
+
+
+# The shape of a release name in ``deploy_maintenance`` (Issue #54, Decision 0079):
+# the release tool's version names (``apps/backend/deploy/release``).
+RELEASE_NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+
+
+class DeployMaintenanceRow(Base):
+    """The maintenance of an update (Issue #54, Decision 0079): while this one
+    row exists, :meth:`TaskQueue.claim_next` hands out no entry (no new task
+    starts; queued ones stay queued). Written by the server-local deploy
+    commands as the table owner; the application role only reads it.
+
+    ``from_release`` / ``to_release`` say which update holds the queue (for the
+    operator; ``NULL`` when the command was not told)."""
+
+    __tablename__ = "deploy_maintenance"
+
+    id: Mapped[int] = mapped_column(
+        SmallInteger, primary_key=True, server_default=text("1")
+    )
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+    from_release: Mapped[str | None] = mapped_column(String(64))
+    to_release: Mapped[str | None] = mapped_column(String(64))
+
+    __table_args__ = (
+        CheckConstraint("id = 1", name="single_row"),
+        CheckConstraint(
+            f"from_release IS NULL OR from_release ~ '{RELEASE_NAME_PATTERN}'",
+            name="from_release_shape",
+        ),
+        CheckConstraint(
+            f"to_release IS NULL OR to_release ~ '{RELEASE_NAME_PATTERN}'",
+            name="to_release_shape",
+        ),
+    )

@@ -2,6 +2,7 @@ import { getDefaultNormalizer, render, screen, within } from "@testing-library/r
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "../App";
+import { ApiError } from "../api/client";
 import { mockApi, Providers, reply, session } from "../test/helpers";
 import { fakeTaskSource, PR_42, samplePullRequests, TASK_203 } from "../test/tasks";
 import { type TaskSource, TaskSourceProvider } from "./source";
@@ -124,6 +125,33 @@ describe("Pull requests page", () => {
     expect(getOne).toHaveBeenCalledWith(older.id);
     const list = screen.getByRole("navigation", { name: "プルリクエストの一覧" });
     expect(within(list).queryByText(older.title)).not.toBeInTheDocument();
+  });
+
+  it("retries an exact read that failed instead of hiding the pull request", async () => {
+    // Codex P2 on PR #206: a transient failure left the routed PR blank for good.
+    const [older, ...newer] = samplePullRequests();
+    if (!older) throw new Error("no sample");
+    const { source } = fakeTaskSource(undefined, newer);
+    const getOne = vi
+      .spyOn(source, "getPullRequest")
+      .mockRejectedValueOnce(new ApiError(503, "service_unavailable", "x"))
+      .mockResolvedValue(older);
+    renderPulls(`/pulls/${older.id}`, source);
+    expect(await screen.findByRole("alert")).toHaveTextContent("一時的に利用できません");
+    expect(screen.queryByText(/このプルリクエストは見つかりませんでした/)).not.toBeInTheDocument();
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "再試行" }));
+    expect(await screen.findByRole("heading", { name: older.title, level: 2 })).toBeInTheDocument();
+    expect(getOne).toHaveBeenCalledTimes(2);
+  });
+
+  it("says a pull request that does not exist was not found", async () => {
+    const { source } = fakeTaskSource();
+    renderPulls("/pulls/pr-missing", source);
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "このプルリクエストは見つかりませんでした",
+    );
+    expect(screen.queryByRole("button", { name: "再試行" })).not.toBeInTheDocument();
   });
 
   it("does not crash on a malformed escape in the path", async () => {

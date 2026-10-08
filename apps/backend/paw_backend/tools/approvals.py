@@ -246,9 +246,18 @@ class ApprovalService:
         self._timeout_seconds = timeout_seconds
 
     async def approve(
-        self, approval_id: uuid.UUID, approver: Principal
+        self,
+        approval_id: uuid.UUID,
+        approver: Principal,
+        *,
+        allow_strong: bool = True,
     ) -> ApprovalResult:
-        return await self._decide(approval_id, approver, approve=True)
+        """``allow_strong=False``: a ``STRONG_APPROVAL`` is refused as
+        ``STEP_UP_REQUIRED`` whatever the step-up verifier says (a caller that has
+        no step-up bound to this approval, Decision 0078 6)."""
+        return await self._decide(
+            approval_id, approver, approve=True, allow_strong=allow_strong
+        )
 
     async def reject(
         self, approval_id: uuid.UUID, approver: Principal
@@ -451,7 +460,12 @@ class ApprovalService:
         )
 
     async def _decide(
-        self, approval_id: uuid.UUID, approver: Principal, *, approve: bool
+        self,
+        approval_id: uuid.UUID,
+        approver: Principal,
+        *,
+        approve: bool,
+        allow_strong: bool = True,
     ) -> ApprovalResult:
         if not isinstance(approval_id, uuid.UUID) or not isinstance(
             approver, Principal
@@ -466,7 +480,7 @@ class ApprovalService:
             return ApprovalResult(ApprovalOutcome.UNAVAILABLE, approval_id)
 
         internal = await self._outcome(
-            record, approval_id, approver, approve, now, store
+            record, approval_id, approver, approve, now, store, allow_strong
         )
         # A stranger is told "not found", not that the approval exists.
         outcome = (
@@ -505,6 +519,7 @@ class ApprovalService:
         approve: bool,
         now: datetime,
         store: _StoreDeadline,
+        allow_strong: bool = True,
     ) -> ApprovalOutcome:
         if record is None:
             return ApprovalOutcome.NOT_FOUND
@@ -519,7 +534,9 @@ class ApprovalService:
             and diagnose_decide(record, approver.user_id, now, step_up_verified=True)
             is DecideOutcome.DECIDED
         ):
-            if not await self._stepped_up(approver.user_id, approval_id):
+            if not allow_strong or not await self._stepped_up(
+                approver.user_id, approval_id
+            ):
                 return ApprovalOutcome.STEP_UP_REQUIRED
             stepped_up = True
         try:
