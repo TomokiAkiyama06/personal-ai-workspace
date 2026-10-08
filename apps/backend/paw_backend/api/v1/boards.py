@@ -464,7 +464,10 @@ async def decide_approval(
     execution = _execution(request)
     service = execution.approvals
     if body.decision == "approve":
-        result = await service.approve(approval_id, principal)
+        # Never a STRONG_APPROVAL here, even with a step-up verifier wired: the
+        # Passkey step-up is bound to the user, not to this approval (Decision 0078
+        # 6, Codex review of #206).
+        result = await service.approve(approval_id, principal, allow_strong=False)
     else:
         result = await service.reject(approval_id, principal)
     if result.outcome is ApprovalOutcome.APPROVED:
