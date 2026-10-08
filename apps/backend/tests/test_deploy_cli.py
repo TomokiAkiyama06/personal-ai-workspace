@@ -22,9 +22,11 @@ import unittest
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest import mock
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
+from sqlalchemy.exc import OperationalError
 
 from paw_backend.cli import deploy as cli
 from paw_backend.cli import dispatch
@@ -203,6 +205,22 @@ class DeployCommandTest(unittest.IsolatedAsyncioTestCase):
             ["deploy-maintenance-begin", "--to-release", "../x"]
         )
         self.assertEqual(code, cli.EXIT_REFUSED, err)
+
+    async def test_an_audit_failure_does_not_hide_that_the_maintenance_ended(self):
+        # Codex review #204 (baf009c): the row is gone and the queue runs; a
+        # nonzero exit would make the release tool report "in maintenance".
+        code, _, err = await self.owner_run(["deploy-maintenance-begin"])
+        self.assertEqual(code, cli.EXIT_OK, err)
+
+        async def refuse(*args, **kwargs):
+            raise OperationalError("INSERT", {}, Exception("audit down"))
+
+        with mock.patch.object(cli, "record_deploy_event", refuse):
+            code, _, err = await self.owner_run(["deploy-maintenance-end"])
+        self.assertEqual(code, cli.EXIT_OK, err)
+        self.assertIn("Maintenance ended", err)
+        self.assertIn("could not be recorded", err)
+        self.assertIsNone(await self.scalar("SELECT id FROM deploy_maintenance"))
 
     async def test_the_drain_times_out_on_a_live_claim(self):
         gate = ALWAYS_ACTIVE

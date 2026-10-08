@@ -305,13 +305,13 @@ async def _database_command(
                 from_release=arguments.from_release, to_release=arguments.to_release
             )
             held = await maintenance.hold_running()
-            if created:
-                await record_deploy_event(
-                    database,
-                    DeployAction.MAINTENANCE_STARTED,
-                    f"from={arguments.from_release or '-'} "
-                    f"to={arguments.to_release or '-'} held={held}",
-                )
+            if created and not await _record_quietly(
+                database,
+                DeployAction.MAINTENANCE_STARTED,
+                f"from={arguments.from_release or '-'} "
+                f"to={arguments.to_release or '-'} held={held}",
+            ):
+                _say(err, "The start could not be recorded in audit_events.")
             _say(
                 err,
                 ("Maintenance started" if created else "Maintenance was already on")
@@ -340,11 +340,15 @@ async def _database_command(
             return EXIT_FAILED
         # END_COMMAND
         report = await maintenance.end()
-        await record_deploy_event(
+        # The row is gone and the queue runs: a failed audit row must not make
+        # this look like a failed end (the release tool would report the system
+        # as still in maintenance).
+        if not await _record_quietly(
             database,
             DeployAction.MAINTENANCE_ENDED,
             f"resumed={report.resumed} remaining={report.remaining}",
-        )
+        ):
+            _say(err, "The end could not be recorded in audit_events.")
         _say(
             err,
             f"Maintenance ended: {report.resumed} task(s) resumed, "
@@ -354,6 +358,18 @@ async def _database_command(
         return EXIT_OK
     finally:
         await database.dispose()
+
+
+async def _record_quietly(
+    database: Database, action: DeployAction, reason: str
+) -> bool:
+    """Record ``action``; ``False`` (not an error) when the row could not be
+    written: the maintenance itself already changed."""
+    try:
+        await record_deploy_event(database, action, reason)
+    except (SQLAlchemyError, OSError):
+        return False
+    return True
 
 
 async def _precheck(
