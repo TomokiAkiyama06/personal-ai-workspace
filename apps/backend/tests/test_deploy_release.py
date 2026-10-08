@@ -631,6 +631,27 @@ class RollbackTest(ReleaseToolTestCase):
         self.assertIn("r1:deploy-maintenance-begin", self.world.calls)
         self.assertFalse(self.world.maintenance)
 
+    def test_a_rollback_without_maintenance_changes_nothing(self):
+        # Codex review #204 (baf009c): without the row the started release
+        # could claim tasks before its health check; without the drain running
+        # work would be cut off.
+        for failing, code in (
+            ("deploy-maintenance-begin", paw_release.EXIT_ABORTED),
+            ("deploy-drain", paw_release.EXIT_ABORTED),
+            ("deploy-status", paw_release.EXIT_REFUSED),
+        ):
+            with self.subTest(failing=failing):
+                self.setUp()
+                self.installed()
+                self.assertEqual(self.run_tool("update", "r2")[0], 0)
+                self.world.fail = {failing}
+                self.world.calls.clear()
+                result, out = self.run_tool("rollback")
+                self.assertEqual(result, code, out)
+                self.assertEqual(self.current(), "r2")
+                self.assertNotIn("svc-stop", self.world.calls)
+                self.assertFalse(self.world.maintenance)
+
     def test_only_to_a_known_good_release(self):
         self.installed()
         code, out = self.run_tool("rollback", "--to", "r3")

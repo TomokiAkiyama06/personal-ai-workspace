@@ -881,7 +881,12 @@ class Tool:
             status = (self._status(current) if tools is current else None) or (
                 self._status(target)
             )
-            revision = status.get("schema_revision") if status else None
+            if status is None:
+                raise ReleaseError(
+                    "the database status cannot be read (deploy-status failed): "
+                    "no maintenance could be established; nothing was changed"
+                )
+            revision = status.get("schema_revision")
             if restore_point is not None:
                 point = self._restore_point(restore_point)
                 if not point.get("verified"):
@@ -1269,6 +1274,17 @@ class _Rollback(_Operation):
         self.restore_point = restore_point
         self.status = status
 
+    def abort(self, *, end_maintenance: bool) -> int:
+        """Nothing was stopped or switched: the current release runs on."""
+        if end_maintenance and not self.step(
+            "resume", self.tool.cli(self.tools, "deploy-maintenance-end")
+        ):
+            return self.maintenance_mode("the tasks could not be resumed")
+        self.state.update(in_progress=None)
+        self.state.log("rollback", "aborted", "ok")
+        self.say(f"Aborted: {self.current.version} runs on; nothing was switched.")
+        return EXIT_ABORTED
+
     def run(self) -> int:
         tool, current, target = self.tool, self.current, self.target
         self.state.update(
@@ -1280,29 +1296,32 @@ class _Rollback(_Operation):
             }
         )
         self.state.log("rollback", "started", "ok", **{"from": current.version})
-        # The current release may be broken: its maintenance and drain are tried,
-        # the rollback goes on without them.
-        if self.status is not None and self.status.get("maintenance") is None:
-            self.step(
-                "maintenance",
-                tool.cli(
-                    self.tools,
-                    "deploy-maintenance-begin",
-                    "--from-release",
-                    current.version,
-                    "--to-release",
-                    target.version,
-                ),
-            )
-            self.step(
-                "drain",
-                tool.cli(
-                    self.tools,
-                    "deploy-drain",
-                    "--timeout-seconds",
-                    str(tool.config.drain_timeout_seconds),
-                ),
-            )
+        # No task may start before the target's health check, and running work
+        # drains first: without both nothing is stopped or switched.
+        began = self.status.get("maintenance") is None
+        if began and not self.step(
+            "maintenance",
+            tool.cli(
+                self.tools,
+                "deploy-maintenance-begin",
+                "--from-release",
+                current.version,
+                "--to-release",
+                target.version,
+            ),
+        ):
+            # The row may be committed although the command failed.
+            return self.abort(end_maintenance=True)
+        if not self.step(
+            "drain",
+            tool.cli(
+                self.tools,
+                "deploy-drain",
+                "--timeout-seconds",
+                str(tool.config.drain_timeout_seconds),
+            ),
+        ):
+            return self.abort(end_maintenance=began)
         if not self.step("stop", tool.configured("stop", release=current)):
             return self.maintenance_mode(f"{current.version} could not be stopped")
         expected = target.schema_head
