@@ -1,6 +1,7 @@
 # Orchestrator の実 Runtime Adapter（Local の Main Model on vLLM・Codex CLI・Claude Code CLI）の設計（境界、Local の Tool loop、Reasoning の履歴の差し込み口、使用量の報告、OOM と Error の分類、Credential と Sandbox、承認、Timeout と取り消し、Test、PR の分け方）
 
-- Status: Proposed
+- Status: Approved
+- Approval: 2026-10-08、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで直接回答して承認（すべての判断点を推奨どおり承認。条件: 実装の PR 4 で、(1) 硬くした systemd の Template Unit（NoNewPrivileges・空の CapabilityBoundingSet・ProtectSystem/ProtectHome）の下で rootless Podman が動くこと（動かなければ single-uid の mapping と ReadWritePaths を使う）を確かめ、(2) 1 接続 1 Session の DB Lease を更新できない Holder は、Lease が切れる前に自分の CLI を止めること。末尾の「承認時の決定」）
 - Date: 2026-10-08
 - Scope: Issue [#208](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/208)。この Decision は設計だけで、実装は承認の後に下の 11 の段階ごとの PR で行う。関係する既存の口: `apps/backend/paw_backend/orchestrator/runtime.py`（`AgentRuntime`・`NodeAssignment`・`NodeOutcome`・`NodeTools`・`NodeBudget`・`NodePlacement`）、`orchestrator/orchestrator.py`（`_retry_step`）、`compute/runtimes.py`（`HybridRuntime`）、`compute/wiring.py`（`LocalRuntime`）、`orchestrator/composition.py`（`local_runtimes`・`agent_runtimes`）、`orchestrator/errors.py`（`RUNTIME_ERROR_CLASSES`・`AGENT_OUT_OF_MEMORY`）、`orchestrator/workspaces.py`（`NodeWorktree`）、`integration/coordinator.py`（`GitWorktreeCoordinator`）、`connections/`（`ConnectionAdapter`・`ConnectionService.execute`）、`tools/`（Tool Broker・`ToolRunner`・Registry）、`apps/backend/deploy/systemd/paw-llm-main.service`
 - Supersedes（一部）:
@@ -221,3 +222,7 @@ Orchestrator（PAW-034）は Node の 1 回の試行を `AgentRuntime.run_node(N
 承認されたら `Approval` に記録し、Status を Approved に改める。
 方針を変えるときは、この Decision を書き換えず、新しい Decision から `Supersedes` する。
 [REQUIREMENTS.md](../../REQUIREMENTS.md) の原文は書き換えない。
+
+## 承認時の決定（2026-10-08）
+
+Human は、作業 Session で判断が必要な点について推奨つきの説明を受け、直接回答して承認した（すべての判断点を推奨どおり承認。条件: 実装の PR 4 で、(1) 硬くした systemd の Template Unit（NoNewPrivileges・空の CapabilityBoundingSet・ProtectSystem/ProtectHome）の下で rootless Podman が動くこと（動かなければ single-uid の mapping と ReadWritePaths を使う）を確かめ、(2) 1 接続 1 Session の DB Lease を更新できない Holder は、Lease が切れる前に自分の CLI を止めること）。独立レビュー（4 回）の P3（Host 側の git は Runner の環境の許可リストを使い GIT_OPTIONAL_LOCKS=0 を保つ、読むだけの Node の log --stat は過去の名前だけが見える、nftables の宛先 IP は保守が要る、Credential を足す Proxy は CONNECT の Tunnel では足せず CLI の Endpoint の上書きが要る）は、実装の PR で扱う。
