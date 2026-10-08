@@ -16,15 +16,15 @@ import { Link } from "../router";
 import { Icon } from "../shell/icons";
 import { HealthChart, HealthTable } from "./HealthChart";
 import {
+  type AreaName,
   abnormal,
+  areasOf,
   CHART_METRICS,
   type ComponentHealth,
   chartStepSeconds,
   componentOf,
   formatGb,
   formatPercent,
-  GROUPS,
-  type GroupName,
   groupComponents,
   groupSeverity,
   HEALTH_RANGES,
@@ -34,6 +34,7 @@ import {
   initialGroup,
   type Metrics,
   numberOf,
+  OTHER,
   type PercentPoint,
   percentPoints,
   queueOf,
@@ -82,7 +83,7 @@ function Dot({ severity }: { severity: Severity }) {
   return <span className={`health-dot-mark sev-${severity}`} aria-hidden="true" />;
 }
 
-function groupValue(t: Translate, report: HealthReport, group: GroupName): string {
+function groupValue(t: Translate, report: HealthReport, group: AreaName): string {
   const components = groupComponents(report, group);
   const worst = components.reduce<ComponentHealth | null>(
     (found, entry) =>
@@ -124,6 +125,7 @@ function groupValue(t: Translate, report: HealthReport, group: GroupName): strin
       break;
     }
     case "recovery":
+    case OTHER:
       break;
   }
   return worst ? statusText(t, worst.status) : t("health.stat.none");
@@ -180,8 +182,8 @@ function GroupChips({
   onSelect,
 }: {
   report: HealthReport;
-  selected: GroupName;
-  onSelect: (group: GroupName) => void;
+  selected: AreaName;
+  onSelect: (group: AreaName) => void;
 }) {
   const { t } = useI18n();
   return (
@@ -189,7 +191,7 @@ function GroupChips({
     <div className="health-chips-scroll">
       <fieldset className="health-chips">
         <legend className="visually-hidden">{t("health.groups")}</legend>
-        {GROUPS.map(({ name }) => {
+        {areasOf(report).map((name) => {
           const severity = groupSeverity(report, name);
           return (
             <button
@@ -675,6 +677,13 @@ function componentLines(t: Translate, health: ComponentHealth): string[] {
       }
       break;
     }
+    default:
+      // A component this version does not know (その他): its numbers, flags and
+      // codes as the Backend names them (Decision 0080 3). A value it did not
+      // read (null) is left out, like a known one.
+      for (const [name, value] of Object.entries(m)) {
+        if (value !== null) lines.push(`${name} ${String(value)}`);
+      }
   }
   return lines;
 }
@@ -726,7 +735,7 @@ function ComponentRow({ health }: { health: ComponentHealth }) {
   );
 }
 
-function DetailPanel({ report, group }: { report: HealthReport; group: GroupName }) {
+function DetailPanel({ report, group }: { report: HealthReport; group: AreaName }) {
   const { t } = useI18n();
   const severity = groupSeverity(report, group);
   const components = groupComponents(report, group);
@@ -741,6 +750,7 @@ function DetailPanel({ report, group }: { report: HealthReport; group: GroupName
         </span>
       </div>
       {group === "gpu" && <GpuSummary compute={componentOf(report, "compute")} />}
+      {group === OTHER && <p className="muted small">{t("health.detail.unknown")}</p>}
       <hr />
       <span className="health-section-title">{t("health.detail.components")}</span>
       <ul className="health-components">
@@ -789,7 +799,7 @@ export function MonitoringView() {
   const [receivedAt, setReceivedAt] = useState<string | null>(null);
   const [receivedOk, setReceivedOk] = useState(true);
   const [failures, setFailures] = useState(0);
-  const [group, setGroup] = useState<GroupName | null>(null);
+  const [group, setGroup] = useState<AreaName | null>(null);
   const [chart, setChart] = useState<History<PercentPoint[]>>({ status: "loading" });
   const [events, setEvents] = useState<History<HealthEvent[]>>({ status: "loading" });
   const [attempt, setAttempt] = useState(0);
@@ -930,7 +940,9 @@ export function MonitoringView() {
       );
       break;
     case "ready": {
-      const selected = group ?? initialGroup(load.report);
+      // An area that is gone (その他 once its components are) is not kept selected.
+      const selected =
+        group && areasOf(load.report).includes(group) ? group : initialGroup(load.report);
       body = (
         <>
           <StatusLine report={load.report} />

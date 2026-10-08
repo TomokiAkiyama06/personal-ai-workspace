@@ -124,6 +124,7 @@ Design Canvas との差分（Backend が優先）: 上限の「GPU 時間（今�
 
 - Board の Host と温度は Backend に Source がないため、UI_DESIGN.md の領域（GPU / VRAM・タスクキュー・PostgreSQL・Recovery Repository・外部エージェント）を Chip にし、Card は VRAM・GPU 使用率・タスクキュー・受信、グラフは GPU / VRAM の推移（%、`表で見る` で同じ値の表）、アラートは Severity の変化（`GET /system/health/events`）です
 - 通常時は「すべて正常です」の 1 行と、Component ごとの閉じた 1 行だけ。異常時は Banner を出し、最も悪い領域を選び、異常な Component の理由と数値を自動で開きます。理由・Status は Code から Catalog で文にし、知らない Code はそのまま出します
+- この Version が知らない Component（新しい Backend の項目）は、あるときだけ出る「その他」の Chip と Panel に入れ、名前・理由・数値を Code のまま出します。異常なら他の領域と同じく「その他」が選ばれます（Decision 0080 の 3。PR #203 の Codex P2 への Human の選択）
 - 15 秒ごとに `GET /system/health` を読み（Tab が隠れている間は読まない）、推移とアラートは期間の変更と 60 秒ごと。失敗しても前の表示を残し「受信」を「途切れています」にします
 - Header の Chip: Owner / Admin は `GPU 38% · Queue 3`（異常時は「Backup 異常 +1」）で、押すとサーバー監視。一般の User は `GET /system/health/summary` の全体の Severity と「Codex · Claude 利用可 / Claude 利用不可」だけ（押しても開かない）。スマートフォンでは点だけ
 - 画面は読み取りのみで、モデルや GPU・サービスの操作はしません

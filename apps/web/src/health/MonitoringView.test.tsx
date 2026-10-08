@@ -8,6 +8,7 @@ import {
   fakeHealthSource,
   healthEvents,
   normalReport,
+  withUnknownComponent,
 } from "../test/healthFixture";
 import { mockApi, Providers, reply, session } from "../test/helpers";
 import { REFRESH_SECONDS } from "./MonitoringView";
@@ -31,7 +32,9 @@ function renderMonitoring(source: HealthSource | null, role = "owner") {
 }
 
 function panel() {
-  return screen.getByRole("region", { name: /^(GPU \/ VRAM|Recovery Repository|PostgreSQL)$/ });
+  return screen.getByRole("region", {
+    name: /^(GPU \/ VRAM|Recovery Repository|PostgreSQL|その他)$/,
+  });
 }
 
 describe("サーバー監視", () => {
@@ -232,6 +235,85 @@ describe("サーバー監視", () => {
     if (backup) backup.reasons = ["failing", "a_code_from_later"];
     renderMonitoring(fakeHealthSource(report, { events: async () => healthEvents().slice(0, 1) }));
     expect(await screen.findByText("a_code_from_later")).toBeVisible();
+  });
+
+  it("shows a component this version does not know under その他 (Codex P2, PR #203)", async () => {
+    const report = withUnknownComponent(normalReport(), "error");
+    renderMonitoring(fakeHealthSource(report));
+    const banner = await screen.findByRole("alert");
+    expect(
+      within(banner).getByText("inference_gateway: 確認が時間内に終わりませんでした"),
+    ).toBeVisible();
+    // Its area is there and selected, not GPU / VRAM.
+    const areas = screen.getByRole("group", { name: "監視の対象" });
+    expect(within(areas).getByRole("button", { name: /その他.*低下/ })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(within(areas).getByRole("button", { name: /GPU \/ VRAM/ })).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+    // The panel shows it by its code, every reason and its numbers as they are.
+    const detail = panel();
+    expect(detail).toHaveAccessibleName("その他");
+    expect(
+      within(detail).getByText("この画面が知らない監視項目です", { exact: false }),
+    ).toBeVisible();
+    expect(
+      within(detail).getByRole("button", { name: "inference_gateway の詳細" }),
+    ).toHaveAttribute("aria-expanded", "true");
+    expect(within(detail).getByText("確認が時間内に終わりませんでした")).toBeVisible();
+    expect(within(detail).getByText("gateway_backlog")).toBeVisible();
+    expect(within(detail).getByText("backlog 7")).toBeVisible();
+    expect(within(detail).getByText("mode drain")).toBeVisible();
+    expect(within(detail).getByText("healthy false")).toBeVisible();
+    // A value the Backend did not read is not made up.
+    expect(within(detail).queryByText(/last_seen/)).not.toBeInTheDocument();
+    // The known areas still hold only their own components.
+    const user = userEvent.setup();
+    await user.click(within(areas).getByRole("button", { name: /GPU \/ VRAM/ }));
+    expect(within(panel()).queryByText("inference_gateway")).not.toBeInTheDocument();
+  });
+
+  it("shows その他 only while there is a component this version does not know", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let current = withUnknownComponent(normalReport(), "info");
+    renderMonitoring(fakeHealthSource(normalReport(), { report: async () => current }));
+    const areas = await screen.findByRole("group", { name: "監視の対象" });
+    // Normal: the area is there, GPU / VRAM stays the one opened first.
+    expect(within(areas).getByRole("button", { name: /その他.*正常/ })).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+    expect(within(areas).getByRole("button", { name: /GPU \/ VRAM/ })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    await user.click(within(areas).getByRole("button", { name: /その他/ }));
+    expect(within(panel()).getByText("inference_gateway")).toBeVisible();
+
+    // The component goes away (or this version learns it): the area goes too,
+    // and the selection falls back instead of showing an empty panel.
+    current = normalReport();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(REFRESH_SECONDS * 1000);
+    });
+    await waitFor(() =>
+      expect(within(areas).queryByRole("button", { name: /その他/ })).not.toBeInTheDocument(),
+    );
+    expect(within(areas).getByRole("button", { name: /GPU \/ VRAM/ })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+  });
+
+  it("has no その他 when every component is known", async () => {
+    renderMonitoring(fakeHealthSource(abnormalReport()));
+    const areas = await screen.findByRole("group", { name: "監視の対象" });
+    expect(within(areas).getAllByRole("button")).toHaveLength(5);
+    expect(within(areas).queryByRole("button", { name: /その他/ })).not.toBeInTheDocument();
   });
 
   it("does not show numbers a failed check did not read (Codex P2)", async () => {
