@@ -345,6 +345,23 @@ class UpdateTest(ReleaseToolTestCase):
         code, out = self.run_tool("install", "r1")
         self.assertEqual(code, paw_release.EXIT_REFUSED)
 
+    def test_a_failed_install_can_be_retried(self):
+        # Codex review #204 (baf009c): after a failed start the first release
+        # is current but not known-good; install again finishes it.
+        self.build("r1", "0001", None)
+        self.world.fail.add("start:r1")
+        code, out = self.run_tool("install", "r1")
+        self.assertEqual(code, paw_release.EXIT_MAINTENANCE, out)
+        self.assertEqual(self.state()["known_good"], [])
+        self.world.fail.clear()
+        code, out = self.run_tool("install", "r1")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.state()["known_good"], ["r1"])
+        self.assertIsNone(self.state()["in_progress"])
+        # Only the unfinished install of that same release is retried.
+        code, out = self.run_tool("install", "r1")
+        self.assertEqual(code, paw_release.EXIT_REFUSED, out)
+
     def test_an_update_with_a_migration(self):
         self.installed()
         code, out = self.run_tool("update", "r2")

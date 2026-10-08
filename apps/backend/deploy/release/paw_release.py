@@ -942,8 +942,17 @@ class Tool:
 
     def install(self, version: str) -> int:
         with self.state.lock():
-            if current_version(self.config) is not None:
+            current = current_version(self.config)
+            in_progress = self.state.read()["in_progress"] or {}
+            retry = (
+                current == version
+                and in_progress.get("operation") == "install"
+                and in_progress.get("to") == version
+            )
+            if current is not None and not retry:
                 raise ReleaseError("a release is installed already: use update")
+            # A retry finishes the same install (Codex review #204): the
+            # migration is idempotent, then start, health and known-good.
             target = load_release(self.config, version, verify=True)
             self.state.update(in_progress={"operation": "install", "to": version})
             self.state.log("install", "started", "ok", to=version)
@@ -957,7 +966,10 @@ class Tool:
             healthy = started.code == 0 and self.healthy(target, target.schema_head)
             if not healthy:
                 self.state.log("install", "health", "failed")
-                self.say("FAILED: the release did not become healthy.")
+                self.say(
+                    "FAILED: the release did not become healthy; fix it, then run "
+                    f"install {version} again."
+                )
                 return EXIT_MAINTENANCE
             self.state.mark_known_good(version)
             self.state.update(in_progress=None)
