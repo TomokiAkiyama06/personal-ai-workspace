@@ -1,5 +1,5 @@
-"""The changed files of a delivered pull request (issue #185 item 6, Decision 0078
-Proposed): reading them from GitHub (``integration/changes.py``) and revision
+"""The changed files of a delivered pull request (issue #185 item 6, Decision
+0078): reading them from GitHub (``integration/changes.py``) and revision
 0190.
 
 GitHub's API is a fake ``GhRunner`` that answers ``pulls/<n>/files`` like ``gh
