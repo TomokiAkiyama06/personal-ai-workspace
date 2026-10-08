@@ -662,6 +662,23 @@ class RollbackTest(ReleaseToolTestCase):
                 self.assertEqual(code, paw_release.EXIT_ENVIRONMENT, out)
                 self.assertIn("outside releases/", out)
                 self.assertFalse(self.world.calls)
+        # Codex review of #213: a release directory that is itself a link out of
+        # the root is refused too, by ``current`` and by any other read.
+        copy = self.tmp / "other" / "r9"
+        shutil.copytree(self.root / "releases" / "r1", copy, symlinks=True)
+        manifest = copy / paw_release.MANIFEST
+        data = json.loads(manifest.read_text())
+        manifest.write_text(json.dumps({**data, "version": "r9"}))
+        (self.root / "releases" / "r9").symlink_to(copy)
+        link.unlink()
+        link.symlink_to(Path("releases") / "r9")
+        self.world.calls.clear()
+        code, out = self.run_tool("status")
+        self.assertEqual(code, paw_release.EXIT_ENVIRONMENT, out)
+        self.assertIn("outside releases/", out)
+        self.assertFalse(self.world.calls)
+        with self.assertRaises(paw_release.ReleaseError):
+            paw_release.load_release(paw_release.load_config(self.config), "r9")
         # The forms the tool writes, and the absolute path of the same release.
         for target in (Path("releases") / "r1", self.root / "releases" / "r1"):
             with self.subTest(target=str(target)):

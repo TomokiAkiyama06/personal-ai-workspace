@@ -400,10 +400,19 @@ def source_digest(directory: Path) -> str:
     return digest.hexdigest()
 
 
+def _inside_releases(config: Config, version: str) -> bool:
+    """Whether ``releases/<version>`` stays under the releases directory once
+    links are followed (not itself a link out of the root, Codex review of #213)."""
+    path = config.releases / version
+    return path.resolve().parent == config.releases.resolve()
+
+
 def load_release(config: Config, version: str, *, verify: bool = False) -> Release:
     if not re.fullmatch(VERSION_PATTERN, version):
         raise ReleaseError("invalid release name")
     path = config.releases / version
+    if not _inside_releases(config, version):
+        raise ReleaseError(f"release {version} points outside releases/")
     try:
         data = json.loads((path / MANIFEST).read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -455,9 +464,14 @@ def current_version(config: Config) -> str | None:
     # of the same directory: a ``releases/<version>`` elsewhere would be run by the
     # service while this tool verifies and runs the one under the root (Codex
     # review #204).
-    if not re.fullmatch(VERSION_PATTERN, target.name) or target not in (
-        Path("releases") / target.name,
-        config.releases / target.name,
+    if (
+        not re.fullmatch(VERSION_PATTERN, target.name)
+        or target
+        not in (
+            Path("releases") / target.name,
+            config.releases / target.name,
+        )
+        or not _inside_releases(config, target.name)
     ):
         raise ReleaseError("current points outside releases/", EXIT_ENVIRONMENT)
     return target.name
