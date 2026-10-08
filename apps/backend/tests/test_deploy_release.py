@@ -636,6 +636,32 @@ class RollbackTest(ReleaseToolTestCase):
         self.assertIn("source digest", out)
         self.assertFalse([c for c in self.world.calls if c.startswith("r1:")])
 
+    def test_a_current_link_outside_the_release_root_is_refused(self):
+        # Codex review #204 (5450071434): ``<anything>/releases/<version>`` was
+        # taken for ``<root>/releases/<version>``.
+        self.installed()
+        outside = self.tmp / "elsewhere" / "releases" / "r1"
+        outside.mkdir(parents=True)
+        link = self.root / "current"
+        for target in (outside, Path("..") / "elsewhere" / "releases" / "r1"):
+            with self.subTest(target=str(target)):
+                link.unlink()
+                link.symlink_to(target)
+                self.world.calls.clear()
+                code, out = self.run_tool("status")
+                self.assertEqual(code, paw_release.EXIT_ENVIRONMENT, out)
+                self.assertIn("outside releases/", out)
+                self.assertFalse(self.world.calls)
+        # The forms the tool writes, and the absolute path of the same release.
+        for target in (Path("releases") / "r1", self.root / "releases" / "r1"):
+            with self.subTest(target=str(target)):
+                link.unlink()
+                link.symlink_to(target)
+                self.assertEqual(
+                    paw_release.current_version(paw_release.load_config(self.config)),
+                    "r1",
+                )
+
     def test_a_rollback_from_a_changed_release_runs_only_the_targets_tools(self):
         self.installed()
         self.assertEqual(self.run_tool("update", "r2")[0], 0)

@@ -451,8 +451,13 @@ def current_version(config: Config) -> str | None:
             raise ReleaseError("current is not a symlink", EXIT_ENVIRONMENT)
         return None
     target = Path(os.readlink(link))
-    if target.parent.name != "releases" or not re.fullmatch(
-        VERSION_PATTERN, target.name
+    # Only ``releases/<version>`` (what switch_current writes) or the absolute path
+    # of the same directory: a ``releases/<version>`` elsewhere would be run by the
+    # service while this tool verifies and runs the one under the root (Codex
+    # review #204).
+    if not re.fullmatch(VERSION_PATTERN, target.name) or target not in (
+        Path("releases") / target.name,
+        config.releases / target.name,
     ):
         raise ReleaseError("current points outside releases/", EXIT_ENVIRONMENT)
     return target.name
