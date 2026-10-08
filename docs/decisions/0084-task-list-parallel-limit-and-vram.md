@@ -1,6 +1,7 @@
 # Task の一覧の並列の上限と VRAM（何を「並列の上限」とするか、VRAM を誰に見せるか）
 
-- Status: Proposed
+- Status: Approved
+- Approval: 2026-10-08、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで直接回答して承認（すべての判断点を推奨どおり承認（画面の目視確認も OK）。末尾の「承認時の決定」）
 - Date: 2026-10-08
 - Scope: Issue [#185](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/185) の 1 の残り（Task の一覧の Scheduler の並列の上限と VRAM）。`apps/backend/paw_backend/compute/scheduler.py`（`ComputeScheduler.coding_capacity()`）、`apps/backend/paw_backend/api/v1/tasks.py`（`GET /api/v1/tasks` の `capacity`）、`apps/web/src/tasks/apiSource.ts`
 - Supersedes: なし。[Decision 0067](0067-task-pr-http-api.md)（Approved）の 6・7 で「何を並列の上限とするかを決めてから足す」とした値を決める（0067 は書き換えない）
@@ -71,3 +72,7 @@ Migration は不要（メモリ上の Scheduler の値だけ）。予約され�
 承認されたら Status を Approved に改め、承認の内容を記録する。
 方針を変えるときは、この Decision を書き換えず、新しい Decision から `Supersedes` する。
 [REQUIREMENTS.md](../../REQUIREMENTS.md) の原文は書き換えない。
+
+## 承認時の決定（2026-10-08）
+
+Human は、作業 Session で判断が必要な点について推奨つきの説明を受け、直接回答して承認した（すべての判断点を推奨どおり承認（画面の目視確認も OK））。

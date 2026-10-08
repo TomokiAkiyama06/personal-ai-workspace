@@ -144,7 +144,7 @@ function gigabytes(bytes: number): number {
   return Math.round((bytes / GB) * 10) / 10;
 }
 
-// The scheduler's parallel limit (Decision 0084, Proposed); the VRAM only comes
+// The scheduler's parallel limit (Decision 0084); the VRAM only comes
 // to a person who may see System Health's detail, and only from a fresh reading.
 function capacity(wire: TaskCapacityWire | null | undefined): TaskCapacity | undefined {
   if (!wire) return undefined;

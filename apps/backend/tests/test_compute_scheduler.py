@@ -593,7 +593,7 @@ if __name__ == "__main__":
 
 
 class CodingCapacityTest(unittest.IsolatedAsyncioTestCase):
-    """The parallel limit of the local coding agents (Decision 0084, Proposed):
+    """The parallel limit of the local coding agents (Decision 0084):
     the Coding leases on the main model and how many more agents of a whole
     context it would admit now."""
 

@@ -130,7 +130,7 @@ class TaskSummaryOut(BaseModel):
 
 
 class TaskCapacityOut(BaseModel):
-    # The parallel limit of the local coding agents (Decision 0084, Proposed):
+    # The parallel limit of the local coding agents (Decision 0084):
     # the running ones and how many more of a whole context fit now.
     parallel_limit: int
     running: int
