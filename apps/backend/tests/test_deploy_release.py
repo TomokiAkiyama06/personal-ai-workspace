@@ -636,6 +636,16 @@ class RollbackTest(ReleaseToolTestCase):
         self.assertIn("source digest", out)
         self.assertFalse([c for c in self.world.calls if c.startswith("r1:")])
 
+    def test_status_does_not_run_a_changed_current_release(self):
+        # Codex review #204 (5450071434): status ran deploy-status of the current
+        # release without verifying it, with the deployment environment.
+        self.installed()
+        self.tamper("r1")
+        code, out = self.run_tool("status")
+        self.assertEqual(code, paw_release.EXIT_REFUSED, out)
+        self.assertIn("source digest", out)
+        self.assertFalse([c for c in self.world.calls if c.startswith("r1:")])
+
     def test_a_current_link_outside_the_release_root_is_refused(self):
         # Codex review #204 (5450071434): ``<anything>/releases/<version>`` was
         # taken for ``<root>/releases/<version>``.

@@ -1484,7 +1484,10 @@ def _show(tool: Tool, *, verbose: bool) -> int:
     if verbose:
         tool.say(f"in progress: {state['in_progress'] or 'none'}")
         if current is not None:
-            status = tool._status(load_release(tool.config, current))
+            # Verified first, as update and rollback do: its deploy-status runs
+            # with the deployment environment (Codex review #204).
+            release = load_release(tool.config, current, verify=True)
+            status = tool._status(release)
             tool.say(
                 "database: "
                 + (json.dumps(status, sort_keys=True) if status else "unavailable")
