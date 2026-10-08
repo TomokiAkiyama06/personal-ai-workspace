@@ -139,7 +139,15 @@ class NodeOutcome:
     first call) only: no other node may propose nodes. ``message`` is the failure
     text; it is hashed for the loop detector and **never stored, logged or echoed**.
     ``retryable=False`` says that trying again is pointless (the node fails at
-    once, without a retry or an escalation).
+    once, without a retry or an escalation). ``escalate=True`` (Decision 0083,
+    section 4, which adds it to Decision 0021's section 3) says that trying again
+    on THIS rung with the same method is pointless but a higher rung might
+    succeed (a context or step limit, no submission, an expired credential, a
+    refused cloud gate): the node moves to the next agent of its ladder at once,
+    without waiting for the loop detector and without trying an alternative
+    first (it skips Decision 0007's ``TRY_ALTERNATIVE``). Without a higher rung
+    it is an ordinary retryable failure. ``escalate=True`` with
+    ``retryable=False`` contradicts itself and is refused.
     """
 
     result: NodeResult | None = None
@@ -147,6 +155,7 @@ class NodeOutcome:
     error_class: str | None = None
     message: str = field(default="", repr=False)
     retryable: bool = True
+    escalate: bool = False
 
     def __post_init__(self) -> None:
         if (self.result is None) == (self.error_class is None):
@@ -161,6 +170,10 @@ class NodeOutcome:
             check_label("error_class", self.error_class, maximum=200)
         if not isinstance(self.message, str) or not isinstance(self.retryable, bool):
             raise InvalidOrchestratorArgumentError("message")
+        if not isinstance(self.escalate, bool) or (
+            self.escalate and (self.result is not None or not self.retryable)
+        ):
+            raise InvalidOrchestratorArgumentError("escalate")
 
     @classmethod
     def succeeded(
@@ -170,9 +183,19 @@ class NodeOutcome:
 
     @classmethod
     def failed(
-        cls, error_class: str, message: str = "", *, retryable: bool = True
+        cls,
+        error_class: str,
+        message: str = "",
+        *,
+        retryable: bool = True,
+        escalate: bool = False,
     ) -> "NodeOutcome":
-        return cls(error_class=error_class, message=message, retryable=retryable)
+        return cls(
+            error_class=error_class,
+            message=message,
+            retryable=retryable,
+            escalate=escalate,
+        )
 
     @property
     def ok(self) -> bool:
