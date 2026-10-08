@@ -36,4 +36,11 @@ Restart=on-failure
 RestartSec=5s
 NoNewPrivileges=true
 PrivateTmp=true
-ProtectSystem=strict
+# full, not strict: /usr, /boot and /etc are read-only, but the backend writes
+# the users' checkouts (<home>/workspaces/..., PAW_REPOSITORY_WORKSPACE_SUBDIR)
+# and the paths of its settings (PAW_MEMORY_PROJECTION_DIR, ...), so /home and
+# /srv stay writable (ProtectHome is not set for the same reason).
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

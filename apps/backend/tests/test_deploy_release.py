@@ -679,6 +679,22 @@ class RepositoryTest(unittest.TestCase):
                 with self.subTest(unit=unit):
                     self.assertIn(unit.removesuffix(".timer") + ".service", stopped)
 
+    def test_the_backend_unit_can_be_enabled_and_write_its_paths(self):
+        # Codex review #204 (80d3189): `enable` needs an [Install] target, and
+        # the backend creates checkouts under the users' homes.
+        unit = (TOOL_PATH.parents[1] / "systemd" / "paw-backend.service").read_text()
+        settings = [
+            line.split("=", 1)
+            for line in unit.splitlines()
+            if "=" in line and not line.startswith("#")
+        ]
+        values = {key.strip(): value.strip() for key, value in settings}
+        self.assertIn("[Install]", unit)
+        self.assertEqual(values.get("WantedBy"), "multi-user.target")
+        protect = values.get("ProtectSystem")
+        self.assertNotEqual(protect, "strict")
+        self.assertNotEqual(values.get("ProtectHome"), "true")
+
     def test_the_deployment_document_follows_the_decisions_status(self):
         # Codex review #204 (ad3c59c): no "until it is approved" once it is.
         docs = Path(__file__).resolve().parents[3] / "docs"
