@@ -2201,7 +2201,9 @@ class Orchestrator:
                 # A node's is written with its failure (``fail_node``); the
                 # planner has no node, so its own (Decision 0071).
                 try:
-                    await self._store.record_incident(IncidentKind.OUT_OF_MEMORY)
+                    await self._store.record_incident(
+                        IncidentKind.OUT_OF_MEMORY, task_id=task_id
+                    )
                 except Exception as error:
                     logger.error(
                         "Recording an incident failed (%s)", error_class_of(error)

@@ -2,6 +2,8 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App";
 import { SessionProvider } from "./auth/session";
+import { apiHealthSource } from "./health/api";
+import { HealthSourceProvider } from "./health/model";
 import { I18nProvider } from "./i18n";
 import { apiMemorySource } from "./memory/apiSource";
 import { MemorySourceProvider } from "./memory/source";
@@ -33,7 +35,9 @@ if (root) {
                 <MemorySourceProvider source={apiMemorySource}>
                   <UsageSourceProvider source={apiUsageSource}>
                     <TaskSourceProvider source={apiTaskSource}>
-                      <App />
+                      <HealthSourceProvider source={apiHealthSource}>
+                        <App />
+                      </HealthSourceProvider>
                     </TaskSourceProvider>
                   </UsageSourceProvider>
                 </MemorySourceProvider>

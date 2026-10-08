@@ -1,6 +1,8 @@
 // 日本語（既定）の文言。キーの一覧の正本で、他の言語はこの型に合わせる。
 // 文言は PAW-060 の Design Canvas（Login / SettingsDevices / UserMenu / Roles /
 // NotificationCenter など）に合わせる。`{name}` は translate() の引数で置き換える。
+
+import { healthJa } from "./health";
 import { memoryJa } from "./memory.ja";
 import { tasksJa } from "./tasks";
 
@@ -451,6 +453,8 @@ export const ja = {
   "notifications.severity.critical": "CRITICAL",
 
   ...tasksJa,
+
+  ...healthJa,
 
   "common.cancel": "キャンセル",
   "common.close": "閉じる",

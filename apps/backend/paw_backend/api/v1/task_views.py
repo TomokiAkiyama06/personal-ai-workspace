@@ -94,6 +94,8 @@ class TaskListItem:
 class PullRequestItem:
     id: int
     number: int
+    # The attempt of the task the record belongs to.
+    attempt: int
     url: str
     state: PullRequestState
     task_id: uuid.UUID
@@ -476,6 +478,7 @@ async def list_pull_requests(
             PullRequestItem(
                 id=row.id,
                 number=row.pr_number,
+                attempt=row.attempt,
                 url=row.pr_url,
                 state=row.pr_state,
                 task_id=row.task_id,

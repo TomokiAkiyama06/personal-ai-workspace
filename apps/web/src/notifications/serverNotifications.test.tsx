@@ -68,13 +68,29 @@ describe("stored notifications: wording", () => {
       id: "n-1",
       severity: "error",
       title: "Backup に異常があります",
-      body: "状態 failing · 以前の Severity warning",
+      body: "状態 異常 · 以前の Severity WARNING",
+      // A reason code this version does not know is shown as it is.
       detail: "consecutive_failures",
       source: "System Health",
       remote: true,
       read: false,
     });
-    expect(item.actions).toEqual([{ label: "詳細を見る", to: "/admin", primary: true }]);
+    // 詳細を見る opens 管理 › サーバー監視 (PAW-067).
+    expect(item.actions).toEqual([{ label: "詳細を見る", to: "/admin/monitoring", primary: true }]);
+    const known = toIncoming(
+      stored({
+        params: {
+          component: "connections",
+          status: "degraded",
+          previous_severity: "info",
+          reasons: ["unavailable:claude", "push"],
+        },
+      }),
+      t,
+    );
+    expect(known.title).toBe("Codex / Claude の接続 に異常があります");
+    expect(known.body).toBe("状態 低下 · 以前の Severity INFO");
+    expect(known.detail).toBe("Claude に接続できません · push");
     expect(toIncoming(stored({ severity: "info" }), t).title).toBe("Backup は正常に戻りました");
   });
 

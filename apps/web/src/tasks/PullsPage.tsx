@@ -2,13 +2,18 @@
 // requests the agents delivered, what they still need before Merge Ready, and the
 // human's merge authority. The Backend has no merge API, so the merge button is
 // shown disabled and the pull request is merged on GitHub.
+// The changed files, the review summary and the audit rows come from the
+// Backend's records of the delivered pull request (issue #185 item 6, Decision
+// 0078); `/pulls/<id>/files` and `/pulls/<id>/files/<n>` are the MobileDiff board.
 import { useCallback, useEffect, useState } from "react";
 import { useI18n } from "../i18n";
 import { errorMessage } from "../i18n/errors";
 import { Link, useRouter } from "../router";
 import { Icon } from "../shell/icons";
+import { DiffView, FilesView } from "./DiffView";
 import type { PullRequestRecord } from "./model";
 import { decodeSegment, REFRESH_MS, shortId } from "./model";
+import { AuditPanel, ChangedFilesPanel, diffPath, ReviewPanel, useRead } from "./PullPanels";
 import { CheckMark } from "./parts";
 import { type TaskSource, useTaskSource } from "./source";
 import { TASKS_PATH, Unavailable } from "./TasksPage";
@@ -32,10 +37,25 @@ function matches(pr: PullRequestRecord, filter: Filter): boolean {
   }
 }
 
-function selectedPullId(path: string): string | null {
+interface PullRoute {
+  id: string;
+  /** `files`: the file list; a number: that file's diff. */
+  view: "detail" | "files" | number;
+}
+
+/** `/pulls/<id>`, `/pulls/<id>/files` or `/pulls/<id>/files/<n>`; null for the list. */
+function pullRoute(path: string): PullRoute | null {
   if (!path.startsWith(`${PULLS_PATH}/`)) return null;
-  const id = path.slice(PULLS_PATH.length + 1);
-  return id ? (decodeSegment(id) ?? id) : null;
+  const [segment, files, index, ...rest] = path.slice(PULLS_PATH.length + 1).split("/");
+  if (!segment) return null;
+  const id = decodeSegment(segment) ?? segment;
+  if (files === undefined) return { id, view: "detail" };
+  if (files === "files" && rest.length === 0) {
+    if (index === undefined || index === "") return { id, view: "files" };
+    if (/^\d{1,4}$/.test(index)) return { id, view: Number(index) };
+  }
+  // Anything else under a pull request is that pull request.
+  return { id, view: "detail" };
 }
 
 /** A GitHub link is followed only if it is an https URL (the Backend records one). */
@@ -64,7 +84,8 @@ type Load =
 function PullsView({ source }: { source: TaskSource }) {
   const { t } = useI18n();
   const { path } = useRouter();
-  const selectedId = selectedPullId(path);
+  const route = pullRoute(path);
+  const selectedId = route?.id ?? null;
   const [load, setLoad] = useState<Load>({ status: "loading" });
   const [filter, setFilter] = useState<Filter>("all");
   const reload = useCallback(() => {
@@ -178,8 +199,12 @@ function PullsView({ source }: { source: TaskSource }) {
           </ul>
         </nav>
         <div className="task-detail-pane">
-          {shown ? (
-            <PullDetail pr={shown} />
+          {shown && route?.view === "files" ? (
+            <FilesView source={source} pr={shown} />
+          ) : shown && typeof route?.view === "number" ? (
+            <DiffView source={source} pr={shown} index={route.view} />
+          ) : shown ? (
+            <PullDetail source={source} pr={shown} />
           ) : (
             load.status === "ready" &&
             all.length > 0 && <p className="muted small">{t("pulls.select")}</p>
@@ -232,10 +257,15 @@ function Condition({
   );
 }
 
-function PullDetail({ pr }: { pr: PullRequestRecord }) {
+function PullDetail({ source, pr }: { source: TaskSource; pr: PullRequestRecord }) {
   const { t } = useI18n();
   const url = safeUrl(pr.url);
   const merged = pr.state === "merged";
+  const changes = useRead(() => source.getChangedFiles(pr.id), pr.id);
+  const review = useRead(() => source.getReview(pr.id), pr.id);
+  const audit = useRead(() => source.getAudit(pr.id), pr.id);
+  const recorded = changes.status === "ready" && changes.data.recorded ? changes.data : null;
+  const firstDiff = recorded?.files.find((file) => file.hasPatch);
   return (
     <div className="pull-detail">
       <Link to={PULLS_PATH} className="back-row phone-only">
@@ -267,6 +297,13 @@ function PullDetail({ pr }: { pr: PullRequestRecord }) {
             <span className="small muted">{t("pulls.conditionsHint")}</span>
           </div>
           <ul className="plain-list">
+            {recorded && (
+              <Condition
+                label={t("pulls.condition.implementation")}
+                state="done"
+                value={t("pulls.filesCount", { count: recorded.files.length })}
+              />
+            )}
             <Condition
               label={t("pulls.condition.pr")}
               state={pr.state === "closed" ? "failed" : pr.state === "draft" ? "waiting" : "done"}
@@ -301,6 +338,8 @@ function PullDetail({ pr }: { pr: PullRequestRecord }) {
             />
           </ul>
         </section>
+        <ChangedFilesPanel prId={pr.id} changes={changes} />
+        <ReviewPanel review={review} />
       </div>
       <aside className="pull-side">
         <section className="task-card-panel merge-panel" aria-labelledby="merge-title">
@@ -315,6 +354,11 @@ function PullDetail({ pr }: { pr: PullRequestRecord }) {
             {t("pulls.mergeUnavailable")}
           </p>
           <div className="actions">
+            {firstDiff && (
+              <Link className="button-link" to={diffPath(pr.id, firstDiff.index)}>
+                {t("pulls.viewDiff")}
+              </Link>
+            )}
             {url && (
               <a className="button-link" href={url} target="_blank" rel="noopener noreferrer">
                 {t("pulls.openGitHub")}
@@ -332,6 +376,7 @@ function PullDetail({ pr }: { pr: PullRequestRecord }) {
           <Icon name="key" size={16} />
           <p>{t("pulls.authority")}</p>
         </div>
+        <AuditPanel audit={audit} />
       </aside>
     </div>
   );

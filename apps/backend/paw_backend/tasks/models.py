@@ -510,3 +510,50 @@ class TaskEventRow(Base):
         ),
         CheckConstraint("retry_count >= 0", name="retry_count_not_negative"),
     )
+
+
+# How many changed files of one pull request are kept (revision 0190 writes the
+# same number; ``integration/changes.py`` reads at most this many).
+MAX_PULL_REQUEST_FILES = 300
+
+
+class PullRequestChangesRow(Base):
+    """The changed files of a delivered pull request (revision ``0190``, issue
+    #185 item 6, Decision 0078): read from GitHub when the Integration
+    Gate delivered it (``integration/changes.py``), for the PR screen.
+
+    ``files`` holds one object per file (``path``, ``previous_path``, ``status``,
+    ``additions``, ``deletions``, ``patch_truncated``), at most
+    :data:`MAX_PULL_REQUEST_FILES`, in GitHub's order; ``patches`` the patch of
+    each (a string, or ``null`` when GitHub gave none or it was not read), at the
+    same index. ``truncated``: GitHub listed more files than were kept. The row
+    goes with its record (``task_attempt_repositories``)."""
+
+    __tablename__ = "pull_request_changes"
+
+    record_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("task_attempt_repositories.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    head_commit: Mapped[str] = mapped_column(String(64))
+    truncated: Mapped[bool] = mapped_column(Boolean)
+    files: Mapped[list[dict[str, Any]]] = mapped_column(JSONB)
+    patches: Mapped[list[str | None]] = mapped_column(JSONB)
+    recorded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "head_commit ~ '^([0-9a-f]{40}|[0-9a-f]{64})$'",
+            name="head_commit_object_id",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(files) = 'array'"
+            f" AND jsonb_array_length(files) <= {MAX_PULL_REQUEST_FILES}"
+            " AND jsonb_typeof(patches) = 'array'"
+            " AND jsonb_array_length(patches) = jsonb_array_length(files)",
+            name="files_shape",
+        ),
+    )
