@@ -199,8 +199,13 @@ async def mark_consolidated(
     )
 
 
-async def _lock_keys(session: AsyncSession, owner: UUID, keys: list[str]) -> None:
-    """Advisory-lock (owner, key) for every key, in the order of the lock ids."""
+async def lock_keys(session: AsyncSession, owner: UUID, keys: list[str]) -> None:
+    """Advisory-lock (owner, key) for every key, in the order of the lock ids.
+
+    The confirmation flow (PAW-044, ``memory/preferences``) takes the same lock
+    before it writes a key's memory, and always before any memory lock, so that a
+    consolidation and a confirmation of one key are serialised.
+    """
     if not keys:
         return
     lock_ids = (
@@ -379,7 +384,7 @@ async def apply_items(
             if key is not None
         }
     )
-    await _lock_keys(session, owner, involved)
+    await lock_keys(session, owner, involved)
     registry = await _load_registry(session, owner, involved)
     latest = await _load_latest(
         session, owner, {registered.memory_id for registered in registry.values()}
