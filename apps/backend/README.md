@@ -53,7 +53,7 @@ Python 側の Package（`pgvector-python`）は使わず、`paw_backend/memory/v
 apps/backend/
 ├─ pyproject.toml          # 依存（完全一致で固定）と Ruff 設定
 ├─ alembic.ini             # Alembic 設定（DB URL は持たない）
-├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0022 は Password / Session / Login Throttle / 認証 Policy、0023 は Passkey / Passkey の Challenge / Session の Gate、0026 は Project、0027 は Repository 登録・Remote・Checkout、0030 は Shared Connection・Quota・Usage、0031 は Tool Approval、0033 は Queue / Budget / Loop、0034 は DAG Agent Orchestrator（Plan・DAG・Node の試行）、0040 は Memory Schema、0041 は Memory Journal / Consolidation Queue、0042 は Memory の鮮度の Job の Index、0043 は `memory_versions` の全文検索の Index、0046 は Shared Memory Candidate、0050 は Research Scratch、0052 は Evidence / Claim Provenance、0071 は Memory の Status / Stale 状態の変更履歴、0083 は `tasks (project_id, state)` の Index、0085 は Task の Working Set、0087 は外部送信の Audit の `audit_events.details`、0108 は他の Account の Passkey の Reset（`admin_reset`）と 1 回限りの Password 再設定 Token（`password_reset`）とその発行の関数、0124 は招待・端末の Pairing・User の状態の履歴、0133 は Node の試行の Placement（Local / Cloud と Agent・Model）と Cloud の外部送信の Audit の対応、0147 は `memory_versions.content` の長さの上限（20,000 文字）、0154 は承認つきの Pairing の Session の Passkey の登録（`device_pairings.passkey_allowance_ended_at`）、0066 は System Health の時系列・Event と `connection_usage` の実行中の行の部分 Index、0183 は System Health が数える Agent の OOM と Escalation（`agent_incidents`）、0188 は保存される通知と User ごとの既読・非表示、0189 は Local の Model での実行の使用量（`local_usage`）と `agent_incidents.task_id`
+├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0022 は Password / Session / Login Throttle / 認証 Policy、0023 は Passkey / Passkey の Challenge / Session の Gate、0026 は Project、0027 は Repository 登録・Remote・Checkout、0030 は Shared Connection・Quota・Usage、0031 は Tool Approval、0033 は Queue / Budget / Loop、0034 は DAG Agent Orchestrator（Plan・DAG・Node の試行）、0040 は Memory Schema、0041 は Memory Journal / Consolidation Queue、0042 は Memory の鮮度の Job の Index、0043 は `memory_versions` の全文検索の Index、0046 は Shared Memory Candidate、0050 は Research Scratch、0052 は Evidence / Claim Provenance、0071 は Memory の Status / Stale 状態の変更履歴、0083 は `tasks (project_id, state)` の Index、0085 は Task の Working Set、0087 は外部送信の Audit の `audit_events.details`、0108 は他の Account の Passkey の Reset（`admin_reset`）と 1 回限りの Password 再設定 Token（`password_reset`）とその発行の関数、0124 は招待・端末の Pairing・User の状態の履歴、0133 は Node の試行の Placement（Local / Cloud と Agent・Model）と Cloud の外部送信の Audit の対応、0147 は `memory_versions.content` の長さの上限（20,000 文字）、0154 は承認つきの Pairing の Session の Passkey の登録（`device_pairings.passkey_allowance_ended_at`）、0066 は System Health の時系列・Event と `connection_usage` の実行中の行の部分 Index、0183 は System Health が数える Agent の OOM と Escalation（`agent_incidents`）、0188 は保存される通知と User ごとの既読・非表示、0189 は Local の Model での実行の使用量（`local_usage`、0191 は Update の保守（`deploy_maintenance`。ある間は Task が始まらない））と `agent_incidents.task_id`
 ├─ paw_backend/
 │  ├─ app.py               # create_app(settings)
 │  ├─ config.py            # PAW_ 環境変数から読む Settings
@@ -68,7 +68,7 @@ apps/backend/
 │  │  ├─ passkeys/         # Passkey（WebAuthn）: Ceremony の検証、Challenge、登録・認証・失効、Passkey の Step-up の Verifier、Tool Broker の強い承認の Step-up（PAW-023）
 │  │  └─ onboarding/       # 招待、QR / リンクの端末の Pairing、User の Lifecycle（削除・復元）、1 回限りの Token（PAW-024）
 │  ├─ identity/            # 最小の users、One-time Token。`redeemer.py` は Web 側、`operator.py`（Owner の作成・Token の発行）は cli だけが使う（PAW-021）
-│  ├─ cli/                 # server-local の管理コマンド `python -m paw_backend.cli`（PAW-021。`audit-retention-*` は Issue #117、`memory-projection-*` は PAW-045、`compute-status` は PAW-036、`user-erasure-run` は Issue #127）
+│  ├─ cli/                 # server-local の管理コマンド `python -m paw_backend.cli`（PAW-021。`deploy-*` は PAW-068。`audit-retention-*` は Issue #117、`memory-projection-*` は PAW-045、`compute-status` は PAW-036、`user-erasure-run` は Issue #127）
 │  ├─ compute/             # GPU / Compute Resource Scheduler: 読み取り専用の GPU Probe、VRAM の勘定、KV Cache の Admission、縮退と常駐、Exclusive、Hybrid の Runtime（PAW-036）、Kaggle / Full GPU Mode（PAW-037）
 │  ├─ orchestrator/        # DAG Agent Orchestrator: Plan、Scheduler、DAG の永続化と Fencing、Runtime の Protocol、Tool・Budget の Gateway、Project 削除の Sweep（PAW-034）、worktree と統合の継ぎ目 `workspaces.py`（PAW-035）
 │  ├─ integration/         # Parallel Worktree / Integration Node: Worker ごとの worktree・branch、integration branch への統合と Conflict の検知、統合後の Test → Evaluator → Review の Gate（PAW-035）、Gate を通った `target` の Push と PR の作成（#132）
@@ -82,6 +82,7 @@ apps/backend/
 │  │  └─ projection/       # Memory Markdown Projection: 決定的な Renderer、Snapshot の読み取り、安全な Writer（0700 / 0600、Link を辿らない）、実行と Audit（PAW-045）
 │  ├─ recovery/            # Recovery Repository: 形式（JSON・Manifest・Checksum）、列の Allow-list の Snapshot、Renderer、Checkout（Marker・Lock）、git（Fast-forward の Push だけ）、Backup、Dry run が既定の Restore（PAW-047）
 │  ├─ projects/            # Project、Membership（招待制）、Lifecycle（PAW-026）、管理者向けの全 Project 一覧（Issue #84）。`task_gate.py` は Task Lane に渡す Project の状態 Gate（Issue #83）、`task_stop.py` は Delete 開始時の Task 停止
+│  ├─ deploy/              # Update の保守（受付停止・Drain・再開）、DB の復旧点（作成・隔離した検証・復元）、その Audit（PAW-068）。Command は `cli/deploy.py`
 │  ├─ health/              # System Health: Component ごとの Source（読み取りだけ）、Monitor、時系列と Event の Store（PAW-066）
 │  ├─ connections/         # Shared Codex / Claude Connection: Adapter の Interface、Secret（Handle）、User 別 Quota、利用量の帰属（PAW-030）
 │  ├─ repositories/        # Repository の登録、Remote、User ごとの Checkout、Path の安全性、git の安全な実行（PAW-027）
@@ -93,7 +94,8 @@ apps/backend/
 │  └─ api/
 │     ├─ deps.py           # FastAPI Dependency
 │     └─ v1/               # /api/v1 の Router（health、events、auth、passkeys、accounts、system_health、compute、usage、projects、memory、tasks、notifications）
-├─ deploy/systemd/         # Audit の保存期間・退避（Issue #117）、Memory Markdown Projection（PAW-045）、Recovery Repository の Backup（PAW-047）の定期実行の Unit File の例、Main の LLM の Runtime の Unit の例（Issue #182）
+├─ deploy/systemd/         # Audit の保存期間・退避（Issue #117）、Memory Markdown Projection（PAW-045）、Recovery Repository の Backup（PAW-047）の定期実行の Unit File の例、Main の LLM の Runtime の Unit の例（Issue #182）、Backend の Unit の例（PAW-068）
+├─ deploy/release/        # Release の Tool `paw_release.py`（標準 Library だけ）と設定の例（PAW-068）
 ├─ deploy/ssh-git-wrapper/ # SshGitRunner の Forced Command の Wrapper と配備の手順（Issue #134）
 └─ tests/                  # unittest
 ```
@@ -149,6 +151,7 @@ Database には pgvector が必要です（CI は `pgvector/pgvector:pg18` を�
 | `PAW_MIGRATION_DATABASE_URL` | なし | Migration 専用の接続先（Schema の Owner の Role）。設定すると Alembic は `PAW_DATABASE_URL` の代わりにこれを使う。認可・Audit の節を参照 |
 | `PAW_APP_DATABASE_ROLE` | なし | Web の Application が接続する PostgreSQL の Role 名（英数字と `_`、63 文字まで。`public`、`pg_` で始まる名前、`postgres` などの予約名は拒否）。Audit Table の Migration が、実在するこの Role に INSERT と SELECT だけを与える（存在しなければ Migration が失敗する）。Migration `0021` は `users` / `setup_tokens` について Token の使用に必要な最小限の権限だけを与える |
 | `PAW_DATABASE_READINESS_CACHE_SECONDS` | `1` | Readiness の結果（失敗を含む）を再利用する秒数。`0` で再利用しない |
+| `PAW_DEPLOY_ADMIN_DATABASE_URL` | なし | Update の復旧点の検証と復元（`deploy-restore-point-verify` / `-restore`）が Database を作成・改名・削除する接続先（`CREATEDB` を持ち Workspace の Database を所有する Role。普通は Migration の Role で `postgres` Database に接続）。[Deploy / Update / Rollback](#deploy--update--rollbackpaw-068)（Decision 0079） |
 | `PAW_OPERATOR_DATABASE_URL` | なし | Owner の管理コマンド（`python -m paw_backend.cli`）の接続先（Token を作れる Role）。未設定のときだけ `PAW_DATABASE_URL` を使い、警告する。[Owner の初期設定と復旧](#owner-の初期設定と復旧) |
 | `PAW_OPERATOR_DATABASE_ROLE` | なし | 上の Role 名（`PAW_APP_DATABASE_ROLE` と同じ検証）。Migration `0021` が、実在するこの Role に管理コマンドの権限を与える |
 | `PAW_SETUP_TOKEN_TTL_SECONDS` | `1800` | Owner の Setup / Recovery Token の有効期間（60〜14400 秒） |
@@ -902,7 +905,7 @@ Issue [#117](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/117
   `PAW_MIGRATION_DATABASE_URL` は root だけが読める `/etc/paw/audit-retention.env`（`chmod 600`）に置く。cron でも同じ Command を使える。
 - **Backend を動かす OS User で実行しない。** この Job は Table の Owner の Credential を持つ。同じ uid の Process は `/proc/<pid>/environ` からそれを読め、
   Job が実行する Code や venv に書き込める User は次の実行に何でもさせられる。例の Unit は専用の `paw-maint`（`useradd --system --no-create-home --shell /usr/sbin/nologin paw-maint`）で動かす。
-  `/opt/paw/apps/backend` と `/opt/paw/venv` は root が所有し、Backend の User にも `paw-maint` にも書き込ませない（Operator の Credential を Backend の User に読ませないのと同じ規則）。
+  `/opt/paw/releases/`（`/opt/paw/current` が指す Release。[Deploy / Update / Rollback](#deploy--update--rollbackpaw-068)）は root が所有し、Backend の User にも `paw-maint` にも書き込ませない（Operator の Credential を Backend の User に読ませないのと同じ規則）。
 
 ```bash
 # 配備（root。Path と User は配備に合わせて Unit File を直す）
@@ -3852,6 +3855,63 @@ python -m paw_backend.cli recovery-restore --apply  # 1 Transaction で書く
 ### Test
 
 `apps/backend/tests/test_recovery_*.py` と `recovery_support.py` です。`test_recovery_render.py`・`_backup.py` は DB を使わず、`tempfile` の Directory の Bare Repository とその Clone にだけ書きます（git は現在の User で実行し、Remote は Local の Bare Repository）。`test_recovery_postgres.py`・`_cli.py`・`_grants.py` は実 PostgreSQL（`PAW_TEST_DATABASE_URL`）を使い、未設定なら Skip します。`_grants.py` は Backup を非 Superuser の Application の Role で実行し、その Role では Restore できないことを確かめます。
+
+## Deploy / Update / Rollback（PAW-068）
+
+[Issue #54](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/54)。方式は [Decision 0079](../../docs/decisions/0079-deploy-update-rollback.md)（2026-10-08 Approved）。要件は [DEPLOYMENT_UPDATE.md](../../docs/DEPLOYMENT_UPDATE.md)。
+
+- **Release Tool** [`deploy/release/paw_release.py`](deploy/release/paw_release.py)（標準 Library だけ。Host の `python3` 3.12 以上で動く）: Commit ごとの不変の Release（`/opt/paw/releases/<YYYYMMDD-sha12>/`、`release.json` に Schema の Head と Migration の鎖・互換性・Source の Digest）、`/opt/paw/current` の Symlink の切り替え、更新前の確認、Update、Rollback、最初の Install、古い復旧点の削除。Service の停止・起動・Health・通知は設定（[`release.example.toml`](deploy/release/release.example.toml)）の Command だけで行い、Tool 自身は `systemctl` / `sudo` を呼ばない。
+- **DB 側の Command** `python -m paw_backend.cli deploy-*`（`paw_backend/cli/deploy.py`、`paw_backend/deploy/`。`PAW_MIGRATION_DATABASE_URL` で接続）: `deploy-status` / `deploy-precheck`（JSON）、`deploy-maintenance-begin` / `deploy-drain` / `deploy-maintenance-end`、`deploy-restore-point-create` / `-verify` / `-restore`。終了コードは 0（成功）・1（拒否）・2（環境）・3（失敗）。
+- **保守**（Migration `0191`、`deploy_maintenance`、Application の Role は SELECT だけ）: 行がある間 `TaskQueue.claim_next` は何も渡さない（Task の作成と Queue への追加は受け付ける）。Running の Task は Full GPU Mode と同じ Policy の Hold（理由 `Deploy / Update maintenance`）で Node の終わりまで Drain し、終わりに自分が Hold した Task だけを同じ Priority で Queue に戻す。
+- **復旧点**（Migration があるときだけ）: `pg_dump --format=custom`（0700 の `restore_point_dir`、Recovery Repository の外）、`PAW_DEPLOY_ADMIN_DATABASE_URL` で作る Scratch の DB への `pg_restore` で検証、戻すときは新しい DB に戻して名前を入れ替え（置き換えた DB は `<db>_replaced_<時刻>` として残る）。取得した後に User が削除されていれば Restore を拒否。Credential は `PG*` 環境変数で渡し、Command 行・出力・Audit に出さない。
+- **互換な Migration**: Migration の File の `paw_compatibility = "expand"` は「一つ前の Release がこの Schema で動く」という宣言。間がすべて `expand` なら Rollback は DB を戻さない。宣言なし・`contract`・`data` は非互換（復旧点が要る）。新しい Migration は可能なら Table・Nullable な Column の追加などの `expand` にし、削除・改名は次の Release の別の Migration にする。
+
+### Update の手順（`paw-release update <version>`）
+
+1. 更新前の確認（1 つでも失敗すれば何も変えずに終了コード 1）: Release の Digest、進行中の操作がない、Disk の空き、`deploy-precheck`（DB、保守中でない、**`audit_events` の Partition が翌月末まで**（`audit-retention-check` と同じ）、Recovery Backup が 90 分以内に成功、`PAW_RECOVERY_REPOSITORY_DIR`）、Schema の互換性、設定の `precheck`（例: `paw-audit-retention.timer` と `paw-recovery-backup.timer` が有効）。
+2. 保守の開始（新しい Task は始まらない）と Running の Task の Hold。
+3. Drain（既定 900 秒）。終わらなければ中止して再開（終了コード 3）。`--stop-now` は待たずに進む。
+4. `recovery-backup-run`（Recovery Projection の最新化）。
+5. 設定の `stop`（Backend と、DB に書く Timer）。
+6. Migration があれば復旧点の作成と検証（失敗すれば元の Release を起動し直して中止）、`python -m alembic upgrade head`（新しい Release）。
+7. `current` の切り替え、設定の `start`、Health（`deploy-status` の Revision と設定の `health`。既定 300 秒まで再試行）。
+8. 成功: known-good に加え、保守を終えて Task を再開し、古い復旧点を消す（終了コード 0）。失敗: 新しい Release を止め、復旧点を戻し（Migration をした場合）、元の Release に切り替え、`post_restore`（`user-erasure-run`）、起動、Health、再開（終了コード 4）。戻せなければ保守のまま `notify` を実行して止まる（終了コード 5。直した後 `paw-release end-maintenance`）。
+
+`paw-release rollback [--to <version>] [--restore-point <label>]` は known-good の Release へ戻す。間の Migration が `expand` だけなら Application だけ、そうでなければ戻り先の Head と同じ Revision の検証済みの復旧点が要る。
+
+### 配置（承認の後、運用者が行う。root で）
+
+```bash
+useradd --system --no-create-home --shell /usr/sbin/nologin paw-maint  # Decision 0031 6
+install -d -m 0755 /opt/paw/releases
+install -d -m 0700 /var/lib/paw/deploy
+install -d -m 0700 -o paw-maint /var/lib/paw/restore-points
+cp deploy/release/paw_release.py /usr/local/sbin/paw-release && chmod 0755 /usr/local/sbin/paw-release
+cp deploy/release/release.example.toml /etc/paw/release.toml        # Path と Unit 名を合わせる
+# /etc/paw/deploy.env（chmod 600、root）: PAW_MIGRATION_DATABASE_URL、PAW_DATABASE_URL、
+# PAW_RECOVERY_REPOSITORY_DIR、PAW_DEPLOY_ADMIN_DATABASE_URL、PAW_APP_DATABASE_ROLE など
+cp deploy/systemd/*.service deploy/systemd/*.timer /etc/systemd/system/
+systemctl daemon-reload
+paw-release build --repo /srv/paw/source --commit origin/main
+paw-release install <version>
+# Audit の保存期間（Decision 0031、Issue #54 のコメント）と他の定期実行
+systemctl enable --now paw-audit-retention.timer paw-recovery-backup.timer \
+  paw-memory-projection.timer paw-user-erasure.timer paw-release-prune.timer \
+  paw-backend.service
+python3 /usr/local/sbin/paw-release precheck <next version>   # Timer と Partition の確認を含む
+```
+
+`/opt/paw/releases` は root が所有し、Backend の User（`paw`）にも `paw-maint` にも書き込ませない。復旧点の Directory は `backend_prefix` の User（例 `paw-maint`）の 0700。
+
+### 制限と未確認の点
+
+- 実際のサーバーではまだ動かしていない（Decision 0079 は 2026-10-08 に承認。本番への配置は「配置」の手順で Human が行う）。Test は一時 Directory と Fake（Service、Health、`pg_dump` / `pg_restore`）。`pg_dump` / `pg_restore` の実物では、作業環境の Docker（`pgvector/pgvector:pg18` の Client）で全 Schema の作成・検証・名前の入れ替えを手で確かめた。
+- 「Update available」の通知、Model の Update（Application と独立。`paw-llm-main.service` は別）は後続。
+- `install` は既存の DB の復旧点を取らない（Tool を使う前の配備から移るときは手で `pg_dump` を取る）。
+
+### Test
+
+`tests/test_deploy_release.py`（Tool。Fake の世界で手順の順序・失敗・Rollback・互換性・Lock・Build と不変性）、`tests/test_deploy_maintenance.py` / `test_deploy_maintenance_migration.py`（保守と Migration 0191）、`tests/test_deploy_restore_points.py` / `test_deploy_cli.py`（復旧点と Command。実 PostgreSQL が要る Test は `PAW_TEST_DATABASE_URL` がなければ Skip）。
 
 ## DAG Agent Orchestrator
 
