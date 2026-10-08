@@ -103,6 +103,13 @@ class JournalEntry(Base):
             "event_sequence",
             postgresql_where=text("state = 'pending'"),
         ),
+        # The Inferred Preference flow (PAW-044, revision 0192) reads one owner's
+        # entries, newest first: the candidates and their evidence.
+        Index(
+            "ix_memory_journal_entries_owner_user_id_recorded_at",
+            "owner_user_id",
+            "recorded_at",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, server_default=_UUID_DEFAULT)

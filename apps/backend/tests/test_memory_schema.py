@@ -67,6 +67,8 @@ class LayerSeparationTest(MemoryDatabaseTestCase):
             "memory_journal_entries",
             "memory_consolidation_queue",
             "memory_consolidation_keys",
+            # The Inferred Preference flow (PAW-044): the answers to held candidates.
+            "memory_preference_resolutions",
         }
         edges = {
             (child, parent): action
@@ -100,6 +102,10 @@ class LayerSeparationTest(MemoryDatabaseTestCase):
                 ("memory_journal_entries", "messages"): "c",
                 ("memory_consolidation_queue", "memory_journal_entries"): "c",
                 ("memory_consolidation_keys", "memories"): "c",
+                # An answer to a held candidate goes with its journal entry; the
+                # memory a confirmation wrote may go first.
+                ("memory_preference_resolutions", "memory_journal_entries"): "c",
+                ("memory_preference_resolutions", "memories"): "n",
             },
         )
         # Two edges appear once per column of memory_relations: they collapse in

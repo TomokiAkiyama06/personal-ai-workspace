@@ -2,7 +2,7 @@
 
 - Issue: [#200](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/200)（[Decision 0074](../decisions/0074-seed-v2-and-qwen-27b-comparison.md) の後続）。提案は [Decision 0076](../decisions/0076-main-kv-context-under-coexistence.md)（Proposed）
 - 材料（どれも既にある Run の記録で、この分析のために GPU は使っていない）:
-  - 10-07 の共存の確認 Run（Qwen3.8-27B-FP8、0.51、paw-seed-v1 の 24 Task × 3 回。[#180 の報告](https://github.com/TomokiAkiyama06/personal-ai-workspace/pull/210) の `docs/benchmarks/paw-017-coexist-qwen38-2026-10.md`）: Trace と vLLM の `/metrics`（5 秒ごと）。`/data/results/paw-bench-2026-10-07`
+  - 10-07 の共存の確認 Run（Qwen3.8-27B-FP8、0.51、paw-seed-v1 の 24 Task × 3 回。[共存の確認 Run の報告](paw-017-coexist-qwen38-2026-10.md)）: Trace と vLLM の `/metrics`（5 秒ごと）。`/data/results/paw-bench-2026-10-07`
   - 10-05 / 10-06 の paw-seed-v2 の比較 Run（Qwen3.8-27B-FP8、単独 0.90、49 Task × 3 回。[paw-seed-v2 の報告](paw-017-seed-v2-2026-10.md)）: Trace。`/data/results/paw-bench-2026-10-05`
 - 分析の Script と出力は Repository の外の `/data/results/paw-analysis-200-2026-10-08`（`load.py`・`a_tasks.py`・`b_sim.py`・`c_grid.py`・`d_resv.py`・`e_thr.py`・`f_resv16k.py`、出力は `output.txt`）。Trace は Hidden check の内容を含むため Repository に入れない（Decision 0041 の 4）
 
