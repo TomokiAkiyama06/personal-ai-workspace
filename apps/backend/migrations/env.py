@@ -14,6 +14,7 @@ from paw_backend.auth import models as auth_models  # noqa: F401
 from paw_backend.auth.onboarding import models as onboarding_models  # noqa: F401
 from paw_backend.auth.passkeys import models as passkey_models  # noqa: F401
 from paw_backend.authz import models as authz_models  # noqa: F401
+from paw_backend.compute import models as compute_models  # noqa: F401
 from paw_backend.config import Settings
 from paw_backend.connections import models as connection_models  # noqa: F401
 from paw_backend.db import Base
@@ -21,6 +22,7 @@ from paw_backend.health import models as health_models  # noqa: F401
 from paw_backend.identity import models as identity_models  # noqa: F401
 from paw_backend.memory import models as memory_models  # noqa: F401
 from paw_backend.memory.journal import models as journal_models  # noqa: F401
+from paw_backend.memory.preferences import models as preference_models  # noqa: F401
 from paw_backend.memory.shared import models as shared_memory_models  # noqa: F401
 from paw_backend.notifications import models as notification_models  # noqa: F401
 from paw_backend.orchestrator import models as orchestrator_models  # noqa: F401

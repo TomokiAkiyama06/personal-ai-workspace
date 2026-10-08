@@ -39,6 +39,7 @@ from paw_backend.compute import (
     FullGpuState,
     HybridRuntime,
     Placement,
+    PostgresLocalUsage,
     ResourceClass,
     SchedulerMode,
     TrackerLateGpuCharge,
@@ -227,6 +228,9 @@ class CompositionTest(unittest.TestCase):
         # GPU time a node used after its attempt closed reaches the task budget.
         self.assertIsInstance(hybrid._late, TrackerLateGpuCharge)
         self.assertIs(hybrid._late._tracker, execution.budget)
+        # Every local call is recorded in local_usage (Decision 0077).
+        self.assertIsInstance(hybrid._usage, PostgresLocalUsage)
+        self.assertIs(hybrid._usage._database, database)
         # The warnings of that scheduler go to the application's sink.
         self.assertIs(scheduler._warnings._sink, app.state.compute.warnings)
 

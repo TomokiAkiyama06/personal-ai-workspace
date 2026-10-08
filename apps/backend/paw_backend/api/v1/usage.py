@@ -23,8 +23,8 @@ The routes are guarded by ``require_capability`` (``account.read``: every human
 role, for the reads the service authorizes itself; the administrator's capability
 for the rest), and the ``ConnectionService`` authorizes again and audits. The
 answers hold counts, enums, ids and login names: never a prompt, an answer, a model
-name or a credential. The local agent records no usage yet: its figures are
-``null`` ("not recorded"), as are GPU time and escalations (issue #187, item 5).
+name or a credential. The local models' calls, their GPU time and the escalated
+tasks are in the report (issue #187 item 5, Decision 0077).
 
 Without a database the routes answer 503 ``service_unavailable``.
 """
@@ -116,12 +116,15 @@ class QuotasResponse(BaseModel):
 
 
 class TokensOut(BaseModel):
-    # null: the local agent records no usage yet (issue #187, item 5).
+    # The tokens the local runtimes reported (Decision 0077). Nullable in the
+    # contract of the screen (null: not recorded); always a number now.
     local: int | None
     external: int
 
 
 class EscalationsOut(BaseModel):
+    # Escalated tasks by cause (Decision 0077, point 5): every escalation of the
+    # orchestrator comes from the loop detector, so ``failed`` is 0 for now.
     failed: int
     loop_detected: int
 
@@ -167,10 +170,11 @@ class UsageResponse(BaseModel):
     # The tasks of the period of the same length just before (Decision 0069).
     previous_tasks: int | None
     tokens: TokensOut
-    # Not recorded yet (issue #187, item 5): always null for now.
+    # The GPU time of the local models' calls, in seconds (Decision 0077). Nullable
+    # in the contract of the screen (null: not recorded); always a number now.
     gpu_seconds: int | None = None
     escalations: EscalationsOut | None = None
-    # Every day of the period, in order (local is 0: not recorded).
+    # Every day of the period, in order.
     daily: list[DailyOut]
     agents: list[AgentOut]
     purposes: list[PurposeOut]
@@ -266,9 +270,22 @@ def _quota_out(quota: QuotaUsage) -> QuotaUsageOut:
 def _report_out(
     report: UsageReport, scope: Literal["self", "workspace"]
 ) -> UsageResponse:
-    by_day = {day: {"codex": 0, "claude": 0} for day in report.days}
+    by_day = {day: {"local": 0, "codex": 0, "claude": 0} for day in report.days}
     for item in report.daily:
         by_day[item.day][item.kind.value] = item.tasks
+    for local in report.local.daily:
+        by_day[local.day]["local"] = local.tasks
+    agents = [
+        AgentOut(agent=item.kind.value, tasks=item.tasks, tokens=item.tokens)
+        for item in report.kinds
+    ]
+    if report.local.tasks:
+        agents.insert(
+            0,
+            AgentOut(
+                agent="local", tasks=report.local.tasks, tokens=report.local.tokens
+            ),
+        )
     return UsageResponse(
         scope=scope,
         range=report.range.value,
@@ -276,15 +293,14 @@ def _report_out(
         window_end=report.window_end,
         tasks=report.tasks,
         previous_tasks=report.previous_tasks,
-        tokens=TokensOut(local=None, external=report.tokens),
-        daily=[
-            DailyOut(date=day, local=0, codex=counts["codex"], claude=counts["claude"])
-            for day, counts in by_day.items()
-        ],
-        agents=[
-            AgentOut(agent=item.kind.value, tasks=item.tasks, tokens=item.tokens)
-            for item in report.kinds
-        ],
+        tokens=TokensOut(local=report.local.tokens, external=report.tokens),
+        gpu_seconds=report.local.gpu_seconds,
+        escalations=EscalationsOut(
+            failed=report.escalations.failed,
+            loop_detected=report.escalations.loop_detected,
+        ),
+        daily=[DailyOut(date=day, **counts) for day, counts in by_day.items()],
+        agents=agents,
         purposes=[
             PurposeOut(purpose=item.purpose.value, tasks=item.tasks, tokens=item.tokens)
             for item in report.purposes

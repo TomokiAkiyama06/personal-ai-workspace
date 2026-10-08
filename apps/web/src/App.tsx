@@ -14,6 +14,8 @@ import { PROJECTS_PATH, ProjectsPage } from "./projects/ProjectsPage";
 import { useRouter } from "./router";
 import { AppShell } from "./shell/AppShell";
 import { isActive, NEW_CHAT_PATH, PRIMARY_NAV, SECONDARY_NAV } from "./shell/navigation";
+import { ApprovalsPage } from "./tasks/ApprovalsPage";
+import { APPROVALS_PATH } from "./tasks/model";
 import { PULLS_PATH, PullsPage } from "./tasks/PullsPage";
 import { TASKS_PATH, TasksPage } from "./tasks/TasksPage";
 
@@ -30,6 +32,7 @@ function SignedInPage() {
   if (path === PROJECTS_PATH || path.startsWith(`${PROJECTS_PATH}/`)) return <ProjectsPage />;
   if (isActive({ path: TASKS_PATH }, path)) return <TasksPage />;
   if (isActive({ path: PULLS_PATH }, path)) return <PullsPage />;
+  if (isActive({ path: APPROVALS_PATH }, path)) return <ApprovalsPage />;
   if (path === "/admin" || path.startsWith("/admin/")) return <AdminPage />;
   if (path === "/memory" || path.startsWith("/memory/")) return <MemoryPage />;
   const other = OTHER_SCREENS.find((entry) => entry.path === path);

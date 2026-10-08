@@ -11,6 +11,7 @@
 """
 
 import asyncio
+import contextlib
 import unittest
 import uuid
 from unittest import mock
@@ -978,6 +979,225 @@ class HybridPlacementTest(unittest.IsolatedAsyncioTestCase):
                 self.assertRaises(InvalidOrchestratorArgumentError),
             ):
                 self.runtime(**{name: value})
+
+
+class UsageSink:
+    """Records what ``HybridRuntime`` reports of its local calls."""
+
+    def __init__(self, error=None) -> None:
+        self.records: list[tuple] = []
+        self.error = error
+
+    async def record(self, task_id, *, placement, calls, tokens, seconds):
+        self.records.append((task_id, placement, calls, tokens, seconds))
+        if self.error is not None:
+            raise self.error
+
+
+class Spending(Recorder):
+    """A local runtime that reports tokens to its budget while it runs."""
+
+    def __init__(self, name, clock, seconds, charges):
+        super().__init__(name, clock, seconds=seconds)
+        self.charges = charges
+        self.budgets = []
+
+    async def run_node(self, assignment):
+        self.budgets.append(assignment.budget)
+        for kind, amount in self.charges:
+            with contextlib.suppress(Exception):
+                await assignment.budget.charge(kind, amount)
+        return await super().run_node(assignment)
+
+
+class HybridUsageTest(unittest.IsolatedAsyncioTestCase):
+    """Issue #187 item 5 (Decision 0077): every local call is recorded when it
+    ended (where it ran, the seconds charged as GPU time, the tokens the local
+    runtime reported to the budget); the cloud's are not (they are the shared
+    connection's), and a record that cannot be written changes nothing."""
+
+    async def asyncSetUp(self):
+        self.scheduler, self.probe, self.control, self.clock = build()
+        await self.scheduler.refresh()
+        self.sink = UsageSink()
+        self.cloud = Recorder("cloud")
+
+    def runtime(self, local, **options):
+        values = dict(
+            deployment="main",
+            cloud=self.cloud,
+            cloud_policy=Policy(),
+            cloud_agent="codex",
+            cloud_model="gpt-5-codex",
+            clock=self.clock,
+            wait_seconds=120,
+            usage=self.sink,
+        )
+        values.update(options)
+        return HybridRuntime(self.scheduler, local, **values)
+
+    async def run_for(self, runtime, work, seconds):
+        task = asyncio.create_task(runtime.run_node(work))
+        await settle()
+        await self.clock.advance(seconds)
+        return await task
+
+    async def test_a_local_call_is_recorded_with_its_gpu_time_and_tokens(self):
+        local = Spending(
+            "local",
+            self.clock,
+            90.5,
+            [(BudgetKind.TOKENS, 1200), (BudgetKind.TOKENS, 34)],
+        )
+        work = assignment()
+
+        outcome = await self.run_for(self.runtime(local), work, 90.5)
+
+        self.assertTrue(outcome.ok)
+        self.assertEqual(
+            self.sink.records, [(work.task_id, Placement.LOCAL_GPU, 1, 1234, 91)]
+        )
+        # The budget took every report as before.
+        self.assertEqual(
+            work.budget.charges,
+            [
+                (BudgetKind.TOKENS, 1200),
+                (BudgetKind.TOKENS, 34),
+                (BudgetKind.GPU_SECONDS, 91),
+            ],
+        )
+        # What the runtime is given answers like the node's budget.
+        self.assertEqual(await local.budgets[0].remaining(), {})
+
+    async def test_a_report_the_budget_refuses_is_not_counted(self):
+        class Refusing(FakeBudget):
+            async def charge(self, kind, amount):
+                if kind is BudgetKind.TOKENS and amount == 5:
+                    raise NodeStopped(StopReason.BUDGET_EXCEEDED)  # recorded
+                if kind is BudgetKind.TOKENS and amount == 7:
+                    raise NodeStopped(StopReason.ABANDONED)  # not recorded
+                if amount == -1:
+                    raise ValueError("amount")
+                await super().charge(kind, amount)
+
+        local = Spending(
+            "local",
+            self.clock,
+            1,
+            [
+                (BudgetKind.TOKENS, 3),
+                (BudgetKind.TOKENS, 5),
+                (BudgetKind.TOKENS, 7),
+                (BudgetKind.TOKENS, -1),
+                (BudgetKind.GPU_SECONDS, 11),  # not tokens
+            ],
+        )
+        work = assignment(budget=Refusing())
+
+        await self.run_for(self.runtime(local), work, 1)
+
+        ((_, _, calls, tokens, seconds),) = self.sink.records
+        self.assertEqual((calls, tokens, seconds), (1, 8, 1))
+
+    async def test_a_failed_or_cancelled_call_is_recorded_too(self):
+        failing = Recorder("local", self.clock, seconds=10, error=RuntimeError("x"))
+        work = assignment()
+        with self.assertRaises(RuntimeError):
+            await self.run_for(self.runtime(failing), work, 10)
+
+        slow = Recorder("local", self.clock, seconds=100)
+        cancelled = assignment()
+        task = asyncio.create_task(self.runtime(slow).run_node(cancelled))
+        await settle()
+        await self.clock.advance(30)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+
+        self.assertEqual(
+            self.sink.records,
+            [
+                (work.task_id, Placement.LOCAL_GPU, 1, 0, 10),
+                (cancelled.task_id, Placement.LOCAL_GPU, 1, 0, 30),
+            ],
+        )
+
+    async def test_the_cloud_and_a_node_that_never_ran_locally_are_not_recorded(self):
+        leases = await fill_main(self.scheduler)
+        cloud_work = assignment()
+        outcome = await self.runtime(Recorder("local")).run_node(cloud_work)
+        self.assertEqual(outcome.result.summary, "done by cloud")
+        for lease in leases:
+            await lease.release()
+
+        # No GPU time left: the local runtime never starts.
+        spent = assignment(budget=FakeBudget(gpu_seconds_left=0))
+        with self.assertRaises(NodeStopped):
+            await self.runtime(Recorder("local")).run_node(spent)
+        # Its placement cannot be recorded: it does not run.
+        unplaced = assignment(placement=FakePlacement(error=RuntimeError("down")))
+        with self.assertLogs("paw_backend.compute.runtimes", "WARNING"):
+            await self.runtime(Recorder("local")).run_node(unplaced)
+
+        self.assertEqual(self.sink.records, [])
+
+    async def test_a_record_that_fails_changes_nothing(self):
+        self.sink.error = RuntimeError("database down")
+        work = assignment()
+        with self.assertLogs("paw_backend.compute.runtimes", "ERROR") as logs:
+            outcome = await self.run_for(
+                self.runtime(Recorder("local", self.clock, seconds=5)), work, 5
+            )
+        self.assertTrue(outcome.ok)
+        self.assertEqual(work.budget.charges, [(BudgetKind.GPU_SECONDS, 5)])
+        self.assertEqual(len(self.sink.records), 1)
+        # The class of the error only.
+        self.assertIn("(RuntimeError)", logs.output[0])
+        self.assertNotIn("database down", "".join(logs.output))
+
+    async def test_the_late_time_of_a_call_that_outlived_its_node_is_recorded(self):
+        release = asyncio.Event()
+
+        class Stubborn:
+            async def run_node(self, assignment):
+                while True:
+                    try:
+                        await release.wait()
+                        await assignment.budget.charge(BudgetKind.TOKENS, 40)
+                        return NodeOutcome.succeeded(NodeResult(summary="late"))
+                    except asyncio.CancelledError:
+                        continue
+
+        runtime = self.runtime(Stubborn(), cloud=None, cloud_policy=None)
+        work = assignment(budget=FakeBudget(gpu_seconds_left=10))
+        try:
+            with mock.patch.object(runtimes_module, "CANCEL_GRACE_SECONDS", 0.01):
+                task = asyncio.create_task(runtime.run_node(work))
+                await settle()
+                await self.clock.advance(10)
+                with self.assertRaises(NodeStopped):
+                    await task
+            self.assertEqual(
+                self.sink.records, [(work.task_id, Placement.LOCAL_GPU, 1, 0, 10)]
+            )
+            await self.clock.advance(25)
+        finally:
+            release.set()
+            await settle()
+        # The late time and the tokens reported since, in a row of no call.
+        self.assertEqual(
+            self.sink.records[1:], [(work.task_id, Placement.LOCAL_GPU, 0, 40, 25)]
+        )
+
+    async def test_without_a_sink_the_runtime_gets_the_nodes_budget(self):
+        local = Spending("local", self.clock, 1, [])
+        work = assignment()
+        await self.run_for(self.runtime(local, usage=None), work, 1)
+        self.assertIs(local.budgets[0], work.budget)
+
+    async def test_the_sink_must_have_an_async_record(self):
+        with self.assertRaises(TypeError):
+            self.runtime(Recorder("local"), usage=object())
 
 
 class MemoryWorkerTest(unittest.IsolatedAsyncioTestCase):
