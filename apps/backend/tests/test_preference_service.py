@@ -196,6 +196,36 @@ class CandidatesTest(PostgresPreferenceTestCase):
         (found,) = await self.preferences.candidates(me)
         self.assertEqual((found.entry_id, found.content), (newer, "newer"))
 
+    async def test_the_capped_observations_follow_the_journal_in_one_conversation(
+        self,
+    ):
+        # Codex P2 on #205: the per-key cap kept the latest recorded times, so a
+        # clock that stepped back in one conversation dropped the newest entries
+        # (by event sequence) from the evidence.
+        me = self.user()
+        self.seed_candidate(me.user_id, "indent_style", "use tabs")
+        conversation = self.execute(
+            "INSERT INTO conversations (owner_user_id) VALUES (:o) RETURNING id",
+            o=me.user_id,
+        ).scalar_one()
+        for sequence, minutes, message in (
+            (1, 10, "tabs please"),
+            (2, 5, "tabs please"),
+            (3, 0, "今後はtabにして"),  # the newest: written last, clock stepped back
+        ):
+            self.observe(
+                me.user_id,
+                "indent_style",
+                message=message,
+                conversation=conversation,
+                sequence=sequence,
+                at=T0 + timedelta(minutes=minutes),
+            )
+        with patch.object(preference_limits, "MAX_OBSERVATIONS_PER_KEY", 2):
+            (found,) = await self.preferences.candidates(me)
+        self.assertEqual(found.evidence.frequency, 2)
+        self.assertIs(found.evidence.language_strength, LanguageStrength.STANDING)
+
     async def test_a_confirmation_checks_every_held_item_of_its_key(self):
         # Codex P2 on #205: the cap on the listing must not decide which held item
         # of a key is the latest one when the person answers it.

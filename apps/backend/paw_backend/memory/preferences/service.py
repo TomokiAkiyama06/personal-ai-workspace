@@ -222,19 +222,33 @@ _LIVE_HELD = text(
 
 # The observations of some keys: the person's consolidated entries, newest first,
 # at most ``:per_key`` per key, with the message (for the language strength only).
+# "Newest" follows the journal's order (``journal.rules.is_newer``): in one
+# conversation the event sequence, whatever the clock said (Codex P2 on #205). An
+# entry ranks at the latest time recorded up to it in its conversation, so
+# the times only grow with the sequence there; across conversations the recorded
+# time and then the conversation id.
 _OBSERVATIONS = text(
     "SELECT * FROM ("
-    " SELECT item->>'key' AS key, e.id AS entry_id, e.project_id, e.repo_id,"
-    "  e.recorded_at, item->>'result' AS result, m.content AS message,"
-    "  row_number() OVER (PARTITION BY item->>'key'"
-    "   ORDER BY e.recorded_at DESC, e.event_sequence DESC) AS n"
-    " FROM memory_journal_entries e"
-    " JOIN conversations c ON c.id = e.conversation_id AND c.owner_user_id = :owner"
-    " JOIN messages m ON m.id = e.message_id AND m.conversation_id = e.conversation_id"
-    " CROSS JOIN LATERAL jsonb_array_elements(e.outcome->'items') AS item"
-    " WHERE e.owner_user_id = :owner AND e.state = 'consolidated'"
-    "  AND item->>'key' = ANY(:keys) AND item->>'result' = ANY(:observed)"
-    ") observed WHERE n <= :per_key"
+    " SELECT *, row_number() OVER (PARTITION BY key"
+    "  ORDER BY ranked_at DESC, CAST(conversation_id AS text) DESC,"
+    "   event_sequence DESC) AS n"
+    " FROM ("
+    "  SELECT item->>'key' AS key, e.id AS entry_id, e.project_id, e.repo_id,"
+    "   e.recorded_at, item->>'result' AS result, m.content AS message,"
+    "   e.conversation_id, e.event_sequence,"
+    "   max(e.recorded_at) OVER (PARTITION BY e.conversation_id"
+    "    ORDER BY e.event_sequence"
+    "    ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS ranked_at"
+    "  FROM memory_journal_entries e"
+    "  JOIN conversations c"
+    "   ON c.id = e.conversation_id AND c.owner_user_id = :owner"
+    "  JOIN messages m"
+    "   ON m.id = e.message_id AND m.conversation_id = e.conversation_id"
+    "  CROSS JOIN LATERAL jsonb_array_elements(e.outcome->'items') AS item"
+    "  WHERE e.owner_user_id = :owner AND e.state = 'consolidated'"
+    "   AND item->>'key' = ANY(:keys) AND item->>'result' = ANY(:observed)"
+    " ) observed"
+    ") ranked WHERE n <= :per_key"
 ).bindparams(_texts("keys"), _texts("observed"))
 
 # Which of some versions a ``conflicts_with`` relation touches (ids only).
