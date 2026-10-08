@@ -118,6 +118,39 @@ describe("System Health model", () => {
     ]);
   });
 
+  it("keeps the empty buckets before the first and after the last sample (Codex P2)", () => {
+    // Monitoring that started late or an outage now must not stretch the samples
+    // over the whole period (PR #203); the bucket still filling is no gap.
+    const point = (bucket_start: string, mean: number) => ({
+      bucket_start,
+      mean,
+      min: mean,
+      max: mean,
+    });
+    const series = {
+      gpu: [point("2026-10-07T04:12:00Z", 40), point("2026-10-07T04:24:00Z", 50)],
+      used: [],
+      reserved: [],
+      total: [],
+    };
+    const range = {
+      since: new Date("2026-10-07T03:50:00Z"),
+      until: new Date("2026-10-07T05:05:00Z"),
+    };
+    expect(
+      percentPoints(series, 720, range).map((entry) => [entry.at.slice(11, 16), entry.gpu]),
+    ).toEqual([
+      ["04:00", null],
+      ["04:12", 40],
+      ["04:24", 50],
+      ["04:36", null],
+      ["04:48", null],
+    ]);
+    // Nothing sampled stays "no records"; without a step nothing is added.
+    expect(percentPoints({ gpu: [], used: [], reserved: [], total: [] }, 720, range)).toEqual([]);
+    expect(percentPoints(series, undefined, range)).toHaveLength(2);
+  });
+
   it("asks for about 120 points per period, never finer than 10 seconds", () => {
     expect(chartStepSeconds("last1h")).toBe(30);
     expect(chartStepSeconds("last24h")).toBe(720);

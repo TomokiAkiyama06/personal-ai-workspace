@@ -141,6 +141,10 @@ describe("サーバー監視", () => {
   });
 
   it("draws GPU / VRAM and shows the same values as a table", async () => {
+    // The last 24 hours end at 04:00 the next day: the fixture's samples are at
+    // the start of the period.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-08T04:00:00Z"));
     renderMonitoring(fakeHealthSource(normalReport()));
     expect(
       await screen.findByRole("img", { name: /GPU \/ VRAM の推移（直近 24 時間/ }),
@@ -149,16 +153,19 @@ describe("サーバー監視", () => {
     await user.click(screen.getByRole("button", { name: "表で見る" }));
     const table = screen.getByRole("table", { name: "GPU / VRAM の推移" });
     const rows = within(table).getAllByRole("row");
-    // The header and the buckets of 12 minutes from 04:00 to 05:00: the two that
-    // were sampled (GPU, VRAM used and reserved of 48 GB) and the empty ones between.
+    // The header and the 120 buckets of 12 minutes of the period: the two that
+    // were sampled (04:00 and 05:00: GPU, VRAM used and reserved of 48 GB) and
+    // the empty ones between and after them (sampling stopped, Codex P2 on #203).
     const cells = (row: number) =>
       within(rows[row] as HTMLElement)
         .getAllByRole("cell")
         .map((cell) => cell.textContent);
-    expect(rows).toHaveLength(7);
+    expect(rows).toHaveLength(121);
     expect(cells(1)).toEqual(["40%", "25%", "38%"]);
     expect(cells(2)).toEqual(["—", "—", "—"]);
     expect(cells(6)).toEqual(["50%", "50%", "38%"]);
+    expect(cells(7)).toEqual(["—", "—", "—"]);
+    expect(cells(120)).toEqual(["—", "—", "—"]);
   });
 
   it("reads the history of the chosen period", async () => {
