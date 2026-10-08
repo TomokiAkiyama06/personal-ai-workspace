@@ -224,9 +224,10 @@ _LIVE_HELD = text(
 # at most ``:per_key`` per key, with the message (for the language strength only).
 # "Newest" follows the journal's order (``journal.rules.is_newer``): in one
 # conversation the event sequence, whatever the clock said (Codex P2 on #205). An
-# entry ranks at the latest time recorded up to it in its conversation, so
-# the times only grow with the sequence there; across conversations the recorded
-# time and then the conversation id.
+# entry ranks at the latest time recorded up to it in its conversation for the
+# same key (another key's times never rank it, Codex P2 on #213), so the times
+# only grow with the sequence there; across conversations the recorded time and
+# then the conversation id.
 _OBSERVATIONS = text(
     "SELECT * FROM ("
     " SELECT *, row_number() OVER (PARTITION BY key"
@@ -236,7 +237,7 @@ _OBSERVATIONS = text(
     "  SELECT item->>'key' AS key, e.id AS entry_id, e.project_id, e.repo_id,"
     "   e.recorded_at, item->>'result' AS result, m.content AS message,"
     "   e.conversation_id, e.event_sequence,"
-    "   max(e.recorded_at) OVER (PARTITION BY e.conversation_id"
+    "   max(e.recorded_at) OVER (PARTITION BY e.conversation_id, item->>'key'"
     "    ORDER BY e.event_sequence"
     "    ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS ranked_at"
     "  FROM memory_journal_entries e"
