@@ -606,6 +606,31 @@ class RollbackTest(ReleaseToolTestCase):
         self.assertEqual(code, 0, out)
         self.assertEqual((self.current(), self.world.revision), ("r1", "0003"))
 
+    def tamper(self, version: str) -> None:
+        migration = next((self.root / "releases" / version).rglob("*_m.py"))
+        migration.write_text(migration.read_text() + "# changed\n")
+
+    def test_a_changed_current_release_is_not_run_by_an_update(self):
+        # Codex review #204 (80d3189): its commands are the most privileged.
+        self.installed()
+        self.tamper("r1")
+        code, out = self.run_tool("update", "r2")
+        self.assertEqual(code, paw_release.EXIT_REFUSED, out)
+        self.assertIn("source digest", out)
+        self.assertFalse([c for c in self.world.calls if c.startswith("r1:")])
+
+    def test_a_rollback_from_a_changed_release_runs_only_the_targets_tools(self):
+        self.installed()
+        self.assertEqual(self.run_tool("update", "r2")[0], 0)
+        self.tamper("r2")
+        self.world.calls.clear()
+        code, out = self.run_tool("rollback")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.current(), "r1")
+        self.assertFalse([c for c in self.world.calls if c.startswith("r2:")])
+        self.assertIn("r1:deploy-maintenance-begin", self.world.calls)
+        self.assertFalse(self.world.maintenance)
+
     def test_only_to_a_known_good_release(self):
         self.installed()
         code, out = self.run_tool("rollback", "--to", "r3")

@@ -739,7 +739,7 @@ class Tool:
             in_progress is None,
             "none" if in_progress is None else f"{in_progress} (roll back first)",
         )
-        current = load_release(self.config, current_name)
+        current = load_release(self.config, current_name, verify=True)
         for name, path in (
             ("disk_free_releases", self.config.root),
             ("disk_free_restore_points", self.config.restore_point_dir),
@@ -870,7 +870,17 @@ class Tool:
                 raise ReleaseError(f"{to} is already current")
             current = load_release(self.config, current_name)
             target = load_release(self.config, to, verify=True)
-            status = self._status(current) or self._status(target)
+            # A current release whose files changed runs none of its code: the
+            # target's commands stand in for it (Codex review #204).
+            try:
+                load_release(self.config, current_name, verify=True)
+                tools = current
+            except ReleaseError:
+                self.say(f"  {current_name} changed since it was built: not run")
+                tools = target
+            status = (self._status(current) if tools is current else None) or (
+                self._status(target)
+            )
             revision = status.get("schema_revision") if status else None
             if restore_point is not None:
                 point = self._restore_point(restore_point)
@@ -898,7 +908,7 @@ class Tool:
                 f"Rollback {current_name} -> {to}"
                 + (f" with restore point {restore_point}" if restore_point else "")
             )
-            return _Rollback(self, current, target, restore_point, status).run()
+            return _Rollback(self, current, target, restore_point, status, tools).run()
 
     def _restore_point(self, label: str) -> dict:
         if not re.fullmatch(VERSION_PATTERN, label):
@@ -957,7 +967,7 @@ class Tool:
             current_name = current_version(self.config)
             if current_name is None:
                 raise ReleaseError("no current release")
-            current = load_release(self.config, current_name)
+            current = load_release(self.config, current_name, verify=True)
             result = self.cli(current, "deploy-maintenance-end")
             if result.code != 0:
                 self.say(f"FAILED: deploy-maintenance-end ({result.code}).")
@@ -1249,9 +1259,12 @@ class _Update(_Operation):
 class _Rollback(_Operation):
     name = "rollback"
 
-    def __init__(self, tool, current, target, restore_point, status) -> None:
+    def __init__(self, tool, current, target, restore_point, status, tools) -> None:
         super().__init__(tool)
         self.current = current
+        # Whose backend commands run before the switch: the current release, or
+        # the target when the current one's files changed.
+        self.tools = tools
         self.target = target
         self.restore_point = restore_point
         self.status = status
@@ -1273,7 +1286,7 @@ class _Rollback(_Operation):
             self.step(
                 "maintenance",
                 tool.cli(
-                    current,
+                    self.tools,
                     "deploy-maintenance-begin",
                     "--from-release",
                     current.version,
@@ -1284,7 +1297,7 @@ class _Rollback(_Operation):
             self.step(
                 "drain",
                 tool.cli(
-                    current,
+                    self.tools,
                     "deploy-drain",
                     "--timeout-seconds",
                     str(tool.config.drain_timeout_seconds),
