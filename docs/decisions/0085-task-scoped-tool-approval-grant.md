@@ -1,6 +1,7 @@
 # Tool の承認の「このタスクの間は許可」（Task の間だけ有効な許可、範囲・対象外・作る人・記録・取り消し）
 
-- Status: Proposed
+- Status: Approved
+- Approval: 2026-10-10、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで直接回答して承認（approved as recommended, all 7 points: 決めてほしいことの 1〜7 をすべて推奨どおり承認（画面の目視確認も OK）。末尾の「承認時の決定」）
 - Date: 2026-10-08
 - Scope: Tool の承認（`apps/backend/paw_backend/tools/`）に Task の間だけ有効な許可（Grant）を足す。`tools/task_grants.py`、`tools/task_grant_store.py`、`tools/task_grant_memory.py`、`tools/broker.py`、`tools/approvals.py`、`api/v1/boards.py`、Migration `0193`、`apps/web/src/tasks/`（承認の Sheet と Task の画面）
 - Supersedes: [Decision 0006](0006-tool-broker-policy.md)（Approved）の「承認は 1 回の呼び出しごと」を**一部**（下の 1〜3 の範囲だけ）。[Decision 0078](0078-pr-screen-and-mobile-board-api.md)（Approved）の 8（決めてほしいことの 7）「Design の『このタスクの間は許可』は出さない」。どちらも本文は書き換えない
@@ -109,3 +110,7 @@ Grant を作る・取り消すときも Audit の行（`tool.approval.grant`、`
 承認されたら Status を Approved に改め、承認の内容を記録する。
 方針を変えるときは、この Decision を書き換えず、新しい Decision から `Supersedes` する。
 [REQUIREMENTS.md](../../REQUIREMENTS.md) の原文は書き換えない。
+
+## 承認時の決定（2026-10-10）
+
+Human は、作業 Session で判断が必要な点について推奨つきの説明を受け、直接回答して承認した（2026-10-10、Human (approved as recommended, all 7 points)。決めてほしいことの 1〜7 をすべて推奨どおり承認（画面の目視確認も OK））。

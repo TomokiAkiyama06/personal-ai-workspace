@@ -1849,9 +1849,9 @@ Test（要求と使用）: `tests/test_tools_postgres.py` の `StalledServerTest
 今の構成は Application の Role が 1 つで、その Role は合法な遷移（`pending` → `approved`）を実行できるため、**Application の Process が侵害されれば、その User の名前で承認を書ける**（承認者は委任元 User でなければならず、強い承認は `step_up_verified` を偽るだけ）ことは、Database では防げません。
 分離には、承認の Endpoint 用の別 Role（と、その接続を持つ別 Process）が要ります。認証（PAW-022）と Step-up（PAW-023）の Endpoint ができる時に、承認の Endpoint だけが `UPDATE (status = 'approved' ...)` を実行できる構成（別 Role、または `SECURITY DEFINER` 関数）へ進めてください（Decision 0006 の後続の課題）。それまでは、**Agent の Runtime に Application の Role の DB 接続を渡さず、Broker だけを渡すことが前提条件です**（Decision 0006 で承認）。分離は PAW-022 / PAW-023 の受け入れ条件に入っています。
 
-### Task の間の許可（「このタスクの間は許可」、Decision 0085、Proposed）
+### Task の間の許可（「このタスクの間は許可」、Decision 0085、Approved）
 
-[Decision 0085](../../docs/decisions/0085-task-scoped-tool-approval-grant.md)（**Proposed**。推奨どおりに実装）。承認を求められた本人が「このタスクの間は許可」で答えると、`ApprovalService.approve_for_task` が、その承認を承認し、**同じ Transaction で** Grant（`tool_task_grants`、Migration `0193`）を作ります。Broker は以後、同じ Task の**同じ Run**・同じ Agent・同じ本人・同じ Tool で、Scope の状態と引数が**同じか狭い**呼び出しを、人に聞かずに通します（`task_grant_applied`）。
+[Decision 0085](../../docs/decisions/0085-task-scoped-tool-approval-grant.md)（**Approved**。推奨どおりに実装）。承認を求められた本人が「このタスクの間は許可」で答えると、`ApprovalService.approve_for_task` が、その承認を承認し、**同じ Transaction で** Grant（`tool_task_grants`、Migration `0193`）を作ります。Broker は以後、同じ Task の**同じ Run**・同じ Agent・同じ本人・同じ Tool で、Scope の状態と引数が**同じか狭い**呼び出しを、人に聞かずに通します（`task_grant_applied`）。
 
 - **同じか狭い**（`tools/grant_pattern.py` の `GrantPattern`）: Path は同じかその下（`/` の区切りで比べる）、Query のない URL は同じかその下（`scope.url_within`）、Query のある URL・Host・Project・Repository・文字列・整数・真偽値は完全一致（文字列などは SHA-256 だけを保存）、省略できる引数はあるかないかも同じ。Scope の状態は `in_scope` ⊂ `host_out_of_scope`。
 - **対象外**（`grantable`）: `STRONG_APPROVAL`、`destructive`、`credential-use` と Credential の handle の引数、`network` と `write` の両方（外部送信）、Working Set の Tool、`admin.*` / `owner.*` と Project の設定・Member・Agent Policy・Lifecycle・Repository の追加などの Capability。Broker は承認を開くときに型を `tool_approvals.grant_pattern` に保存し（NULL は対象外）、Web はそれが真のときだけボタンを出します。
@@ -4656,7 +4656,7 @@ PR 画面の「変更されたファイル」「レビューの要点」「監�
 | `GET /api/v1/approvals` | `tasks.list` | 本人が決める（`requester_user_id` が本人の）、読める Project の `pending` で期限内の Tool の承認（`task_id` で絞れる、`limit` 1〜100）。`summary`・Level・Task の題名と Agent・読める Repository の名前・期限 |
 | `GET /api/v1/approvals/{approval_id}` | `tasks.list` | 上の 1 件（一覧の上限の外の承認を Sheet で開く）。本人のものでない・決定済み・期限切れ・ないものは同じ 404 `approval_not_found` |
 | `POST /api/v1/approvals/{approval_id}/decision` | 承認の Project の `project.task.run`（Audit 必須） | `{"decision": "approve" \| "reject" \| "approve_for_task"}` を `ApprovalService` で。本人以外は 404 `approval_not_found`、決定済みは 409 `approval_not_pending`、期限切れは 409 `approval_expired`。`strong_approval` の承認は 403 `strong_approval_unavailable`（Step-up は Fail closed のまま。拒否はできる） |
-| 〃 `approve_for_task` | 同上 | 「このタスクの間は許可」（[Decision 0085](../../docs/decisions/0085-task-scoped-tool-approval-grant.md)、**Proposed**）。承認し、同じ Transaction で Grant を作る（`{"outcome": "approved_for_task", "grant_id": ...}`）。一覧の `task_grant_allowed` が偽の承認は 409 `task_grant_not_allowed`（承認は pending のまま）、Task が動いていない・Run が替わったは 409 `task_not_active`、上限は 409 `task_grant_limit_reached` |
+| 〃 `approve_for_task` | 同上 | 「このタスクの間は許可」（[Decision 0085](../../docs/decisions/0085-task-scoped-tool-approval-grant.md)、**Approved**）。承認し、同じ Transaction で Grant を作る（`{"outcome": "approved_for_task", "grant_id": ...}`）。一覧の `task_grant_allowed` が偽の承認は 409 `task_grant_not_allowed`（承認は pending のまま）、Task が動いていない・Run が替わったは 409 `task_not_active`、上限は 409 `task_grant_limit_reached` |
 | `GET /api/v1/tasks/{task_id}/approval-grants` | `tasks.list` | 本人の、Task の現在の Run の有効な Grant（「このタスクで許可中」）。Tool・元の承認の `summary`・作った時刻・使った回数。読めない Project の Task は空 |
 | `POST /api/v1/approval-grants/{grant_id}/revoke` | `tasks.list`（Service が本人と Admin / Owner だけに許す） | Grant を取り消す（後の呼び出しは毎回の承認に戻る）。他の人とない Grant は 404 `grant_not_found`、取り消し済みは 409 `grant_not_active` |
 
