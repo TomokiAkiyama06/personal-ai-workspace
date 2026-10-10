@@ -52,6 +52,9 @@ export function OtherForm({
   const ids = useId();
   const [text, setText] = useState("");
   const [preview, setPreview] = useState<PreferencePreview | null>(null);
+  // The candidate (and memory version) the preview was made from: saving answers
+  // that version, so a newer observation meanwhile is a conflict, not a silent save.
+  const [pinned, setPinned] = useState<PreferenceCandidate>(candidate);
   const [draft, setDraft] = useState<StructuredPreference | null>(null);
   const [adding, setAdding] = useState<string | null>(null);
   const [checked, setChecked] = useState(false);
@@ -80,6 +83,7 @@ export function OtherForm({
     state.source
       .interpret(candidate, text.trim())
       .then((found) => {
+        setPinned(candidate);
         setPreview(found);
         setDraft({ ...found.preference, exceptions: [...new Set(found.preference.exceptions)] });
         setBusy(null);
@@ -116,7 +120,7 @@ export function OtherForm({
     setBusy("save");
     setFailure(null);
     state.source
-      .confirm(candidate, {
+      .confirm(pinned, {
         preference: {
           ...draft,
           apply_to: draft.apply_to?.trim() ? draft.apply_to.trim() : null,

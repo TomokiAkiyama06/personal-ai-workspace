@@ -34,7 +34,7 @@ export interface PreferenceState {
   error: unknown;
   /** When the candidates were last read (ISO). */
   syncedAt: string | null;
-  /** Read again; true when the read succeeded. */
+  /** Read again; true when the latest read succeeded and was applied. */
   reload: () => Promise<boolean>;
   names: Names;
   /** The Memory badge: ready candidates and held items. */
@@ -64,24 +64,29 @@ function Store({ source, children }: { source: PreferenceSource; children: React
 
   // Reads may overlap (the minute's refresh and the one after an answer): only
   // the latest one started is applied, so an older answer never brings back a
-  // candidate that was just answered.
+  // candidate that was just answered. A superseded read answers with the
+  // outcome of the read that replaced it.
   const generation = useRef(0);
+  const latest = useRef<Promise<boolean>>(Promise.resolve(true));
   const reload = useCallback(() => {
     generation.current += 1;
     const mine = generation.current;
-    return source.candidates().then(
+    const read: Promise<boolean> = source.candidates().then(
       (found) => {
-        if (mine !== generation.current) return true;
+        if (mine !== generation.current) return latest.current;
         setCandidates(found);
         setError(null);
         setSyncedAt(new Date().toISOString());
         return true;
       },
       (caught: unknown) => {
-        if (mine === generation.current) setError(caught);
+        if (mine !== generation.current) return latest.current;
+        setError(caught);
         return false;
       },
     );
+    latest.current = read;
+    return read;
   }, [source]);
 
   useEffect(() => {

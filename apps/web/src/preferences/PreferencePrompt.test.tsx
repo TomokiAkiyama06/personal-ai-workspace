@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "../App";
@@ -288,6 +288,28 @@ describe("the chat's preference confirmation card", () => {
       ],
     });
     expect(await screen.findByRole("status")).toHaveTextContent(/保存しました/);
+  });
+
+  it("その他: saves the version the preview was made from", async () => {
+    const source = new FakePreferenceSource();
+    renderChat(source);
+    const user = userEvent.setup();
+    const card = await screen.findByRole("region", { name: "好みの確認" });
+    await user.click(within(card).getByRole("button", { name: "その他…" }));
+    await user.type(within(card).getByLabelText("どう覚えてほしいか"), "今後も");
+    await user.click(within(card).getByRole("button", { name: "構造にする" }));
+    await within(card).findByText("プレビュー — まだ保存していません");
+    // A newer observation arrives while the preview is open.
+    source.items = source.items.map((item) =>
+      item.memory_id === "m-pytest" ? { ...item, version_number: 2 } : item,
+    );
+    await act(async () => {
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    await user.click(within(card).getByRole("button", { name: "この内容で保存" }));
+    expect(await within(card).findByRole("alert")).toHaveTextContent(
+      "この候補は別の画面で答えたか、新しい観測で内容が変わりました。",
+    );
   });
 
   it("その他: the target belongs to a group of projects only", async () => {
