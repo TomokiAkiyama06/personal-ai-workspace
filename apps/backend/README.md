@@ -3724,7 +3724,7 @@ Test は `tests/test_memory_board.py`（読み取りモデル。見えてはい�
 - **確認**は `MemoryVersioningService` と同じ Lock・認可・履歴の規則で書きます（`PreferenceConfirmationService` はその Subclass）。同じ Memory の `n + 1` を `confirmed` で選んだ Scope に書き、`supersedes` と `confirmed_from` を張り、出典を写して本人の `user_confirmation` を足します。Project / Repository に広げるにはそこでの `project.memory.use`（Repository は保存された ACL つき）が要ります。広げる前の Private な版は Private のままです。
 - **保留された候補**（`held_high_risk` / `held_confirmed` / `held_widened`）の確認は key の Memory の次の Version か新しい登録済みの Memory を書き、答えを `memory_preference_resolutions` に残します。保存しないも答えとして残り、同じ key の新しい保留が来たら新しい質問になります。
 - **高リスク**（Merge・削除・公開・ACL / 権限・Credential・外部送信、または「必須」の規則）は `acknowledge_high_risk: true` がなければ 409 `preference_high_risk_unacknowledged` で何も書きません。確定しても Memory だけで（`attributes.preference.policy_effect = "none"`）、権限・ACL・Merge Policy は何も変わりません。
-- **自由入力**は、`app.state.preference_interpreter`（`PreferenceInterpreter` の Port。`preference-interpretation-v1` の JSON を返すモデル）があればそれが、なければ・失敗したら規則の Interpreter が構造にします（`interpreted_by`）。モデルは ID を名指せず、Risk は Backend の判定より下げられません。`project_group` は本人の Memory に条件（`適用対象: …`）を書いて保存します。モデルの本番の配線はまだありません。
+- **自由入力**は、`app.state.preference_interpreter`（`PreferenceInterpreter` の Port。`preference-interpretation-v1` の JSON を返すモデル）があればそれが、なければ・失敗したら規則の Interpreter が構造にします（`interpreted_by`）。モデルは ID を名指せず、Risk は Backend の判定より下げられません。`project_group` は本人の Memory に条件（`適用対象: …`）を書いて保存します。本番の配線（Issue #208、Decision 0083 の 1）: `create_app(compute=..., local_model=LocalModelSetup(base_url=...))` のとき、Local の Main Model（vLLM の OpenAI 互換 API）に Tool なしの 1 回の Request で聞く `agents.ModelPreferenceInterpreter` を、`compute.ScheduledInterpreter`（Scheduler の Main Model の `INTERACTIVE` の Lease の中でだけ呼ぶ。取れない・`revoked` になったら `InterpreterUnavailableError` ですぐに規則の Interpreter）で包んで置きます。Task に属さないので、Task の Budget と `local_usage` には入りません。`local_model` がなければ今までどおり規則の Interpreter だけです（環境変数の設定はなく、`ComputeSetup` と同じく配備が渡します）。
 - 誤り: 候補が答えられた・変わった 409 `preference_candidate_changed`、版の衝突 409 `memory_version_conflict`、書けない Scope 403 `forbidden`、広げた Memory を別の Project に移す 422 `validation_error`。入口は Memory 画面と同じ `memory.read`（本人の Memory）です。
 
 Test は `tests/test_preference_rules.py`・`test_preference_interpretation.py`（純粋な規則と構造）、`test_preference_service.py`（PostgreSQL。候補と根拠、確認・保存しない、権限、高リスク、自由入力）、`test_preference_flow.py`（Journal と Consolidator を通した end-to-end）、`test_preference_http.py`、`test_preference_grants.py`（Application の Role で実行）、`test_preference_migration.py` です。
@@ -3997,6 +3997,7 @@ Node が失敗するたび（Runtime が失敗を返す、例外を送出する�
 | `WAIT_FOR_USER`（Budget、Loop で上位がない） | Node を残して Run を止め、Task を `waiting`（理由 `user`） |
 | `FAIL`（`retries` の超過） | Node を失敗にして Run を止め、Task を `failed` |
 | `retryable=False` の失敗 | 再試行せず Node を失敗にする |
+| `escalate=True` の失敗（Decision 0083 の 4） | 上の段があり、`MAX_APPROACH` と Budget が許すなら、Loop 検知と代替（`TRY_ALTERNATIVE`）を待たずに `ESCALATE_AGENT`。上の段がなければ今までどおり。Planner の失敗では普通の失敗と同じ |
 
 再試行の前に Back-off（`retry_backoff_seconds`、倍で最大 60 秒）で待ちます。Escalation の段は `OrchestratorConfig.ladders`（Role ごとの Agent の並び）です。
 
@@ -4013,7 +4014,7 @@ class AgentRuntime(Protocol):
     async def run_node(self, assignment: NodeAssignment) -> NodeOutcome: ...
 ```
 
-`Orchestrator(...)` を作るとき、全ての Runtime を `validate_runtime`（`async run_node` が 1 引数か）で検査し、Ladder が名前を挙げる Agent の Runtime がなければ失敗します。`NodeAssignment` は Goal・Input・上流の結果・Agent の Label・試行と方法の番号と、`tools`（Tool の呼び出し）、`budget`（消費の報告）を持ちます。**Runtime は Broker、Runner、`TaskContext`、Grant、Scope、DB 接続を受け取りません。** `NodeStopped`（Task が終わった、Lease を失った、Budget が尽きた）は Runtime が通さなければなりません。`NodeOutcome.succeeded(result, plan=...)` / `NodeOutcome.failed(error_class, message, retryable=...)`。
+`Orchestrator(...)` を作るとき、全ての Runtime を `validate_runtime`（`async run_node` が 1 引数か）で検査し、Ladder が名前を挙げる Agent の Runtime がなければ失敗します。`NodeAssignment` は Goal・Input・上流の結果・Agent の Label・試行と方法の番号と、`tools`（Tool の呼び出し）、`budget`（消費の報告）を持ちます。**Runtime は Broker、Runner、`TaskContext`、Grant、Scope、DB 接続を受け取りません。** `NodeStopped`（Task が終わった、Lease を失った、Budget が尽きた）は Runtime が通さなければなりません。`NodeOutcome.succeeded(result, plan=...)` / `NodeOutcome.failed(error_class, message, retryable=..., escalate=...)`（`escalate=True` と `retryable=False` は同時に付けられません。`InvalidOrchestratorArgumentError`）。
 
 ### Placement（Node をどこで走らせたか。Issue #133）
 
@@ -4160,6 +4161,21 @@ Test: `test_orchestrator_authority.py`（本番の `TaskAuthority`。最後の T
 `apps/backend/tests/test_orchestrator_*.py`、`orchestrator_support.py`、`test_authz_delegation.py`。標準 `unittest` だけで、`test_orchestrator_plan.py`（Plan の検査の表と、ランダムな DAG の位相順・Cycle 検出）、`test_orchestrator_result.py`、`test_orchestrator_scheduling.py`（純粋な規則と、ランダムな DAG の Property Test）、`test_orchestrator_scope.py`、`test_orchestrator_argument_validation.py`（全 Public Method × 全引数 × 誤った値の表。DB を設定しない Database を渡し、DB に届く前に型付きのエラーになること）、`test_orchestrator_migration.py` の前半と `test_orchestrator_project_sweep.py` の前半は DB を使いません。
 それ以外は実 PostgreSQL（`PAW_TEST_DATABASE_URL`）を使い、未設定なら Skip します: 永続化と Fencing の競合（`test_orchestrator_store.py`: 引き継ぎ・書き込み・Lock 待ちの順序、同時に終わる 2 Node、同じ Node の 2 重の起動）、実行・並列・結果の受け渡し（`test_orchestrator_run.py`）、失敗・Retry・Escalation・Isolation（`test_orchestrator_failures.py`）、Plan の受け入れ（`test_orchestrator_planning.py`）、Budget（`test_orchestrator_budget.py`）、Pause / Cancel / Retry / Restart（`test_orchestrator_control.py`）、Lease・Crash・引き継ぎ（`test_orchestrator_lease.py`）、Tool 呼び出しの Lease の Fencing と `tool_calls` の Run への計上（`test_orchestrator_lease_fencing.py`。Issue #126）、終了の Command と Start の Fencing（`test_orchestrator_fenced_commands.py`: Barrier で「最後の確認の後、Command の前」に `fail` → Retry → Start を割り込ませる）、`succeeded` の DAG の Retry と予期しない Error の後始末（`test_orchestrator_recovery.py`）、走っている間の Runtime の Budget（`test_orchestrator_runtime_budget.py`）、Gate の明示的な組み立て（`test_orchestrator_wiring.py`）、Project が Active でないときの Claim・Start・走行中の Task（実際の `ProjectStateGate`。`test_orchestrator_project_gate.py`）、Worker の停止と `serve`（`test_orchestrator_shutdown.py`）、実際の Tool Broker と（`test_orchestrator_tools.py`）、ランダムな DAG を Orchestrator 全体で動かす Property Test（`test_orchestrator_property.py`）、Migration の上げ下げと Model との一致（`test_orchestrator_migration.py`、Revision `0133` は `test_orchestrator_placement_migration.py`）、Placement の記録と Cloud の外部送信の Audit（`test_orchestrator_placement.py`: Fencing・1 回だけ・Audit の行と同じ Transaction・DB の CHECK と Trigger・`HybridRuntime` を Orchestrator に入れた Local / Cloud）、Sweep（`test_orchestrator_project_sweep.py`）、非 Superuser の Role（`test_orchestrator_grants.py`）。時間は注入した `ManualClock` で、速度に依存する Test はありません（Lock 待ちや非同期の進行は上限を長く取った待機で確かめます）。
 
+## Agent Runtime の共有部品（Issue #208、Decision 0083、Approved）
+
+`paw_backend/agents/` は Orchestrator の実 Runtime（Local の Main Model の Tool loop、Codex / Claude Code の CLI）とその共有部品の Package です。Decision 0083 の 11 の段階ごとに入り、いまは段階 1（共有部品）だけです。Tool・Sandbox・CLI はまだ何も動かしません。
+
+| File | 内容 |
+| --- | --- |
+| `failures.py` | 閉じた失敗の対応表（`ErrorClassifier`、Decision 0083 の 4）。`Failure`（理由ごとの固定の文）→ `error_class`（すべて `RUNTIME_ERROR_CLASSES` の名前）と `escalate`。`retryable=False` の行はありません。Cloud の振り替えの経路（`fallback=True`）の Gate の拒否だけは `HybridRuntime` の `ComputeUnavailable`。`from_error` は `NodeStopped`・Cancel・`MemoryError` を握りつぶさずに上げ、他の例外の文は読みません |
+| `reasoning.py` | Reasoning の履歴の方針の差し込み口 `ReasoningHistoryPolicy.prepare(messages) -> messages`（Decision 0083 の 3）。既定は Benchmark と同じ `KeepAllReasoning`（入力を変えない写し）。古い Reasoning を外す方針は #200 の Decision 0076 の承認の後に足します。Reasoning は DB・Log・Audit・`NodeResult` に書きません（Log には `reasoning_chars` の文字数だけ） |
+| `chat.py` | `ChatCompletionsClient`: OpenAI 互換の `/chat/completions` への非 Stream の 1 回の呼び出し（httpx。環境の Proxy を使わず、Redirect を追わない）。答えの文・Reasoning（`reasoning_content` / `reasoning`）・Tool 呼び出し・`usage`（無ければ `None`。0 にしない）。失敗は表の `RuntimeFailure` だけ（繋がらない・503 → `SERVER_UNAVAILABLE`、CUDA OOM → `OUT_OF_MEMORY`、`maximum context length` → `CONTEXT_LIMIT`、全体の Timeout → `TIMEOUT`、壊れた・大きすぎる答え → `MALFORMED_RESPONSE`、その他 → `OTHER`）。Server の Error の本文は印を探すだけで、Log・例外・保存に出しません。Compute の Lease の内側でだけ使います |
+| `preferences.py`・`wiring.py` | #38 の Model の Interpreter（`ModelPreferenceInterpreter`。本人の文と候補を JSON の Data として渡し、`enable_thinking: false`）と、`LocalModelSetup` / `build_preference_interpreter`（`create_app(local_model=...)`。[Inferred Preference の確認 Flow](#inferred-preference-の確認-flowissue-38paw-044decision-0081)） |
+
+`NodeOutcome.failed(..., escalate=True)` と `_retry_step` の扱いは [Node ごとの Retry / Escalate](#node-ごとの-retry--escalate) の表のとおりです（Decision 0007 / 0021 の一部 Supersede）。
+
+Test は `tests/test_agents_failures.py`（表の各行と不変条件）、`test_agents_reasoning.py`、`test_agents_chat.py`（Fake の Server: `httpx.MockTransport`）、`test_agents_preferences.py`（Fake の Server と `compute_support` の Fake の GPU。実 PostgreSQL の Service の Test は `PAW_TEST_DATABASE_URL` がないと Skip）、`test_orchestrator_escalate.py`（実 PostgreSQL）です。GPU・Network・本物の CLI は使いません。
+
 ## Parallel Worktree / Integration Node
 
 [PAW-035](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/31)（`paw_backend/integration/`、Orchestrator の継ぎ目 `paw_backend/orchestrator/workspaces.py`）で実装しました。**Migration はありません。** 設計は [要件](../../REQUIREMENTS.md)の「Repository isolation」「Review independence」に従い、要件が決めていない選択（置き場所と名前、Worker の branch の起点、統合の base・順序・方法、Conflict と未 Commit の変更の扱い、統合後の検査、PR / Push を行わないこと、後片付け、SSH の Wrapper の許可リストへの追加）は **[Decision 0036（Approved）](../../docs/decisions/0036-parallel-worktree-integration.md)** にまとめ、Human が 2026-09-28 に全点を推奨どおり承認しました（13 の Wrapper は条件つきで [#134](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/134)、PR の作成と Push は [#132](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/132)）。
@@ -4227,7 +4243,7 @@ completed（Merge Ready。Human が Merge を判断する）/ 通らなければ
 | `control.py` | `ModelControl` の Protocol と、Admin が設定した Command を実行する `CommandModelControl`（GPU の Runtime の起動前にホストの `MemAvailable` を確かめる。Issue #182） |
 | `host.py` | ホストの `MemAvailable`（`/proc/meminfo`）の読み取り（Issue #182） |
 | `scheduler.py` | `ComputeScheduler`: Admission と待ち行列、縮退と常駐、Exclusive |
-| `runtimes.py` | `HybridRuntime`（Orchestrator の Runtime。Local / Cloud）、`ScheduledMemoryWorker`、`PlacedEmbedder` |
+| `runtimes.py` | `HybridRuntime`（Orchestrator の Runtime。Local / Cloud）、`ScheduledMemoryWorker`、`ScheduledInterpreter`（Issue #208）、`PlacedEmbedder` |
 | `usage.py`、`models.py`、Migration `0189` | `local_usage`（Local の Model での実行の使用量。Application の Role は SELECT / INSERT）と `PostgresLocalUsage`（Decision 0077） |
 | `wiring.py` | Application への組み込み（Issue #165）: `ComputeSetup`、`LocalRuntime`、VRAM の警告の Sink `RecentVramWarnings`、HTTP の経路が使う `FullGpuController` |
 
