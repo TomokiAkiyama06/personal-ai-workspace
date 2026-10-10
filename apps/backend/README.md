@@ -4674,6 +4674,7 @@ CI は pre-commit の専用環境で Test を実行するため、同じ Version
 [test_dependency_pins.py](../../.github/scripts/test_dependency_pins.py) が検査します。
 依存を追加・更新する場合は 3 か所を同時に変更してください。
 PAW-023 は `webauthn`（py_webauthn。WebAuthn の検証。`auth/passkeys/ceremony.py` だけが import する）と `cryptography`（Test の Software Authenticator が実際に署名するために直接 import する）を追加しました。どちらも最新の Version を固定しています（選定の理由は Decision 0025）。
+Issue #208（Decision 0083）は、Test だけで使っていた `httpx` を実行時の依存に移しました（`agents/chat.py` が Local の Model の Server を呼ぶため。Release は dev の依存を入れないので、Application が import する Package は実行時の依存でなければなりません。`test_dependency_pins.py` が検査します）。
 
 ## 今後の Issue
 
