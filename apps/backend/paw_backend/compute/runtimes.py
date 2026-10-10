@@ -33,6 +33,12 @@
   reads as "not now" and defers without counting a failure (Decision 0018). An
   observation too long for the model ever to take is a failed attempt instead
   (``ComputeUnavailableError``), so that it is not deferred for ever.
+* :class:`ScheduledInterpreter` wraps the model interpreter of Inferred
+  Preferences (#38, Decision 0083, 1) the same way, on an ``INTERACTIVE`` lease of
+  the main model (a person waits for the preview): without a lease now, or when
+  the lease is revoked, it raises ``InterpreterUnavailableError`` and the
+  preference service lets its rule interpreter answer. The call belongs to no
+  task (nothing is charged to a budget or recorded in ``local_usage``).
 * :class:`PlacedEmbedder` wraps the GPU and the CPU copy of an embedding model
   (the retrieval's ``Embedder``, PAW-043) and uses the one the scheduler placed
   (CPU fallback).
@@ -55,7 +61,10 @@ from paw_backend.compute.domain import (
     Refusal,
     ResourceClass,
 )
-from paw_backend.compute.errors import ComputeUnavailableError
+from paw_backend.compute.errors import (
+    ComputeUnavailableError,
+    InterpreterUnavailableError,
+)
 from paw_backend.compute.limits import (
     BYTES_PER_TOKEN_ESTIMATE,
     DEFAULT_MEMORY_OUTPUT_TOKENS,
@@ -72,6 +81,7 @@ from paw_backend.compute.scheduler import (
 from paw_backend.compute.usage import LocalUsageSink
 from paw_backend.memory.journal.errors import WorkerUnavailableError
 from paw_backend.memory.journal.worker import check_worker
+from paw_backend.memory.preferences.interpretation import check_interpreter
 from paw_backend.orchestrator.config import Clock, SystemClock
 from paw_backend.orchestrator.domain import ExecutionPlacement
 from paw_backend.orchestrator.errors import (
@@ -821,6 +831,75 @@ class ScheduledMemoryWorker:
             # and the relief steps are not held up by it.
             return await _until_revoked(
                 self._worker.extract(input_text), lease, WorkerUnavailableError
+            )
+
+
+# The fixed part of an interpreter's prompt, when it does not say (bytes).
+DEFAULT_INTERPRETER_PROMPT_BYTES = 4_096
+DEFAULT_INTERPRETER_OUTPUT_TOKENS = 2_048
+
+
+class ScheduledInterpreter:
+    """A ``PreferenceInterpreter`` that runs only when the scheduler has room
+    now (see the module). ``prompt_bytes``: the fixed part of the interpreter's
+    prompt, ``output_tokens`` its answer's limit; with the person's text and the
+    candidate they make the lease's context estimate."""
+
+    def __init__(
+        self,
+        interpreter: object,
+        scheduler: ComputeScheduler,
+        *,
+        deployment: str,
+        resource_class: ResourceClass = ResourceClass.INTERACTIVE,
+        prompt_bytes: int = DEFAULT_INTERPRETER_PROMPT_BYTES,
+        output_tokens: int = DEFAULT_INTERPRETER_OUTPUT_TOKENS,
+    ) -> None:
+        check_interpreter(interpreter)
+        if not isinstance(scheduler, ComputeScheduler):
+            raise TypeError("scheduler must be a ComputeScheduler")
+        if resource_class is ResourceClass.EXCLUSIVE:
+            raise ValueError("resource_class")
+        for name, value in (
+            ("prompt_bytes", prompt_bytes),
+            ("output_tokens", output_tokens),
+        ):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or not 0 <= value <= MAX_LOCAL_TOKENS
+            ):
+                raise ValueError(name)
+        ComputeRequest(resource_class, deployment=deployment)
+        scheduler.parallelism(deployment, 0, resource_class)  # a known model
+        self._interpreter = interpreter
+        self._scheduler = scheduler
+        self._deployment = deployment
+        self._class = resource_class
+        self._prompt = prompt_bytes
+        self._output = output_tokens
+
+    def __repr__(self) -> str:
+        return f"ScheduledInterpreter(deployment={self._deployment!r})"
+
+    async def interpret(self, text: str, candidate: str | None) -> str:
+        size = self._prompt + len(str(text).encode("utf-8"))
+        if candidate is not None:
+            size += len(str(candidate).encode("utf-8"))
+        admission = await self._scheduler.try_acquire(
+            ComputeRequest(
+                self._class,
+                deployment=self._deployment,
+                context_tokens=min(_tokens(size) + self._output, _MAX_ESTIMATE),
+            )
+        )
+        if admission.lease is None:
+            raise InterpreterUnavailableError(admission.refusal)
+        async with admission.lease as lease:
+            return await _until_revoked(
+                self._interpreter.interpret(text, candidate),
+                lease,
+                InterpreterUnavailableError,
             )
 
 

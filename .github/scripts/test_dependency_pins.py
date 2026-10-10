@@ -58,10 +58,10 @@ FIRST_PARTY = {"paw_backend", "tests", "migrations"}
 DISTRIBUTION_OF_IMPORT = {"argon2": "argon2-cffi"}
 
 
-def imported_third_party_packages(backend):
+def imported_third_party_packages(backend, directories=SCANNED_DIRECTORIES):
     """Normalized names of the third-party packages the backend code imports."""
     imported = set()
-    for directory in SCANNED_DIRECTORIES:
+    for directory in directories:
         for folder, subfolders, files in os.walk(backend / directory):
             subfolders[:] = [
                 name
@@ -84,9 +84,13 @@ def imported_third_party_packages(backend):
     }
 
 
-def backend_pins():
+def backend_pins(*, runtime_only=False):
+    """The backend's pins; ``runtime_only``: without the ``dev`` group (what a
+    release installs, ``uv pip install apps/backend``)."""
     project = tomllib.loads((BACKEND / "pyproject.toml").read_text())
-    specs = project["project"]["dependencies"] + project["dependency-groups"]["dev"]
+    specs = project["project"]["dependencies"]
+    if not runtime_only:
+        specs = specs + project["dependency-groups"]["dev"]
     return [parse_pin(spec) for spec in specs]
 
 
@@ -111,6 +115,18 @@ class DependencyPinsTest(unittest.TestCase):
         declared = {name for name, _, _ in backend_pins()}
         undeclared = imported_third_party_packages(BACKEND) - declared
         self.assertEqual(undeclared, set(), "imported but not pinned in pyproject.toml")
+
+    def test_the_application_imports_only_its_runtime_dependencies(self):
+        # A release installs the project without the dev group: a package the
+        # application's own code imports must be a runtime dependency.
+        declared = {name for name, _, _ in backend_pins(runtime_only=True)}
+        undeclared = (
+            imported_third_party_packages(BACKEND, ("paw_backend", "migrations"))
+            - declared
+        )
+        self.assertEqual(
+            undeclared, set(), "imported by the application but only a dev dependency"
+        )
 
 
 class ImportScanTest(unittest.TestCase):
