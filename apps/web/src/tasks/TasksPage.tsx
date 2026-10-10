@@ -650,17 +650,22 @@ function TaskGrantsPanel({
   const [pending, setPending] = useState<string | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [done, setDone] = useState<string | null>(null);
+  // Only the answer of the latest read is shown: polls may overlap and resolve
+  // out of order, and a read started before a revoke must not bring the revoked
+  // grant back (Codex review of #216).
+  const latest = useRef(0);
   const read = useCallback(() => {
-    let current = true;
+    latest.current += 1;
+    const ticket = latest.current;
     source
       .listTaskGrants(taskId)
       .then((items) => {
-        if (current) setGrants(items);
+        if (ticket === latest.current) setGrants(items);
       })
       // A failed read keeps what is shown (as the task's own refresh).
       .catch(() => {});
     return () => {
-      current = false;
+      latest.current += 1;
     };
   }, [source, taskId]);
   // biome-ignore lint/correctness/useExhaustiveDependencies: read again for a new version
@@ -679,6 +684,7 @@ function TaskGrantsPanel({
     source
       .revokeTaskGrant(grant.id)
       .then(() => {
+        latest.current += 1;
         setGrants((items) => items.filter((item) => item.id !== grant.id));
         setDone(t("tasks.grants.revoked", { tool: grant.tool }));
         read();

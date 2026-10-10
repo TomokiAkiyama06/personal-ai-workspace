@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "../App";
@@ -243,6 +243,33 @@ describe("Approvals page", () => {
       vi.spyOn(source, "listTaskGrants").mockResolvedValue([{ ...grant, uses: 3 }]);
       await vi.advanceTimersByTimeAsync(5000);
       expect(await within(panel).findByText(/3 回使用/)).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("never lets an older read bring a revoked grant back", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const { source } = fakeTaskSource();
+      await source.decideApproval("approval-1", "approve_for_task");
+      const before = await source.listTaskGrants(TASK_204);
+      renderAt(`/agents/${TASK_204}`, source);
+      const panel = await screen.findByRole("region", { name: "このタスクで許可中" });
+      // A poll that is still in flight when the grant is revoked.
+      let answer: (items: typeof before) => void = () => {};
+      vi.spyOn(source, "listTaskGrants").mockImplementationOnce(
+        () => new Promise((resolve) => (answer = resolve)),
+      );
+      await vi.advanceTimersByTimeAsync(5000);
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      await user.click(within(panel).getByRole("button", { name: "取り消す: package.add" }));
+      expect(await screen.findByText("取り消しました: package.add")).toBeInTheDocument();
+      await act(async () => {
+        answer(before);
+        await vi.advanceTimersByTimeAsync(50);
+      });
+      expect(screen.queryByText('uv add "pyjwt>=2.9"')).not.toBeInTheDocument();
     } finally {
       vi.useRealTimers();
     }
