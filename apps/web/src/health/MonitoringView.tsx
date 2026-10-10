@@ -684,6 +684,13 @@ function componentLines(t: Translate, health: ComponentHealth): string[] {
       for (const [name, value] of Object.entries(m)) {
         if (value !== null) lines.push(`${name} ${String(value)}`);
       }
+      // Its parts (one per item it measures), numbered, one line each.
+      health.parts.forEach((part, index) => {
+        const values = Object.entries(part).flatMap(([name, value]) =>
+          value === null ? [] : [`${name} ${String(value)}`],
+        );
+        if (values.length > 0) lines.push(`#${index + 1} ${values.join(" · ")}`);
+      });
   }
   return lines;
 }

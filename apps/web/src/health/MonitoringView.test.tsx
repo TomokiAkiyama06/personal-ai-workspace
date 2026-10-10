@@ -276,6 +276,22 @@ describe("サーバー監視", () => {
     expect(within(panel()).queryByText("inference_gateway")).not.toBeInTheDocument();
   });
 
+  it("shows the parts of a component this version does not know (Codex P2, PR #215)", async () => {
+    const report = withUnknownComponent(normalReport(), "error");
+    const unknown = report.components.find((entry) => entry.component === "inference_gateway");
+    if (!unknown) throw new Error("fixture");
+    unknown.parts = [
+      { kind: "replica_a", healthy: true, backlog: 0 },
+      { kind: "replica_b", healthy: false, backlog: 7, last_seen: null },
+    ];
+    renderMonitoring(fakeHealthSource(report));
+    await screen.findByRole("alert");
+    const detail = panel();
+    // Each part on its own line, numbered, with its values as the Backend names them.
+    expect(within(detail).getByText("#1 kind replica_a · healthy true · backlog 0")).toBeVisible();
+    expect(within(detail).getByText("#2 kind replica_b · healthy false · backlog 7")).toBeVisible();
+  });
+
   it("shows その他 only while there is a component this version does not know", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     let current = withUnknownComponent(normalReport(), "info");
