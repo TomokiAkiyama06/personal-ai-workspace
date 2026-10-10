@@ -5,11 +5,13 @@ import { NotificationsPage } from "./notifications/NotificationCenter";
 import { ServerNotifications } from "./notifications/serverNotifications";
 import { useNotificationOwner } from "./notifications/store";
 import { AdminPage } from "./pages/AdminPage";
+import { ChatPage } from "./pages/ChatPage";
 import { LoginPage } from "./pages/LoginPage";
 import { PairPage } from "./pages/PairPage";
 import { PasskeyGatePage } from "./pages/PasskeyGatePage";
 import { PlaceholderPage } from "./pages/PlaceholderPage";
 import { SettingsPage } from "./pages/SettingsPage";
+import { PreferenceProvider } from "./preferences/store";
 import { PROJECTS_PATH, ProjectsPage } from "./projects/ProjectsPage";
 import { useRouter } from "./router";
 import { AppShell } from "./shell/AppShell";
@@ -35,6 +37,10 @@ function SignedInPage() {
   if (isActive({ path: APPROVALS_PATH }, path)) return <ApprovalsPage />;
   if (path === "/admin" || path.startsWith("/admin/")) return <AdminPage />;
   if (path === "/memory" || path.startsWith("/memory/")) return <MemoryPage />;
+  // The chat (a later issue) shows the Inferred Preference card (issue #38).
+  if (path === "/" || path === NEW_CHAT_PATH) {
+    return <ChatPage screen={path === "/" ? "nav.chat" : "nav.newChat"} />;
+  }
   const other = OTHER_SCREENS.find((entry) => entry.path === path);
   if (other) return <PlaceholderPage screen={other.label} />;
   const item = [...PRIMARY_NAV, ...SECONDARY_NAV].find((entry) => isActive(entry, path));
@@ -85,8 +91,10 @@ export function App() {
       if (state.data.auth && state.data.auth.passkey.gate !== "open") return <PasskeyGatePage />;
       // The stored notifications stay connected on every screen, Settings too
       // (it shows the banners); the same position keeps it mounted across both.
+      // The preference candidates (issue #38) belong to the account: another one
+      // starts empty.
       return (
-        <>
+        <PreferenceProvider key={state.data.user.id}>
           <ServerNotifications />
           {/* Settings is a screen of its own (the design's 「ワークスペースへ戻る」 header). */}
           {path === "/settings" || path.startsWith("/settings/") ? (
@@ -96,7 +104,7 @@ export function App() {
               <SignedInPage />
             </AppShell>
           )}
-        </>
+        </PreferenceProvider>
       );
   }
 }
