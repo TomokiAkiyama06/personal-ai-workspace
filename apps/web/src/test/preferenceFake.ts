@@ -75,7 +75,7 @@ export function heldCandidate(
   return {
     kind: "held",
     key: overrides.entry_id,
-    title: "Held",
+    title: overrides.entry_id,
     content: "Text",
     evidence: evidence(),
     recommendation: { scope: "project", project_id: PROJECT_ID, repo_id: null },
@@ -143,8 +143,9 @@ export function designCandidates(): PreferenceCandidate[] {
     heldCandidate({
       entry_id: "e-merge",
       key: "merge.after_ci",
-      title: "CI が通った PR は確認なしで main にマージする",
-      content: "CI が通ったら、レビューの後に確認を待たず main にマージしてよい。",
+      // The Backend titles a held item by its key; the statement is the content.
+      title: "merge.after_ci",
+      content: "CI が通った PR は確認なしで main にマージする",
       evidence: evidence({
         frequency: 3,
         repo_count: 2,
@@ -157,8 +158,8 @@ export function designCandidates(): PreferenceCandidate[] {
     heldCandidate({
       entry_id: "e-lang",
       key: "ui.language",
-      title: "UI の表示言語は英語",
-      content: "UI の表示言語は英語にする。",
+      title: "ui.language",
+      content: "UI の表示言語は英語",
       evidence: evidence({ frequency: 2, consistency: "conflicting" }),
       held_reason: "held_confirmed",
       memory_id: "m-lang",
@@ -168,8 +169,8 @@ export function designCandidates(): PreferenceCandidate[] {
     heldCandidate({
       entry_id: "e-pr",
       key: "pr.language",
-      title: "PR の説明は英語で書く",
-      content: "PR の説明は英語で書く。",
+      title: "pr.language",
+      content: "PR の説明は英語で書く",
       evidence: evidence({ frequency: 2 }),
       held_reason: "held_widened",
       memory_id: "m-pr",
@@ -195,8 +196,16 @@ export class FakePreferenceSource implements PreferenceSource {
     this.items = [...items];
   }
 
+  /** Fail the next read of the candidates with this error. */
+  failRead: ApiError | null = null;
+
   async candidates(): Promise<PreferenceCandidate[]> {
     this.calls.push({ method: "candidates", args: [] });
+    if (this.failRead) {
+      const error = this.failRead;
+      this.failRead = null;
+      throw error;
+    }
     return [...this.items];
   }
 

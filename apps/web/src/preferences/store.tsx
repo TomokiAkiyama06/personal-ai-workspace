@@ -34,7 +34,8 @@ export interface PreferenceState {
   error: unknown;
   /** When the candidates were last read (ISO). */
   syncedAt: string | null;
-  reload: () => Promise<void>;
+  /** Read again; true when the read succeeded. */
+  reload: () => Promise<boolean>;
   names: Names;
   /** The Memory badge: ready candidates and held items. */
   badge: number;
@@ -70,13 +71,15 @@ function Store({ source, children }: { source: PreferenceSource; children: React
     const mine = generation.current;
     return source.candidates().then(
       (found) => {
-        if (mine !== generation.current) return;
+        if (mine !== generation.current) return true;
         setCandidates(found);
         setError(null);
         setSyncedAt(new Date().toISOString());
+        return true;
       },
       (caught: unknown) => {
         if (mine === generation.current) setError(caught);
+        return false;
       },
     );
   }, [source]);

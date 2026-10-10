@@ -136,6 +136,11 @@ describe("メモリ › 推定の候補 / 保留中", () => {
     expect(screen.getByText("保留の種類とできること")).toBeInTheDocument();
     expect(screen.getByText("高リスクで保留")).toBeInTheDocument();
     expect(document.body.textContent).not.toMatch(/HELD_HIGH_RISK|held_high_risk/);
+    // The Backend titles a held item by its key; the statement is shown instead.
+    expect(document.body.textContent).not.toMatch(/merge\.after_ci|ui\.language|pr\.language/);
+    expect(
+      screen.getByRole("heading", { name: "CI が通った PR は確認なしで main にマージする" }),
+    ).toBeInTheDocument();
     const save = screen.getByRole("button", { name: "確認して保存" });
     expect(save).toBeDisabled();
     await user.click(screen.getByRole("checkbox"));

@@ -14,6 +14,22 @@ export const HELD_PATH = "/memory/held";
 
 export type PreferenceView = "candidates" | "held";
 
+/**
+ * The words to show as a candidate's title. The Backend titles a held item by
+ * its key (e.g. `merge.after_ci`), which is not for people: its statement
+ * (`content`) is shown instead.
+ */
+export function candidateTitle(candidate: PreferenceCandidate): string {
+  return candidate.kind === "held" && candidate.title === candidate.key
+    ? candidate.content
+    : candidate.title;
+}
+
+/** Whether the title already shows the content (then the content is not repeated). */
+export function titleIsContent(candidate: PreferenceCandidate): boolean {
+  return candidateTitle(candidate) === candidate.content;
+}
+
 /** A candidate's id on screen: the memory, or the held item of a journal entry. */
 export function candidateId(candidate: PreferenceCandidate): string {
   return candidate.kind === "memory"

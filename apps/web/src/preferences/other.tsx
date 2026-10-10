@@ -336,9 +336,11 @@ export function OtherForm({
     <AnswerError
       error={failure}
       candidate={candidate}
+      // The conflict (and its retry) stays until the latest is read.
       onReload={() => {
-        setFailure(null);
-        void state.reload();
+        void state.reload().then((read) => {
+          if (read) setFailure(null);
+        });
       }}
     />
   );

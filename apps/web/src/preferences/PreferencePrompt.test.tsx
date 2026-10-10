@@ -208,6 +208,25 @@ describe("the chat's preference confirmation card", () => {
     );
   });
 
+  it("keeps the conflict and its retry when reading the latest fails", async () => {
+    const source = new FakePreferenceSource();
+    source.failNext = new ApiError(409, "preference_candidate_changed", "x");
+    renderChat(source);
+    const user = userEvent.setup();
+    const card = await screen.findByRole("region", { name: "好みの確認" });
+    await user.click(within(card).getByRole("button", { name: /このRepoだけ/ }));
+    source.failRead = new ApiError(503, "unavailable", "x");
+    const before = source.calls.filter((call) => call.method === "candidates").length;
+    await user.click(within(card).getByRole("button", { name: "最新を読み込む" }));
+    await waitFor(() =>
+      expect(source.calls.filter((call) => call.method === "candidates").length).toBe(before + 1),
+    );
+    expect(within(card).getByRole("button", { name: "最新を読み込む" })).toBeInTheDocument();
+    // The next read succeeds: the conflict goes.
+    await user.click(within(card).getByRole("button", { name: "最新を読み込む" }));
+    await waitFor(() => expect(within(card).queryByRole("alert")).not.toBeInTheDocument());
+  });
+
   it("その他: free text → the structured preview → saved as corrected", async () => {
     const source = new FakePreferenceSource();
     source.preview = {

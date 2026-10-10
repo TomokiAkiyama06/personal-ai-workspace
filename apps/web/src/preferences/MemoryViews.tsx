@@ -14,12 +14,14 @@ import {
   CANDIDATES_PATH,
   candidateId,
   candidatePath,
+  candidateTitle,
   HELD_PATH,
   heldCandidates,
   MIN_REPEATS,
   memoryCandidates,
   needsAcknowledgement,
   type PreferenceView,
+  titleIsContent,
 } from "./model";
 import { OtherForm } from "./other";
 import {
@@ -184,7 +186,7 @@ function ListCard({ candidate, selected }: { candidate: PreferenceCandidate; sel
       aria-current={selected ? "page" : undefined}
     >
       <span className="pref-list-main">
-        <span className="pref-list-title">{candidate.title}</span>
+        <span className="pref-list-title">{candidateTitle(candidate)}</span>
         <span className="pref-chips">{chips}</span>
         <span className="mono pref-list-meta">{meta}</span>
       </span>
@@ -369,7 +371,7 @@ function CandidateDetail({
         {t("pref.memory.candidates")}
       </Link>
       <div className="pref-detail-head">
-        <h2>{candidate.title}</h2>
+        <h2>{candidateTitle(candidate)}</h2>
         <KindPill candidate={candidate} />
         <Pill tone="neutral">{t("pref.detail.scopeUser")}</Pill>
         <span className="mono muted">
@@ -469,9 +471,9 @@ function HeldDetail({
       </Link>
       <div className="pref-detail-head">
         <span className={`pref-tag tone-${HELD_TONE[reason]}`}>{t(`pref.held.tag.${reason}`)}</span>
-        <h2>{candidate.title}</h2>
+        <h2>{candidateTitle(candidate)}</h2>
       </div>
-      <p className="pref-content">{candidate.content}</p>
+      {!titleIsContent(candidate) && <p className="pref-content">{candidate.content}</p>}
       <div className="pref-chips">
         <EvidenceChips candidate={{ ...candidate, held_reason: null }} names={state.names} />
         <span className="mono pref-list-meta">

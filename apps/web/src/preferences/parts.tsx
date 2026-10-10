@@ -8,7 +8,7 @@ import { type MessageKey, useI18n } from "../i18n";
 import { errorMessage } from "../i18n/errors";
 import type { MemoryVersion } from "../memory/types";
 import { Link } from "../router";
-import { defaultOption, type Names, needsAcknowledgement } from "./model";
+import { candidateTitle, defaultOption, type Names, needsAcknowledgement } from "./model";
 import type { PreferenceState } from "./store";
 import type { PreferenceCandidate, ScopeOption } from "./types";
 
@@ -408,9 +408,11 @@ export function AnswerControls({
         <AnswerError
           error={failure}
           candidate={candidate}
+          // The conflict (and its retry) stays until the latest is read.
           onReload={() => {
-            setFailure(null);
-            void state.reload();
+            void state.reload().then((read) => {
+              if (read) setFailure(null);
+            });
           }}
         />
       )}
@@ -464,7 +466,7 @@ export function AnsweredLine({ answer, state }: { answer: Answered; state: Prefe
       <span className="muted">
         {answer.kind === "saved" ? t("pref.card.saved") : t("pref.card.rejected")}
       </span>
-      <span className="pref-answered-title ellipsis">{answer.candidate.title}</span>
+      <span className="pref-answered-title ellipsis">{candidateTitle(answer.candidate)}</span>
       {version ? (
         <>
           <span className="mono muted">

@@ -8,7 +8,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useI18n } from "../i18n";
 import { PHONE_QUERY, useMediaQuery } from "../shell/common";
-import { candidateId, needsAcknowledgement } from "./model";
+import { candidateId, candidateTitle, needsAcknowledgement, titleIsContent } from "./model";
 import { OtherForm } from "./other";
 import {
   AnswerControls,
@@ -42,8 +42,8 @@ function CardBody({
   return (
     <>
       <div className="pref-card-text">
-        {phone ? <h2>{candidate.title}</h2> : <h3>{candidate.title}</h3>}
-        <p>{candidate.content}</p>
+        {phone ? <h2>{candidateTitle(candidate)}</h2> : <h3>{candidateTitle(candidate)}</h3>}
+        {!titleIsContent(candidate) && <p>{candidate.content}</p>}
       </div>
       <EvidenceChips candidate={candidate} names={state.names} consistency={!phone} />
       {ack && <Note tone="danger">{t("pref.risk.notice")}</Note>}
