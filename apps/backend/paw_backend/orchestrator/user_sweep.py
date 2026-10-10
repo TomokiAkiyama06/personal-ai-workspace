@@ -98,7 +98,11 @@ from paw_backend.tasks import (
     TaskState,
 )
 from paw_backend.tasks.queueing import ACTIVE_QUEUE_STATUSES, TaskQueue
-from paw_backend.tools import ApprovalService, PostgresApprovalStore
+from paw_backend.tools import (
+    ApprovalService,
+    PostgresApprovalStore,
+    PostgresTaskGrantStore,
+)
 from paw_backend.tools.interfaces import require_async_method
 
 logger = logging.getLogger(__name__)
@@ -544,7 +548,11 @@ def build_user_stop_loop(
     """
     audit = PostgresAuditSink(database)
     if tasks is None:
-        approvals = ApprovalService(PostgresApprovalStore(database), audit)
+        approvals = ApprovalService(
+            PostgresApprovalStore(database),
+            audit,
+            grants=PostgresTaskGrantStore(database),
+        )
         tasks = TaskService(
             database,
             listeners=[approvals.revoke_on_task_end],

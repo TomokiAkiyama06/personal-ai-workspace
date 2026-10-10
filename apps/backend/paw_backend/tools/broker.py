@@ -84,6 +84,19 @@ narrow what the previous one allowed:
    consumes the approval** (``require_active_task``: the task row is read
    locked), and a task that ended, or a run that was replaced, in between opens
    or consumes nothing (``task_not_active`` / ``task_superseded``).
+7a. **A task-scoped grant** ("このタスクの間は許可", Decision 0085;
+   ``task_grants.py``): before an ``APPROVAL`` call (never a ``STRONG_APPROVAL``,
+   and only a call ``grant_pattern.grantable`` allows) opens a request, the
+   active grants of the same task, run, agent, user and tool are read; one whose
+   pattern covers the call's (the same or narrower scope and arguments) lets it
+   run without a human (``task_grant_applied``). The repository use is admitted
+   first, as for an approval; the store records the use only while the grant is
+   active and the task can act in the grant's run, checked under the task's row
+   lock in the same transaction; the use is audited with the grant's id
+   (``tool.approval.grant.use``), and a use that cannot be audited does not run
+   (``audit_unavailable``). A grant that cannot be read or used (revoked
+   meanwhile, a store failure) falls back to asking a human. The request a human
+   is asked carries the call's pattern, so that they may grant it for the task.
 
 The decision is audited (ids and enums only). An ``ALLOW`` that cannot be
 recorded becomes a ``DENY`` (``audit_unavailable``): a tool never runs without
@@ -156,6 +169,7 @@ from paw_backend.tools.capabilities import (
     most_restrictive,
 )
 from paw_backend.tools.decisions import BrokerDecision, BrokerReason, Verdict
+from paw_backend.tools.grant_pattern import GrantPattern, grant_pattern_of
 from paw_backend.tools.interfaces import require_async_method
 from paw_backend.tools.lease import (
     FailClosedLeaseVerifier,
@@ -171,6 +185,12 @@ from paw_backend.tools.scope import (
     RealpathResolver,
     TargetKind,
     classify_targets,
+)
+from paw_backend.tools.task_grants import (
+    GrantUse,
+    GrantUseOutcome,
+    TaskGrantRecord,
+    TaskGrantStore,
 )
 from paw_backend.tools.task_state import (
     FailClosedTaskActivity,
@@ -220,6 +240,14 @@ _PROXY_CAPABILITY = {
     RepoPermission.WRITE: Capability.PROJECT_REPO_WRITE,
 }
 _CHANGES = frozenset({ToolCapability.WRITE, ToolCapability.DESTRUCTIVE})
+# A grant's use refused because of the task: the call is refused for that reason
+# (any other refusal of a grant falls back to asking a human).
+_GRANT_TASK_REASON = {
+    GrantUseOutcome.TASK_NOT_ACTIVE: BrokerReason.TASK_NOT_ACTIVE,
+    GrantUseOutcome.TASK_UNKNOWN: BrokerReason.TASK_UNKNOWN,
+    GrantUseOutcome.TASK_SUPERSEDED: BrokerReason.TASK_SUPERSEDED,
+}
+GRANT_USE_ACTION = "tool.approval.grant.use"
 _OPEN_REFUSAL_REASON = {
     OpenOutcome.TOO_MANY_PENDING: BrokerReason.APPROVAL_LIMIT_REACHED,
     OpenOutcome.COOLING_DOWN: BrokerReason.APPROVAL_COOLDOWN,
@@ -248,6 +276,7 @@ class ToolBroker:
         path_resolver: PathResolver | None = None,
         registrations: WorkingSetRegistrations | None = None,
         use_gate: RepositoryUseGate | None = None,
+        grants: TaskGrantStore | None = None,
         approval_ttl: timedelta = DEFAULT_APPROVAL_TTL,
         max_pending_approvals: int = 10,
         rejection_cooldown: timedelta = timedelta(minutes=5),
@@ -285,6 +314,12 @@ class ToolBroker:
         self._use_gate: RepositoryUseGate = use_gate or FailClosedUseGate()
         require_async_method(self._use_gate, "admit_repository_use", 3)
         require_async_method(self._use_gate, "release_repository_use", 2)
+        # Without a grant store no call is granted for a task, and no request
+        # offers it (its pattern is left out).
+        if grants is not None:
+            require_async_method(grants, "active_grants", 5)
+            require_async_method(grants, "use", 2)
+        self._grants = grants
         if not isinstance(approval_ttl, timedelta) or not (
             MIN_APPROVAL_TTL <= approval_ttl <= MAX_APPROVAL_TTL
         ):
@@ -575,8 +610,33 @@ class ToolBroker:
                 approval_id=approval_id,
             )
         if approval_id is None:
+            pattern = (
+                None
+                if self._grants is None
+                else grant_pattern_of(spec, parsed.values, classification.status, level)
+            )
+            if pattern is not None:
+                granted = await self._apply_grant(
+                    spec,
+                    parsed,
+                    context,
+                    level,
+                    call_hash,
+                    correlation_id,
+                    classification,
+                    admitted,
+                    pattern,
+                )
+                if granted is not None:
+                    return granted
             return await self._open_approval(
-                spec, parsed, context, level, call_hash, correlation_id
+                spec,
+                parsed,
+                context,
+                level,
+                call_hash,
+                correlation_id,
+                grant_pattern=pattern,
             )
         # Admitted BEFORE the approval is consumed: a use the stored Working Set
         # refuses (or that cannot be admitted) leaves the human's one-shot
@@ -976,6 +1036,8 @@ class ToolBroker:
         level: ApprovalLevel,
         call_hash: str,
         correlation_id: uuid.UUID,
+        *,
+        grant_pattern: GrantPattern | None = None,
     ) -> BrokerDecision:
         now = self._clock()
         if not parsed.summary:
@@ -1001,6 +1063,7 @@ class ToolBroker:
                 targets=parsed.targets,
                 summary=parsed.summary,
                 expires_at=now + self._approval_ttl,
+                grant_pattern=grant_pattern,
             )
         except ValueError:
             return self._refuse(
@@ -1071,6 +1134,129 @@ class ToolBroker:
             level=level,
             call_hash=call_hash,
             approval_id=opened.record.approval_id,
+        )
+
+    async def _apply_grant(
+        self,
+        spec: ToolSpec,
+        parsed: ParsedArguments,
+        context: TaskContext,
+        level: ApprovalLevel,
+        call_hash: str,
+        correlation_id: uuid.UUID,
+        classification: Classification,
+        admitted: list[uuid.UUID],
+        pattern: GrantPattern,
+    ) -> BrokerDecision | None:
+        """Run the call on an active task-scoped grant that covers it, or say
+        why not; ``None``: no grant applies, a human is asked (Decision 0085).
+
+        Only a refusal that a human could not lift either (the task ended or
+        was started again, the repository use is refused, the use cannot be
+        audited) is returned as a denial."""
+        assert self._grants is not None
+        try:
+            async with asyncio.timeout(self._timeout_seconds):
+                grants = await self._grants.active_grants(
+                    context.task_id,
+                    context.run,
+                    context.grant.agent_id,
+                    context.delegator_id,
+                    spec.name,
+                )
+        except Exception as error:
+            logger.error("Task grants not read (%s)", type(error).__name__)
+            return None
+        grant = next(
+            (
+                item
+                for item in grants
+                if isinstance(item, TaskGrantRecord)
+                and item.tool == spec.name
+                and item.task_id == context.task_id
+                and item.task_run == context.run
+                and item.agent_id == context.grant.agent_id
+                and item.requester_user_id == context.delegator_id
+                and item.pattern.covers(pattern)
+            ),
+            None,
+        )
+        if grant is None:
+            return None
+        use_reason, reservation = await self._admit_use(
+            spec, context, classification, admitted
+        )
+        if use_reason is not None:
+            return self._refuse(
+                use_reason,
+                correlation_id,
+                tool=spec.name,
+                level=level,
+                call_hash=call_hash,
+            )
+        now = self._clock()
+        try:
+            async with asyncio.timeout(self._timeout_seconds):
+                outcome = await self._grants.use(
+                    grant.grant_id,
+                    GrantUse(
+                        task_id=context.task_id,
+                        task_run=context.run,
+                        agent_id=context.grant.agent_id,
+                        requester_user_id=context.delegator_id,
+                        tool=spec.name,
+                        call_hash=call_hash,
+                        correlation_id=correlation_id,
+                    ),
+                    now=now,
+                )
+        except Exception as error:
+            logger.error("Task grant not used (%s)", type(error).__name__)
+            outcome = None
+        if outcome is GrantUseOutcome.USED:
+            recorded = await record_event(
+                self._audit,
+                build_tool_event(
+                    action=GRANT_USE_ACTION,
+                    allowed=True,
+                    reason=BrokerReason.TASK_GRANT_APPLIED.value,
+                    correlation_id=correlation_id,
+                    occurred_at=now,
+                    resource_kind="tool_task_grant",
+                    resource_id=grant.grant_id,
+                    project_id=context.primary_project_id,
+                    actor_id=context.delegator_id,
+                    agent_id=context.grant.agent_id,
+                ),
+                self._timeout_seconds,
+            )
+            if recorded:
+                return replace(
+                    self._allow(
+                        spec,
+                        parsed,
+                        context,
+                        level,
+                        call_hash,
+                        correlation_id,
+                        BrokerReason.TASK_GRANT_APPLIED,
+                        reservation_id=reservation,
+                    ),
+                    grant_id=grant.grant_id,
+                )
+            reason: BrokerReason | None = BrokerReason.AUDIT_UNAVAILABLE
+        else:
+            reason = _GRANT_TASK_REASON.get(outcome)  # type: ignore[arg-type]
+        if reservation is not None:
+            await self._release(context, reservation)
+        if reason is None:
+            return None  # revoked meanwhile, or not answered: ask a human
+        return self._refuse(
+            reason,
+            correlation_id,
+            tool=spec.name,
+            level=level,
+            call_hash=call_hash,
         )
 
     async def _consume_approval(

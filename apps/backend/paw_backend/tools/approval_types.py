@@ -36,6 +36,7 @@ from typing import Protocol
 from paw_backend.tasks import TaskRun
 from paw_backend.tools.capabilities import ApprovalLevel
 from paw_backend.tools.credentials import contains_credential_plaintext, redact_text
+from paw_backend.tools.grant_pattern import GrantPattern
 from paw_backend.tools.scope import Target
 from paw_backend.tools.task_state import TaskActivity
 
@@ -219,6 +220,10 @@ class NewApproval:
     # What the approver sees. Never empty: an approval nobody can read is refused.
     summary: tuple[SummaryItem, ...]
     expires_at: datetime
+    # How the call can be granted for the rest of its task ("このタスクの間は
+    # 許可", Decision 0085; ``grant_pattern.grant_pattern_of``). ``None``: it
+    # can never be (a strong approval, a deletion, a credential...).
+    grant_pattern: GrantPattern | None = None
 
     def __post_init__(self) -> None:
         for name in ("approval_id", "task_id", "project_id", "agent_id"):
@@ -249,6 +254,11 @@ class NewApproval:
             or sum(len(item.value) for item in self.summary) > MAX_SUMMARY_TOTAL_CHARS
         ):
             raise ValueError("an approval needs a bounded, non-empty summary")
+        if self.grant_pattern is not None and (
+            not isinstance(self.grant_pattern, GrantPattern)
+            or self.level is not ApprovalLevel.APPROVAL
+        ):
+            raise ValueError("only an APPROVAL can carry a grant pattern")
 
 
 @dataclass(frozen=True, slots=True)
@@ -293,6 +303,8 @@ class ApprovalRecord:
     revoked_at: datetime | None = None
     # ``None`` with ``revoked_at`` set: revoked by the system (the task ended).
     revoked_by: uuid.UUID | None = None
+    # See ``NewApproval.grant_pattern``.
+    grant_pattern: GrantPattern | None = None
 
     def binding(self) -> ApprovalBinding:
         return ApprovalBinding(

@@ -25,6 +25,18 @@ boards).
   (the service's step-up fails closed; 403 ``strong_approval_unavailable``):
   merging to the default branch and credential changes need a Passkey
   re-authentication bound to the approval, which does not exist yet.
+  ``{"decision": "approve_for_task"}`` (「このタスクの間は許可」, Decision 0085)
+  approves it and, in the same transaction, grants the later calls of the same
+  tool with the same or narrower scope and arguments for the rest of the task's
+  run (``ApprovalService.approve_for_task``): only an approval whose
+  ``task_grant_allowed`` is true (409 ``task_grant_not_allowed`` otherwise, the
+  approval stays pending), while the task can act (409 ``task_not_active``),
+  within the cap of active grants (409 ``task_grant_limit_reached``).
+* ``GET /tasks/{task_id}/approval-grants`` (``tasks.list``): the person's own
+  active grants of the task's current run (「このタスクで許可中」).
+* ``POST /approval-grants/{grant_id}/revoke`` (``tasks.list``; the service lets
+  only the person, or an Admin / Owner, revoke one, and tells anybody else it
+  does not exist): later calls are asked again. Revoking only takes rights away.
 
 The pull request panels answer only for a record the person may read, exactly as
 ``GET /pull-requests/{record_id}`` (``task_views.list_pull_requests``: its
@@ -172,6 +184,8 @@ class ApprovalOut(BaseModel):
     repositories: list[str]
     created_at: datetime
     expires_at: datetime
+    # It may be answered with 「このタスクの間は許可」 (Decision 0085).
+    task_grant_allowed: bool
 
 
 class ApprovalListOut(BaseModel):
@@ -181,12 +195,34 @@ class ApprovalListOut(BaseModel):
 class DecisionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    decision: Literal["approve", "reject"]
+    decision: Literal["approve", "reject", "approve_for_task"]
 
 
 class DecisionOut(BaseModel):
     id: uuid.UUID
-    outcome: Literal["approved", "rejected"]
+    outcome: Literal["approved", "rejected", "approved_for_task"]
+    # The grant ``approve_for_task`` created (left out otherwise).
+    grant_id: uuid.UUID | None = None
+
+
+class TaskGrantOut(BaseModel):
+    id: uuid.UUID
+    approval_id: uuid.UUID
+    tool: str
+    # What the person was shown when they granted it (the approval's summary).
+    summary: list[SummaryItemOut]
+    created_at: datetime
+    # How many calls it let run without asking again.
+    uses: int
+
+
+class TaskGrantListOut(BaseModel):
+    grants: list[TaskGrantOut]
+
+
+class RevokeGrantOut(BaseModel):
+    id: uuid.UUID
+    outcome: Literal["revoked"]
 
 
 # -- helpers ----------------------------------------------------------------------
@@ -239,6 +275,7 @@ def _approval_out(item: boards.ApprovalView) -> ApprovalOut:
         repositories=list(item.repositories),
         created_at=item.created_at,
         expires_at=item.expires_at,
+        task_grant_allowed=item.task_grant_allowed,
     )
 
 
@@ -446,14 +483,42 @@ _DECISION_ERRORS = {
         "approvals_unavailable",
         "Approvals are not available now",
     ),
+    ApprovalOutcome.NOT_GRANTABLE: (
+        409,
+        "task_grant_not_allowed",
+        "This call cannot be allowed for the rest of the task",
+    ),
+    ApprovalOutcome.GRANT_LIMIT_REACHED: (
+        409,
+        "task_grant_limit_reached",
+        "Too many calls are allowed for this task already",
+    ),
+    ApprovalOutcome.TASK_NOT_ACTIVE: (
+        409,
+        "task_not_active",
+        "The task ended or was started again",
+    ),
+}
+_REVOKE_GRANT_ERRORS = {
+    ApprovalOutcome.NOT_FOUND: (404, "grant_not_found", "Grant not found"),
+    ApprovalOutcome.NOT_OPEN: (409, "grant_not_active", "The grant is not active"),
+    ApprovalOutcome.UNAVAILABLE: (
+        503,
+        "approvals_unavailable",
+        "Approvals are not available now",
+    ),
 }
 
 
 @router.post(
     "/approvals/{approval_id}/decision",
     response_model=DecisionOut,
+    response_model_exclude_none=True,
     tags=["approvals"],
-    summary="Approve or reject one tool approval (once, for this one call)",
+    summary=(
+        "Approve or reject one tool approval (once, for this one call), or"
+        " approve it for the rest of its task"
+    ),
 )
 async def decide_approval(
     request: Request,
@@ -468,13 +533,73 @@ async def decide_approval(
         # Passkey step-up is bound to the user, not to this approval (Decision 0078
         # 6, Codex review of #206).
         result = await service.approve(approval_id, principal, allow_strong=False)
+    elif body.decision == "approve_for_task":
+        # Never a STRONG_APPROVAL either: such an approval carries no grant
+        # pattern (Decision 0085, 2).
+        result = await service.approve_for_task(approval_id, principal)
     else:
         result = await service.reject(approval_id, principal)
     if result.outcome is ApprovalOutcome.APPROVED:
         return DecisionOut(id=approval_id, outcome="approved")
     if result.outcome is ApprovalOutcome.REJECTED:
         return DecisionOut(id=approval_id, outcome="rejected")
+    if result.outcome is ApprovalOutcome.APPROVED_FOR_TASK:
+        return DecisionOut(
+            id=approval_id, outcome="approved_for_task", grant_id=result.grant_id
+        )
     status, code, message = _DECISION_ERRORS.get(
         result.outcome, (422, "invalid_approval", "Invalid approval")
+    )
+    raise ApiError(status, code, message)
+
+
+@router.get(
+    "/tasks/{task_id}/approval-grants",
+    response_model=TaskGrantListOut,
+    tags=["approvals"],
+    summary="The person's active 'allow for this task' grants of a task",
+)
+async def list_task_grants(
+    request: Request, principal: _LIST, task_id: uuid.UUID
+) -> TaskGrantListOut:
+    _execution(request)
+    database: Database = request.app.state.database
+    policy = _policy(request)
+    async with database.session() as session, session.begin():
+        await _read_only(session)
+        projects = await views.readable_projects(session, principal, policy)
+        items = await boards.task_grants(session, principal, projects, task_id)
+    return TaskGrantListOut(
+        grants=[
+            TaskGrantOut(
+                id=item.id,
+                approval_id=item.approval_id,
+                tool=item.tool,
+                summary=[
+                    SummaryItemOut(name=name, kind=kind, value=value)
+                    for name, kind, value in item.summary
+                ],
+                created_at=item.created_at,
+                uses=item.uses,
+            )
+            for item in items
+        ]
+    )
+
+
+@router.post(
+    "/approval-grants/{grant_id}/revoke",
+    response_model=RevokeGrantOut,
+    tags=["approvals"],
+    summary="Withdraw an 'allow for this task' grant: later calls are asked again",
+)
+async def revoke_task_grant(
+    request: Request, grant_id: uuid.UUID, principal: _LIST
+) -> RevokeGrantOut:
+    result = await _execution(request).approvals.revoke_grant(grant_id, principal)
+    if result.outcome is ApprovalOutcome.REVOKED:
+        return RevokeGrantOut(id=grant_id, outcome="revoked")
+    status, code, message = _REVOKE_GRANT_ERRORS.get(
+        result.outcome, (422, "invalid_grant", "Invalid grant")
     )
     raise ApiError(status, code, message)

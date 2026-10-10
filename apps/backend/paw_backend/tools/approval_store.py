@@ -127,6 +127,7 @@ from paw_backend.tools.approval_types import (
     diagnose_revoke,
 )
 from paw_backend.tools.capabilities import ApprovalLevel
+from paw_backend.tools.grant_pattern import GrantPattern
 from paw_backend.tools.models import ToolApprovalEventRow
 from paw_backend.tools.scope import Target, TargetKind
 from paw_backend.tools.task_state import TaskActivity, lock_task_activity
@@ -155,7 +156,7 @@ _COLUMNS = (
     "id, task_id, task_attempt, task_retry_count, project_id, agent_id,"
     " requester_user_id, tool, level, call_hash, targets, summary, status,"
     " created_at, expires_at, approver_id, decided_at, consumed_at,"
-    " step_up_verified, revoked_at, revoked_by"
+    " step_up_verified, revoked_at, revoked_by, grant_pattern"
 )
 _GET = f"SELECT {_COLUMNS} FROM tool_approvals WHERE id = %(id)s"
 # One statement per change, like ``_REVOKE_TASK``: the update and its history row
@@ -289,11 +290,12 @@ _INSERT_REQUEST = f"""
 INSERT INTO tool_approvals (
     id, task_id, task_attempt, task_retry_count, project_id, agent_id,
     requester_user_id, tool, level, call_hash, targets, summary, status,
-    created_at, expires_at
+    created_at, expires_at, grant_pattern
 ) VALUES (
     %(id)s, %(task_id)s, %(attempt)s, %(retry_count)s, %(project_id)s,
     %(agent_id)s, %(user_id)s, %(tool)s, %(level)s, %(call_hash)s, %(targets)s,
-    %(summary)s, '{ApprovalStatus.PENDING.value}', %(now)s, %(expires_at)s
+    %(summary)s, '{ApprovalStatus.PENDING.value}', %(now)s, %(expires_at)s,
+    %(grant_pattern)s
 )
 ON CONFLICT (call_hash) WHERE status IN ('{_OPEN[0]}', '{_OPEN[1]}') DO NOTHING
 RETURNING {_COLUMNS}
@@ -369,6 +371,7 @@ def _record_of_values(values: tuple) -> ApprovalRecord:
         step_up_verified,
         revoked_at,
         revoked_by,
+        grant_pattern,
     ) = values
     return ApprovalRecord(
         approval_id=approval_id,
@@ -393,6 +396,9 @@ def _record_of_values(values: tuple) -> ApprovalRecord:
         step_up_verified=step_up_verified,
         revoked_at=revoked_at,
         revoked_by=revoked_by,
+        grant_pattern=None
+        if grant_pattern is None
+        else GrantPattern.from_json(grant_pattern),
     )
 
 
@@ -593,6 +599,9 @@ class PostgresApprovalStore:
                     "summary": summary,
                     "now": now,
                     "expires_at": new.expires_at,
+                    "grant_pattern": None
+                    if new.grant_pattern is None
+                    else Jsonb(new.grant_pattern.to_json()),
                 },
             )
         ).fetchone()

@@ -42,6 +42,17 @@ true state. Decision 0006, section 4.
 A user who is not the delegating user is told the approval does not exist (no
 oracle for other users' approvals); the audit row records ``not_authorised``.
 
+**"このタスクの間は許可"** (Decision 0085): :meth:`ApprovalService.approve_for_task`
+approves a pending approval *and* creates a task-scoped grant
+(``task_grants.py``) in one step of the ``TaskGrantStore``, only for the person
+the approval asks, for an approval whose call may be granted (it carries a
+pattern) while its task can act in the approval's run, and within
+``max_task_grants`` active grants per (task, user). :meth:`revoke_grant`
+withdraws one (the person, or an Admin / Owner); the end of the task revokes
+them with its approvals (:meth:`revoke_task`). Each is audited
+(``tool.approval.grant`` / ``tool.approval.grant.revoke``, the grant as the
+resource). Without a grant store nothing is granted for a task.
+
 Approving and rejecting change no external state, so their audit row is written
 after the change is stored and a failure to write it is logged, not fatal: the
 durable, append-only ``tool_approval_events`` row is written in the same
@@ -71,6 +82,12 @@ from paw_backend.tools.approval_types import (
 from paw_backend.tools.audit import build_tool_event, record_event
 from paw_backend.tools.capabilities import ApprovalLevel
 from paw_backend.tools.interfaces import require_async_method, require_callable
+from paw_backend.tools.task_grants import (
+    DEFAULT_MAX_ACTIVE_GRANTS,
+    GrantOutcome,
+    TaskGrantStore,
+    check_max_active,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -181,12 +198,20 @@ class ApprovalOutcome(StrEnum):
     STEP_UP_REQUIRED = "step_up_required"
     UNAVAILABLE = "unavailable"  # the store failed or did not answer in time
     INVALID = "invalid"  # not a UUID / not a Principal
+    # "このタスクの間は許可" (Decision 0085).
+    APPROVED_FOR_TASK = "approved_for_task"
+    NOT_GRANTABLE = "not_grantable"  # this call is never granted for a task
+    GRANT_LIMIT_REACHED = "grant_limit_reached"
+    # The task ended, is not known or was started again (Retry / Restart).
+    TASK_NOT_ACTIVE = "task_not_active"
 
 
 @dataclass(frozen=True, slots=True)
 class ApprovalResult:
     outcome: ApprovalOutcome
     approval_id: uuid.UUID | None = None
+    # The grant ``approve_for_task`` created, or ``revoke_grant`` revoked.
+    grant_id: uuid.UUID | None = None
 
     @property
     def decided(self) -> bool:
@@ -194,6 +219,7 @@ class ApprovalResult:
             ApprovalOutcome.APPROVED,
             ApprovalOutcome.REJECTED,
             ApprovalOutcome.REVOKED,
+            ApprovalOutcome.APPROVED_FOR_TASK,
         )
 
     def __bool__(self) -> bool:
@@ -206,6 +232,17 @@ _DECIDE_TO_OUTCOME = {
     DecideOutcome.EXPIRED: ApprovalOutcome.EXPIRED,
     DecideOutcome.NOT_AUTHORISED: ApprovalOutcome.NOT_AUTHORISED,
     DecideOutcome.STEP_UP_REQUIRED: ApprovalOutcome.STEP_UP_REQUIRED,
+}
+_GRANT_TO_OUTCOME = {
+    GrantOutcome.NOT_FOUND: ApprovalOutcome.NOT_FOUND,
+    GrantOutcome.NOT_AUTHORISED: ApprovalOutcome.NOT_AUTHORISED,
+    GrantOutcome.NOT_PENDING: ApprovalOutcome.NOT_PENDING,
+    GrantOutcome.EXPIRED: ApprovalOutcome.EXPIRED,
+    GrantOutcome.NOT_GRANTABLE: ApprovalOutcome.NOT_GRANTABLE,
+    GrantOutcome.LIMIT_REACHED: ApprovalOutcome.GRANT_LIMIT_REACHED,
+    GrantOutcome.TASK_NOT_ACTIVE: ApprovalOutcome.TASK_NOT_ACTIVE,
+    GrantOutcome.TASK_UNKNOWN: ApprovalOutcome.TASK_NOT_ACTIVE,
+    GrantOutcome.TASK_SUPERSEDED: ApprovalOutcome.TASK_NOT_ACTIVE,
 }
 # Task states after which nothing the task was approved for should stay usable.
 _TASK_END_STATES = frozenset({"cancelled", "failed", "completed"})
@@ -226,6 +263,8 @@ class ApprovalService:
         listeners: Sequence[Listener] = (),
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         timeout_seconds: float = 3.0,
+        grants: TaskGrantStore | None = None,
+        max_task_grants: int = DEFAULT_MAX_ACTIVE_GRANTS,
     ) -> None:
         for name, count in (
             ("get", 1),
@@ -234,6 +273,16 @@ class ApprovalService:
             ("revoke_task", 1),
         ):
             require_async_method(store, name, count)
+        if grants is not None:
+            for name, count in (
+                ("grant_from_approval", 1),
+                ("get", 1),
+                ("revoke", 1),
+                ("revoke_task", 1),
+            ):
+                require_async_method(grants, name, count)
+        self._grants = grants
+        self._max_task_grants = check_max_active(max_task_grants)
         require_async_method(audit, "record", 1)
         self._step_up: StepUpVerifier = step_up or FailClosedStepUp()
         require_async_method(self._step_up, "verify", 2)
@@ -316,6 +365,138 @@ class ApprovalService:
         )
         return ApprovalResult(outcome, approval_id)
 
+    async def approve_for_task(
+        self, approval_id: uuid.UUID, approver: Principal
+    ) -> ApprovalResult:
+        """Approve the pending approval and grant its call for the rest of its
+        task ("このタスクの間は許可", Decision 0085): one step of the grant
+        store, so both or neither. Only the person the approval asks; anybody
+        else is told it does not exist. A call that is never granted for a task
+        (``NOT_GRANTABLE``), a task that cannot act (``TASK_NOT_ACTIVE``) or too
+        many active grants (``GRANT_LIMIT_REACHED``) leave the approval
+        pending."""
+        if not isinstance(approval_id, uuid.UUID) or not isinstance(
+            approver, Principal
+        ):
+            return ApprovalResult(ApprovalOutcome.INVALID)
+        now = self._clock()
+        store = _StoreDeadline(self._timeout_seconds)
+        try:
+            record = await store.call(self._store.get, approval_id)
+        except Exception as error:
+            logger.error("Approval lookup failed (%s)", type(error).__name__)
+            return ApprovalResult(ApprovalOutcome.UNAVAILABLE, approval_id)
+        grant_id: uuid.UUID | None = None
+        if record is None:
+            internal = ApprovalOutcome.NOT_FOUND
+        elif approver.user_id == record.agent_id:
+            internal = ApprovalOutcome.SELF_APPROVAL
+        elif approver.user_id != record.requester_user_id:
+            internal = ApprovalOutcome.NOT_AUTHORISED
+        elif self._grants is None:
+            internal = ApprovalOutcome.NOT_GRANTABLE
+        else:
+            try:
+                granted = await store.call(
+                    self._grants.grant_from_approval,
+                    approval_id,
+                    approver_id=approver.user_id,
+                    now=now,
+                    max_active=self._max_task_grants,
+                )
+            except Exception as error:
+                logger.error("Task grant failed (%s)", type(error).__name__)
+                granted = None
+            if granted is None:
+                internal = ApprovalOutcome.UNAVAILABLE
+            elif granted.outcome is GrantOutcome.GRANTED and granted.record:
+                internal = ApprovalOutcome.APPROVED_FOR_TASK
+                grant_id = granted.record.grant_id
+            else:
+                internal = _GRANT_TO_OUTCOME.get(
+                    granted.outcome, ApprovalOutcome.UNAVAILABLE
+                )
+        outcome = (
+            ApprovalOutcome.NOT_FOUND
+            if internal is ApprovalOutcome.NOT_AUTHORISED
+            else internal
+        )
+        if record is not None and outcome is ApprovalOutcome.APPROVED_FOR_TASK:
+            await self._emit(ApprovalEventKind.APPROVED, record, now)
+        await self._audit_row(
+            "tool.approval.approve",
+            outcome is ApprovalOutcome.APPROVED_FOR_TASK,
+            internal.value,
+            approval_id,
+            None if record is None else record.project_id,
+            approver,
+            now,
+        )
+        if grant_id is not None and record is not None:
+            await self._grant_audit_row(
+                "tool.approval.grant",
+                True,
+                ApprovalOutcome.APPROVED_FOR_TASK.value,
+                grant_id,
+                record.project_id,
+                approver,
+                now,
+            )
+        return ApprovalResult(outcome, approval_id, grant_id)
+
+    async def revoke_grant(
+        self, grant_id: uuid.UUID, actor: Principal
+    ) -> ApprovalResult:
+        """Withdraw a task-scoped grant: the later calls it covered are asked
+        again. The person it belongs to may, and so may an Admin or Owner
+        (revoking only takes rights away); anybody else is told it does not
+        exist."""
+        if not isinstance(grant_id, uuid.UUID) or not isinstance(actor, Principal):
+            return ApprovalResult(ApprovalOutcome.INVALID)
+        if self._grants is None:
+            return ApprovalResult(ApprovalOutcome.NOT_FOUND, grant_id=grant_id)
+        now = self._clock()
+        store = _StoreDeadline(self._timeout_seconds)
+        try:
+            record = await store.call(self._grants.get, grant_id)
+        except Exception as error:
+            logger.error("Task grant lookup failed (%s)", type(error).__name__)
+            return ApprovalResult(ApprovalOutcome.UNAVAILABLE, grant_id=grant_id)
+        audit_reason: ApprovalOutcome
+        if record is None:
+            outcome = audit_reason = ApprovalOutcome.NOT_FOUND
+        elif actor.user_id == record.agent_id or (
+            actor.user_id != record.requester_user_id
+            and actor.system_role not in _MAY_REVOKE_ANY
+        ):
+            outcome, audit_reason = (
+                ApprovalOutcome.NOT_FOUND,
+                ApprovalOutcome.NOT_AUTHORISED,
+            )
+        else:
+            try:
+                revoked = await store.call(
+                    self._grants.revoke, grant_id, actor_id=actor.user_id, now=now
+                )
+            except Exception as error:
+                logger.error("Task grant revoke failed (%s)", type(error).__name__)
+                revoked = None
+            outcome = audit_reason = {
+                RevokeOutcome.REVOKED: ApprovalOutcome.REVOKED,
+                RevokeOutcome.NOT_FOUND: ApprovalOutcome.NOT_FOUND,
+                RevokeOutcome.NOT_OPEN: ApprovalOutcome.NOT_OPEN,
+            }.get(revoked, ApprovalOutcome.UNAVAILABLE)
+        await self._grant_audit_row(
+            "tool.approval.grant.revoke",
+            outcome is ApprovalOutcome.REVOKED,
+            audit_reason.value,
+            grant_id,
+            None if record is None else record.project_id,
+            actor,
+            now,
+        )
+        return ApprovalResult(outcome, grant_id=grant_id)
+
     async def revoke_task(self, task_id: uuid.UUID) -> int:
         """Revoke every open approval of a task (it ended); returns how many.
 
@@ -353,6 +534,28 @@ class ApprovalService:
                 for approval_id in revoked:
                     await self._report_task_end(approval_id, now)
                     reported += 1
+                if self._grants is not None:
+                    # Unusable already (the store checks the task's run at every
+                    # use); revoked so that the record says so (Decision 0085).
+                    try:
+                        grants = await self._grants.revoke_task(task_id, now=now)
+                    except Exception as error:
+                        logger.error(
+                            "Task grant revoke failed (%s)", type(error).__name__
+                        )
+                        raise ApprovalRevocationError(
+                            "the grants of a task could not be revoked"
+                        ) from None
+                    for grant_id in grants:
+                        await self._grant_audit_row(
+                            "tool.approval.grant.revoke",
+                            True,
+                            "task_ended",
+                            grant_id,
+                            None,
+                            None,
+                            now,
+                        )
         except TimeoutError:
             if revoked is None:
                 logger.error("Task approval revoke failed (%s)", "TimeoutError")
@@ -452,6 +655,33 @@ class ApprovalService:
                 occurred_at=now,
                 resource_kind="tool_approval",
                 resource_id=approval_id,
+                project_id=project_id,
+                actor_id=None if actor is None else actor.user_id,
+                actor_role=None if actor is None else actor.system_role.value,
+            ),
+            self._timeout_seconds,
+        )
+
+    async def _grant_audit_row(
+        self,
+        action: str,
+        allowed: bool,
+        reason: str,
+        grant_id: uuid.UUID,
+        project_id: uuid.UUID | None,
+        actor: Principal | None,
+        now: datetime,
+    ) -> None:
+        await record_event(
+            self._audit,
+            build_tool_event(
+                action=action,
+                allowed=allowed,
+                reason=reason,
+                correlation_id=uuid.uuid4(),
+                occurred_at=now,
+                resource_kind="tool_task_grant",
+                resource_id=grant_id,
                 project_id=project_id,
                 actor_id=None if actor is None else actor.user_id,
                 actor_role=None if actor is None else actor.system_role.value,
