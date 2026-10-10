@@ -17,7 +17,7 @@ from unittest.mock import patch
 
 from sqlalchemy import text
 
-from paw_backend.authz import InMemoryAuditSink
+from paw_backend.authz import InMemoryAuditSink, Principal, SystemRole
 from paw_backend.memory.versioning import FreshnessMaintenance
 from paw_backend.orchestrator.freshness_loop import FreshnessJobLoop
 from paw_backend.orchestrator.task_end import (
@@ -26,12 +26,21 @@ from paw_backend.orchestrator.task_end import (
     TaskEndResidue,
 )
 from paw_backend.tasks import Actor, TaskCommand, TaskService, TaskState
-from paw_backend.tools import ApprovalService, PostgresApprovalStore
+from paw_backend.tools import (
+    ApprovalOutcome,
+    ApprovalService,
+    GrantPattern,
+    PostgresApprovalStore,
+    PostgresTaskGrantStore,
+    ScopeStatus,
+    TaskGrantStatus,
+)
 
 from .gate_support import ALWAYS_ACTIVE
 from .support import make_settings
 from .task_support import FIRST_RUN, make_completable, single_target
-from .tools_store_contract import LIMITS, new_approval
+from .tools_store_contract import LIMITS, binding_of, new_approval
+from .tools_support import U1
 from .versioning_support import T0, PostgresVersioningTestCase, requires_postgres
 
 SYSTEM = Actor.system()
@@ -339,6 +348,44 @@ class TaskEndTest(PostgresVersioningTestCase):
         # Running it again changes nothing.
         self.assertNotIn(task_id, [r.task_id for r in await self.cleanup.sweep()])
         self.assertEqual(len(self.changes(memory.version_id)), 1)
+
+    async def test_the_sweep_revokes_a_grant_the_listener_never_did(self):
+        # Codex P2 on PR #216: a task whose approvals were all used, with no
+        # session memory, but an active 「このタスクの間は許可」 grant (Decision
+        # 0085) is still residue, so the sweep revokes the grant and audits it.
+        database = self._database()
+        grants = PostgresTaskGrantStore(database)
+        approvals = ApprovalService(self.store, InMemoryAuditSink(), grants=grants)
+        cleanup = TaskEndCleanup(
+            approvals, self.new_freshness(), TaskEndResidue(database)
+        )
+        task_id = await self.new_task(self.bare_tasks)
+        await self.bare_tasks.execute(task_id, TaskCommand.START, actor=SYSTEM)
+        now = datetime.now(UTC)
+        new = new_approval(
+            task_id=task_id,
+            expires_at=now + timedelta(hours=1),
+            grant_pattern=GrantPattern(ScopeStatus.IN_SCOPE, ()),
+        )
+        await self.store.open_request(new, now=now, limits=LIMITS)
+        granted = await approvals.approve_for_task(
+            new.approval_id, Principal(U1, SystemRole.USER, {})
+        )
+        self.assertEqual(granted.outcome, ApprovalOutcome.APPROVED_FOR_TASK)
+        # The waiting call used the approval: no open approval is left.
+        consumed = await self.store.consume(
+            new.approval_id, binding_of(new), now=datetime.now(UTC)
+        )
+        self.assertEqual(consumed.value, "consumed")
+        await self.end(task_id, TaskState.CANCELLED, self.bare_tasks)
+        residue = TaskEndResidue(database)
+        self.assertIn(task_id, await residue.task_ids(100))
+
+        await cleanup.sweep()
+
+        record = await grants.get(granted.grant_id)
+        self.assertEqual(record.status, TaskGrantStatus.REVOKED)
+        self.assertNotIn(task_id, await residue.task_ids(100))
 
     async def test_a_locked_version_is_finished_by_a_later_sweep(self):
         task_id = await self.new_task()
