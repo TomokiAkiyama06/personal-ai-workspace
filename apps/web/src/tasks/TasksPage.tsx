@@ -515,7 +515,12 @@ function TaskDetailView({
         ))}
       </dl>
 
-      <TaskGrantsPanel source={source} taskId={data.id} version={data.version} />
+      <TaskGrantsPanel
+        source={source}
+        taskId={data.id}
+        version={data.version}
+        live={isUnsettled(data.state)}
+      />
 
       {data.currentStep?.toolCalls && data.currentStep.toolCalls.length > 0 && (
         <section className="stack-xs step-tools" aria-labelledby="step-tools-title">
@@ -625,16 +630,20 @@ function ApprovalNotice({
  * このタスクで許可中 (Decision 0085): the person's 「このタスクの間は許可」
  * grants of the task's current run, each with what it was granted for and how
  * often it was used, and 取り消す (later calls are asked again). Read again when
- * the task changes; shown only while there is one (or the answer to a revoke).
+ * the task changes and, while it runs, every REFRESH_MS (a use does not change
+ * the task's version; Codex review of #216); shown only while there is one (or
+ * the answer to a revoke).
  */
 function TaskGrantsPanel({
   source,
   taskId,
   version,
+  live,
 }: {
   source: TaskSource;
   taskId: string;
   version: number;
+  live: boolean;
 }) {
   const { t, formatTime } = useI18n();
   const [grants, setGrants] = useState<readonly TaskGrant[]>([]);
@@ -656,6 +665,11 @@ function TaskGrantsPanel({
   }, [source, taskId]);
   // biome-ignore lint/correctness/useExhaustiveDependencies: read again for a new version
   useEffect(read, [read, version]);
+  useEffect(() => {
+    if (!live) return;
+    const timer = window.setInterval(read, REFRESH_MS);
+    return () => window.clearInterval(timer);
+  }, [live, read]);
   if (grants.length === 0 && done === null) return null;
 
   const revoke = (grant: TaskGrant) => {

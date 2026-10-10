@@ -229,6 +229,25 @@ describe("Approvals page", () => {
     expect(screen.queryByText('uv add "pyjwt>=2.9"')).not.toBeInTheDocument();
   });
 
+  it("reads the grants again while the task runs (their use counts change)", async () => {
+    // Codex P2 on #216: a use does not change the task's version.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const { source } = fakeTaskSource();
+      await source.decideApproval("approval-1", "approve_for_task");
+      const [grant] = await source.listTaskGrants(TASK_204);
+      if (!grant) throw new Error("no grant");
+      renderAt(`/agents/${TASK_204}`, source);
+      const panel = await screen.findByRole("region", { name: "このタスクで許可中" });
+      expect(within(panel).getByText(/0 回使用/)).toBeInTheDocument();
+      vi.spyOn(source, "listTaskGrants").mockResolvedValue([{ ...grant, uses: 3 }]);
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(await within(panel).findByText(/3 回使用/)).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("shows no grants panel when nothing is allowed for the task", async () => {
     const { source } = fakeTaskSource();
     const grants = vi.spyOn(source, "listTaskGrants");
