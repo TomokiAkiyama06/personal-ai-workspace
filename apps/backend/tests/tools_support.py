@@ -31,6 +31,7 @@ from paw_backend.tools import (
     BudgetStatus,
     Environment,
     InMemoryApprovalStore,
+    InMemoryTaskGrantStore,
     LeaseStatus,
     LexicalPathResolver,
     ScopedRepository,
@@ -469,6 +470,14 @@ class Harness:
         self.registrations = overrides.pop("registrations", Registrations())
         self.events: list = []
         listeners = overrides.pop("listeners", (self.events.append,))
+        # ``with_grants=True``: "このタスクの間は許可" is wired (Decision 0085),
+        # on the same approvals and the same task activity.
+        # ``grants=`` passes another store (PostgreSQL).
+        self.grants = overrides.pop("grants", None)
+        if overrides.pop("with_grants", False):
+            self.grants = InMemoryTaskGrantStore(
+                self.approvals, task_activity=self.task_activity
+            )
         self.broker = ToolBroker(
             overrides.pop("registry", sample_registry()),
             self.authorizer,
@@ -482,6 +491,7 @@ class Harness:
             use_gate=self.use_gate,
             clock=self.clock,
             listeners=listeners,
+            grants=self.grants,
             **overrides,
         )
         self.runner = ToolRunner(self.broker, self.executor)
@@ -491,6 +501,7 @@ class Harness:
             step_up=StepUp(True),
             clock=self.clock,
             listeners=(self.events.append,),
+            grants=self.grants,
         )
 
     def tool_events(self):

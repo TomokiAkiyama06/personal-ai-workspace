@@ -65,7 +65,11 @@ from paw_backend.projects.models import ProjectRow
 from paw_backend.projects.task_stop import ProjectTaskStopper, TaskStopResult
 from paw_backend.tasks import ProjectGate, TaskService
 from paw_backend.tasks.queueing import TaskQueue
-from paw_backend.tools import ApprovalService, PostgresApprovalStore
+from paw_backend.tools import (
+    ApprovalService,
+    PostgresApprovalStore,
+    PostgresTaskGrantStore,
+)
 from paw_backend.tools.interfaces import require_async_method
 
 logger = logging.getLogger(__name__)
@@ -313,7 +317,9 @@ def build_project_stop_loop(
     """
     if tasks is None:
         approvals = ApprovalService(
-            PostgresApprovalStore(database), PostgresAuditSink(database)
+            PostgresApprovalStore(database),
+            PostgresAuditSink(database),
+            grants=PostgresTaskGrantStore(database),
         )
         tasks = TaskService(
             database,

@@ -91,6 +91,7 @@ from paw_backend.tools import (
     ApprovalService,
     PostgresApprovalStore,
     PostgresTaskActivity,
+    PostgresTaskGrantStore,
     ToolBroker,
     ToolRegistry,
     ToolRunner,
@@ -141,6 +142,7 @@ def build_tool_broker(
     budget: BudgetTracker,
     approvals: PostgresApprovalStore,
     registrations: RepositoryScopes,
+    grants: PostgresTaskGrantStore | None = None,
 ) -> ToolBroker:
     """The Tool Broker of the application (module docstring). Every call is
     fenced on the worker's lease, read from ``queue`` (issue #126, Decision 0046;
@@ -156,6 +158,7 @@ def build_tool_broker(
         lease=QueueLeaseVerifier(queue),
         registrations=registrations,
         use_gate=tasks,
+        grants=grants,
     )
 
 
@@ -259,7 +262,12 @@ def build_task_execution(
         require_async_method(accounts, "account_of", 1)
 
     approval_store = PostgresApprovalStore(database)
-    approvals = ApprovalService(approval_store, PostgresAuditSink(database))
+    # "このタスクの間は許可" (Decision 0085): the broker uses the grants the
+    # service makes from approvals.
+    grant_store = PostgresTaskGrantStore(database)
+    approvals = ApprovalService(
+        approval_store, PostgresAuditSink(database), grants=grant_store
+    )
     freshness = FreshnessMaintenance(database)
     task_end = TaskEndCleanup(approvals, freshness, TaskEndResidue(database))
     tasks = TaskService(database, project_gate=gate, listeners=[task_end.on_task_event])
@@ -274,6 +282,7 @@ def build_task_execution(
         budget=budget,
         approvals=approval_store,
         registrations=repositories,
+        grants=grant_store,
     )
     tools = ToolRunner(broker, WorkingSetExecutor(tasks))
     orchestrator = None
