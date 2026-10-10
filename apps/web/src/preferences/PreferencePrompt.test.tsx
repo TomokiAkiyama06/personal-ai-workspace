@@ -171,6 +171,29 @@ describe("the chat's preference confirmation card", () => {
     expect(await screen.findByRole("status")).toHaveTextContent(/保存しました.*自分のメモリ/);
   });
 
+  it("asks for the acknowledgement again when the candidate changes", async () => {
+    const source = new FakePreferenceSource(
+      designCandidates()
+        .filter((item) => item.key === "merge.after_ci")
+        .map((item) => ({ ...item, ready: true })),
+    );
+    renderChat(source);
+    const user = userEvent.setup();
+    const card = await screen.findByRole("region", { name: "好みの確認" });
+    await user.click(within(card).getByRole("checkbox"));
+    expect(within(card).getByRole("checkbox")).toBeChecked();
+    // A newer observation changes the candidate while the card is open.
+    source.items = source.items.map((item) => ({
+      ...item,
+      content: "CI が通ったら main にマージする（例外なし）",
+    }));
+    await act(async () => {
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    await waitFor(() => expect(within(card).getByRole("checkbox")).not.toBeChecked());
+    expect(within(card).getByRole("button", { name: "確認して保存" })).toBeDisabled();
+  });
+
   it("asks for the acknowledgement when the Backend judges the save high risk", async () => {
     const source = new FakePreferenceSource();
     source.failNext = new ApiError(409, "preference_high_risk_unacknowledged", "x");

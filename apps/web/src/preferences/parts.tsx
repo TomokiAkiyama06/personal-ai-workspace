@@ -8,7 +8,13 @@ import { type MessageKey, useI18n } from "../i18n";
 import { errorMessage } from "../i18n/errors";
 import type { MemoryVersion } from "../memory/types";
 import { Link } from "../router";
-import { candidateTitle, defaultOption, type Names, needsAcknowledgement } from "./model";
+import {
+  candidateId,
+  candidateTitle,
+  defaultOption,
+  type Names,
+  needsAcknowledgement,
+} from "./model";
 import type { PreferenceState } from "./store";
 import type { PreferenceCandidate, ScopeOption } from "./types";
 
@@ -299,14 +305,15 @@ export interface Answered {
  * answered 409 `preference_high_risk_unacknowledged`) selects a button, needs
  * the checkbox, then [確認して保存].
  */
-export function AnswerControls({
-  candidate,
-  state,
-  hint,
-  onAnswered,
-  onOther,
-  showBoxes = true,
-}: {
+export function AnswerControls(props: AnswerControlsProps) {
+  // A new revision of the candidate (a newer memory version, or other words)
+  // starts over: the choice and the acknowledgement were given for the old one.
+  const { candidate } = props;
+  const revision = `${candidateId(candidate)}#${candidate.version_number ?? ""}#${candidate.content}`;
+  return <Controls key={revision} {...props} />;
+}
+
+interface AnswerControlsProps {
   candidate: PreferenceCandidate;
   state: PreferenceState;
   /** The row's note on the right (the board's grey text). */
@@ -314,7 +321,16 @@ export function AnswerControls({
   onAnswered: (answer: Answered) => void;
   onOther: () => void;
   showBoxes?: boolean;
-}) {
+}
+
+function Controls({
+  candidate,
+  state,
+  hint,
+  onAnswered,
+  onOther,
+  showBoxes = true,
+}: AnswerControlsProps) {
   const { t } = useI18n();
   const [forced, setForced] = useState(false);
   const ack = forced || needsAcknowledgement(candidate);
