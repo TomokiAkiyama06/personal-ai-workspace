@@ -227,6 +227,21 @@ describe("the chat's preference confirmation card", () => {
     await waitFor(() => expect(within(card).queryByRole("alert")).not.toBeInTheDocument());
   });
 
+  it("names a held candidate by its statement, never its key", async () => {
+    const source = new FakePreferenceSource(
+      designCandidates()
+        .filter((item) => item.key === "ui.language")
+        .map((item) => ({ ...item, ready: true })),
+    );
+    renderChat(source);
+    const user = userEvent.setup();
+    const card = await screen.findByRole("region", { name: "好みの確認" });
+    expect(within(card).getByRole("heading", { name: "UI の表示言語は英語" })).toBeVisible();
+    await user.click(within(card).getByRole("button", { name: "その他…" }));
+    expect(card).toHaveTextContent("UI の表示言語は英語");
+    expect(card.textContent).not.toMatch(/ui\.language/);
+  });
+
   it("その他: free text → the structured preview → saved as corrected", async () => {
     const source = new FakePreferenceSource();
     source.preview = {
@@ -310,6 +325,16 @@ describe("the chat's preference confirmation card", () => {
     expect(await within(card).findByRole("alert")).toHaveTextContent(
       "この候補は別の画面で答えたか、新しい観測で内容が変わりました。",
     );
+    // Loading the latest drops the old preview: it is made again from the new version.
+    await user.click(within(card).getByRole("button", { name: "最新を読み込む" }));
+    await waitFor(() =>
+      expect(within(card).queryByText("プレビュー — まだ保存していません")).not.toBeInTheDocument(),
+    );
+    expect(within(card).getByLabelText("どう覚えてほしいか")).toHaveValue("今後も");
+    await user.click(within(card).getByRole("button", { name: "構造にする" }));
+    await within(card).findByText("プレビュー — まだ保存していません");
+    await user.click(within(card).getByRole("button", { name: "この内容で保存" }));
+    expect(await screen.findByRole("status")).toHaveTextContent(/保存しました/);
   });
 
   it("その他: the target belongs to a group of projects only", async () => {

@@ -343,7 +343,13 @@ export function OtherForm({
       // The conflict (and its retry) stays until the latest is read.
       onReload={() => {
         void state.reload().then((read) => {
-          if (read) setFailure(null);
+          if (!read) return;
+          setFailure(null);
+          // The preview belonged to the old version: make it again from the
+          // latest (the person's words stay).
+          setPreview(null);
+          setDraft(null);
+          setChecked(false);
         });
       }}
     />

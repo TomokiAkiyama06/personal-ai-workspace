@@ -181,7 +181,7 @@ function Prompt({
         </span>
         <KindPill candidate={candidate} />
         <span className="pref-card-meta mono ellipsis">
-          {other ? candidate.title : observedMeta(candidate, t, formatTime)}
+          {other ? candidateTitle(candidate) : observedMeta(candidate, t, formatTime)}
         </span>
         {close}
       </div>
