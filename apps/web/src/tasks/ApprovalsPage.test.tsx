@@ -275,6 +275,30 @@ describe("Approvals page", () => {
     }
   });
 
+  it("shows the answer of a poll slower than the interval", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const { source } = fakeTaskSource();
+      await source.decideApproval("approval-1", "approve_for_task");
+      const [grant] = await source.listTaskGrants(TASK_204);
+      if (!grant) throw new Error("no grant");
+      renderAt(`/agents/${TASK_204}`, source);
+      const panel = await screen.findByRole("region", { name: "このタスクで許可中" });
+      vi.spyOn(source, "listTaskGrants").mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            setTimeout(() => resolve([{ ...grant, uses: 5 }]), 7000);
+          }),
+      );
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(13000);
+      });
+      expect(within(panel).getByText(/5 回使用/)).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("shows no grants panel when nothing is allowed for the task", async () => {
     const { source } = fakeTaskSource();
     const grants = vi.spyOn(source, "listTaskGrants");

@@ -650,29 +650,40 @@ function TaskGrantsPanel({
   const [pending, setPending] = useState<string | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [done, setDone] = useState<string | null>(null);
-  // Only the answer of the latest read is shown: polls may overlap and resolve
-  // out of order, and a read started before a revoke must not bring the revoked
-  // grant back (Codex review of #216).
+  // Only the answer of the latest read is shown: a read started before a revoke
+  // must not bring the revoked grant back (Codex review of #216). The poll waits
+  // for the read in flight instead of starting another, so a read slower than
+  // REFRESH_MS still shows its answer.
   const latest = useRef(0);
+  const inFlight = useRef(false);
   const read = useCallback(() => {
     latest.current += 1;
     const ticket = latest.current;
+    inFlight.current = true;
     source
       .listTaskGrants(taskId)
       .then((items) => {
         if (ticket === latest.current) setGrants(items);
       })
       // A failed read keeps what is shown (as the task's own refresh).
-      .catch(() => {});
-    return () => {
-      latest.current += 1;
-    };
+      .catch(() => {})
+      .finally(() => {
+        if (ticket === latest.current) inFlight.current = false;
+      });
   }, [source, taskId]);
   // biome-ignore lint/correctness/useExhaustiveDependencies: read again for a new version
-  useEffect(read, [read, version]);
+  useEffect(() => {
+    read();
+    return () => {
+      latest.current += 1;
+      inFlight.current = false;
+    };
+  }, [read, version]);
   useEffect(() => {
     if (!live) return;
-    const timer = window.setInterval(read, REFRESH_MS);
+    const timer = window.setInterval(() => {
+      if (!inFlight.current) read();
+    }, REFRESH_MS);
     return () => window.clearInterval(timer);
   }, [live, read]);
   if (grants.length === 0 && done === null) return null;
@@ -684,7 +695,6 @@ function TaskGrantsPanel({
     source
       .revokeTaskGrant(grant.id)
       .then(() => {
-        latest.current += 1;
         setGrants((items) => items.filter((item) => item.id !== grant.id));
         setDone(t("tasks.grants.revoked", { tool: grant.tool }));
         read();
