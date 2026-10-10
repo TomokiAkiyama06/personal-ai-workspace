@@ -17,6 +17,7 @@ import {
 } from "../notifications/NotificationCenter";
 import { usePendingApprovalNotifications } from "../notifications/pendingApprovals";
 import { useNotifications } from "../notifications/store";
+import { usePreferences } from "../preferences/store";
 import { Link, useRouter } from "../router";
 import { useTheme } from "../theme";
 import {
@@ -43,6 +44,10 @@ function NavLink({ item, onNavigate }: { item: NavItem; onNavigate: () => void }
   const { t } = useI18n();
   const { path } = useRouter();
   const { user } = useSignedIn();
+  // メモリ: the preference candidates waiting for an answer (issue #38: the ready
+  // ones and the held ones).
+  const preferences = usePreferences();
+  const count = item.path === "/memory" ? (preferences?.badge ?? 0) : 0;
   return (
     <Link
       to={item.path}
@@ -56,6 +61,12 @@ function NavLink({ item, onNavigate }: { item: NavItem; onNavigate: () => void }
         {t(item.short)}
       </span>
       {item.adminOnly && <RoleBadge role={user.system_role} />}
+      {count > 0 && (
+        <span className="nav-count">
+          {count}
+          <span className="visually-hidden">{t("pref.nav.waiting")}</span>
+        </span>
+      )}
     </Link>
   );
 }

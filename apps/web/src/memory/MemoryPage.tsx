@@ -5,6 +5,15 @@
 // see and do; this screen only shows it.
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { useI18n } from "../i18n";
+import {
+  PreferenceChips,
+  PreferencePanes,
+  PreferencePrivacy,
+  PreferenceSection,
+  PreferenceSegments,
+  PreferenceSynced,
+} from "../preferences/MemoryViews";
+import { preferencePath } from "../preferences/model";
 import { Link, useRouter } from "../router";
 import { useDismiss } from "../shell/common";
 import { freshnessTag, needsReview, stateChip } from "./labels";
@@ -120,16 +129,19 @@ function ScopePane({
   tree,
   scope,
   onSelect,
+  preference,
 }: {
   tree: ScopeTree;
   scope: ScopeKey;
   onSelect: (scope: ScopeKey) => void;
+  /** 推定の候補 / 保留中 is shown instead of a scope (issue #38). */
+  preference: "candidates" | "held" | null;
 }) {
   const { t } = useI18n();
   const [open, setOpen] = useState<ReadonlySet<string>>(
     () => new Set(tree.projects.map((project) => project.project_id)),
   );
-  const current = scopeValue(scope);
+  const current = preference ? null : scopeValue(scope);
   const toggle = (id: string) =>
     setOpen((value) => {
       const next = new Set(value);
@@ -139,6 +151,7 @@ function ScopePane({
     });
   return (
     <nav className="memory-scopes" aria-label={t("memory.scopes")}>
+      <PreferenceSection view={preference} />
       <div className="memory-scopes-head">
         <span className="section-label">{t("memory.scopes")}</span>
         <button
@@ -206,6 +219,7 @@ function ScopePane({
         active={current === "shared"}
         onSelect={() => onSelect({ kind: "shared" })}
       />
+      {preference && <PreferencePrivacy />}
     </nav>
   );
 }
@@ -385,14 +399,24 @@ function MemoryUnavailable() {
 
 function MemoryScreen({ source }: { source: MemorySource }) {
   const { t } = useI18n();
-  const { path } = useRouter();
-  const selected = selectedId(path);
+  const { path, navigate } = useRouter();
+  // メモリ › 推定の候補 / 保留中 (issue #38) live under /memory/candidates and /memory/held.
+  const preference = preferencePath(path);
+  const selected = preference ? null : selectedId(path);
   const searchId = useId();
   const [scope, setScope] = useState<ScopeKey>({ kind: "user" });
   const [input, setInput] = useState("");
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState<StatusFilter>("all");
   const [review, setReview] = useState(false);
+  const view = preference?.view ?? null;
+  const onScope = useCallback(
+    (next: ScopeKey) => {
+      setScope(next);
+      if (preference) navigate("/memory");
+    },
+    [preference, navigate],
+  );
 
   // Search as the reader types, once the typing pauses.
   useEffect(() => {
@@ -424,7 +448,15 @@ function MemoryScreen({ source }: { source: MemorySource }) {
   );
 
   return (
-    <div className={selected ? "memory-screen has-selection" : "memory-screen"}>
+    <div
+      className={[
+        "memory-screen",
+        selected || preference?.id ? "has-selection" : "",
+        preference ? "pref-mode" : "",
+      ]
+        .filter(Boolean)
+        .join(" ")}
+    >
       <div className="memory-toolbar">
         <h1>{t("memory.title")}</h1>
         <div className="memory-search">
@@ -452,20 +484,29 @@ function MemoryScreen({ source }: { source: MemorySource }) {
             onChange={(event) => setInput(event.target.value)}
           />
         </div>
-        <StatusMenu value={status} onChange={setStatus} />
-        <button
-          type="button"
-          className="chip review-chip"
-          aria-pressed={review}
-          onClick={() => setReview((value) => !value)}
-        >
-          {t("memory.filter.review", { count: reviewCount })}
-        </button>
-        {tree.data && <ScopeSelect tree={tree.data} scope={scope} onSelect={setScope} />}
+        {!preference && (
+          <>
+            <StatusMenu value={status} onChange={setStatus} />
+            <button
+              type="button"
+              className="chip review-chip"
+              aria-pressed={review}
+              onClick={() => setReview((value) => !value)}
+            >
+              {t("memory.filter.review", { count: reviewCount })}
+            </button>
+          </>
+        )}
+        <PreferenceChips view={view} />
+        {tree.data && !preference && (
+          <ScopeSelect tree={tree.data} scope={scope} onSelect={setScope} />
+        )}
+        {preference && <PreferenceSynced />}
       </div>
+      <PreferenceSegments view={view} />
       <div className="memory-panes">
         {tree.data ? (
-          <ScopePane tree={tree.data} scope={scope} onSelect={setScope} />
+          <ScopePane tree={tree.data} scope={scope} onSelect={onScope} preference={view} />
         ) : (
           <div className="memory-scopes">
             {tree.error ? (
@@ -477,33 +518,39 @@ function MemoryScreen({ source }: { source: MemorySource }) {
             )}
           </div>
         )}
-        <div className="memory-list-pane">
-          {list.error ? (
-            <LoadError error={list.error} onRetry={list.reload} />
-          ) : list.loading && !list.data ? (
-            <p className="muted small" role="status">
-              {t("app.loading")}
-            </p>
-          ) : shown.length > 0 ? (
-            <MemoryList items={shown} tree={tree.data} selected={selected} />
-          ) : (
-            <p className="memory-empty muted small">
-              {items.length === 0 && !query ? t("memory.list.empty") : t("memory.list.noMatch")}
-            </p>
-          )}
-        </div>
-        <section className="memory-detail-pane" aria-label={t("memory.detail.label")}>
-          {selected ? (
-            <MemoryDetail
-              key={selected}
-              source={source}
-              memoryId={selected}
-              onChanged={onChanged}
-            />
-          ) : (
-            <p className="memory-empty muted small">{t("memory.detail.none")}</p>
-          )}
-        </section>
+        {preference ? (
+          <PreferencePanes view={preference.view} id={preference.id} query={query} />
+        ) : (
+          <>
+            <div className="memory-list-pane">
+              {list.error ? (
+                <LoadError error={list.error} onRetry={list.reload} />
+              ) : list.loading && !list.data ? (
+                <p className="muted small" role="status">
+                  {t("app.loading")}
+                </p>
+              ) : shown.length > 0 ? (
+                <MemoryList items={shown} tree={tree.data} selected={selected} />
+              ) : (
+                <p className="memory-empty muted small">
+                  {items.length === 0 && !query ? t("memory.list.empty") : t("memory.list.noMatch")}
+                </p>
+              )}
+            </div>
+            <section className="memory-detail-pane" aria-label={t("memory.detail.label")}>
+              {selected ? (
+                <MemoryDetail
+                  key={selected}
+                  source={source}
+                  memoryId={selected}
+                  onChanged={onChanged}
+                />
+              ) : (
+                <p className="memory-empty muted small">{t("memory.detail.none")}</p>
+              )}
+            </section>
+          </>
+        )}
       </div>
     </div>
   );
