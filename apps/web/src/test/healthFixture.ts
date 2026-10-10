@@ -120,6 +120,37 @@ export function abnormalReport(): HealthReport {
   return report;
 }
 
+/**
+ * The report with a component this version does not know (a newer Backend's):
+ * normal, or abnormal with a known and an unknown reason and its own numbers.
+ */
+export function withUnknownComponent(
+  report: HealthReport,
+  severity: ComponentHealth["severity"] = "warning",
+): HealthReport {
+  const problem = severity !== "info";
+  return {
+    ...report,
+    severity: worstOf(report.severity, severity),
+    components: [
+      ...report.components,
+      {
+        component: "inference_gateway",
+        severity,
+        status: problem ? "degraded" : "ok",
+        reasons: problem ? ["check_timeout", "gateway_backlog"] : [],
+        metrics: problem ? { backlog: 7, mode: "drain", healthy: false, last_seen: null } : {},
+        parts: [],
+      },
+    ],
+  };
+}
+
+function worstOf(a: HealthReport["severity"], b: HealthReport["severity"]) {
+  const order = ["info", "warning", "error", "critical"];
+  return order.indexOf(a) >= order.indexOf(b) ? a : b;
+}
+
 export function healthSummary(overrides: Partial<HealthSummary> = {}): HealthSummary {
   return {
     severity: "info",

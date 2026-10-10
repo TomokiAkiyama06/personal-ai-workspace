@@ -316,8 +316,8 @@ class ComputeStatus:
 
 @dataclass(frozen=True, slots=True)
 class CodingCapacity:
-    """The parallel limit of the local coding agents now (Decision 0084,
-    Proposed; the task list of PAW-062 shows it).
+    """The parallel limit of the local coding agents now (Decision 0084; the
+    task list of PAW-062 shows it).
 
     ``running``: the Coding leases on the main models' GPU. ``limit``: those and
     how many more agents of a whole context each (the main model's longest
