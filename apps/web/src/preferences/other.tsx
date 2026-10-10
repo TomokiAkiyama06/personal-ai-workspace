@@ -99,12 +99,15 @@ export function OtherForm({
 
   const setScope = (scope: InterpretedScope) => {
     if (!draft) return;
+    // Only a group of projects names its target (the Backend rejects apply_to
+    // for any other scope).
+    const base = { ...draft, scope, apply_to: scope === "project_group" ? draft.apply_to : null };
     if (scope === "repo") {
-      setDraft({ ...draft, scope, repo_id: repoId, project_id: repo?.project_id ?? projectId });
+      setDraft({ ...base, repo_id: repoId, project_id: repo?.project_id ?? projectId });
     } else if (scope === "project") {
-      setDraft({ ...draft, scope, repo_id: null, project_id: projectId });
+      setDraft({ ...base, repo_id: null, project_id: projectId });
     } else {
-      setDraft({ ...draft, scope, repo_id: null, project_id: null });
+      setDraft({ ...base, repo_id: null, project_id: null });
     }
   };
 
@@ -180,7 +183,7 @@ export function OtherForm({
             ))}
           </select>,
         )}
-        {(draft.scope === "project_group" || draft.apply_to) &&
+        {draft.scope === "project_group" &&
           row(
             <label htmlFor={`${ids}-apply`}>{t("pref.other.applyTo")}</label>,
             <input
@@ -198,57 +201,56 @@ export function OtherForm({
             onChange={(event) => setDraft({ ...draft, rule: event.target.value })}
           />,
         )}
-        {(!page || draft.exceptions.length > 0) &&
-          row(
-            <span>{t("pref.other.exceptions")}</span>,
-            <div className="pref-exceptions">
-              {draft.exceptions.map((item) => (
-                <span key={item} className="pref-exception">
-                  {item}
-                  <button
-                    type="button"
-                    className="icon-button"
-                    aria-label={t("pref.other.removeException", { text: item })}
-                    onClick={() =>
-                      setDraft({
-                        ...draft,
-                        exceptions: draft.exceptions.filter((other) => other !== item),
-                      })
-                    }
-                  >
-                    <PrefIcon name="x" size={11} />
-                  </button>
-                </span>
-              ))}
-              {adding === null ? (
-                <button type="button" className="pref-add" onClick={() => setAdding("")}>
-                  {t("pref.other.addException")}
+        {row(
+          <span>{t("pref.other.exceptions")}</span>,
+          <div className="pref-exceptions">
+            {draft.exceptions.map((item) => (
+              <span key={item} className="pref-exception">
+                {item}
+                <button
+                  type="button"
+                  className="icon-button"
+                  aria-label={t("pref.other.removeException", { text: item })}
+                  onClick={() =>
+                    setDraft({
+                      ...draft,
+                      exceptions: draft.exceptions.filter((other) => other !== item),
+                    })
+                  }
+                >
+                  <PrefIcon name="x" size={11} />
                 </button>
-              ) : (
-                <input
-                  className="pref-add-input"
-                  aria-label={t("pref.other.newException")}
-                  // biome-ignore lint/a11y/noAutofocus: the person just asked to type one
-                  autoFocus
-                  value={adding}
-                  onChange={(event) => setAdding(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter") {
-                      event.preventDefault();
-                      const value = adding.trim();
-                      addException(value);
-                      setAdding(null);
-                    } else if (event.key === "Escape") setAdding(null);
-                  }}
-                  onBlur={() => {
+              </span>
+            ))}
+            {adding === null ? (
+              <button type="button" className="pref-add" onClick={() => setAdding("")}>
+                {t("pref.other.addException")}
+              </button>
+            ) : (
+              <input
+                className="pref-add-input"
+                aria-label={t("pref.other.newException")}
+                // biome-ignore lint/a11y/noAutofocus: the person just asked to type one
+                autoFocus
+                value={adding}
+                onChange={(event) => setAdding(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
                     const value = adding.trim();
                     addException(value);
                     setAdding(null);
-                  }}
-                />
-              )}
-            </div>,
-          )}
+                  } else if (event.key === "Escape") setAdding(null);
+                }}
+                onBlur={() => {
+                  const value = adding.trim();
+                  addException(value);
+                  setAdding(null);
+                }}
+              />
+            )}
+          </div>,
+        )}
         {row(
           <span>{t("pref.other.strength")}</span>,
           <fieldset className="pref-segments">
@@ -268,21 +270,20 @@ export function OtherForm({
         {draft.strength === "required" && page && (
           <p className="pref-small-note">{t("pref.other.requiredNote")}</p>
         )}
-        {!page &&
-          row(
-            <label htmlFor={`${ids}-expires`}>{t("pref.other.expires")}</label>,
-            <div className="pref-expires">
-              <input
-                id={`${ids}-expires`}
-                type="date"
-                value={dateValue(draft.expires_at)}
-                onChange={(event) =>
-                  setDraft({ ...draft, expires_at: expiresFrom(event.target.value) })
-                }
-              />
-              <span>{t("pref.other.noExpiry")}</span>
-            </div>,
-          )}
+        {row(
+          <label htmlFor={`${ids}-expires`}>{t("pref.other.expires")}</label>,
+          <div className="pref-expires">
+            <input
+              id={`${ids}-expires`}
+              type="date"
+              value={dateValue(draft.expires_at)}
+              onChange={(event) =>
+                setDraft({ ...draft, expires_at: expiresFrom(event.target.value) })
+              }
+            />
+            <span>{t("pref.other.noExpiry")}</span>
+          </div>,
+        )}
       </div>
     </div>
   );
@@ -342,7 +343,11 @@ export function OtherForm({
     />
   );
 
-  const saveDisabled = !draft?.rule.trim() || busy !== null || (highRisk && !checked);
+  const saveDisabled =
+    !draft?.rule.trim() ||
+    (draft.scope === "project_group" && !draft.apply_to?.trim()) ||
+    busy !== null ||
+    (highRisk && !checked);
   const saveLabel =
     busy === "save"
       ? t("pref.action.saving")

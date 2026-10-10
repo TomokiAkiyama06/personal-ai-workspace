@@ -61,18 +61,25 @@ function Store({ source, children }: { source: PreferenceSource; children: React
   );
   const prompts = useRef(new Map<string, string | null>());
 
-  const reload = useCallback(
-    () =>
-      source.candidates().then(
-        (found) => {
-          setCandidates(found);
-          setError(null);
-          setSyncedAt(new Date().toISOString());
-        },
-        (caught: unknown) => setError(caught),
-      ),
-    [source],
-  );
+  // Reads may overlap (the minute's refresh and the one after an answer): only
+  // the latest one started is applied, so an older answer never brings back a
+  // candidate that was just answered.
+  const generation = useRef(0);
+  const reload = useCallback(() => {
+    generation.current += 1;
+    const mine = generation.current;
+    return source.candidates().then(
+      (found) => {
+        if (mine !== generation.current) return;
+        setCandidates(found);
+        setError(null);
+        setSyncedAt(new Date().toISOString());
+      },
+      (caught: unknown) => {
+        if (mine === generation.current) setError(caught);
+      },
+    );
+  }, [source]);
 
   useEffect(() => {
     void reload();

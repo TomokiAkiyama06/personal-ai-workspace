@@ -271,6 +271,46 @@ describe("the chat's preference confirmation card", () => {
     expect(await screen.findByRole("status")).toHaveTextContent(/保存しました/);
   });
 
+  it("その他: the target belongs to a group of projects only", async () => {
+    const source = new FakePreferenceSource();
+    source.preview = {
+      preference: {
+        scope: "project_group",
+        project_id: null,
+        repo_id: null,
+        apply_to: "開発系の Project",
+        rule: "テストは pytest -x で回す。",
+        exceptions: [],
+        strength: "default",
+        expires_at: null,
+      },
+      content: "x",
+      risk_level: "low",
+      requires_acknowledgement: false,
+      interpreted_by: "rules",
+    };
+    renderChat(source);
+    const user = userEvent.setup();
+    const card = await screen.findByRole("region", { name: "好みの確認" });
+    await user.click(within(card).getByRole("button", { name: "その他…" }));
+    await user.type(within(card).getByLabelText("どう覚えてほしいか"), "開発系だけ");
+    await user.click(within(card).getByRole("button", { name: "構造にする" }));
+    await within(card).findByText("プレビュー — まだ保存していません");
+    const save = within(card).getByRole("button", { name: "この内容で保存" });
+    // A group needs its target.
+    await user.clear(within(card).getByLabelText("適用対象"));
+    expect(save).toBeDisabled();
+    // Leaving the group drops the target (the Backend rejects it for any other scope).
+    await user.type(within(card).getByLabelText("適用対象"), "開発系");
+    await user.selectOptions(within(card).getByLabelText("範囲"), "user");
+    expect(within(card).queryByLabelText("適用対象")).not.toBeInTheDocument();
+    await user.click(save);
+    expect(writes(source).at(-1)).toMatchObject({
+      method: "confirm",
+      args: ["m-pytest", { preference: { scope: "user", apply_to: null } }],
+    });
+  });
+
   it("その他: 必須 makes the preview high risk and needs the acknowledgement", async () => {
     const source = new FakePreferenceSource();
     renderChat(source);
@@ -304,6 +344,12 @@ describe("the chat's preference confirmation card", () => {
     ).toBeVisible();
     await user.click(within(sheet).getByRole("button", { name: "その他…" }));
     const page = screen.getByRole("dialog", { name: "その他 — 自分の言葉で" });
+    // The page edits the whole structure: the first exception and the expiry too.
+    await user.type(within(page).getByLabelText("どう覚えてほしいか"), "今後も");
+    await user.click(within(page).getByRole("button", { name: "構造にする" }));
+    await within(page).findByText("プレビュー — 未保存");
+    expect(within(page).getByRole("button", { name: "+ 例外を追加" })).toBeInTheDocument();
+    expect(within(page).getByLabelText("期限")).toBeInTheDocument();
     await user.click(within(page).getByRole("button", { name: "候補のボタンに戻る" }));
     await user.click(
       within(screen.getByRole("dialog", { name: "好みの確認" })).getByRole("button", {
@@ -311,7 +357,7 @@ describe("the chat's preference confirmation card", () => {
       }),
     );
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-    expect(writes(source)).toEqual([]);
+    expect(writes(source).filter((call) => call.method !== "interpret")).toEqual([]);
   });
 
   it("puts the phone's sheet off with Escape like ×", async () => {
