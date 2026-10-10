@@ -840,6 +840,12 @@ export function MonitoringView() {
           if (worst !== lastWorst.current) {
             lastWorst.current = worst;
             setGroup(initialGroup(report));
+          } else {
+            // An area that is gone (その他 once its components are) is dropped, so
+            // it is not selected again when it comes back (Codex P2, PR #215).
+            setGroup((previous) =>
+              previous && !areasOf(report).includes(previous) ? null : previous,
+            );
           }
         },
         (error: unknown) => {

@@ -323,6 +323,24 @@ describe("サーバー監視", () => {
       "aria-pressed",
       "true",
     );
+
+    // It comes back, normal: その他 is shown again but not selected by itself
+    // (the gone selection was dropped, not kept) (Codex P2, PR #215).
+    current = withUnknownComponent(normalReport(), "info");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(REFRESH_SECONDS * 1000);
+    });
+    await waitFor(() =>
+      expect(within(areas).getByRole("button", { name: /その他/ })).toBeInTheDocument(),
+    );
+    expect(within(areas).getByRole("button", { name: /その他/ })).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+    expect(within(areas).getByRole("button", { name: /GPU \/ VRAM/ })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
   });
 
   it("has no その他 when every component is known", async () => {
