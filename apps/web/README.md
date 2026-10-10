@@ -44,6 +44,18 @@ Data は `ProjectsSource`（`src/projects/model.ts`）で受けます。本番�
 
 **Backend にタスク・DAG・PR の HTTP API がまだありません**（`/api/v1` は health / events / auth / passkeys / accounts だけ）。画面のデータは `TaskSource`（`src/tasks/source.tsx`）で受け、今は接続していないので、両画面とも「タスクの状態はまだ表示できません」を表示します（Notification Center の `NotificationSource` と同じ扱い）。マージの API もないため、マージのボタンは無効にして GitHub の PR へ誘導します。
 
+## 推定された好みの確認（Issue #38）
+
+[Issue #38](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/38)（PAW-044）の確認の画面を、Human が承認した Design canvas の P1008Pref* の Board（チャットの確認カード ダーク / ライト、その他の構造化プレビュー、高リスクの確認、メモリ › 推定の候補 ダーク / ライト、保留中、スマートフォンの Bottom Sheet / その他の画面 / 一覧、Flow）に合わせて実装しました（`src/preferences/`）。Data は Backend の `/api/v1/memory/preferences/*`（[Decision 0081](../../docs/decisions/0081-inferred-preference-confirmation-flow.md)）を `PreferenceSource`（`src/preferences/source.tsx`、本番は `src/preferences/api.ts`）で受けます。
+
+- 聞くかどうか（`ready`）・推奨の範囲・出すボタン・高リスクかどうかは Backend が決め、画面は並べて言葉にするだけです。API の Enum の名前（`frequency`・`standing` など）は画面に出さず、日本語の Label だけを出します
+- チャット: アシスタントの返答 1 つにカードは多くても 1 枚（ready の候補のうち、「今後」などの発言 → 観測の回数 → 新しさの順で最も強いもの。残りはメモリで待つ）。× / Escape（あとで）は API を呼ばず、この会話でだけカードを隠します。答えると 1 行（保存しました … 履歴）に畳みます。**チャットの画面と API はまだない**ので、チャットの Placeholder の下に最新の返答のカードを出しています（チャットができたら、返答ごとに `<PreferencePrompt conversation reply>` を置く）
+- [その他…]: 自分の言葉 → `interpret`（何も書かない）の構造化プレビュー → 範囲・適用対象・内容・例外・強さ・期限を直して保存。保存のときに Backend がもう一度検証してリスクを計り直します。Project のグループと「必須」は条件として本文に書いて保存します（Decision 0081 の 11）。Model の解釈器はまだつないでいないので、規則の解釈（「規則で解釈」）が答えます
+- 高リスク（Merge・削除・公開範囲・権限・Credential・外部送信。「必須」も）は、チェックで明示的に確認するまで保存できません（Passkey は不要）。Backend が `preference_high_risk_unacknowledged` を返したら、その場で確認を求めます
+- メモリ › 推定の候補 / 保留中（`/memory/candidates[/<id>]`、`/memory/held[/<id>]`）: 聞く準備ができた順の一覧、根拠（回数・範囲・言葉の強さ・一貫性・リスク・最後の観測）、チャットと同じ答えのボタン。保留中は種類（高リスク・確定済みと違う・広げたメモリ・置き換え済み）ごとにできることを出します
+- Navigation の メモリ の Badge は ready の候補 + 保留中の数です。候補は 60 秒ごと・画面へ戻ったとき・答えたあとに読み直します（Push はまだない）
+- スマートフォンはカードを下からの Sheet（MobileApproval と同じ）、その他を全画面、メモリは すべて / 推定の候補 / 保留 の切り替えと一覧 → 詳細の 2 階層です
+
 ## 構成
 
 ```text
@@ -60,6 +72,7 @@ apps/web/
 │  ├─ notifications/           # Notification Center の状態と Bell / Banner
 │  ├─ health/                  # 管理 › サーバー監視と Header の状態 Chip、HealthSource
 │  ├─ memory/                  # メモリ画面（3 ペイン・履歴 Graph・差分）と MemorySource
+│  ├─ preferences/             # 推定された好みの確認（チャットのカード、メモリ › 推定の候補 / 保留中）と PreferenceSource
 │  ├─ shell/                   # Header・Navigation（Sidebar / Rail / Drawer / 下部 Tab）・User Menu・Icon・QR Code
 │  ├─ pages/                   # サインイン、Passkey Gate、設定（プロフィール / 端末とセッション / 言語と外観）、Pairing、Placeholder
 │  ├─ styles.css               # Design Token（ダーク / ライトの CSS 変数）と Breakpoint
@@ -125,6 +138,7 @@ Design Canvas との差分（Backend が優先）: 上限の「GPU 時間（今�
 
 - Board の Host と温度は Backend に Source がないため、UI_DESIGN.md の領域（GPU / VRAM・タスクキュー・PostgreSQL・Recovery Repository・外部エージェント）を Chip にし、Card は VRAM・GPU 使用率・タスクキュー・受信、グラフは GPU / VRAM の推移（%、`表で見る` で同じ値の表）、アラートは Severity の変化（`GET /system/health/events`）です
 - 通常時は「すべて正常です」の 1 行と、Component ごとの閉じた 1 行だけ。異常時は Banner を出し、最も悪い領域を選び、異常な Component の理由と数値を自動で開きます。理由・Status は Code から Catalog で文にし、知らない Code はそのまま出します
+- この Version が知らない Component（新しい Backend の項目）は、あるときだけ出る「その他」の Chip と Panel に入れ、名前・理由・数値を Code のまま出します。異常なら他の領域と同じく「その他」が選ばれます（Decision 0080 の 3。PR #203 の Codex P2 への Human の選択）
 - 15 秒ごとに `GET /system/health` を読み（Tab が隠れている間は読まない）、推移とアラートは期間の変更と 60 秒ごと。失敗しても前の表示を残し「受信」を「途切れています」にします
 - Header の Chip: Owner / Admin は `GPU 38% · Queue 3`（異常時は「Backup 異常 +1」）で、押すとサーバー監視。一般の User は `GET /system/health/summary` の全体の Severity と「Codex · Claude 利用可 / Claude 利用不可」だけ（押しても開かない）。スマートフォンでは点だけ
 - 画面は読み取りのみで、モデルや GPU・サービスの操作はしません

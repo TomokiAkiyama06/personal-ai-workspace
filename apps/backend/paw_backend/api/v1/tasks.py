@@ -5,8 +5,8 @@ over HTTP (issue #185, Decision 0067 Approved; the screens of PAW-062, #48).
   the projects the person may read (``project.read``, decided per project), newest
   first, at most ``limit`` (default 100, up to 200), with the compute
   scheduler's parallel limit of the local coding agents and, for a person who
-  may see System Health's detail, the VRAM (``capacity``; Decision 0084,
-  Proposed; ``null`` without a scheduler).
+  may see System Health's detail, the VRAM (``capacity``; Decision 0084;
+  ``null`` without a scheduler).
 * ``GET /tasks/{task_id}`` (``project.read`` on the task's project): the task as
   ``TaskService.restore`` reads it, its Working Set with each repository's state
   in the current attempt, the DAG of the current attempt with every node attempt,

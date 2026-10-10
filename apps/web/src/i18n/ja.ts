@@ -4,6 +4,7 @@
 
 import { healthJa } from "./health";
 import { memoryJa } from "./memory.ja";
+import { preferencesJa } from "./preferences.ja";
 import { tasksJa } from "./tasks";
 
 export const ja = {
@@ -555,6 +556,7 @@ export const ja = {
   "usage.users.empty": "ユーザーの記録はありません。",
 
   ...memoryJa,
+  ...preferencesJa,
 } as const;
 
 export type MessageKey = keyof typeof ja;

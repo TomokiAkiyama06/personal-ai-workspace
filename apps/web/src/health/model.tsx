@@ -159,6 +159,16 @@ export const GROUPS: readonly { name: GroupName; components: readonly ComponentN
   { name: "external", components: ["connections", "connection_reaper"] },
 ];
 
+/**
+ * An area of the board: one of the groups, or その他 for the components this
+ * version does not know (a newer Backend's). その他 is there only while the
+ * report has such a component, and it is selected like any other area when one
+ * is the worst problem, so a component's reasons and numbers are never hidden
+ * (Decision 0080 3; the Human's choice for the Codex P2 on PR #203).
+ */
+export const OTHER = "other";
+export type AreaName = GroupName | typeof OTHER;
+
 export function groupOf(component: string): GroupName | null {
   return (
     GROUPS.find((group) => (group.components as readonly string[]).includes(component))?.name ??
@@ -170,16 +180,24 @@ export function componentOf(report: HealthReport, name: ComponentName): Componen
   return report.components.find((entry) => entry.component === name) ?? null;
 }
 
-export function groupComponents(report: HealthReport, group: GroupName): ComponentHealth[] {
-  const names = GROUPS.find((entry) => entry.name === group)?.components ?? [];
+/** The components of an area: a group's in its order, その他's in the report's order. */
+export function groupComponents(report: HealthReport, area: AreaName): ComponentHealth[] {
+  if (area === OTHER) return report.components.filter((entry) => groupOf(entry.component) === null);
+  const names = GROUPS.find((entry) => entry.name === area)?.components ?? [];
   return names.flatMap((name) => {
     const found = componentOf(report, name);
     return found ? [found] : [];
   });
 }
 
-export function groupSeverity(report: HealthReport, group: GroupName): Severity {
-  return worstSeverity(groupComponents(report, group).map((entry) => entry.severity));
+/** The areas to show: the five groups, and その他 when a component is in none of them. */
+export function areasOf(report: HealthReport): AreaName[] {
+  const areas: AreaName[] = GROUPS.map((group) => group.name);
+  return groupComponents(report, OTHER).length > 0 ? [...areas, OTHER] : areas;
+}
+
+export function groupSeverity(report: HealthReport, area: AreaName): Severity {
+  return worstSeverity(groupComponents(report, area).map((entry) => entry.severity));
 }
 
 /** The components that are not normal, worst first (the report's order within a level). */
@@ -189,10 +207,11 @@ export function abnormal(report: HealthReport): ComponentHealth[] {
     .sort((a, b) => severityRank(b.severity) - severityRank(a.severity));
 }
 
-/** The group to open first: the worst one, or GPU / VRAM when all are normal. */
-export function initialGroup(report: HealthReport): GroupName {
+/** The area to open first: the worst one's, or GPU / VRAM when all are normal. */
+export function initialGroup(report: HealthReport): AreaName {
   const worst = abnormal(report)[0];
-  return (worst && groupOf(worst.component)) || "gpu";
+  if (!worst) return "gpu";
+  return groupOf(worst.component) ?? OTHER;
 }
 
 // ---------- Reading metrics ----------

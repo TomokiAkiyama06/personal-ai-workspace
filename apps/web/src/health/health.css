@@ -266,6 +266,9 @@ a.header-health:hover {
 
 .health-chips {
   display: flex;
+  /* Wider screens wrap, so a sixth area (その他) is never out of sight; the
+     phone scrolls the row sideways. */
+  flex-wrap: wrap;
   gap: 10px;
 }
 
@@ -709,6 +712,10 @@ a.header-health:hover {
 
   .health .usage-toolbar select {
     margin-left: 0;
+  }
+
+  .health-chips {
+    flex-wrap: nowrap;
   }
 
   .health-chip {
