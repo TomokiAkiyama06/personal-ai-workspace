@@ -370,9 +370,27 @@ export interface ToolApproval {
   repositories: readonly string[];
   createdAt: string;
   expiresAt: string;
+  /** It may be answered with 「このタスクの間は許可」 (Decision 0085). */
+  taskGrantAllowed: boolean;
 }
 
-export type ApprovalDecision = "approve" | "reject";
+/**
+ * Approve once, reject, or approve and allow the later calls of the same tool
+ * with the same or narrower scope for the rest of the task (Decision 0085).
+ */
+export type ApprovalDecision = "approve" | "reject" | "approve_for_task";
+
+/** An active 「このタスクの間は許可」 grant of a task (the person's own). */
+export interface TaskGrant {
+  id: string;
+  approvalId: string;
+  tool: string;
+  /** What the person was shown when they granted it (the approval's summary). */
+  summary: readonly { name: string; kind: string; value: string }[];
+  createdAt: string;
+  /** How many calls it let run without asking again. */
+  uses: number;
+}
 
 export type DiffLineKind = "hunk" | "add" | "delete" | "context" | "note";
 

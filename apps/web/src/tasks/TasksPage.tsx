@@ -26,6 +26,7 @@ import {
   REFRESH_MS,
   shortId,
   type TaskDetail,
+  type TaskGrant,
   type TaskList,
   type TaskSummary,
   type ToolApproval,
@@ -514,6 +515,8 @@ function TaskDetailView({
         ))}
       </dl>
 
+      <TaskGrantsPanel source={source} taskId={data.id} version={data.version} />
+
       {data.currentStep?.toolCalls && data.currentStep.toolCalls.length > 0 && (
         <section className="stack-xs step-tools" aria-labelledby="step-tools-title">
           <span id="step-tools-title" className="section-label">
@@ -615,6 +618,108 @@ function ApprovalNotice({
         </Link>
       )}
     </div>
+  );
+}
+
+/**
+ * このタスクで許可中 (Decision 0085): the person's 「このタスクの間は許可」
+ * grants of the task's current run, each with what it was granted for and how
+ * often it was used, and 取り消す (later calls are asked again). Read again when
+ * the task changes; shown only while there is one (or the answer to a revoke).
+ */
+function TaskGrantsPanel({
+  source,
+  taskId,
+  version,
+}: {
+  source: TaskSource;
+  taskId: string;
+  version: number;
+}) {
+  const { t, formatTime } = useI18n();
+  const [grants, setGrants] = useState<readonly TaskGrant[]>([]);
+  const [pending, setPending] = useState<string | null>(null);
+  const [error, setError] = useState<unknown>(null);
+  const [done, setDone] = useState<string | null>(null);
+  const read = useCallback(() => {
+    let current = true;
+    source
+      .listTaskGrants(taskId)
+      .then((items) => {
+        if (current) setGrants(items);
+      })
+      // A failed read keeps what is shown (as the task's own refresh).
+      .catch(() => {});
+    return () => {
+      current = false;
+    };
+  }, [source, taskId]);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: read again for a new version
+  useEffect(read, [read, version]);
+  if (grants.length === 0 && done === null) return null;
+
+  const revoke = (grant: TaskGrant) => {
+    setPending(grant.id);
+    setError(null);
+    setDone(null);
+    source
+      .revokeTaskGrant(grant.id)
+      .then(() => {
+        setGrants((items) => items.filter((item) => item.id !== grant.id));
+        setDone(t("tasks.grants.revoked", { tool: grant.tool }));
+        read();
+      })
+      .catch((caught: unknown) => setError(caught))
+      .finally(() => setPending(null));
+  };
+
+  return (
+    <section className="task-card-panel grants-panel" aria-labelledby="grants-title">
+      <div className="panel-head">
+        <h3 id="grants-title">{t("tasks.grants.title")}</h3>
+        {grants.length > 0 && <span className="small muted">{t("tasks.grants.hint")}</span>}
+      </div>
+      {done && (
+        <p className="small muted" role="status">
+          {done}
+        </p>
+      )}
+      {error !== null && (
+        <p className="form-error" role="alert">
+          {errorMessage(t, error)}
+        </p>
+      )}
+      <ul className="plain-list">
+        {grants.map((grant) => (
+          <li key={grant.id} className="grant-row">
+            <div className="grant-body">
+              <span className="mono strong">{grant.tool}</span>
+              {grant.summary.map((item) => (
+                <code key={item.name}>
+                  {item.name === "command" ? item.value : `${item.name}: ${item.value}`}
+                </code>
+              ))}
+              <span className="mono muted small">
+                {t("tasks.grants.meta", {
+                  time: formatTime(grant.createdAt),
+                  count: grant.uses,
+                })}
+              </span>
+            </div>
+            <button
+              type="button"
+              className="secondary small-button"
+              disabled={pending !== null}
+              aria-busy={pending === grant.id}
+              aria-label={t("tasks.grants.revokeLabel", { tool: grant.tool })}
+              onClick={() => revoke(grant)}
+            >
+              {t("tasks.grants.revoke")}
+            </button>
+          </li>
+        ))}
+      </ul>
+    </section>
   );
 }
 

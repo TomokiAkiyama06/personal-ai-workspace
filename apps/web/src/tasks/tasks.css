@@ -1589,3 +1589,56 @@
     display: inline;
   }
 }
+
+/* 「このタスクの間は許可」 (Decision 0085): the secondary choice of the sheet
+   and what it covers. */
+.sheet-actions button.secondary.wide {
+  min-height: 48px;
+  font-size: 14px;
+}
+
+.approval-for-task-hint {
+  margin: -3px 2px 2px;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+/* このタスクで許可中: the task's active grants, each revocable (laid out as the
+   dependency graph's panel). */
+.grants-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 16px;
+}
+
+.grants-panel .grant-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+}
+
+.grants-panel .grant-row:first-child {
+  border-top: 0;
+}
+
+.grant-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  flex-grow: 1;
+}
+
+.grant-body code {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+
+.grant-row button {
+  flex-shrink: 0;
+}

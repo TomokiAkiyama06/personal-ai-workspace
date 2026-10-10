@@ -28,6 +28,7 @@ import type {
   ReviewSummary,
   TaskCapacity,
   TaskDetail,
+  TaskGrant,
   TaskList,
   TaskRepository,
   TaskState,
@@ -337,6 +338,16 @@ interface ApprovalWire {
   repositories: string[];
   created_at: string;
   expires_at: string;
+  task_grant_allowed: boolean;
+}
+
+interface TaskGrantWire {
+  id: string;
+  approval_id: string;
+  tool: string;
+  summary: { name: string; kind: string; value: string }[];
+  created_at: string;
+  uses: number;
 }
 
 function changedFile(wire: ChangedFileWire): ChangedFile {
@@ -364,6 +375,18 @@ function approval(wire: ApprovalWire): ToolApproval {
     repositories: wire.repositories,
     createdAt: wire.created_at,
     expiresAt: wire.expires_at,
+    taskGrantAllowed: wire.task_grant_allowed === true,
+  };
+}
+
+function taskGrant(wire: TaskGrantWire): TaskGrant {
+  return {
+    id: wire.id,
+    approvalId: wire.approval_id,
+    tool: wire.tool,
+    summary: wire.summary,
+    createdAt: wire.created_at,
+    uses: wire.uses,
   };
 }
 
@@ -451,5 +474,15 @@ export const apiTaskSource: TaskSource = {
   },
   async decideApproval(id: string, decision: ApprovalDecision): Promise<void> {
     await apiRequest("POST", `/approvals/${encodeURIComponent(id)}/decision`, { decision });
+  },
+  async listTaskGrants(taskId: string): Promise<readonly TaskGrant[]> {
+    const body = await apiRequest<{ grants: TaskGrantWire[] }>(
+      "GET",
+      `${taskPath(taskId)}/approval-grants`,
+    );
+    return body.grants.map(taskGrant);
+  },
+  async revokeTaskGrant(id: string): Promise<void> {
+    await apiRequest("POST", `/approval-grants/${encodeURIComponent(id)}/revoke`);
   },
 };

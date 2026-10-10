@@ -226,6 +226,17 @@ export const tasksJa = {
   "approvals.notFound": "この承認は見つかりませんでした。決定済みか、期限が切れています。",
   "tasks.approvalNeeded": "{tool} に承認が必要です",
   "tasks.approvalOpen": "確認",
+  "approvals.approveForTask": "このタスクの間は許可",
+  "approvals.forTaskHint":
+    "このタスクが終わるまで、同じツールで同じか狭い対象の操作を聞かずに許可します。タスクの画面から取り消せます。",
+  "approvals.approvedForTask": "このタスクの間は許可しました: {tool}",
+  "tasks.grants.title": "このタスクで許可中",
+  "tasks.grants.hint":
+    "同じツールで同じか狭い対象の操作を、聞かずに許可しています。タスクが終わると自動で解除されます。",
+  "tasks.grants.meta": "{time} から · {count} 回使用",
+  "tasks.grants.revoke": "取り消す",
+  "tasks.grants.revokeLabel": "取り消す: {tool}",
+  "tasks.grants.revoked": "取り消しました: {tool}",
 
   // The task API's errors (apps/backend/paw_backend/api/v1/tasks.py).
   "error.task_not_found": "このタスクは見つかりませんでした。",
@@ -245,6 +256,13 @@ export const tasksJa = {
     "この操作は Passkey での再認証が必要なため、この画面では許可できません。",
   "error.approvals_unavailable":
     "いま承認を受け付けられません。少し待ってからもう一度試してください。",
+  "error.task_grant_not_allowed":
+    "この操作は、このタスクの間の許可にできません。今回だけ許可してください。",
+  "error.task_grant_limit_reached":
+    "このタスクで許可中の操作が多すぎます。不要な許可を取り消してから、もう一度試してください。",
+  "error.task_not_active": "タスクが終わったか、やり直されたため、許可できません。",
+  "error.grant_not_found": "この許可は見つかりませんでした。",
+  "error.grant_not_active": "この許可はすでに取り消されています。",
 } as const;
 
 export const tasksEn: Record<keyof typeof tasksJa, string> = {
@@ -468,6 +486,17 @@ export const tasksEn: Record<keyof typeof tasksJa, string> = {
   "approvals.notFound": "This approval was not found. It was decided or has expired.",
   "tasks.approvalNeeded": "{tool} needs your approval",
   "tasks.approvalOpen": "Review",
+  "approvals.approveForTask": "Allow for this task",
+  "approvals.forTaskHint":
+    "Until this task ends, later calls of the same tool on the same or a narrower target run without asking. You can revoke it on the task screen.",
+  "approvals.approvedForTask": "Allowed for this task: {tool}",
+  "tasks.grants.title": "Allowed for this task",
+  "tasks.grants.hint":
+    "Calls of the same tool on the same or a narrower target run without asking. This ends with the task.",
+  "tasks.grants.meta": "Since {time} · used {count} times",
+  "tasks.grants.revoke": "Revoke",
+  "tasks.grants.revokeLabel": "Revoke: {tool}",
+  "tasks.grants.revoked": "Revoked: {tool}",
 
   "error.task_not_found": "This task was not found.",
   "error.task_conflict": "The task changed. Check its current state and try again.",
@@ -485,4 +514,11 @@ export const tasksEn: Record<keyof typeof tasksJa, string> = {
   "error.strong_approval_unavailable":
     "This operation needs a Passkey re-authentication and cannot be allowed here.",
   "error.approvals_unavailable": "Approvals are not available right now. Try again shortly.",
+  "error.task_grant_not_allowed":
+    "This operation cannot be allowed for the whole task. Allow it once.",
+  "error.task_grant_limit_reached":
+    "Too many operations are allowed for this task. Revoke the ones you no longer need and try again.",
+  "error.task_not_active": "The task ended or was started again, so this cannot be allowed.",
+  "error.grant_not_found": "This grant was not found.",
+  "error.grant_not_active": "This grant was already revoked.",
 };

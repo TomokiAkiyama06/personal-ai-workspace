@@ -13,6 +13,7 @@ import type {
   PullRequestRecord,
   ReviewSummary,
   TaskDetail,
+  TaskGrant,
   TaskList,
   ToolApproval,
 } from "./model";
@@ -38,6 +39,10 @@ export interface TaskSource {
   getApproval(id: string): Promise<ToolApproval>;
   /** Approve or reject one; resolves when the Backend stored the decision. */
   decideApproval(id: string, decision: ApprovalDecision): Promise<void>;
+  /** The person's active 「このタスクの間は許可」 grants of a task (Decision 0085). */
+  listTaskGrants(taskId: string): Promise<readonly TaskGrant[]>;
+  /** Withdraw one: the later calls it covered are asked again. */
+  revokeTaskGrant(id: string): Promise<void>;
 }
 
 const TaskSourceContext = createContext<TaskSource | null>(null);

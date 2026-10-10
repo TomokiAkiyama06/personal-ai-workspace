@@ -391,6 +391,7 @@ describe("apiTaskSource", () => {
             repositories: ["web-app"],
             created_at: "2026-10-01T09:00:00Z",
             expires_at: "2026-10-01T10:00:00Z",
+            task_grant_allowed: true,
           },
         ],
       }),
@@ -407,10 +408,17 @@ describe("apiTaskSource", () => {
         repositories: [],
         created_at: "2026-10-01T09:00:00Z",
         expires_at: "2026-10-01T10:00:00Z",
+        task_grant_allowed: false,
       }),
     });
     const [item] = await apiTaskSource.listApprovals(TASK);
-    expect(item).toMatchObject({ id: "a-1", taskId: TASK, level: "approval", tool: "package.add" });
+    expect(item).toMatchObject({
+      id: "a-1",
+      taskId: TASK,
+      level: "approval",
+      tool: "package.add",
+      taskGrantAllowed: true,
+    });
     expect(String(fetchMock.mock.calls[0]?.[0])).toContain(`/approvals?task_id=${TASK}`);
     await apiTaskSource.decideApproval("a-1", "approve");
     expect(await apiTaskSource.getApproval("a-1")).toMatchObject({ level: "strong_approval" });
@@ -419,6 +427,45 @@ describe("apiTaskSource", () => {
       path: "/approvals/a-1/decision",
       body: { decision: "approve" },
     });
+  });
+
+  it("lists the grants of a task and revokes one", async () => {
+    const { calls } = mockApi({
+      "GET /tasks/t-1/approval-grants": reply(200, {
+        grants: [
+          {
+            id: "g-1",
+            approval_id: "a-1",
+            tool: "package.add",
+            summary: [{ name: "command", kind: "text", value: "uv add x" }],
+            created_at: "2026-10-01T09:00:00Z",
+            uses: 3,
+          },
+        ],
+      }),
+      "POST /approval-grants/g-1/revoke": reply(200, { id: "g-1", outcome: "revoked" }),
+      "POST /approvals/a-2/decision": reply(200, {
+        id: "a-2",
+        outcome: "approved_for_task",
+        grant_id: "g-2",
+      }),
+    });
+    expect(await apiTaskSource.listTaskGrants("t-1")).toEqual([
+      {
+        id: "g-1",
+        approvalId: "a-1",
+        tool: "package.add",
+        summary: [{ name: "command", kind: "text", value: "uv add x" }],
+        createdAt: "2026-10-01T09:00:00Z",
+        uses: 3,
+      },
+    ]);
+    await apiTaskSource.revokeTaskGrant("g-1");
+    await apiTaskSource.decideApproval("a-2", "approve_for_task");
+    expect(calls.slice(1)).toMatchObject([
+      { method: "POST", path: "/approval-grants/g-1/revoke" },
+      { method: "POST", path: "/approvals/a-2/decision", body: { decision: "approve_for_task" } },
+    ]);
   });
 
   it("computes what is left of the budget", () => {
