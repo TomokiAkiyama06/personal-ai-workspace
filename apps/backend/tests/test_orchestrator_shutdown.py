@@ -109,6 +109,27 @@ class ShutdownTest(PostgresOrchestratorTestCase):
         self.assertIn("ConnectionError", "\n".join(logs.output))
         self.assertNotIn("secret detail", "\n".join(logs.output))
 
+    async def test_a_claim_that_lands_after_the_stop_is_given_back(self):
+        # Codex review of #225 (P1): a stop that comes while the claim is in
+        # flight sends the claimed entry back unstarted (Decision 0086, 4).
+        runtime = FakeRuntime("local")
+        h = self.harness(runtimes={"local": runtime})
+        task_id = await self.prepare(h, make_plan(node("a")))
+        stop = asyncio.Event()
+        original = h.queue.claim_next
+
+        async def slow(worker_id, now=None):
+            entry = await original(worker_id, now)
+            stop.set()  # the shutdown began meanwhile
+            return entry
+
+        h.queue.claim_next = slow
+        await asyncio.wait_for(h.orchestrator.serve("w1", stop), 120)
+        self.assertEqual(runtime.assignments, [])
+        (entry,) = await self.rows("SELECT status FROM queue_entries")
+        self.assertEqual(entry["status"], "queued")
+        self.assertEqual((await h.tasks.restore(task_id)).state, TaskState.QUEUED)
+
 
 if __name__ == "__main__":
     unittest.main()

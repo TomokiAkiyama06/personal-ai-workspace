@@ -325,14 +325,15 @@ def create_app(
                     _, ignored = await asyncio.wait(
                         running, timeout=settings.shutdown_timeout_seconds
                     )
-                    for worker in ignored:
-                        worker.add_done_callback(_retrieve)
                     if ignored:
                         logger.warning(
                             "%d orchestrator worker(s) did not stop", len(ignored)
                         )
-                for worker in workers - running:
-                    _retrieve(worker)
+                for worker in workers:
+                    if worker.done():
+                        _retrieve(worker)
+                    else:
+                        worker.add_done_callback(_retrieve)
             health.monitor.stop()
             health.reaper.attach(None)
             if stop_loop is not None:
