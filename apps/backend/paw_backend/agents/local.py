@@ -199,6 +199,10 @@ WORKER_SUBMIT_TOOL = _function(
             "description": "Every file you changed, created or deleted, relative "
             "to /workspace.",
         },
+        # What a later node may use (optional, as the reader's submit).
+        "discovered_facts": {"type": "array", "items": {"type": "string"}},
+        "unresolved_questions": {"type": "array", "items": {"type": "string"}},
+        "confidence": {"type": "number"},
     },
     ["summary", "changed_files"],
 )
@@ -497,10 +501,16 @@ class LocalAgentRuntime:
             attempt.previous_usage, attempt.new_tool_results
         )
         prepared = self._policy.prepare(attempt.messages, prompt_tokens=estimate)
+        # The estimate was of the history before the policy: what it dropped (an
+        # older step's reasoning) is no longer sent, nor reserved.
+        dropped = _reasoning_bytes(attempt.messages) - _reasoning_bytes(prepared)
         attempt.messages = prepared  # what was sent is the history from now on
         attempt.new_tool_results = []
         size = len(json.dumps(prepared, ensure_ascii=False).encode("utf-8"))
-        prompt = estimate if estimate is not None else _tokens(size)
+        if estimate is None:
+            prompt = _tokens(size)
+        else:
+            prompt = max(0, estimate - max(0, dropped) // BYTES_PER_TOKEN_ESTIMATE)
         if prompt > limits.max_prompt_tokens:
             raise RuntimeFailure(Failure.CONTEXT_LIMIT)
         lease = current_lease()
@@ -611,6 +621,10 @@ class LocalAgentRuntime:
             raise _ToolError(
                 NOT_APPROVED.format(approval=decision.approval_id or "pending")
             )
+        if approval is not None:
+            # The approval ended (rejected, revoked, expired): nothing waits.
+            attempt.waiting.pop(approval, None)
+            attempt.approvals.pop(key, None)
         if outcome.status is ExecutionStatus.FAILED:
             if outcome.error_type in ("SandboxUnavailableError", "PermissionError"):
                 raise RuntimeFailure(Failure.SANDBOX_UNAVAILABLE)
@@ -857,6 +871,19 @@ def _with_repository(tool: dict[str, Any]) -> dict[str, Any]:
     }
     parameters["required"] = ["command", "repository"]
     return tool
+
+
+def _reasoning_bytes(messages: Sequence[Mapping[str, Any]]) -> int:
+    """The UTF-8 bytes of the reasoning in ``messages`` (each message counted
+    once, whatever name its reasoning has)."""
+    total = 0
+    for message in messages:
+        for name in REASONING_FIELDS:
+            text = message.get(name)
+            if isinstance(text, str):
+                total += len(text.encode("utf-8"))
+                break
+    return total
 
 
 def _tokens(size_bytes: int) -> int:

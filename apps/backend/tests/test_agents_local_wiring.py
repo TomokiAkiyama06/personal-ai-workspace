@@ -47,7 +47,9 @@ class WiringTest(unittest.TestCase):
             compute=setup,
             local_model=LocalModelSetup(BASE),
             sandbox=SandboxSetup(NullRunner(), shim_base="/run/paw-sandbox"),
-            orchestrator_config=OrchestratorConfig.uniform(("local",)),
+            orchestrator_config=OrchestratorConfig.uniform(
+                ("local",), node_timeout_seconds=2400
+            ),
         )
         execution = app.state.task_execution
         names = execution.broker._registry.names()
@@ -63,6 +65,8 @@ class WiringTest(unittest.TestCase):
         self.assertEqual(hybrid._local_model, "Qwen3.8-27B-FP8")
         self.assertEqual(hybrid._deployment, "main")
         self.assertIs(hybrid._local._policy, MAIN_REASONING_POLICY)
+        # The orchestrator's node timeout is the runtime's outer limit.
+        self.assertEqual(hybrid._local._limits.node_seconds, 2400)
 
     def test_without_a_sandbox_no_repository_tool_and_no_local_agent(self):
         setup, *_ = fake_gpu()

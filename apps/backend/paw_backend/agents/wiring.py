@@ -11,6 +11,7 @@ the older steps' reasoning is dropped by default; ``KeepAllReasoning`` keeps
 it, as the benchmark).
 """
 
+import dataclasses
 from dataclasses import dataclass, field
 
 import httpx
@@ -98,15 +99,22 @@ def build_preference_interpreter(
 
 
 def build_local_agent(
-    setup: LocalModelSetup, client: ChatCompletionsClient
+    setup: LocalModelSetup,
+    client: ChatCompletionsClient,
+    *,
+    node_seconds: float | None = None,
 ) -> LocalRuntime:
     """The local agent runtime on the main model, for ``local_runtimes``: the
     composition wraps it in ``HybridRuntime`` (the lease, its resizing through
     ``compute.current_lease``, GPU time, placement and ``local_usage``)."""
     if not isinstance(setup, LocalModelSetup):
         raise TypeError("local_model must be a LocalModelSetup")
+    limits = setup.limits
+    if node_seconds is not None:
+        # The orchestrator's node timeout is the outer limit (Decision 0083, 8).
+        limits = dataclasses.replace(limits, node_seconds=node_seconds)
     runtime = LocalAgentRuntime(
-        client, reasoning_history=setup.reasoning_history, limits=setup.limits
+        client, reasoning_history=setup.reasoning_history, limits=limits
     )
     return LocalRuntime(
         runtime=runtime,

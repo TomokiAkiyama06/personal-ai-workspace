@@ -332,6 +332,33 @@ class ToolTest(unittest.IsolatedAsyncioTestCase):
             (f"approval needed: repo.shell.run (approval {approval})",),
         )
 
+    async def test_an_approval_that_ended_is_no_longer_listed(self):
+        approval = uuid.uuid4()
+
+        def answer_for(arguments, approval_id):
+            if approval_id is None:
+                return ToolOutcome(
+                    BrokerDecision(
+                        Verdict.NEEDS_APPROVAL,
+                        BrokerReason.APPROVAL_REQUIRED,
+                        uuid.uuid4(),
+                        approval_id=approval,
+                    ),
+                    ExecutionStatus.NOT_EXECUTED,
+                )
+            return ToolOutcome(
+                BrokerDecision(Verdict.DENY, BrokerReason.UNKNOWN_TOOL, uuid.uuid4()),
+                ExecutionStatus.NOT_EXECUTED,
+            )
+
+        bash = {"command": "rm -rf build"}
+        outcome, _, _ = await self.run_calls(
+            call("bash", bash),
+            call("bash", bash),
+            tools=Tools(**{"repo.shell.run": answer_for}),
+        )
+        self.assertEqual(outcome.result.unresolved_questions, ())
+
     async def test_a_refusal_is_told_to_the_model(self):
         def refused(arguments, approval_id):
             return ToolOutcome(
@@ -460,6 +487,43 @@ class AccountingTest(unittest.IsolatedAsyncioTestCase):
         sent = server.bodies[1]["messages"]
         self.assertFalse(any("reasoning_content" in m for m in sent))
 
+    async def test_the_reservation_leaves_out_the_dropped_reasoning(self):
+        # Codex review of #224 (P1): the estimate is of the history before the
+        # policy; the reasoning it dropped is neither sent nor reserved.
+        class DropAll:
+            def prepare(self, messages, *, prompt_tokens=None):
+                kept = [dict(m) for m in messages]
+                if prompt_tokens is not None:
+                    for message in kept:
+                        message.pop("reasoning_content", None)
+                        message.pop("reasoning", None)
+                return kept
+
+        class Lease:
+            sizes = []
+
+            def resize(self, tokens):
+                self.sizes.append(tokens)
+
+        lease = Lease()
+        reasoning = "r" * 30_000
+        tools = Tools(**{"repo.git.changes": changes()})
+        server = Server(
+            answer(
+                call("bash", {"command": "ls"}), reasoning=reasoning, usage=(2000, 100)
+            ),
+            answer(submit()),
+        )
+        token = _LOCAL_LEASE.set(lease)
+        try:
+            await runtime(server, reasoning_history=DropAll()).run_node(
+                assignment(tools)
+            )
+        finally:
+            _LOCAL_LEASE.reset(token)
+        without = 2000 + 100 + len(b"exit code: 0\n") // 3 - 30_000 // 3
+        self.assertEqual(lease.sizes[1], max(0, without) + 16_384)
+
     async def test_the_lease_is_resized_before_every_request(self):
         class Lease:
             def __init__(self, refuse=False):
@@ -520,6 +584,30 @@ class SubmitTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result.test_result)
         commit_call = [c for c in tools.calls if c[0] == "repo.git.commit"][0]
         self.assertEqual(commit_call[1]["workdir"], WORKTREE)
+
+    async def test_a_worker_reports_its_findings_too(self):
+        tools = Tools(**{"repo.git.changes": changes()})
+        found = call(
+            "submit",
+            {
+                "summary": "s",
+                "changed_files": [],
+                "discovered_facts": ["the parser is in src/p.py"],
+                "unresolved_questions": ["is the API stable?"],
+                "confidence": 0.8,
+            },
+        )
+        server = Server(answer(found))
+        outcome = await runtime(server).run_node(assignment(tools))
+        properties = server.bodies[0]["tools"][3]["function"]["parameters"][
+            "properties"
+        ]
+        self.assertIn("discovered_facts", properties)
+        self.assertEqual(
+            outcome.result.discovered_facts, ("the parser is in src/p.py",)
+        )
+        self.assertEqual(outcome.result.unresolved_questions, ("is the API stable?",))
+        self.assertEqual(outcome.result.confidence, 0.8)
 
     async def test_nothing_to_commit_and_nothing_changed(self):
         tools = Tools(**{"repo.git.changes": changes()})

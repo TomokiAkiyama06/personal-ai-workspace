@@ -151,7 +151,9 @@ def create_app(
             local_runtimes = {
                 **dict(local_runtimes or {}),
                 local_model.agent_label: build_local_agent(
-                    local_model, local_model_client
+                    local_model,
+                    local_model_client,
+                    node_seconds=orchestrator_config.node_timeout_seconds,
                 ),
             }
 
