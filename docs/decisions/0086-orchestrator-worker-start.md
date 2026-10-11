@@ -1,4 +1,4 @@
-# Orchestrator の Worker（Queue を Claim して Task を動かす `Orchestrator.serve`）を Application の起動で動かす方針（起動する条件、数、Worker の ID、終了時）
+# Orchestrator の Worker（Queue を Claim して Task を動かす `Orchestrator.serve`）を Application の起動で動かす方針（起動する条件、数、Worker の ID、終了時の取り消し）
 
 - Status: Proposed
 - Date: 2026-10-11
@@ -30,17 +30,19 @@
 - `check_worker_id` の文字（`[A-Za-z0-9._:@/-]`、100 文字まで）に合わない Host 名の文字は `-` に置き換え、長すぎれば切る。Queue の Lease は Worker の ID と Claim の世代で Fencing されるので、同じ ID の再起動も別の Claim として扱われる（Decision 0046）。
 - 代替: 起動ごとの UUID（Log から Host と Process が分からない）。
 
-### 4. 終了時は `stop` を立て、Shutdown の Timeout まで待ってから取り消す
+### 4. 終了時は Worker を最初に取り消す（取り消しの後の待ちは Shutdown の Timeout まで）
 
-- Lifespan の終了で `stop` を立てる。動いている Task は今の Node の試行が終わるまで続き、その後 Worker は返る。`settings.shutdown_timeout_seconds` を過ぎたら取り消す（`serve` は持っている Entry を返し、走っていた Node を `ready` に戻す。次の起動か他の Process の Worker が続ける）。
-- 理由: 取り消しは安全（Fencing と Entry の返却がある）だが、Node の試行（最大 30 分）の途中の作業は捨てられるので、まず止まる機会を与える。
+- Lifespan の終了の最初に Worker を取り消す。`serve` は持っている Entry を Queue に返し、走っていた Node を `ready` に戻す（PAW-034 の取り消し。Lease の Fencing もある）。次の起動か他の Process の Worker が続ける。Claim の途中で止まった Worker は、取れた Entry を始めずに返す。
+- 取り消しの後の待ちは `settings.shutdown_timeout_seconds` まで。取り消しを無視する Worker（取り消しを握りつぶす Runtime、止まった Database）は Log を出して諦める（Database の後始末を止めない）。
+- 理由: Node の試行は最大 30 分で、Shutdown の Timeout（既定 5 秒）の間に終わることはまずない。待つ間に Worker が次の Node や Entry を始めると、その作業も結局捨てられる。取り消しは安全に作られている（上の返却と Fencing）。
+- 代替: 止まる合図を出して今の Node の試行の終わりまで待つ（待つ間に下流の Node が始まらないよう、Orchestrator の DAG の進行にも合図を通す必要がある。終わらなければ結局取り消す）。
 
 ## 決めてほしいこと
 
 1. **Orchestrator が組み立てられたときだけ Lifespan が `orchestrator.serve` を動かす（Decision 0047 の 5 の「起動しない」をこの条件で置き換える）**（1）でよいか。推奨: はい。
 2. **Worker の数は `PAW_ORCHESTRATOR_WORKERS`（既定 1、0 で止める、最大 8）**（2）でよいか。推奨: はい。
 3. **Worker の ID は `<host>:<pid>:<n>`**（3）でよいか。推奨: はい。
-4. **終了時は `stop` を立てて Shutdown の Timeout まで待ち、その後取り消す**（4）でよいか。推奨: はい。
+4. **終了時は Worker を最初に取り消し（Entry は返り、Node は `ready` に戻る。Claim の途中なら始めずに返す）、取り消しの後の待ちは Shutdown の Timeout まで**（4）でよいか。推奨: はい。
 
 ## 承認後の扱い
 

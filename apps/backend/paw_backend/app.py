@@ -271,8 +271,7 @@ def create_app(
                 )
                 background.add(asyncio.create_task(maintenance.run()))
             # The orchestrator's workers (Decision 0086, Proposed): only when an
-            # orchestrator was composed; stopped through ``compute_stop`` first,
-            # cancelled after the shutdown timeout below.
+            # orchestrator was composed; cancelled first at shutdown.
             orchestrator = (
                 None if task_execution is None else task_execution.orchestrator
             )
@@ -287,6 +286,27 @@ def create_app(
             yield
         finally:
             workers_stop.set()
+            if workers:
+                # The workers are cancelled first (Decision 0086, 4): each gives
+                # its entry back and its running nodes become ready again, for
+                # the next process (a node attempt can take far longer than the
+                # shutdown timeout, and no new node or entry is started while
+                # the rest of the shutdown runs). The wait is bounded: a worker
+                # that ignores its cancellation is given up on.
+                for worker in workers:
+                    worker.cancel()
+                _, ignored = await asyncio.wait(
+                    workers, timeout=settings.shutdown_timeout_seconds
+                )
+                if ignored:
+                    logger.warning(
+                        "%d orchestrator worker(s) did not stop", len(ignored)
+                    )
+                for worker in workers:
+                    if worker.done():
+                        _retrieve(worker)
+                    else:
+                        worker.add_done_callback(_retrieve)
             if compute_services is not None and compute_services.full_gpu is not None:
                 # A start in progress is abandoned: the scheduler goes back to
                 # normal, the models it unloaded are loaded again and the held
@@ -310,30 +330,6 @@ def create_app(
                 compute_services.full_gpu = None
                 health.compute.attach(compute_services.scheduler)
             compute_stop.set()
-            if workers:
-                # Each worker ends after its current node attempt; past the
-                # shutdown timeout it is cancelled (it gives its entry back and
-                # its running nodes become ready again: Decision 0086, 4).
-                _, running = await asyncio.wait(
-                    workers, timeout=settings.shutdown_timeout_seconds
-                )
-                for worker in running:
-                    worker.cancel()
-                if running:
-                    # Bounded too: a worker that ignores its cancellation (or
-                    # waits on a stalled database) is given up on.
-                    _, ignored = await asyncio.wait(
-                        running, timeout=settings.shutdown_timeout_seconds
-                    )
-                    if ignored:
-                        logger.warning(
-                            "%d orchestrator worker(s) did not stop", len(ignored)
-                        )
-                for worker in workers:
-                    if worker.done():
-                        _retrieve(worker)
-                    else:
-                        worker.add_done_callback(_retrieve)
             health.monitor.stop()
             health.reaper.attach(None)
             if stop_loop is not None:

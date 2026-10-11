@@ -70,7 +70,8 @@ class LifespanTest(unittest.IsolatedAsyncioTestCase):
         async with app.router.lifespan_context(app):
             await asyncio.sleep(0.05)
             self.assertEqual(served, worker_ids(2))
-        self.assertEqual(served[2:], [f"stopped {w}" for w in worker_ids(2)])
+        # Cancelled at shutdown (Decision 0086, 4): not run to their end.
+        self.assertEqual(served, worker_ids(2))
 
     async def test_none_without_an_orchestrator_or_when_turned_off(self):
         served = self.record()
@@ -79,11 +80,13 @@ class LifespanTest(unittest.IsolatedAsyncioTestCase):
                 await asyncio.sleep(0.05)
         self.assertEqual(served, [])
 
-    async def test_a_worker_that_does_not_stop_is_cancelled(self):
+    async def test_a_busy_worker_is_cancelled_at_once(self):
         served = self.record(stubborn=True)
-        app = self.app(shutdown_timeout_seconds=1)
+        app = self.app(shutdown_timeout_seconds=30)
+        started = asyncio.get_running_loop().time()
         async with app.router.lifespan_context(app):
             await asyncio.sleep(0.05)
+        self.assertLess(asyncio.get_running_loop().time() - started, 10)
         self.assertEqual(served, worker_ids(1))
 
     async def test_a_worker_that_ignores_its_cancellation_is_given_up(self):
