@@ -524,6 +524,20 @@ class AccountingTest(unittest.IsolatedAsyncioTestCase):
         without = 2000 + 100 + len(b"exit code: 0\n") // 3 - 30_000 // 3
         self.assertEqual(lease.sizes[1], max(0, without) + 16_384)
 
+    async def test_a_nudge_counts_in_the_next_estimate(self):
+        # Codex review of #224 (P2): the nudge is part of the next prompt.
+        seen = []
+
+        class Recording:
+            def prepare(self, messages, *, prompt_tokens=None):
+                seen.append(prompt_tokens)
+                return [dict(m) for m in messages]
+
+        tools = Tools(**{"repo.git.changes": changes()})
+        server = Server(answer(usage=(1000, 50)), answer(submit()))
+        await runtime(server, reasoning_history=Recording()).run_node(assignment(tools))
+        self.assertEqual(seen[1], 1000 + 50 + len(NUDGE.encode()) // 3)
+
     async def test_the_lease_is_resized_before_every_request(self):
         class Lease:
             def __init__(self, refuse=False):
@@ -616,6 +630,24 @@ class SubmitTest(unittest.IsolatedAsyncioTestCase):
         outcome = await runtime(server).run_node(assignment(tools))
         self.assertEqual(outcome.error_class, "InvalidNodeResultError")
         self.assertIn("201 files changed", server.bodies[1]["messages"][-1]["content"])
+        self.assertFalse(any(c[0] == "repo.git.commit" for c in tools.calls))
+
+    async def test_an_unacceptable_result_is_corrected_before_any_commit(self):
+        # Codex review of #224 (P2): the whole NodeResult is checked first.
+        long_path = "d/" * 300 + "f.py"
+        tools = Tools(
+            **{
+                "repo.git.changes": changes(
+                    changed=(long_path,), uncommitted=(long_path,)
+                )
+            }
+        )
+        server = Server(*[answer(submit(changed=[long_path])) for _ in range(4)])
+        outcome = await runtime(server).run_node(assignment(tools))
+        self.assertEqual(outcome.error_class, "InvalidNodeResultError")
+        self.assertIn(
+            "the result is not acceptable", server.bodies[1]["messages"][-1]["content"]
+        )
         self.assertFalse(any(c[0] == "repo.git.commit" for c in tools.calls))
 
     async def test_nothing_to_commit_and_nothing_changed(self):
