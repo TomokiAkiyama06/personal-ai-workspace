@@ -1,6 +1,6 @@
 # SSH の Forced Command の Wrapper（`paw-git-wrapper`）の配備
 
-更新日: 2026-09-28
+更新日: 2026-10-11
 
 Issue [#134](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/134)。
 [Decision 0029](../../../../docs/decisions/0029-per-user-git-runner-ssh.md)（Approved）の SSH の Wrapper と、
@@ -53,7 +53,7 @@ Wrapper は Client（Backend）を信用しない。`$SSH_ORIGINAL_COMMAND` を 
 
 | 副コマンド | 受け付ける形（これ以外は拒否） |
 | --- | --- |
-| `rev-parse` | `--is-bare-repository`／`--show-toplevel --absolute-git-dir`／`--show-toplevel`／`--path-format=absolute --git-dir`／`--path-format=absolute --git-common-dir`／`--verify --quiet <rev>^{commit}`（`<rev>` は `HEAD`・`MERGE_HEAD`・`refs/heads/<branch>`・`refs/remotes/origin/<branch>`） |
+| `rev-parse` | `--is-bare-repository`／`--show-toplevel --absolute-git-dir`／`--show-toplevel`／`--path-format=absolute --git-dir`／`--path-format=absolute --git-common-dir`／`--verify --quiet <rev>^{commit}`（`<rev>` は `HEAD`・`MERGE_HEAD`・`refs/heads/<branch>`・`refs/remotes/origin/<branch>`、Decision 0083 の 2 で足した `HEAD~<n>`・Object ID・`refs/paw/base/paw/<...>`） |
 | `symbolic-ref` | `--quiet --short HEAD`／`--quiet --short refs/remotes/origin/HEAD`／`--quiet HEAD` |
 | `config` | `--local --get remote.origin.url` だけ（書き込み・`--global` は拒否） |
 | `clone` | `--quiet [-c credential.helper=!<--gh> auth git-credential] [--branch <b>] -- <https URL> <Root の中・.paw-worktrees の外の Path>` |
@@ -62,10 +62,42 @@ Wrapper は Client（Backend）を信用しない。`$SSH_ORIGINAL_COMMAND` を 
 | `worktree` | `add --quiet -b paw/<...> -- <.paw-worktrees の中の Path> <commit id>`／`add --quiet -- <.paw-worktrees の中の Path> paw/<...>`／`list --porcelain -z`／`prune` |
 | `merge` | `--no-ff --no-edit --quiet -m "Integrate paw/<b>" refs/heads/paw/<b>`／`--abort` |
 | `merge-tree` | `--write-tree --name-only -z --no-messages refs/heads/paw/<a> refs/heads/paw/<b>` |
-| `merge-base` | `--is-ancestor refs/heads/paw/<a> refs/heads/paw/<b>` |
+| `merge-base` | `--is-ancestor refs/heads/paw/<a> refs/heads/paw/<b>`／`--is-ancestor <object id> <object id>`（Decision 0083 の 2。pin してもよい） |
 | `submodule` | `status --cached` だけ（Decision 0051（PR #130）による。pin したときだけ。下の 10。`foreach`・`update`・`init` など他の副コマンド・Option はすべて拒否） |
 | `push` | `--quiet --no-follow-tags --no-recurse-submodules --no-signed -- https://<--push-host の Host>/<owner>/<repo>.git <commit id>:refs/heads/paw/<b>` だけ（3 つの `--no-` は必須で、Repository の `push.followTags`（Annotated Tag も Push される）、`push.recurseSubmodules`（Submodule の Commit を別の Remote へ Push する）と `push.gpgSign`（鍵がない・署名つきの Push を受け付けない Remote では Push が失敗する。#90）を打ち消す。[Decision 0052](../../../../docs/decisions/0052-integration-push-and-pull-request.md)・[Decision 0062](../../../../docs/decisions/0062-integration-push-fixed-form-no-options.md)（Proposed。形の 3 つの `--no-`）、#132。`--gh` と `--push-host` を設定したときだけ。先頭の `-c` は `credential.helper=` と `credential.helper=!<--gh> auth git-credential` だけ受け付け、Wrapper 自身が同じ 2 つを付ける。`+`（Force）・`--force`・`--mirror`・`--delete`・Tag・`paw/` 以外の宛先・2 つ以上の Refspec・Remote 名は拒否。pin しない。下の 9 の設定の確認を行い、`url.<base>.insteadOf` / `pushInsteadOf`・`http.*` も拒否） |
-| `status` | `--porcelain=v1 -z --untracked-files=all`／`--porcelain=v1 -z --untracked-files=normal --ignored=traditional --ignore-submodules=none`（Decision 0051（PR #130）による。`--git-dir=` / `--work-tree=` で pin したときだけ。下の 10） |
+| `status` | `--porcelain=v1 -z --untracked-files=all`／`--porcelain=v1 -z --untracked-files=normal --ignored=traditional --ignore-submodules=none`（Decision 0051（PR #130）による。`--git-dir=` / `--work-tree=` で pin したときだけ。下の 10）／下の「Sandbox の git の Shim の読み取り」の形 |
+| `diff`・`log`・`show` | 下の「Sandbox の git の Shim の読み取り」の形だけ（Decision 0083 の 2） |
+| `cat-file` | `-t <object id>` だけ（Decision 0083 の 2。Shim が受けた ID が Commit かを確かめる） |
+
+### Sandbox の git の Shim の読み取り（Decision 0083 の 2）
+
+Sandbox の中の `git`（[`../sandbox/paw_git_shim.py`](../sandbox/paw_git_shim.py)）は git を動かさず Backend に頼み、Backend（`paw_backend/sandbox/gitread.py`）が次の形で Host の git を動かす。Wrapper は形をもう一度確かめる（`check_read`。Option の一覧は Backend の `paw_backend/sandbox/gitargs.py` と同じで、Test が一致を確かめる）。
+
+```text
+<sub-command> <固定> [Option] [Revision] -- <Pathspec>...
+```
+
+- 固定: `diff` は `--no-color --no-ext-diff --no-textconv`、`log`・`show` はさらに `--no-decorate`、`status` はなし。
+- Option: Sub-command ごとの固定の一覧（`READ_OPTIONS`）と `--max-count=<n>`・`--skip=<n>`（`log`）・`--unified=<n>`・`--format=<oneline|short|medium|full|fuller|reference>`（`log`・`show`）だけ。`--no-index`・`--output`・`--ext-diff`・任意の Format などは拒否。
+- Revision: Object ID だけ（`log` は `^<id>` も）。Backend が `HEAD~<n>` などを Commit に解決し、Node の範囲（起点から `HEAD`）を確かめてから送る。`status` には付けられない。
+- Pathspec: `.`・`:(literal)<相対 Path>`・`:(exclude,literal)<相対 Path>` だけ（相対 Path は `/` で始まらず、`..`・`.`・空の段を含まない）。肯定の Pathspec が 1 つ以上要る。
+- **pin していない読み取り**（worktree のない Node が Checkout を読む）は今の状態だけ: `show` と Revision は拒否、`log` の Option は `--oneline`・`--stat`・`--name-only`・`--max-count=<n>` だけ（古い履歴から除外の File の内容を出さない）。
+- 9 の設定の確認（Command を名指す設定の拒否）、8 の場所の確認は他の副コマンドと同じく行う。
+
+### Sandbox（`paw-sandbox/v1`、Decision 0083 の 6）
+
+先頭の語が `paw-sandbox/v1` の呼び出しは git ではなく、Tool の Sandbox（Rootless の Podman の Container）の起動・実行・停止だけを受け付ける。配備と Mount・Mask の規則は [`../sandbox/README.md`](../sandbox/README.md)。
+
+```text
+paw-sandbox/v1 start <sandbox id> <spec JSON>
+paw-sandbox/v1 exec  <sandbox id> <nonce> <workdir> shell|file-write|file-str-replace [<file>]   （Command・入力は stdin）
+paw-sandbox/v1 stop  <sandbox id>
+```
+
+- `--sandbox-image=`（Digest）がなければすべて `sandbox_not_configured` で拒否する。Image・Podman の Option（`--network none`・`--userns keep-id`・`--user <その Account の uid>:<gid>`・`--cap-drop all`・`--security-opt no-new-privileges`・CPU / Memory / PID の上限・寿命）・実行する Program（`timeout -k 5 <秒> bash -lc` か File の Helper）は Wrapper が決め、Client は選べない。
+- `start` は Mount の Path を全部確かめる（Root の中・Link なし・書き込みは `.paw-worktrees` の worktree だけ・Mask の種類）。`exec` は Container が動いていなければ `missing` の状態行を返す。`stop` は `podman rm --force --time 5 --ignore`。
+- `exec` の出力の最後の行は Wrapper の状態行（`paw-sandbox-status <nonce> exit=<n> truncated=<0|1>`）。Nonce は Backend が呼び出しごとに決め、Container の中には渡らないので、Command は偽れない。
+- Podman の環境は固定（`PATH`・`HOME`・`LC_ALL`・`LANG`・`XDG_RUNTIME_DIR`）。Log は操作の名前と User だけ。
 
 上の形以外の `push`、`fetch`・`pull`・`checkout`・`switch`・`reset`・`rebase`・`commit`・`branch`・`gc`・`submodule` など、表にないものはすべて拒否する。
 
@@ -88,7 +120,9 @@ paw-git-wrapper[1235]: rejected user=alice reason=config_not_allowed
 
 書くのは、受け付けたか・固定の理由コード・許可リストにある副コマンド名・Linux User 名だけ。**引数・Path・URL・`-c` の値・git の出力は書かない**（URL や設定値は Credential を含み得る）。stderr にも `paw-git-wrapper: rejected (<理由コード>)` しか出さない（`SshGitRunner` は stderr を読まずに捨てる）。
 
-理由コード: `no_command`・`too_long`・`bad_encoding`・`bad_protocol`・`root_unavailable`・`bad_worktrees`・`bad_path`・`path_unresolvable`・`path_outside_root`・`path_outside_worktrees`・`path_in_worktrees`・`bad_ceiling`・`bad_option`・`no_subcommand`・`subcommand_not_allowed`・`config_not_allowed`・`bad_git_dir`・`bad_work_tree`・`unpinned_worktree`・`bad_arguments`・`populated_submodule`・`git_dir_outside_root`・`git_dir_link`・`git_dir_alternates`・`init_existing`・`probe_failed`・`config_unsafe`・`config_unreadable`・`misconfigured`。
+Sandbox（`paw-sandbox/v1`）の Log は `accepted user=alice sandbox=start`・`accepted user=alice sandbox=exec kind=shell` の形で、Path・Command・Spec・出力を書かない。
+
+理由コード: `no_command`・`too_long`・`bad_encoding`・`bad_protocol`・`root_unavailable`・`bad_worktrees`・`bad_path`・`path_unresolvable`・`path_outside_root`・`path_outside_worktrees`・`path_in_worktrees`・`bad_ceiling`・`bad_option`・`no_subcommand`・`subcommand_not_allowed`・`config_not_allowed`・`bad_git_dir`・`bad_work_tree`・`unpinned_worktree`・`bad_arguments`・`populated_submodule`・`git_dir_outside_root`・`git_dir_link`・`git_dir_alternates`・`init_existing`・`probe_failed`・`config_unsafe`・`config_unreadable`・`misconfigured`、Sandbox の `sandbox_not_configured`・`bad_sandbox_id`・`bad_spec`・`bad_mask`・`mask_unavailable`・`path_is_link`・`not_a_worktree`・`bad_shim`。
 
 ## 既知の限界
 
@@ -157,6 +191,7 @@ restrict,command="/usr/local/lib/paw/paw-git-wrapper",from="127.0.0.1",no-pty,no
   - `--root=/home/alice/<workspace_subdir>`: Backend の `workspace_subdir` が `workspaces` 以外のとき。Backend が送る Path と同じ綴り（Account Database の Home から作った Path）にする。
   - `--gh=/usr/bin/gh`: PAW-028 の `gh` の Credential Helper を `clone` と `push`（Decision 0052）に使うとき。`credential.helper=!/usr/bin/gh auth git-credential` という値そのものだけを受け付ける（Backend の `GitClient(gh_executable=...)` と同じ Path にする）。無ければ Credential Helper はすべて拒否する。
   - `--push-host=github.com`: `push`（Decision 0052）の宛先として許す Host（繰り返して複数）。無ければ `push` はすべて拒否する（`push_host_not_allowed`）。Client（Backend）が送る宛先は信用しない: 乗っ取られた Backend が Root の中のどの Repository の Commit でも好きな Server へ送れないようにするため。
+  - Sandbox（Decision 0083 の 6）の `--sandbox-image=`・`--sandbox-shim-base=`・`--podman=`・`--sandbox-cpus=`・`--sandbox-memory=`・`--sandbox-pids=`・`--sandbox-lifetime=`・`--sandbox-command-timeout=`・`--sandbox-keep-groups=`。[`../sandbox/README.md`](../sandbox/README.md) の表。
   - `--git=/usr/bin/git`（既定）、`--allow-protocol=https`（既定。足すと `protocol.<名前>.allow=always` を受け付ける）、`--config=key=value`（配備が固定する追加の設定）、`--home=`、`--path=`（git の `PATH`。既定 `/usr/local/bin:/usr/bin:/bin`）。
   - Option の綴りの誤りは、すべての呼び出しを `misconfigured` で拒否する（黙って緩い既定に戻らない）。
 

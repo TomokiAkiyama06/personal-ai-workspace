@@ -1,0 +1,27 @@
+# The tool sandbox image of Decision 0083 §6 (Issue #208).
+#
+# Built FROM the benchmark's sandbox image (the image the Main model's numbers of
+# Decision 0074 were measured with: Python 3.13, bash, coreutils' `timeout`), so
+# that the model's `bash` finds the same tools. Two things are added:
+#
+#   /usr/local/bin/git                  the git shim (no git runs in the sandbox)
+#   /usr/local/lib/paw/paw-file-tool    the helper of the file tools
+#
+# Any real git of the base image is removed: the shim is the only `git`. The
+# image's USER does not matter: the wrapper runs the container and every
+# command as the workspace account's own uid / gid (`--user`, `--userns keep-id`).
+# Build (as the account that runs the sandboxes, or load the image into each
+# account's rootless storage), then pin it by digest on the wrapper's
+# `command=` line (`--sandbox-image=<name>@sha256:<digest>`; a tag is refused):
+#
+#   podman build --build-arg BASE_IMAGE=<benchmark image> \
+#     -t paw-sandbox:<date> -f Containerfile .
+#   podman image inspect --format '{{.Digest}}' paw-sandbox:<date>
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+USER root
+RUN rm -f /usr/bin/git /usr/local/bin/git \
+    && mkdir -p /usr/local/lib/paw \
+    && command -v python3 && command -v bash && command -v timeout
+COPY --chmod=0755 paw_git_shim.py /usr/local/bin/git
+COPY --chmod=0755 paw_file_tool.py /usr/local/lib/paw/paw-file-tool

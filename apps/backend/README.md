@@ -4179,7 +4179,7 @@ Test: `test_orchestrator_authority.py`（本番の `TaskAuthority`。最後の T
 
 ## Agent Runtime の共有部品（Issue #208、Decision 0083、Approved）
 
-`paw_backend/agents/` は Orchestrator の実 Runtime（Local の Main Model の Tool loop、Codex / Claude Code の CLI）とその共有部品の Package です。Decision 0083 の 11 の段階ごとに入り、いまは段階 1（共有部品）だけです。Tool・Sandbox・CLI はまだ何も動かしません。
+`paw_backend/agents/` は Orchestrator の実 Runtime（Local の Main Model の Tool loop、Codex / Claude Code の CLI）とその共有部品の Package です。Decision 0083 の 11 の段階ごとに入り、いまは段階 1（共有部品）と段階 2（[Tool Broker のファイル・Shell・Git の Tool と Sandbox](#tool-broker-のファイルshellgit-の-tool-と-sandboxissue-208decision-0083-の段階-2)、`paw_backend/sandbox/`）です。Runtime と CLI はまだ何も動かしません。
 
 | File | 内容 |
 | --- | --- |
@@ -4191,6 +4191,25 @@ Test: `test_orchestrator_authority.py`（本番の `TaskAuthority`。最後の T
 `NodeOutcome.failed(..., escalate=True)` と `_retry_step` の扱いは [Node ごとの Retry / Escalate](#node-ごとの-retry--escalate) の表のとおりです（Decision 0007 / 0021 の一部 Supersede）。
 
 Test は `tests/test_agents_failures.py`（表の各行と不変条件）、`test_agents_reasoning.py`、`test_agents_chat.py`（Fake の Server: `httpx.MockTransport`）、`test_agents_preferences.py`（Fake の Server と `compute_support` の Fake の GPU。実 PostgreSQL の Service の Test は `PAW_TEST_DATABASE_URL` がないと Skip）、`test_orchestrator_escalate.py`（実 PostgreSQL）です。GPU・Network・本物の CLI は使いません。
+
+## Tool Broker のファイル・Shell・Git の Tool と Sandbox（Issue #208、Decision 0083 の段階 2）
+
+`paw_backend/sandbox/` は、Local の Model の Tool loop（段階 3 の `LocalAgentRuntime`）が Benchmark の `bash`・`str_replace`・`write_file` を Tool Broker を通して動かすための Tool と、その実行先の Sandbox です（Decision 0083 の 2・6・8、Approved）。**まだ本番の組み立てには配線していません**（Runtime と一緒に段階 3 で `ToolRunner(execution_timeout=300)` に `ToolExecutors({...WorkingSetExecutor..., ...RepoToolExecutor...})` を渡します）。配備と Server の確認は [`deploy/sandbox/README.md`](deploy/sandbox/README.md)。
+
+| Tool | Class | PAW-025 の Capability | 範囲内の Level | 引数 |
+| --- | --- | --- | --- | --- |
+| `repo.file.write` | `write` | `project.repo.write` | `SCOPED_AUTO` | `path`（必須）・`content` |
+| `repo.file.str_replace` | `write` | `project.repo.write` | `SCOPED_AUTO` | `path`・`old_str`・`new_str`（1 回だけ現れるときだけ置き換える） |
+| `repo.shell.run` | `execute` | `project.repo.write` | `SCOPED_AUTO` | `workdir`（必須）・`command` |
+| `repo.shell.read` | `execute` | `project.read` | `SCOPED_AUTO` | `workdir`・`command`（書けない Node の `bash`。読み取り専用の Sandbox） |
+| `repo.git.read` | `read` | `project.read` | `AUTO` | `workdir`・`arguments`（Sandbox の `git` の Shim が呼ぶ。Model に Tool として見せない） |
+
+- どれも触れる Path を必須の引数にするので、Broker はその Repository の ACL・Working Set の Role（`referenced` には書かず、実行もしない）・Scope の除外（`.git`・利用者の Checkout・他の worktree）で判定します。Executor は判定済みの Path の Symbolic Link が Repository の外へ出ないことをもう一度確かめます。
+- **Sandbox**（`plan.py`・`pool.py`）: 呼び出しの Path を含む 1 つの Repository だけを Mount します。読み書きは書き込む Node 自身の worktree だけ（pin した git directory で確かめる。`.git` の File は読み取り専用で重ね直す）、それ以外は読み取り専用で Checkout の `.git` と git directory を Mask。どちらも Scope の除外の Path・`NodeWorktree.protected`・入れ子の他の Repository を空の tmpfs / File で Mask します（置けなければ起動せず `SandboxUnavailableError`、`PermissionError` の `sandbox_unavailable`）。Container は Task の作成者の Linux Account の Rootless の Podman で、`--network none`・CPU / Memory / PID の上限・認証情報なし。経路は Decision 0029 の SSH の Wrapper を広げた `paw-sandbox/v1`（`SshSandboxRunner`。単一 User の配備は `LocalWrapperSandboxRunner`。Backend の User は Podman・Docker を直接動かしません）。Node の試行と Repository ごとに 1 つ（並列の Node どうしも共有しない）を使い回し、Command の Timeout・取り消し・Node の終わり（`release`）・Idle（`reap_idle`）で止めます（SIGTERM、5 秒で SIGKILL。取り消しは止め終わってから上げる）。
+- **Sandbox の `git`**（`gitargs.py`・`gitread.py`・`shim.py`）: Sandbox の中の `git` は Shim で、引数を Sandbox ごとの Unix Socket（Token つき）で Backend に送り、Backend はそれを `repo.git.read` として **Tool Broker に通して** から、Host で `--git-dir` を固定した読み取りの git（`GitRunner`）を動かします。`status`・`diff`・`log`・`show` と決まった Option だけ、Revision は Node の起点（`refs/paw/base/<branch>`。段階 3 で作る。それまでは今の状態だけ）から `HEAD` までの Commit だけ（Tree・Blob・Tag の ID は拒否）、Pathspec は Backend が `:(literal)` で作り、除外の Path を `:(exclude,literal)` で常に外します。拒否は `git: <理由> (<code>)`・終了コード 128。
+- 結果は JSON（`{"exit_code", "output", "truncated"}`、File の Tool は `{"ok": true}` か `{"error": "occurrences", "count": n}` など）で、`ToolRunner` が Redact します。Log には Path・Command・出力を書きません。
+
+Test は `tests/test_sandbox_gitargs.py`（Shim の語の許可リスト）、`test_sandbox_gitread.py`（本物の git と `GitWorktreeCoordinator` の worktree で、範囲・Object の種類・除外の Path）、`test_sandbox_plan.py`、`test_sandbox_pool.py`、`test_sandbox_runner.py`、`test_sandbox_shim.py`（本物の Shim の Program と File の Helper）、`test_sandbox_tools.py`（本物の Tool Broker を通る `bash` の中の `git` まで）、`test_ssh_git_wrapper_sandbox.py`（本物の Wrapper・Fake の `ssh`・Fake の `podman`）。Container・Podman・他の Linux User は使いません。
 
 ## Parallel Worktree / Integration Node
 
