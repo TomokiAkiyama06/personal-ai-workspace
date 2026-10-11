@@ -23,11 +23,12 @@ It is stopped:
 """
 
 import asyncio
+import contextlib
 import logging
 import os
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 
 from paw_backend.repositories.paths import LinuxAccount
@@ -108,17 +109,29 @@ class SandboxPool:
         self._idle = float(idle_seconds)
         self._clock = clock
         self._sandboxes: dict[SandboxKey, _Sandbox] = {}
-        self._locks: dict[SandboxKey, asyncio.Lock] = {}
+        # The lock of each key and how many hold or wait for it.
+        self._locks: dict[SandboxKey, list] = {}
 
     @property
     def shims(self) -> bool:
         return self._shim_base is not None
 
-    def _lock(self, key: SandboxKey) -> asyncio.Lock:
-        lock = self._locks.get(key)
-        if lock is None:
-            lock = self._locks[key] = asyncio.Lock()
-        return lock
+    @contextlib.asynccontextmanager
+    async def _holding(self, key: SandboxKey) -> AsyncIterator[None]:
+        """Hold the lock of ``key``. A lock is forgotten once nobody holds or
+        waits for it and its sandbox is gone (each node attempt has keys of its
+        own: kept, they would pile up for as long as the process runs)."""
+        entry = self._locks.get(key)
+        if entry is None:
+            entry = self._locks[key] = [asyncio.Lock(), 0]
+        entry[1] += 1
+        try:
+            async with entry[0]:
+                yield
+        finally:
+            entry[1] -= 1
+            if entry[1] == 0 and key not in self._sandboxes:
+                self._locks.pop(key, None)
 
     async def run(
         self,
@@ -132,7 +145,7 @@ class SandboxPool:
         """Run ``command`` in the sandbox of ``key`` (started with ``spec`` when
         none runs, or when the running one has another spec or account).
         ``shim`` answers the sandbox's ``git`` while the command runs."""
-        async with self._lock(key):
+        async with self._holding(key):
             for attempt in (1, 2):
                 sandbox = await self._ensure(key, account, spec)
                 if sandbox.shim is not None and shim is not None:
@@ -246,7 +259,7 @@ class SandboxPool:
             and (run is None or k.run == run)
             and (agent_id is None or k.agent_id == agent_id)
         ]:
-            async with self._lock(key):
+            async with self._holding(key):
                 await self._discard(key)
 
     async def reap_idle(self) -> int:
@@ -256,10 +269,10 @@ class SandboxPool:
         for key in [
             k for k, s in self._sandboxes.items() if now - s.used_at >= self._idle
         ]:
-            lock = self._lock(key)
-            if lock.locked():
+            entry = self._locks.get(key)
+            if entry is not None and entry[1]:
                 continue  # in use right now
-            async with lock:
+            async with self._holding(key):
                 sandbox = self._sandboxes.get(key)
                 if sandbox is not None and now - sandbox.used_at >= self._idle:
                     await self._discard(key)
@@ -268,8 +281,12 @@ class SandboxPool:
 
     async def close(self) -> None:
         for key in list(self._sandboxes):
-            async with self._lock(key):
+            async with self._holding(key):
                 await self._discard(key)
 
     def running(self) -> int:
         return len(self._sandboxes)
+
+    def tracked_keys(self) -> int:
+        """How many keys have a lock (for the tests)."""
+        return len(self._locks)

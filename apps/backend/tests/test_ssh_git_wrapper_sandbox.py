@@ -90,8 +90,8 @@ elif args[0] == "exec":
     source = mounts[0].split(",")[1].removeprefix("source=")
     def host(path):
         return source + path[len("/workspace"):]
-    if entry[:2] == ["python3", "-I"]:
-        entry = [sys.executable, "-I", HELPER, entry[3], host(entry[4])]
+    if entry[4:6] == ["python3", "-I"]:
+        entry = [sys.executable, "-I", HELPER, entry[7], host(entry[8])]
     result = subprocess.run(entry, cwd=host(workdir), input=stdin)
     sys.exit(result.returncode)
 """
@@ -353,6 +353,10 @@ class SandboxPlanTest(unittest.TestCase):
                 "--workdir",
                 "/workspace",
                 NAME,
+                "timeout",
+                "-k",
+                "5",
+                "300",
                 "python3",
                 "-I",
                 "/usr/local/lib/paw/paw-file-tool",
@@ -371,6 +375,23 @@ class SandboxPlanTest(unittest.TestCase):
         ):
             with self.assertRaises(wrapper.Rejected, msg=words):
                 wrapper.sandbox_plan(shlex.join(["paw-sandbox/v1", *words]), config)
+
+
+class ExecDeadlineTest(unittest.TestCase):
+    def test_a_command_past_the_wrappers_deadline_has_no_status(self):
+        r = _Root()
+        self.addCleanup(r.close)
+        config = r.config()
+        command = SandboxCommand(CommandKind.SHELL, "/workspace", "sleep 9")
+        call = wrapper.sandbox_plan(exec_command(SANDBOX, NONCE, command), config)
+
+        def capture(argv, env, stdin, timeout):
+            if argv == call.inspect:
+                return 0, b"true\n", b"", False
+            return None, b"", b"", False
+
+        with self.assertRaises(wrapper.SandboxTimeout):
+            wrapper.run_sandbox_exec(call, config, b"sleep 9", capture=capture)
 
 
 class ReadFormTest(unittest.TestCase):

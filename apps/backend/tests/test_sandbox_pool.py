@@ -171,6 +171,8 @@ class PoolTest(unittest.IsolatedAsyncioTestCase):
         await self.pool.run(KEY, ACCOUNT, SPEC, COMMAND)
         await self.pool.close()
         self.assertEqual(self.runner.stopped, self.runner.started)
+        # No lock outlives its sandbox.
+        self.assertEqual(self.pool.tracked_keys(), 0)
 
     async def test_a_failed_stop_is_logged_and_forgotten(self):
         async def failing_stop(account, sandbox_id):

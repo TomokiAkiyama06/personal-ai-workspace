@@ -1828,7 +1828,17 @@ def sandbox_plan(original: str, config: Config) -> SandboxCall:
         else:
             argv.append("--interactive")
             helper = "write" if kind == "file-write" else "str-replace"
-            entry = ["python3", "-I", FILE_HELPER, helper, _sandbox_path(words[6])]
+            entry = [
+                "timeout",
+                "-k",
+                "5",
+                str(config.sandbox_command_timeout),
+                "python3",
+                "-I",
+                FILE_HELPER,
+                helper,
+                _sandbox_path(words[6]),
+            ]
         argv.extend(("--workdir", workdir, name, *entry))
         inspect = [
             podman,
@@ -1908,6 +1918,10 @@ def _read_stdin(limit: int) -> bytes:
     return data
 
 
+class SandboxTimeout(Exception):
+    """An ``exec`` that outlived even the wrapper's own deadline."""
+
+
 def run_sandbox_exec(
     call: SandboxCall,
     config: Config,
@@ -1936,9 +1950,10 @@ def run_sandbox_exec(
     limit = config.sandbox_command_timeout + 60
     code, out, err, truncated = capture(argv, call.env, stdin, limit)
     if code is None:
-        # ``timeout -k 5`` in the container did not end it: the backend stops
-        # the whole sandbox (it waited as long), this reads as ``timeout``'s.
-        code = 124
+        # ``timeout -k 5`` in the container did not end it: no status line, so
+        # that the backend reads the call as not completed and stops the whole
+        # sandbox (whatever is left running in it).
+        raise SandboxTimeout()
     if code < 0:
         code = 128 - code  # a signal, as a shell reports it
     status = f"exit={min(code, 255)} truncated={1 if truncated else 0}\n"
@@ -2022,6 +2037,10 @@ def _sandbox_main(
             log(f"rejected user={user} reason={rejected.reason}")
             sys.stderr.write(f"paw-git-wrapper: rejected ({rejected.reason})\n")
             return REJECTED
+        except SandboxTimeout:
+            log(f"failed user={user} sandbox=exec reason=timeout")
+            sys.stderr.write("paw-git-wrapper: the command did not end\n")
+            return 1
         except (OSError, subprocess.SubprocessError):
             log(f"failed user={user} sandbox=exec reason=podman")
             sys.stderr.write("paw-git-wrapper: the sandbox could not be used\n")
