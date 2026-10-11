@@ -135,11 +135,10 @@ UPDATE tool_task_grants
  WHERE id = %(id)s AND status = '{_ACTIVE}'
 RETURNING id
 """
-_REVOKE_TASK = f"""
-UPDATE tool_task_grants
-   SET status = '{_REVOKED}', revoked_at = %(now)s, revoked_by = NULL
- WHERE task_id = %(task_id)s AND status = '{_ACTIVE}'
-RETURNING id
+_ACTIVE_OF_TASK = f"""
+SELECT {_COLUMNS} FROM tool_task_grants g
+ WHERE g.task_id = %(task_id)s AND g.status = '{_ACTIVE}'
+ ORDER BY g.created_at, g.id
 """
 
 
@@ -419,12 +418,10 @@ class PostgresTaskGrantStore:
         record = await self.get(grant_id)
         return RevokeOutcome.NOT_FOUND if record is None else RevokeOutcome.NOT_OPEN
 
-    async def revoke_task(
-        self, task_id: uuid.UUID, *, now: datetime
-    ) -> list[uuid.UUID]:
+    async def active_of_task(self, task_id: uuid.UUID) -> list[TaskGrantRecord]:
         rows = await self._database.fetch_abortable(
-            _REVOKE_TASK,
-            {"task_id": task_id, "now": now},
+            _ACTIVE_OF_TASK,
+            {"task_id": task_id},
             timeout_seconds=self._timeout_seconds,
         )
-        return [row[0] for row in rows]
+        return [_grant_of_values(row) for row in rows]

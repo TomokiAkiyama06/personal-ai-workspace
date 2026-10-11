@@ -14,6 +14,7 @@ from paw_backend.tools import (
     WORKING_SET_TOOL_SPECS,
     ApprovalLevel,
     ApprovalOutcome,
+    ApprovalRevocationError,
     ApprovalService,
     ApprovalStatus,
     ArgumentKind,
@@ -615,6 +616,35 @@ class ServiceGrantTest(unittest.IsolatedAsyncioTestCase):
             (row.reason, row.resource_id, row.actor_id),
             ("task_ended", granted.grant_id, None),
         )
+
+    async def test_a_grant_whose_revocation_was_not_audited_stays_for_the_next_run(
+        self,
+    ):
+        # Codex review of #216: revoked first, a grant whose audit row could not
+        # be written was no longer found by the next cleanup (it looks only for
+        # active grants), so the row was lost for good.
+        asked = await self.ask()
+        granted = await self.h.service.approve_for_task(asked.approval_id, self.person)
+        failing = FailingSink()
+        written = self.h.service._audit
+        self.h.service._audit = failing
+        with self.assertRaises(ApprovalRevocationError):
+            await self.h.service.revoke_task(TASK)
+        record = await self.h.grants.get(granted.grant_id)
+        self.assertEqual(record.status, TaskGrantStatus.ACTIVE)
+
+        self.h.service._audit = written
+        await self.h.service.revoke_task(TASK)
+        record = await self.h.grants.get(granted.grant_id)
+        self.assertEqual(record.status, TaskGrantStatus.REVOKED)
+        rows = self.audit("tool.approval.grant.revoke")
+        self.assertEqual(
+            [(e.reason, e.resource_id, e.project_id) for e in rows],
+            [("task_ended", granted.grant_id, record.project_id)],
+        )
+        # Nothing is left: a later run writes nothing more.
+        await self.h.service.revoke_task(TASK)
+        self.assertEqual(len(self.audit("tool.approval.grant.revoke")), 1)
 
     async def test_a_use_must_match_the_grant(self):
         asked = await self.ask()

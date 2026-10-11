@@ -127,7 +127,8 @@ _WITH_OPEN_APPROVALS = text(
 # 0085): unusable already (the store checks the task's run at every use), but
 # shown and not yet audited as revoked until ``revoke_task`` ran (Codex review
 # of #216: the approval it was made from may have been used, so the query above
-# does not find the task).
+# does not find the task). A grant whose revocation could not be audited stays
+# active, so that it is found again (``ApprovalService._revoke_task_grants``).
 _WITH_ACTIVE_GRANTS = text(
     "SELECT DISTINCT g.task_id FROM tool_task_grants g"
     " JOIN tasks t ON t.id = g.task_id"

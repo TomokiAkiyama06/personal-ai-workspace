@@ -139,7 +139,8 @@ class TaskGrantStore(Protocol):
     active and its task can act in the grant's run, checked in the same step
     (``require_active_task`` of ``ApprovalStore.consume``, Decision 0006, 9).
     ``revoke`` and ``use`` are ordered by the grant's row: no use is recorded
-    after a revocation committed.
+    after a revocation committed. ``active_of_task`` lists the active grants of a
+    task, every user's (the end of the task revokes them one by one).
     """
 
     async def grant_from_approval(
@@ -174,9 +175,7 @@ class TaskGrantStore(Protocol):
         self, grant_id: uuid.UUID, *, actor_id: uuid.UUID | None, now: datetime
     ) -> RevokeOutcome: ...
 
-    async def revoke_task(
-        self, task_id: uuid.UUID, *, now: datetime
-    ) -> list[uuid.UUID]: ...
+    async def active_of_task(self, task_id: uuid.UUID) -> list[TaskGrantRecord]: ...
 
 
 def diagnose_grant(

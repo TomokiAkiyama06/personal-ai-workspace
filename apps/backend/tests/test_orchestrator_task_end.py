@@ -387,6 +387,63 @@ class TaskEndTest(PostgresVersioningTestCase):
         self.assertEqual(record.status, TaskGrantStatus.REVOKED)
         self.assertNotIn(task_id, await residue.task_ids(100))
 
+    async def test_a_grant_revocation_that_was_not_audited_is_repeated(self):
+        # Codex review of #216: the grant used to be revoked before its
+        # ``tool.approval.grant.revoke`` row was written, so a row that could not
+        # be written was lost (the revoked grant is no longer residue). The grant
+        # now stays active, and residue, until its row is written.
+        class Sink(InMemoryAuditSink):
+            down = True
+
+            async def record(self, event) -> None:
+                if self.down:
+                    raise ConnectionError("the audit store is down")
+                await super().record(event)
+
+        database = self._database()
+        grants = PostgresTaskGrantStore(database)
+        sink = Sink()
+        approvals = ApprovalService(self.store, sink, grants=grants)
+        cleanup = TaskEndCleanup(
+            approvals, self.new_freshness(), TaskEndResidue(database)
+        )
+        task_id = await self.new_task(self.bare_tasks)
+        await self.bare_tasks.execute(task_id, TaskCommand.START, actor=SYSTEM)
+        now = datetime.now(UTC)
+        new = new_approval(
+            task_id=task_id,
+            expires_at=now + timedelta(hours=1),
+            grant_pattern=GrantPattern(ScopeStatus.IN_SCOPE, ()),
+        )
+        await self.store.open_request(new, now=now, limits=LIMITS)
+        sink.down = False
+        granted = await approvals.approve_for_task(
+            new.approval_id, Principal(U1, SystemRole.USER, {})
+        )
+        self.assertEqual(granted.outcome, ApprovalOutcome.APPROVED_FOR_TASK)
+        await self.store.consume(new.approval_id, binding_of(new), now=now)
+        await self.end(task_id, TaskState.CANCELLED, self.bare_tasks)
+        residue = TaskEndResidue(database)
+
+        sink.down = True
+        (report,) = await cleanup.sweep()
+        self.assertEqual((report.task_id, report.failed), (task_id, ("approvals",)))
+        record = await grants.get(granted.grant_id)
+        self.assertEqual(record.status, TaskGrantStatus.ACTIVE)
+        self.assertIn(task_id, await residue.task_ids(100))
+
+        sink.down = False
+        (report,) = await cleanup.sweep()
+        self.assertTrue(report.done)
+        record = await grants.get(granted.grant_id)
+        self.assertEqual(record.status, TaskGrantStatus.REVOKED)
+        self.assertNotIn(task_id, await residue.task_ids(100))
+        rows = [e for e in sink.events if e.action == "tool.approval.grant.revoke"]
+        self.assertEqual(
+            [(e.reason, e.resource_id) for e in rows],
+            [("task_ended", granted.grant_id)],
+        )
+
     async def test_a_locked_version_is_finished_by_a_later_sweep(self):
         task_id = await self.new_task()
         memory = self.session_memory(task_id)

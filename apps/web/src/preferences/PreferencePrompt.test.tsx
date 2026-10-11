@@ -194,6 +194,33 @@ describe("the chat's preference confirmation card", () => {
     expect(within(card).getByRole("button", { name: "確認して保存" })).toBeDisabled();
   });
 
+  it("asks for the acknowledgement again when only the offered scopes change", async () => {
+    const source = new FakePreferenceSource(
+      designCandidates()
+        .filter((item) => item.key === "merge.after_ci")
+        .map((item) => ({ ...item, ready: true })),
+    );
+    renderChat(source);
+    const user = userEvent.setup();
+    const card = await screen.findByRole("region", { name: "好みの確認" });
+    await user.click(within(card).getByRole("checkbox"));
+    expect(within(card).getByRole("checkbox")).toBeChecked();
+    // New observations move the candidate to another repository: the words and
+    // the version stay, the options and the recommendation do not.
+    source.items = source.items.map((item) => ({
+      ...item,
+      recommendation: { scope: "repo", project_id: PROJECT_ID, repo_id: "r-other" },
+      options: item.options.map((option) =>
+        option.scope === "repo" ? { ...option, repo_id: "r-other", recommended: true } : option,
+      ),
+    }));
+    await act(async () => {
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    await waitFor(() => expect(within(card).getByRole("checkbox")).not.toBeChecked());
+    expect(within(card).getByRole("button", { name: "確認して保存" })).toBeDisabled();
+  });
+
   it("asks for the acknowledgement when the Backend judges the save high risk", async () => {
     const source = new FakePreferenceSource();
     source.failNext = new ApiError(409, "preference_high_risk_unacknowledged", "x");
