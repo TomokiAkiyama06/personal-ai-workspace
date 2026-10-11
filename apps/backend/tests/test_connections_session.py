@@ -310,6 +310,21 @@ class LockOrderTest(SessionCase):
         self.assertEqual(adapter.answers, [True])
         self.assertIsNone(result.stopped)
 
+    async def test_a_zero_token_turn_is_fenced_on_the_run_too(self):
+        # A (0, 0) turn charges nothing but still passes the run fence.
+        adapter = FakeSession([(0, 0)])
+
+        async def replace_run():  # a Retry after the admission
+            with self.engine.begin() as connection:
+                connection.execute(
+                    text("UPDATE tasks SET retry_count = 1 WHERE id = :task"),
+                    {"task": self.task},
+                )
+
+        result = await self.start(adapter, gate=replace_run)
+        self.assertEqual(adapter.answers, [False])
+        self.assertIs(result.stopped, SessionStop.RUN_REPLACED)
+
     async def test_a_turn_refused_by_the_lease_charges_nothing(self):
         # The charge comes first now: a lease that does not hold rolls it back.
         before = await self.consumed()
@@ -480,6 +495,26 @@ class SchemaTest(SessionCase):
                     is not None
                 )
             self.assertEqual(ours, await queue.holds_lease(self.task, lease))
+
+    def test_the_lease_is_judged_by_the_clock_not_the_transactions_start(self):
+        # A turn's transaction can wait on the task or budget lock past the
+        # lease's end: ``now()`` (its start) would still accept the lease.
+        with self.engine.begin() as connection:
+            connection.execute(
+                text(
+                    "UPDATE queue_entries SET lease_expires_at ="
+                    " clock_timestamp() + interval '300 milliseconds' WHERE id = :id"
+                ),
+                {"id": self.entry},
+            )
+        with self.engine.begin() as connection:
+            connection.execute(text("SELECT now()"))
+            connection.execute(text("SELECT pg_sleep(0.6)"))
+            held = connection.execute(
+                text(SESSION_LEASE_SQL),
+                {"entry": self.entry, "task": self.task, "worker": "w1", "claims": 1},
+            ).first()
+        self.assertIsNone(held)
 
 
 if __name__ == "__main__":

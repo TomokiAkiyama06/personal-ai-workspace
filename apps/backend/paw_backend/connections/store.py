@@ -210,11 +210,12 @@ USERS_REPORT_SQL = (
 
 
 #: The worker's queue lease, valid now (``TaskQueue.holds_lease``'s rule; the
-#: database's clock). A test compares the two.
+#: database's wall clock, ``clock_timestamp()``, not the transaction's start:
+#: a turn may wait on the task and budget locks first). A test compares the two.
 SESSION_LEASE_SQL = (
     "SELECT 1 FROM queue_entries WHERE id = :entry AND task_id = :task"
     " AND status = 'claimed' AND claimed_by = :worker AND claim_count = :claims"
-    " AND lease_expires_at > now() FOR SHARE"
+    " AND lease_expires_at > clock_timestamp() FOR SHARE"
 )
 #: One turn of a session added to its row (``in_flight`` sessions only).
 SESSION_ADD_SQL = (
@@ -993,7 +994,9 @@ class ConnectionStore:
                 # Lock order as everywhere else: the task row and the budget
                 # row first (``record_in``: its run fence), then the queue
                 # entry. A failed check below rolls the charge back.
-                if budget is not None and amount > 0:
+                # A zero-token turn too: ``record_in`` of 0 charges nothing
+                # but still locks and checks the task's run.
+                if budget is not None:
                     await budget.record_in(
                         session, task_id, BudgetKind.TOKENS, amount, run=run
                     )
