@@ -41,11 +41,19 @@ class LifespanTest(unittest.IsolatedAsyncioTestCase):
             )
         return create_app(config, database=database, **options)
 
-    def record(self, *, stubborn=False):
+    def record(self, *, stubborn=False, deaf=None):
         served = []
 
         async def serve(orchestrator, worker_id, stop, *, idle_seconds=1.0):
             served.append(worker_id)
+            if deaf is not None:
+                # Ignores its cancellation (a runtime that swallows it) until
+                # the test lets it go.
+                try:
+                    await asyncio.sleep(3600)
+                except asyncio.CancelledError:
+                    await deaf.wait()
+                return
             if stubborn:
                 await asyncio.sleep(3600)
             await stop.wait()
@@ -76,6 +84,18 @@ class LifespanTest(unittest.IsolatedAsyncioTestCase):
         app = self.app(shutdown_timeout_seconds=1)
         async with app.router.lifespan_context(app):
             await asyncio.sleep(0.05)
+        self.assertEqual(served, worker_ids(1))
+
+    async def test_a_worker_that_ignores_its_cancellation_is_given_up(self):
+        release = asyncio.Event()
+        self.addCleanup(release.set)
+        served = self.record(deaf=release)
+        app = self.app(shutdown_timeout_seconds=1)
+        started = asyncio.get_running_loop().time()
+        with self.assertLogs("paw_backend.app", "WARNING"):
+            async with app.router.lifespan_context(app):
+                await asyncio.sleep(0.05)
+        self.assertLess(asyncio.get_running_loop().time() - started, 10)
         self.assertEqual(served, worker_ids(1))
 
 

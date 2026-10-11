@@ -65,6 +65,12 @@ logger = logging.getLogger(__name__)
 _WORKER_ID_CHARACTER = re.compile(r"[^A-Za-z0-9._:@/-]")
 
 
+def _retrieve(task: asyncio.Task) -> None:
+    """Read a finished task's result (so that no "never retrieved" warning)."""
+    if task.done() and not task.cancelled():
+        task.exception()
+
+
 def worker_ids(count: int) -> list[str]:
     """The ids of this process's orchestrator workers (Decision 0086, 3):
     ``<host>:<pid>:<n>``, the host name's other characters as ``-``, at most
@@ -177,6 +183,9 @@ def create_app(
         maintenance = None
         health = app.state.system_health
         compute_stop = asyncio.Event()
+        # The workers have a stop of their own, set first at shutdown: none
+        # claims another entry while the rest of the shutdown runs.
+        workers_stop = asyncio.Event()
         workers: set[asyncio.Task] = set()
         try:
             # The Compute Resource Scheduler, when the deployment configured one
@@ -270,13 +279,14 @@ def create_app(
             if orchestrator is not None:
                 for worker_id in worker_ids(settings.orchestrator_workers):
                     workers.add(
-                        asyncio.create_task(orchestrator.serve(worker_id, compute_stop))
+                        asyncio.create_task(orchestrator.serve(worker_id, workers_stop))
                     )
             # The System Health history (PAW-066): sample, roll up, purge.
             if health.sampling:
                 background.add(asyncio.create_task(health.monitor.run()))
             yield
         finally:
+            workers_stop.set()
             if compute_services is not None and compute_services.full_gpu is not None:
                 # A start in progress is abandoned: the scheduler goes back to
                 # normal, the models it unloaded are loaded again and the held
@@ -309,7 +319,20 @@ def create_app(
                 )
                 for worker in running:
                     worker.cancel()
-                await asyncio.gather(*workers, return_exceptions=True)
+                if running:
+                    # Bounded too: a worker that ignores its cancellation (or
+                    # waits on a stalled database) is given up on.
+                    _, ignored = await asyncio.wait(
+                        running, timeout=settings.shutdown_timeout_seconds
+                    )
+                    for worker in ignored:
+                        worker.add_done_callback(_retrieve)
+                    if ignored:
+                        logger.warning(
+                            "%d orchestrator worker(s) did not stop", len(ignored)
+                        )
+                for worker in workers - running:
+                    _retrieve(worker)
             health.monitor.stop()
             health.reaper.attach(None)
             if stop_loop is not None:
