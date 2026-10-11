@@ -233,6 +233,8 @@ class HybridRuntime:
         validate_runtime(local, "local")
         if cloud is not None:
             validate_runtime(cloud, "cloud")
+            if getattr(cloud, "run_as_fallback", None) is not None:
+                require_async_method(cloud, "run_as_fallback", 1)
             if cloud_policy is None:
                 raise TypeError("a cloud runtime needs a cloud_policy")
             if cloud_agent is None or cloud_model is None:
@@ -308,6 +310,14 @@ class HybridRuntime:
                     # while the node waited for the local GPU.
                     if not await self._cloud_allowed(assignment):
                         return NodeOutcome.failed(COMPUTE_UNAVAILABLE, retryable=True)
+                    fallback = getattr(self._cloud, "run_as_fallback", None)
+                    if fallback is not None:
+                        # A cloud runtime with its own gate (Decision 0083, 1:
+                        # the CLI runtimes' ``CloudGate``) records the placement
+                        # itself, between its admission and the send; its gate's
+                        # refusals come back as ``ComputeUnavailable`` (the node
+                        # stays on its local rung).
+                        return await fallback(assignment)
                     # The placement and the audit of the send, before anything
                     # leaves the backend; not on record, not sent.
                     placed = await self._place(

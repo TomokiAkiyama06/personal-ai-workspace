@@ -54,9 +54,11 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, tzinfo
+from enum import StrEnum
 from typing import Any
 
 import psycopg
+from sqlalchemy import text
 
 from paw_backend.connections.domain import (
     DEFAULT_PERIOD_TIMEZONE,
@@ -106,6 +108,10 @@ from paw_backend.connections.validation import (
 )
 from paw_backend.db import Database
 from paw_backend.tasks.domain import TaskRun
+from paw_backend.tasks.errors import StaleRunError
+from paw_backend.tasks.queueing import BudgetKind, BudgetTracker
+from paw_backend.tasks.queueing.domain import QueueLease
+from paw_backend.tasks.queueing.errors import BudgetNotConfiguredError
 from paw_backend.tools.task_state import TaskActivity, activity_of
 
 _CONNECTION_COLUMNS = "id, kind, status, enabled, checked_at, created_at, updated_at"
@@ -201,6 +207,32 @@ USERS_REPORT_SQL = (
     " ORDER BY CASE u.system_role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1"
     " ELSE 2 END, u.login_name"
 )
+
+
+#: The worker's queue lease, valid now (``TaskQueue.holds_lease``'s rule; the
+#: database's clock). A test compares the two.
+SESSION_LEASE_SQL = (
+    "SELECT 1 FROM queue_entries WHERE id = :entry AND task_id = :task"
+    " AND status = 'claimed' AND claimed_by = :worker AND claim_count = :claims"
+    " AND lease_expires_at > now() FOR SHARE"
+)
+#: One turn of a session added to its row (``in_flight`` sessions only).
+SESSION_ADD_SQL = (
+    "UPDATE connection_usage SET"
+    " input_tokens = LEAST(COALESCE(input_tokens, 0) + :input, 1000000000),"
+    " output_tokens = LEAST(COALESCE(output_tokens, 0) + :output, 1000000000)"
+    " WHERE id = :id AND status = 'in_flight' AND session RETURNING id"
+)
+
+
+class SessionTurn(StrEnum):
+    """What counting one turn of a session came to."""
+
+    RECORDED = "recorded"
+    LEASE_LOST = "lease_lost"  # nothing written
+    RUN_REPLACED = "run_replaced"  # nothing written
+    NO_BUDGET = "no_budget"  # nothing written
+    CLOSED = "closed"  # the row is no longer in flight
 
 
 @dataclass(frozen=True, slots=True)
@@ -829,8 +861,12 @@ class ConnectionStore:
         kind: ConnectionKind,
         model: str,
         purpose: UsagePurpose,
+        *,
+        session: bool = False,
     ) -> Admitted | Refused:
         """Decide whether the call may start and, if so, record that it did.
+        ``session``: the row is a CLI session's (Decision 0083, 5 (b): it may
+        carry tokens while ``in_flight``).
 
         See the module docstring for the steps and their order. A call for a
         task that has used this connection before is a CONTINUING task: it is
@@ -906,9 +942,9 @@ class ConnectionStore:
             usage_id = uuid.uuid4()
             await connection.execute(
                 "INSERT INTO connection_usage (id, user_id, task_id, project_id, kind,"
-                " model, purpose, status, started_at) VALUES (%(id)s, %(user)s,"
-                " %(task)s, %(project)s, %(kind)s, %(model)s, %(purpose)s,"
-                " 'in_flight', %(now)s)",
+                " model, purpose, status, started_at, session) VALUES (%(id)s,"
+                " %(user)s, %(task)s, %(project)s, %(kind)s, %(model)s, %(purpose)s,"
+                " 'in_flight', %(now)s, %(session)s)",
                 {
                     "id": usage_id,
                     "user": user_id,
@@ -918,6 +954,7 @@ class ConnectionStore:
                     "model": model,
                     "purpose": purpose.value,
                     "now": now,
+                    "session": bool(session),
                 },
             )
             return Admitted(usage_id, connection_id, project_id, handle)
@@ -925,6 +962,85 @@ class ConnectionStore:
         return await self._database.transact_abortable(
             work, timeout_seconds=self._timeout
         )
+
+    async def add_session_turn(
+        self,
+        usage_id: uuid.UUID,
+        task_id: uuid.UUID,
+        run: TaskRun,
+        lease: QueueLease,
+        input_tokens: int,
+        output_tokens: int,
+        budget: BudgetTracker | None,
+    ) -> SessionTurn:
+        """Count one turn of a session (Decision 0083, 5 (b)): in ONE transaction,
+        the worker's queue lease is checked (Decision 0057), the turn's tokens are
+        added to the session's ``in_flight`` row and charged to the task's budget
+        for ``run`` (``BudgetTracker.record_in``, its run fence included). Nothing
+        is written unless all three hold. The database's clock judges the lease
+        (as ``TaskQueue.holds_lease``)."""
+        amount = input_tokens + output_tokens
+        try:
+            async with self._database.session() as session, session.begin():
+                held = await session.execute(
+                    text(SESSION_LEASE_SQL),
+                    {
+                        "entry": lease.entry_id,
+                        "task": task_id,
+                        "worker": lease.worker_id,
+                        "claims": lease.claim_count,
+                    },
+                )
+                if held.first() is None:
+                    return SessionTurn.LEASE_LOST
+                added = await session.execute(
+                    text(SESSION_ADD_SQL),
+                    {"id": usage_id, "input": input_tokens, "output": output_tokens},
+                )
+                if added.first() is None:
+                    return SessionTurn.CLOSED
+                if budget is not None and amount > 0:
+                    await budget.record_in(
+                        session, task_id, BudgetKind.TOKENS, amount, run=run
+                    )
+        except StaleRunError:
+            return SessionTurn.RUN_REPLACED  # rolled back: nothing was written
+        except BudgetNotConfiguredError:
+            return SessionTurn.NO_BUDGET
+        return SessionTurn.RECORDED
+
+    async def settle_session(
+        self,
+        usage_id: uuid.UUID,
+        status: UsageStatus,
+        failure: FailureCode | None,
+        input_tokens: int,
+        output_tokens: int,
+    ) -> UsageRecord | None:
+        """End a session's ``in_flight`` row with its final token counts (what
+        was counted turn by turn plus the remainder: never fewer than counted).
+        Conditional on ``in_flight``, as :meth:`settle`."""
+        clock, params = self._clock_cte()
+        rows = await self._fetch(
+            f"WITH {clock} UPDATE connection_usage SET status = %(status)s,"
+            " failure_code = %(failure)s,"
+            " input_tokens = GREATEST(COALESCE(input_tokens, 0), %(input)s),"
+            " output_tokens = GREATEST(COALESCE(output_tokens, 0), %(output)s),"
+            " finished_at = GREATEST((SELECT ts FROM clock), started_at),"
+            " duration_ms = GREATEST(0, floor(extract(epoch FROM"
+            " ((SELECT ts FROM clock) - started_at)) * 1000))::bigint"
+            " WHERE id = %(id)s AND status = 'in_flight' AND session"
+            f" RETURNING {_USAGE_COLUMNS}",
+            {
+                **params,
+                "id": usage_id,
+                "status": status.value,
+                "failure": None if failure is None else failure.value,
+                "input": input_tokens,
+                "output": output_tokens,
+            },
+        )
+        return usage_record(rows[0]) if rows else None
 
     async def reap_abandoned(
         self, *, limit: int = MAX_REAPED_PER_CYCLE

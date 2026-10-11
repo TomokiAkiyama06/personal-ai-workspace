@@ -142,6 +142,9 @@ class RefusalReason(StrEnum):
     # or it could not be read (no verifier, an error, a timeout, no answer).
     LEASE_LOST = "lease_lost"
     LEASE_UNAVAILABLE = "lease_unavailable"
+    # A CLI session (Decision 0083, 5 (a)): the task has less than the
+    # session's minimum of tokens left.
+    TASK_TOKEN_FLOOR = "task_token_floor"
 
 
 def window_start(period: QuotaPeriod, now: datetime, zone: tzinfo) -> datetime:

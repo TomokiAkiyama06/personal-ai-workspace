@@ -39,6 +39,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     Uuid,
+    false,
     text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
@@ -152,8 +153,11 @@ class ConnectionUsageRow(Base):
             "(finished_at IS NULL) = (duration_ms IS NULL)",
             name="duration_matches_finish",
         ),
+        # A one-prompt call has no tokens until it settles; a CLI session's row
+        # counts them turn by turn (Decision 0083, 5 (b); revision ``0194``).
         CheckConstraint(
-            "status <> 'in_flight' OR (input_tokens IS NULL AND output_tokens IS NULL)",
+            "session OR status <> 'in_flight'"
+            " OR (input_tokens IS NULL AND output_tokens IS NULL)",
             name="no_tokens_in_flight",
         ),
         CheckConstraint(
@@ -209,3 +213,5 @@ class ConnectionUsageRow(Base):
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     duration_ms: Mapped[int | None] = mapped_column(BigInteger)
+    # A CLI session's row (Decision 0083, 5; revision ``0194``).
+    session: Mapped[bool] = mapped_column(Boolean, server_default=false())

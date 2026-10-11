@@ -91,6 +91,7 @@ class VocabularyTest(unittest.TestCase):
                 "task_budget_not_configured",
                 "lease_lost",
                 "lease_unavailable",
+                "task_token_floor",
             ],
         )
 

@@ -113,8 +113,10 @@ Limits (stated, not hidden)
 import asyncio
 import logging
 import uuid
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any
 
 from paw_backend.authz import (
     AuditEvent,
@@ -176,7 +178,22 @@ from paw_backend.connections.records import (
 )
 from paw_backend.connections.report import UsageRange, UsageReport
 from paw_backend.connections.secret import Secret, SecretResolver
-from paw_backend.connections.store import Admitted, ConnectionStore, Refused
+from paw_backend.connections.session import (
+    SESSION_MIN_TOKENS,
+    UNKNOWN_SESSION_TOKENS,
+    AgentSessionAdapter,
+    AgentSessionRequest,
+    AgentSessionResult,
+    SessionRequest,
+    SessionResult,
+    SessionStop,
+)
+from paw_backend.connections.store import (
+    Admitted,
+    ConnectionStore,
+    Refused,
+    SessionTurn,
+)
 from paw_backend.connections.validation import (
     fail,
     require_type,
@@ -277,6 +294,51 @@ def _failure_code_of(error: BaseException) -> FailureCode:
     return FailureCode.INTERNAL_ERROR
 
 
+@dataclass(slots=True)
+class _Session:
+    """What one session came to (in memory; set by ``execute_session``)."""
+
+    status: UsageStatus = UsageStatus.FAILED
+    failure: FailureCode | None = FailureCode.INTERNAL_ERROR
+    counted_input: int = 0
+    counted_output: int = 0
+    known_totals: tuple[int, int] | None = None
+    submission: Any = None
+    stopped: SessionStop | None = None
+    final_input: int = 0
+    final_output: int = 0
+
+    def fail(self, code: FailureCode) -> None:
+        self.status = UsageStatus.FAILED
+        self.failure = code
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if name == "status" and value is not UsageStatus.FAILED:
+            object.__setattr__(self, "failure", None)
+        object.__setattr__(self, name, value)
+
+
+def _session_adapters(
+    adapters: Mapping[ConnectionKind, AgentSessionAdapter] | None,
+) -> dict[ConnectionKind, AgentSessionAdapter]:
+    """The session adapters by kind, each checked (``kind`` matches, an async
+    ``run_session`` of two arguments): a wrong one fails when the service is
+    built."""
+    result: dict[ConnectionKind, AgentSessionAdapter] = {}
+    for kind, adapter in (adapters or {}).items():
+        if (
+            type(kind) is not ConnectionKind
+            or getattr(adapter, "kind", None) is not kind
+        ):
+            raise fail("session_adapters", InputProblem.WRONG_TYPE)
+        try:
+            require_async_method(adapter, "run_session", 2)
+        except TypeError:
+            raise fail("session_adapters", InputProblem.WRONG_TYPE) from None
+        result[kind] = adapter
+    return result
+
+
 class ConnectionService:
     """The shared Codex / Claude connections. See the module docstring."""
 
@@ -290,6 +352,7 @@ class ConnectionService:
         *,
         budget: BudgetTracker | None = None,
         lease: LeaseVerifier | None = None,
+        session_adapters: Mapping[ConnectionKind, AgentSessionAdapter] | None = None,
         period_timezone: str = DEFAULT_PERIOD_TIMEZONE,
         database_timeout_seconds: float = DEFAULT_DATABASE_TIMEOUT_SECONDS,
         health_timeout_seconds: float = DEFAULT_HEALTH_TIMEOUT_SECONDS,
@@ -338,6 +401,7 @@ class ConnectionService:
         self._adapters = adapters
         self._secrets = secrets
         self._budget = budget
+        self._session_adapters = _session_adapters(session_adapters)
         self._lease: LeaseVerifier = (
             FailClosedLeaseVerifier() if lease is None else lease
         )
@@ -792,6 +856,262 @@ class ConnectionService:
             outcome.redactions,
         )
 
+    async def execute_session(
+        self,
+        principal: Principal,
+        context: TaskContext,
+        kind: ConnectionKind,
+        request: SessionRequest,
+        *,
+        gate: Callable[[], Awaitable[None]] | None = None,
+    ) -> SessionResult:
+        """One CLI session of a node attempt through the shared connection of
+        ``kind`` (Decision 0083, 1 and 5). The same checks as :meth:`execute`, in
+        the same order, plus the session's token floor (5 (a): at least
+        ``SESSION_MIN_TOKENS`` of the task's budget left, ``TaskBudgetError``
+        ``task_token_floor``); then the admission (a session row, ``connection.
+        use`` audited as for a call); then ``gate`` (the caller's placement
+        record, Decision 0083, 1: ``CloudPolicy`` -> admission -> placement ->
+        adapter), whose failure closes the row ``cancelled`` without sending
+        anything and propagates; then the adapter.
+
+        Turn by turn the adapter reports its tokens (``on_usage``): each turn is
+        counted into the row and charged to the task's budget in one transaction
+        with the lease check (:meth:`ConnectionStore.add_session_turn`); the
+        answer is ``False`` once the budget is used up, the lease is lost or the
+        run was replaced, and the adapter stops (``SessionResult.stopped``). At
+        the end only the remainder is settled (the totals less what was counted,
+        never less than counted); unknown totals (an abnormal end, a
+        cancellation) count ``UNKNOWN_SESSION_TOKENS`` less what was counted
+        (5 (c), (d)). A cancellation is settled (``cancelled``) before it passes.
+        """
+        self._actor(principal)
+        require_type("context", context, TaskContext)
+        kind = validate_enum("kind", kind, ConnectionKind)
+        require_type("request", request, SessionRequest)
+        if gate is not None and not callable(gate):
+            raise fail("gate", InputProblem.WRONG_TYPE)
+        correlation_id = uuid.uuid4()
+        await self._authorize(
+            principal,
+            Capability.AGENT_USE,
+            Resource.owned_by(context.delegator_id, _RESOURCE_CONNECTION),
+            correlation_id,
+        )
+        adapter = self._session_adapters.get(kind)
+        if adapter is None:
+            await self._refuse(
+                principal, RefusalReason.CONNECTION_UNAVAILABLE, None, correlation_id
+            )
+        await self._check_task_budget(principal, context, correlation_id)
+        await self._check_session_floor(principal, context, correlation_id)
+        await self._check_lease(principal, context, correlation_id)
+        admission = await self._call_store(
+            self._store.admit(
+                principal.user_id,
+                context.task_id,
+                context.run,
+                kind,
+                request.model,
+                request.purpose,
+                session=True,
+            )
+        )
+        if isinstance(admission, Refused):
+            await self._refuse(
+                principal,
+                admission.reason,
+                admission.project_id,
+                correlation_id,
+                admission,
+            )
+        assert isinstance(admission, Admitted)
+        state = _Session()
+        try:
+            if gate is not None:
+                try:
+                    await gate()
+                except BaseException:
+                    state.status = UsageStatus.CANCELLED
+                    state.known_totals = (0, 0)  # nothing was sent
+                    raise
+            try:
+                await self._run_session(adapter, admission, context, request, state)
+            except asyncio.CancelledError:
+                state.status = UsageStatus.CANCELLED
+                raise
+        finally:
+            await self._shielded(self._settle_session(kind, context, admission, state))
+        return SessionResult(
+            admission.usage_id,
+            state.submission,
+            state.final_input,
+            state.final_output,
+            state.failure,
+            state.stopped,
+        )
+
+    async def _check_session_floor(
+        self, principal: Principal, context: TaskContext, correlation_id: uuid.UUID
+    ) -> None:
+        if self._budget is None:
+            return
+        verdict = await self._budget.check(
+            context.task_id, planned={BudgetKind.TOKENS: SESSION_MIN_TOKENS}
+        )
+        if BudgetKind.TOKENS in verdict.exceeded:
+            await self._refuse(
+                principal, RefusalReason.TASK_TOKEN_FLOOR, None, correlation_id
+            )
+
+    async def _run_session(
+        self,
+        adapter: AgentSessionAdapter,
+        admission: Admitted,
+        context: TaskContext,
+        request: SessionRequest,
+        state: "_Session",
+    ) -> None:
+        async def on_usage(input_tokens: int, output_tokens: int) -> bool:
+            if state.stopped is not None:
+                return False
+            for value in (input_tokens, output_tokens):
+                if (
+                    isinstance(value, bool)
+                    or not isinstance(value, int)
+                    or not 0 <= value <= MAX_TOKENS_PER_CALL
+                ):
+                    raise fail("on_usage", InputProblem.OUT_OF_RANGE)
+            turn = await self._store.add_session_turn(
+                admission.usage_id,
+                context.task_id,
+                context.run,
+                context.lease,
+                input_tokens,
+                output_tokens,
+                self._budget,
+            )
+            if turn is SessionTurn.RECORDED:
+                state.counted_input += input_tokens
+                state.counted_output += output_tokens
+            elif turn is SessionTurn.LEASE_LOST:
+                state.stopped = SessionStop.LEASE_LOST
+            elif turn is SessionTurn.RUN_REPLACED:
+                state.stopped = SessionStop.RUN_REPLACED
+            else:
+                state.stopped = SessionStop.BUDGET_EXCEEDED
+            if state.stopped is None and self._budget is not None:
+                verdict = await self._budget.check(context.task_id)
+                if BudgetKind.TOKENS in verdict.exceeded:
+                    state.stopped = SessionStop.BUDGET_EXCEEDED
+            return state.stopped is None
+
+        try:
+            async with asyncio.timeout(request.timeout_seconds):
+                secret = await self._resolve(admission.secret_handle)
+                raw = await adapter.run_session(
+                    secret,
+                    AgentSessionRequest(
+                        request.model,
+                        request.prompt,
+                        request.timeout_seconds,
+                        on_usage,
+                    ),
+                )
+        except TimeoutError:
+            state.fail(FailureCode.TIMEOUT)
+            return
+        except Exception as error:
+            code = _failure_code_of(error)
+            logger.warning(
+                "connection session failed: usage_id=%s code=%s exception_type=%s",
+                admission.usage_id,
+                code.value,
+                log_type_name(error),
+            )
+            state.fail(code)
+            return
+        if type(raw) is not AgentSessionResult:
+            state.fail(FailureCode.INVALID_RESPONSE)
+            return
+        state.submission = raw.submission
+        if raw.input_tokens is not None and raw.output_tokens is not None:
+            state.known_totals = (raw.input_tokens, raw.output_tokens)
+        if raw.failure is not None:
+            state.fail(raw.failure)
+        elif state.stopped is None:
+            state.status = UsageStatus.SUCCEEDED
+        else:
+            state.status = UsageStatus.CANCELLED
+
+    async def _settle_session(
+        self,
+        kind: ConnectionKind,
+        context: TaskContext,
+        admission: Admitted,
+        state: "_Session",
+    ) -> None:
+        """Settle the session's row with the remainder (never raises)."""
+        counted = state.counted_input + state.counted_output
+        if state.known_totals is not None:
+            final_input = max(state.counted_input, state.known_totals[0])
+            final_output = max(state.counted_output, state.known_totals[1])
+        else:
+            # Decision 0083, 5 (d): unknown totals count the estimate in all.
+            final_input = state.counted_input + max(0, UNKNOWN_SESSION_TOKENS - counted)
+            final_output = state.counted_output
+        state.final_input, state.final_output = final_input, final_output
+        try:
+            await self._store.settle_session(
+                admission.usage_id,
+                state.status,
+                state.failure,
+                final_input,
+                final_output,
+            )
+        except Exception as error:
+            logger.error(
+                "connection session could not be settled: usage_id=%s"
+                " exception_type=%s",
+                admission.usage_id,
+                log_type_name(error),
+            )
+        remainder = final_input + final_output - counted
+        if self._budget is not None and remainder > 0:
+            try:
+                await self._budget.record(context.task_id, BudgetKind.TOKENS, remainder)
+            except Exception as error:
+                logger.error(
+                    "task budget could not be charged: usage_id=%s exception_type=%s",
+                    admission.usage_id,
+                    log_type_name(error),
+                )
+        if state.failure is FailureCode.EXPIRED:
+            try:
+                await self._store_health(
+                    kind, admission.secret_handle, ConnectionStatus.EXPIRED
+                )
+            except Exception as error:
+                logger.error(
+                    "connection expiry could not be recorded: exception_type=%s",
+                    log_type_name(error),
+                )
+
+    @staticmethod
+    async def _shielded(awaitable) -> None:
+        """Run ``awaitable`` to its end even while being cancelled; a
+        cancellation is raised once it ended (``_account``'s pattern)."""
+        work = asyncio.ensure_future(awaitable)
+        cancelled: asyncio.CancelledError | None = None
+        while not work.done():
+            try:
+                await asyncio.wait({work})
+            except asyncio.CancelledError as error:
+                cancelled = error
+        work.result()
+        if cancelled is not None:
+            raise cancelled
+
     async def _call(
         self,
         adapter,
@@ -1175,6 +1495,7 @@ class ConnectionService:
         if reason in (
             RefusalReason.TASK_BUDGET_EXCEEDED,
             RefusalReason.TASK_BUDGET_NOT_CONFIGURED,
+            RefusalReason.TASK_TOKEN_FLOOR,
         ):
             raise TaskBudgetError(reason)
         raise ConnectionUnavailableError()
