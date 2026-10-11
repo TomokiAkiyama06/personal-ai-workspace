@@ -72,6 +72,7 @@ Linux user. Never an argument, a path, a URL, a ``-c`` value or git's output: a
 URL or a configuration value may carry a credential (Issue #134).
 """
 
+import json
 import os
 import pwd
 import re
@@ -112,6 +113,9 @@ MERGE_CONFIG = (
 )
 
 _BRANCH = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,199}")
+_HEAD_DEPTH = re.compile(r"HEAD~[1-9][0-9]{0,4}")
+#: Where a writing node's base commit is recorded (Decision 0083 §10).
+BASE_REF_PREFIX = "refs/paw/base/"
 _OBJECT_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 _PROTOCOL = re.compile(r"[a-z][a-z0-9+.-]{0,15}")
 _HOST = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,62})(?:\.[a-z0-9](?:[a-z0-9-]{0,62}))*")
@@ -305,6 +309,17 @@ class Config:
     gh: str | None = None
     path: str = SAFE_PATH
     push_hosts: tuple[str, ...] = ()
+    # Decision 0083 §6: the tool sandbox (``paw-sandbox/v1``). Without an
+    # image every sandbox command is refused (``sandbox_not_configured``).
+    podman: str = "/usr/bin/podman"
+    sandbox_image: str | None = None
+    sandbox_shim_base: str | None = None
+    sandbox_cpus: str = "4"
+    sandbox_memory: str = "8g"
+    sandbox_pids: int = 1024
+    sandbox_lifetime: int = 7200
+    sandbox_command_timeout: int = 300
+    sandbox_keep_groups: bool = False
 
 
 def _canonical(value: str) -> bool:
@@ -350,6 +365,11 @@ def parse_config(argv: Sequence[str], *, uid: int | None = None) -> Config:
             if not sep or _CONFIG_KEY.fullmatch(key) is None:
                 raise Rejected("misconfigured")
             extra.append((key, setting))
+        elif name in _SANDBOX_OPTIONS:
+            if name in seen or not _SANDBOX_OPTIONS[name](value):
+                raise Rejected("misconfigured")
+            seen.add(name)
+            options[name[2:].replace("-", "_")] = value
         else:
             raise Rejected("misconfigured")
     home = str(options["home"])
@@ -366,7 +386,45 @@ def parse_config(argv: Sequence[str], *, uid: int | None = None) -> Config:
         gh=None if options.get("gh") is None else str(options["gh"]),
         path=str(options.get("path", SAFE_PATH)),
         push_hosts=tuple(dict.fromkeys(push_hosts)),
+        podman=str(options.get("podman", "/usr/bin/podman")),
+        sandbox_image=_optional(options.get("sandbox_image")),
+        sandbox_shim_base=_optional(options.get("sandbox_shim_base")),
+        sandbox_cpus=str(options.get("sandbox_cpus", "4")),
+        sandbox_memory=str(options.get("sandbox_memory", "8g")),
+        sandbox_pids=int(str(options.get("sandbox_pids", 1024))),
+        sandbox_lifetime=int(str(options.get("sandbox_lifetime", 7200))),
+        sandbox_command_timeout=int(str(options.get("sandbox_command_timeout", 300))),
+        sandbox_keep_groups=options.get("sandbox_keep_groups") == "yes",
     )
+
+
+def _optional(value: object) -> str | None:
+    return None if value is None else str(value)
+
+
+def _bounded_int(low: int, high: int) -> Callable[[str], bool]:
+    def check(value: str) -> bool:
+        return re.fullmatch(r"[1-9][0-9]{0,6}", value) is not None and (
+            low <= int(value) <= high
+        )
+
+    return check
+
+
+#: The sandbox's options of the ``command=`` line (Decision 0083 §6) and what
+#: each value must look like: the image only by digest (never a tag), paths
+#: canonical, limits bounded.
+_SANDBOX_OPTIONS: Mapping[str, Callable[[str], bool]] = {
+    "--podman": _canonical,
+    "--sandbox-image": lambda v: _IMAGE.fullmatch(v) is not None,
+    "--sandbox-shim-base": lambda v: _canonical(v) and v != "/",
+    "--sandbox-cpus": lambda v: _CPUS.fullmatch(v) is not None,
+    "--sandbox-memory": lambda v: _MEMORY.fullmatch(v) is not None,
+    "--sandbox-pids": _bounded_int(16, 65_536),
+    "--sandbox-lifetime": _bounded_int(60, 86_400),
+    "--sandbox-command-timeout": _bounded_int(1, 3600),
+    "--sandbox-keep-groups": lambda v: v in ("yes", "no"),
+}
 
 
 def hardening(config: Config) -> list[tuple[str, str]]:
@@ -513,12 +571,18 @@ def _paw_ref(value: str) -> bool:
 
 
 def _commit_revision(value: str) -> bool:
-    """``<rev>^{commit}`` for the revisions the backend asks about."""
+    """``<rev>^{commit}`` for the revisions the backend asks about: Decision
+    0036's, and the sandbox git shim's (Decision 0083 §2: ``HEAD~<n>``, an
+    object id, a node's base ``refs/paw/base/paw/...``)."""
     if not value.endswith("^{commit}"):
         return False
     revision = value.removesuffix("^{commit}")
-    if revision in ("HEAD", "MERGE_HEAD"):
+    if revision in ("HEAD", "MERGE_HEAD") or _OBJECT_ID.fullmatch(revision):
         return True
+    if _HEAD_DEPTH.fullmatch(revision):
+        return True
+    if revision.startswith(BASE_REF_PREFIX):
+        return _paw_branch(revision.removeprefix(BASE_REF_PREFIX))
     for prefix in ("refs/heads/", "refs/remotes/origin/"):
         if revision.startswith(prefix):
             return _branch(revision.removeprefix(prefix))
@@ -664,7 +728,159 @@ def _check_merge_base(args: list[str], places: Places, config: Config) -> None:
     if len(args) == 3 and args[0] == "--is-ancestor":
         if _paw_ref(args[1]) and _paw_ref(args[2]):
             return
+        # The sandbox git shim's range check (Decision 0083 §2): two commits.
+        if _OBJECT_ID.fullmatch(args[1]) and _OBJECT_ID.fullmatch(args[2]):
+            return
     raise Rejected("bad_arguments")
+
+
+def _check_cat_file(args: list[str], places: Places, config: Config) -> None:
+    """``cat-file -t <object id>``: whether an id the shim was given names a
+    commit (Decision 0083 §2: a tree, a blob or a tag is refused)."""
+    if len(args) == 2 and args[0] == "-t" and _OBJECT_ID.fullmatch(args[1]):
+        return
+    raise Rejected("bad_arguments")
+
+
+#: The read forms of the sandbox's git shim (Decision 0083 §2): what
+#: ``paw_backend.sandbox.gitread`` sends, in the canonical words of
+#: ``paw_backend.sandbox.gitargs`` (a test keeps these lists equal to that
+#: module's). Each is ``<sub-command> <fixed> [options] [revisions] --
+#: <pathspecs>``: the options from these lists only, revisions only as object
+#: ids (``^<id>`` for ``log``), pathspecs only ``.``, ``:(literal)<path>`` and
+#: ``:(exclude,literal)<path>`` with a relative path that cannot leave the work
+#: tree. Unpinned (a checkout read by a node without a worktree) they read the
+#: current state only: no ``show``, no revision, ``log`` by name only.
+READ_FIXED: Mapping[str, tuple[str, ...]] = {
+    "status": (),
+    "diff": ("--no-color", "--no-ext-diff", "--no-textconv"),
+    "log": ("--no-color", "--no-ext-diff", "--no-textconv", "--no-decorate"),
+    "show": ("--no-color", "--no-ext-diff", "--no-textconv", "--no-decorate"),
+}
+_READ_DIFF_OUTPUT = frozenset(
+    {
+        "--stat",
+        "--numstat",
+        "--shortstat",
+        "--name-only",
+        "--name-status",
+        "--summary",
+        "--patch",
+        "--no-renames",
+        "--find-renames",
+        "--ignore-all-space",
+        "--ignore-space-change",
+        "--ignore-blank-lines",
+        "--word-diff=plain",
+        "--minimal",
+        "--patience",
+        "--histogram",
+    }
+)
+READ_OPTIONS: Mapping[str, frozenset[str]] = {
+    "status": frozenset(
+        {
+            "--short",
+            "--branch",
+            "--porcelain=v1",
+            "--long",
+            "-z",
+            "--untracked-files=all",
+            "--untracked-files=normal",
+            "--untracked-files=no",
+        }
+    ),
+    "diff": _READ_DIFF_OUTPUT | {"--cached", "-R", "--exit-code", "--quiet"},
+    "log": _READ_DIFF_OUTPUT
+    | {
+        "--no-patch",
+        "--oneline",
+        "--abbrev-commit",
+        "--reverse",
+        "--first-parent",
+        "--no-merges",
+        "--merges",
+        "--graph",
+        "--follow",
+    },
+    "show": _READ_DIFF_OUTPUT | {"--no-patch", "--oneline", "--abbrev-commit"},
+}
+READ_FORMATS = ("oneline", "short", "medium", "full", "fuller", "reference")
+#: ``log`` by name only (an unpinned read: Decision 0083 §2).
+READ_NAMES_ONLY_LOG = frozenset({"--oneline", "--stat", "--name-only"})
+_READ_NUMBER = re.compile(r"[0-9]{1,6}")
+_READ_NUMBERED = {
+    "log": (("--max-count=", 100_000), ("--skip=", 100_000), ("--unified=", 1000)),
+    "diff": (("--unified=", 1000),),
+    "show": (("--unified=", 1000),),
+}
+
+
+def _read_option(subcommand: str, word: str) -> bool:
+    if word in READ_OPTIONS[subcommand]:
+        return True
+    for prefix, maximum in _READ_NUMBERED.get(subcommand, ()):
+        if word.startswith(prefix):
+            number = word.removeprefix(prefix)
+            return _READ_NUMBER.fullmatch(number) is not None and int(number) <= maximum
+    if subcommand in ("log", "show") and word.startswith("--format="):
+        return word.removeprefix("--format=") in READ_FORMATS
+    return False
+
+
+def _read_pathspec(word: str) -> str | None:
+    """``positive`` / ``exclude`` for an accepted pathspec, else ``None``."""
+    if word == ".":
+        return "positive"
+    for prefix, kind in ((":(literal)", "positive"), (":(exclude,literal)", "exclude")):
+        if word.startswith(prefix):
+            path = word.removeprefix(prefix)
+            if (
+                path
+                and len(path) <= MAX_PATH_CHARS
+                and not path.startswith("/")
+                and path.isprintable()
+                and all(part not in ("", ".", "..") for part in path.split("/"))
+            ):
+                return kind
+            return None
+    return None
+
+
+def check_read(subcommand: str, args: Sequence[str], *, pinned: bool) -> None:
+    """A read form of the sandbox's git shim, or ``Rejected``."""
+    fixed = list(READ_FIXED[subcommand])
+    if list(args[: len(fixed)]) != fixed or "--" not in args:
+        raise Rejected("bad_arguments")
+    separator = list(args).index("--")
+    words, specs = list(args[len(fixed) : separator]), list(args[separator + 1 :])
+    if not specs or "positive" not in {_read_pathspec(w) for w in specs}:
+        raise Rejected("bad_arguments")
+    if any(_read_pathspec(w) is None for w in specs):
+        raise Rejected("bad_arguments")
+    revisions = 0
+    for word in words:
+        if word.startswith("-"):
+            if not _read_option(subcommand, word):
+                raise Rejected("bad_arguments")
+            if (
+                not pinned
+                and subcommand == "log"
+                and not (word in READ_NAMES_ONLY_LOG or word.startswith("--max-count="))
+            ):
+                raise Rejected("bad_arguments")
+        elif _OBJECT_ID.fullmatch(word) or (
+            subcommand == "log"
+            and word.startswith("^")
+            and _OBJECT_ID.fullmatch(word[1:])
+        ):
+            revisions += 1
+        else:
+            raise Rejected("bad_arguments")
+    if subcommand == "status" and revisions:
+        raise Rejected("bad_arguments")
+    if not pinned and (subcommand == "show" or revisions):
+        raise Rejected("bad_arguments")
 
 
 #: The ``status`` of Decision 0051 (PR #130): whether an integration worktree
@@ -732,10 +948,19 @@ def _check_push(args: list[str], places: Places, config: Config) -> None:
 
 
 def _check_status(args: list[str], places: Places, config: Config) -> None:
-    if not _exactly(
+    if _exactly(
         args, ["--porcelain=v1", "-z", "--untracked-files=all"], STATUS_WITH_SUBMODULES
     ):
+        return
+    # The sandbox git shim's form (pinned or not: :func:`check_read`, from
+    # :func:`plan`, which knows which).
+    if "--" not in args:
         raise Rejected("bad_arguments")
+
+
+def _check_read_form(args: list[str], places: Places, config: Config) -> None:
+    """``diff`` / ``log`` / ``show``: the shape is checked by :func:`check_read`
+    in :func:`plan`, which knows whether the call is pinned."""
 
 
 Checker = Callable[[list[str], Places, Config], None]
@@ -746,10 +971,14 @@ Checker = Callable[[list[str], Places, Config], None]
 #: ``rev-parse`` / ``symbolic-ref`` shapes), and Decision 0051 (PR #130: the
 #: second ``status`` form and ``submodule status --cached``, pinned only; no
 #: other ``submodule`` sub-command or option), and Decision 0052 (issue #132:
-#: one ``push`` form, never pinned). ``True``: the sub-command may run
-#: pinned to a worktree (``--git-dir=`` / ``--work-tree=``, Decision 0036 §13).
-#: Anything not here — any other ``push``, ``fetch``, ``pull``, ``checkout``,
-#: ``switch``, ``reset``, ``rebase``, ``gc``, ``config`` writes, ... — is refused.
+#: one ``push`` form, never pinned), and Decision 0083 §2 (the sandbox git
+#: shim's reads: ``status`` / ``diff`` / ``log`` / ``show`` in the forms of
+#: :func:`check_read`, ``cat-file -t <id>``, ``merge-base --is-ancestor <id>
+#: <id>`` and the added ``rev-parse --verify`` revisions). ``True``: the
+#: sub-command may run pinned to a worktree (``--git-dir=`` / ``--work-tree=``,
+#: Decision 0036 §13). Anything not here — any other ``push``, ``fetch``,
+#: ``pull``, ``checkout``, ``switch``, ``reset``, ``rebase``, ``gc``, ``commit``,
+#: ``config`` writes, ... — is refused.
 SUBCOMMANDS: Mapping[str, tuple[Checker, bool]] = {
     "rev-parse": (_check_rev_parse, True),
     "symbolic-ref": (_check_symbolic_ref, True),
@@ -760,10 +989,15 @@ SUBCOMMANDS: Mapping[str, tuple[Checker, bool]] = {
     "worktree": (_check_worktree, False),
     "merge": (_check_merge, True),
     "merge-tree": (_check_merge_tree, False),
-    "merge-base": (_check_merge_base, False),
+    "merge-base": (_check_merge_base, True),
     "status": (_check_status, True),
     "submodule": (_check_submodule, True),
     "push": (_check_push, False),
+    # Decision 0083 §2: the sandbox git shim's reads (``check_read``).
+    "diff": (_check_read_form, True),
+    "log": (_check_read_form, True),
+    "show": (_check_read_form, True),
+    "cat-file": (_check_cat_file, True),
 }
 
 
@@ -797,10 +1031,10 @@ class Invocation:
     metadata: tuple[str, ...] = ()
 
 
-def _split(original: str | None) -> list[str]:
+def _split(original: str | None, *, limit: int = MAX_COMMAND_BYTES) -> list[str]:
     if original is None or original == "":
         raise Rejected("no_command")  # an interactive login or a bare `ssh host`
-    if len(original.encode("utf-8", "surrogateescape")) > MAX_COMMAND_BYTES:
+    if len(original.encode("utf-8", "surrogateescape")) > limit:
         raise Rejected("too_long")
     try:
         return shlex.split(original, comments=False, posix=True)
@@ -901,6 +1135,15 @@ def plan(original: str | None, config: Config) -> Invocation:
         # pinned to the worktree's git directory in the checkout (Decision 0036).
         raise Rejected("unpinned_worktree")
     checker(args, places, config)
+    if subcommand in READ_FIXED and not (
+        subcommand == "status"
+        and _exactly(
+            args,
+            ["--porcelain=v1", "-z", "--untracked-files=all"],
+            STATUS_WITH_SUBMODULES,
+        )
+    ):
+        check_read(subcommand, args, pinned=bool(pinned))
     if subcommand == "init" and places.check(args[4], worktree=False) != cwd:
         # ``init`` runs where it creates the repository, so the check of the
         # repository found from the cwd (:func:`check_repository`) is the
@@ -1292,6 +1535,403 @@ def _read_small_file(git_dir: str, name: str) -> str:
     return text
 
 
+# -- the sandbox of Decision 0083 §6 (``paw-sandbox/v1``) ---------------------------
+
+#: The first word of a sandbox command (``paw_backend.sandbox.wire``).
+SANDBOX_TAG = "paw-sandbox/v1"
+#: A sandbox command may be longer than a git one (a start lists every mask).
+MAX_SANDBOX_COMMAND_BYTES = 128 * 1024
+SANDBOX_NAME_PREFIX = "paw-sbx-"
+SANDBOX_LABEL = "paw.sandbox=v1"
+WORKSPACE = "/workspace"
+SHIM_MOUNT = "/run/paw-shim"
+#: What a ``shell`` command runs as, and what a file tool runs (in the image).
+FILE_HELPER = "/usr/local/lib/paw/paw-file-tool"
+SANDBOX_KINDS = ("shell", "file-write", "file-str-replace")
+#: The most of each stream of a command that is kept (the rest is dropped and
+#: the status line says so), and the most a command may read on stdin.
+MAX_STREAM_BYTES = 4 * 1024 * 1024
+MAX_STDIN_BYTES = 1024 * 1024
+#: A shell command is one argument of ``bash -lc``: Linux takes 128 KiB.
+MAX_SHELL_COMMAND_BYTES = 100 * 1024
+MAX_MASKS = 256
+#: How long ``start``'s and ``exec``'s own Podman calls may take.
+SANDBOX_CONTROL_TIMEOUT_S = 120
+_IMAGE = re.compile(r"[a-z0-9][a-z0-9._/:-]{0,254}@sha256:[0-9a-f]{64}")
+_CPUS = re.compile(r"[1-9][0-9]{0,2}(?:\.[0-9]{1,2})?")
+_MEMORY = re.compile(r"[1-9][0-9]{0,5}[kmg]")
+_NONCE = re.compile(r"[0-9a-f]{32}")
+_UNMOUNTABLE = re.compile(r'[,"\x00-\x1f\x7f]')
+
+
+@dataclass(frozen=True)
+class SandboxCall:
+    """One accepted sandbox command: what runs (``argv``) and how.
+
+    ``op``: ``start`` / ``exec`` / ``stop``. For ``exec``, ``inspect`` asks
+    Podman whether the container runs, ``nonce`` ends the status line and
+    ``kind`` says what ``argv`` is; the command or the file helper's input
+    comes on stdin."""
+
+    op: str
+    name: str
+    argv: list[str]
+    env: dict[str, str]
+    inspect: list[str] = field(default_factory=list)
+    nonce: str = ""
+    kind: str = ""
+
+
+def _sandbox_id(word: str) -> str:
+    """The container name of a sandbox id (a canonical UUID), or ``Rejected``."""
+    if (
+        re.fullmatch(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", word
+        )
+        is None
+    ):
+        raise Rejected("bad_sandbox_id")
+    return SANDBOX_NAME_PREFIX + word.replace("-", "")
+
+
+def _sandbox_path(value: object) -> str:
+    """A canonical absolute path inside the sandbox (under ``/workspace``)."""
+    if (
+        not isinstance(value, str)
+        or not _canonical(value)
+        or (value != WORKSPACE and not value.startswith(f"{WORKSPACE}/"))
+    ):
+        raise Rejected("bad_path")
+    return value
+
+
+def _host_path(value: object, places: Places, *, worktree: bool | None) -> str:
+    """A host path of a mount, a mask or a read-only path: canonical, mountable
+    (``podman --mount`` reads its value as CSV), in the root, and already the
+    path every symbolic link resolves to (nothing on the way is a link)."""
+    if not isinstance(value, str) or _UNMOUNTABLE.search(value):
+        raise Rejected("bad_path")
+    real = places.check(value, worktree=worktree, must_exist=True)
+    if real != value:
+        raise Rejected("path_is_link")
+    return real
+
+
+def _container_target(path: str, source: str, target: str) -> str:
+    return target + path[len(source) :]
+
+
+def sandbox_environment(config: Config) -> dict[str, str]:
+    """Podman's whole environment: a fixed allowlist (rootless Podman needs the
+    user's runtime directory), nothing inherited from ``sshd``."""
+    return {
+        "PATH": config.path,
+        "HOME": config.home,
+        "LC_ALL": "C",
+        "LANG": "C",
+        "XDG_RUNTIME_DIR": f"/run/user/{os.geteuid()}",
+    }
+
+
+def _start_mounts(spec: object, places: Places, config: Config, name: str) -> list[str]:
+    """The ``--mount`` options of a ``start`` spec, every path re-checked."""
+    if not isinstance(spec, dict) or set(spec) != {
+        "mounts",
+        "masks",
+        "readonly",
+        "shim",
+    }:
+        raise Rejected("bad_spec")
+    mounts, masks, readonly, shim = (
+        spec["mounts"],
+        spec["masks"],
+        spec["readonly"],
+        spec["shim"],
+    )
+    if (
+        not isinstance(mounts, list)
+        or len(mounts) != 1
+        or not isinstance(masks, list)
+        or not isinstance(readonly, list)
+        or len(masks) + len(readonly) > MAX_MASKS
+        or not isinstance(shim, bool)
+    ):
+        raise Rejected("bad_spec")
+    mount = mounts[0]
+    if not isinstance(mount, dict) or set(mount) != {"source", "target", "writable"}:
+        raise Rejected("bad_spec")
+    writable = mount["writable"]
+    if not isinstance(writable, bool):
+        raise Rejected("bad_spec")
+    # Only a worktree (inside ``.paw-worktrees``, with its ``.git`` file) is
+    # ever writable: a user's checkout is mounted read-only or not at all.
+    source = _host_path(mount["source"], places, worktree=True if writable else None)
+    target = _sandbox_path(mount["target"])
+    if (
+        target != WORKSPACE
+        and re.fullmatch(
+            r"/workspace/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+            target,
+        )
+        is None
+    ):
+        raise Rejected("bad_spec")
+    if not os.path.isdir(source):
+        raise Rejected("bad_path")
+    if writable and not stat.S_ISREG(_lstat(os.path.join(source, ".git")).st_mode):
+        raise Rejected("not_a_worktree")
+    options = [
+        f"type=bind,source={source},destination={target}"
+        + ("" if writable else ",ro=true")
+    ]
+    placed: list[str] = []
+    for value, kind in [
+        *((m, "mask") for m in masks),
+        *((r, "readonly") for r in readonly),
+    ]:
+        path = _host_path(value, places, worktree=None)
+        if not _within(path, source, allow_equal=False):
+            raise Rejected("bad_mask")
+        if any(
+            _within(path, other, allow_equal=True)
+            or _within(other, path, allow_equal=True)
+            for other in placed
+        ):
+            raise Rejected("bad_mask")
+        placed.append(path)
+        info = _lstat(path)
+        inside = _container_target(path, source, target)
+        if kind == "readonly":
+            if not writable or not (
+                stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)
+            ):
+                raise Rejected("bad_mask")
+            options.append(f"type=bind,source={path},destination={inside},ro=true")
+        elif stat.S_ISDIR(info.st_mode):
+            # An empty tmpfs that the sandbox's user (not its root) cannot write.
+            options.append(
+                f"type=tmpfs,destination={inside},tmpfs-size=4k,tmpfs-mode=0555"
+            )
+        elif stat.S_ISREG(info.st_mode):
+            options.append(f"type=bind,source=/dev/null,destination={inside},ro=true")
+        else:
+            raise Rejected("mask_unavailable")
+    if shim:
+        if config.sandbox_shim_base is None:
+            raise Rejected("sandbox_not_configured")
+        directory = (
+            f"{config.sandbox_shim_base}/{name.removeprefix(SANDBOX_NAME_PREFIX)}"
+        )
+        info = _lstat(directory)
+        if not stat.S_ISDIR(info.st_mode) or os.path.realpath(directory) != directory:
+            raise Rejected("bad_shim")
+        options.append(f"type=bind,source={directory},destination={SHIM_MOUNT},ro=true")
+    return options
+
+
+def _lstat(path: str) -> os.stat_result:
+    try:
+        return os.lstat(path)
+    except OSError:
+        raise Rejected("mask_unavailable") from None
+
+
+def sandbox_plan(original: str, config: Config) -> SandboxCall:
+    """The :class:`SandboxCall` of a ``paw-sandbox/v1`` command, or ``Rejected``."""
+    if config.sandbox_image is None:
+        raise Rejected("sandbox_not_configured")
+    words = _split(original, limit=MAX_SANDBOX_COMMAND_BYTES)
+    if len(words) < 3 or words[0] != SANDBOX_TAG:
+        raise Rejected("bad_protocol")
+    op, name = words[1], _sandbox_id(words[2])
+    env = sandbox_environment(config)
+    podman = config.podman
+    if op == "start" and len(words) == 4:
+        try:
+            spec = json.loads(words[3])
+        except ValueError:
+            raise Rejected("bad_spec") from None
+        places = Places.of(config)
+        mounts = _start_mounts(spec, places, config, name)
+        argv = [
+            podman,
+            "run",
+            "--detach",
+            "--rm",
+            "--name",
+            name,
+            "--label",
+            SANDBOX_LABEL,
+            "--pull",
+            "never",
+            "--network",
+            "none",
+            "--userns",
+            "keep-id",
+            "--cap-drop",
+            "all",
+            "--security-opt",
+            "no-new-privileges",
+            "--cpus",
+            config.sandbox_cpus,
+            "--memory",
+            config.sandbox_memory,
+            "--pids-limit",
+            str(config.sandbox_pids),
+            "--timeout",
+            str(config.sandbox_lifetime),
+            "--env",
+            "HOME=/tmp",
+            "--env",
+            "PYTHONDONTWRITEBYTECODE=1",
+            "--workdir",
+            WORKSPACE,
+        ]
+        if config.sandbox_keep_groups:
+            argv.extend(("--group-add", "keep-groups"))
+        for option in mounts:
+            argv.extend(("--mount", option))
+        argv.extend((config.sandbox_image, "sleep", "infinity"))
+        return SandboxCall("start", name, argv, env)
+    if op == "stop" and len(words) == 3:
+        argv = [podman, "rm", "--force", "--time", "5", "--ignore", name]
+        return SandboxCall("stop", name, argv, env)
+    if op == "exec" and len(words) in (6, 7):
+        nonce, workdir, kind = words[3], _sandbox_path(words[4]), words[5]
+        if _NONCE.fullmatch(nonce) is None or kind not in SANDBOX_KINDS:
+            raise Rejected("bad_arguments")
+        if (kind == "shell") != (len(words) == 6):
+            raise Rejected("bad_arguments")
+        argv = [podman, "exec"]
+        if kind == "shell":
+            entry = [
+                "timeout",
+                "-k",
+                "5",
+                str(config.sandbox_command_timeout),
+                "bash",
+                "-lc",
+            ]
+        else:
+            argv.append("--interactive")
+            helper = "write" if kind == "file-write" else "str-replace"
+            entry = ["python3", "-I", FILE_HELPER, helper, _sandbox_path(words[6])]
+        argv.extend(("--workdir", workdir, name, *entry))
+        inspect = [
+            podman,
+            "container",
+            "inspect",
+            "--format",
+            "{{.State.Running}}",
+            name,
+        ]
+        return SandboxCall("exec", name, argv, env, inspect, nonce, kind)
+    raise Rejected("bad_arguments")
+
+
+def _capture(
+    argv: Sequence[str],
+    env: Mapping[str, str],
+    stdin: bytes,
+    timeout: float,
+) -> tuple[int | None, bytes, bytes, bool]:
+    """Run ``argv`` with ``stdin``: ``(status, stdout, stderr, truncated)``,
+    each stream kept to :data:`MAX_STREAM_BYTES` (read on to its end, so that
+    the command never blocks on a full pipe). ``status`` is ``None`` when
+    ``timeout`` passed (the process is killed)."""
+    deadline = time.monotonic() + timeout
+    truncated = False
+    with subprocess.Popen(
+        list(argv),
+        env=dict(env),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    ) as process:
+        assert process.stdin and process.stdout and process.stderr
+        try:
+            if stdin:
+                process.stdin.write(stdin)
+            process.stdin.close()
+        except BrokenPipeError:
+            pass
+        out_fd, err_fd = process.stdout.fileno(), process.stderr.fileno()
+        kept: dict[int, list[bytes]] = {out_fd: [], err_fd: []}
+        sizes = {out_fd: 0, err_fd: 0}
+        try:
+            with selectors.DefaultSelector() as selector:
+                selector.register(process.stdout, selectors.EVENT_READ)
+                selector.register(process.stderr, selectors.EVENT_READ)
+                remaining_streams = 2
+                while remaining_streams:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        process.kill()
+                        process.wait()
+                        return None, b"", b"", truncated
+                    for key, _ in selector.select(remaining):
+                        chunk = os.read(key.fd, 65536)
+                        if not chunk:
+                            selector.unregister(key.fileobj)
+                            remaining_streams -= 1
+                            continue
+                        room = MAX_STREAM_BYTES - sizes[key.fd]
+                        if room > 0:
+                            kept[key.fd].append(chunk[:room])
+                            sizes[key.fd] += min(len(chunk), room)
+                        if len(chunk) > room:
+                            truncated = True
+            returncode = process.wait(max(0.0, deadline - time.monotonic()))
+        except BaseException:
+            process.kill()
+            raise
+    return returncode, b"".join(kept[out_fd]), b"".join(kept[err_fd]), truncated
+
+
+def _read_stdin(limit: int) -> bytes:
+    data = sys.stdin.buffer.read(limit + 1)
+    if len(data) > limit:
+        raise Rejected("too_long")
+    return data
+
+
+def run_sandbox_exec(
+    call: SandboxCall,
+    config: Config,
+    stdin: bytes,
+    *,
+    capture: Callable[..., tuple[int | None, bytes, bytes, bool]] = _capture,
+) -> tuple[bytes, bytes]:
+    """Run an accepted ``exec``: ``(stdout, stderr)`` to write, the status line
+    of ``call.nonce`` last (``missing``: the container is not running)."""
+    status_prefix = f"\npaw-sandbox-status {call.nonce} "
+    running, answer, _, _ = capture(
+        call.inspect, call.env, b"", SANDBOX_CONTROL_TIMEOUT_S
+    )
+    if running != 0 or answer.strip() != b"true":
+        return b"", (status_prefix + "missing\n").encode("ascii")
+    argv = list(call.argv)
+    if call.kind == "shell":
+        try:
+            command = stdin.decode("utf-8")
+        except UnicodeDecodeError:
+            raise Rejected("bad_encoding") from None
+        if not command or "\x00" in command or len(stdin) > MAX_SHELL_COMMAND_BYTES:
+            raise Rejected("too_long")
+        argv.append(command)
+        stdin = b""
+    limit = config.sandbox_command_timeout + 60
+    code, out, err, truncated = capture(argv, call.env, stdin, limit)
+    if code is None:
+        # ``timeout -k 5`` in the container did not end it: the backend stops
+        # the whole sandbox (it waited as long), this reads as ``timeout``'s.
+        code = 124
+    if code < 0:
+        code = 128 - code  # a signal, as a shell reports it
+    status = f"exit={min(code, 255)} truncated={1 if truncated else 0}\n"
+    return out, err + (status_prefix + status).encode("ascii")
+
+
 def _syslog(message: str) -> None:
     try:
         syslog.openlog("paw-git-wrapper", syslog.LOG_PID, syslog.LOG_AUTH)
@@ -1308,23 +1948,35 @@ def main(
     chdir: Callable[[str], object] = os.chdir,
     log: Callable[[str], None] = _syslog,
     check: Callable[[Invocation], None] = check_repository,
+    read_stdin: Callable[[int], bytes] = _read_stdin,
 ) -> int:
-    """Decide one call; ``exec`` git or return :data:`REJECTED` (or
+    """Decide one call; ``exec`` git (or Podman, for a sandbox's ``start`` /
+    ``stop``), run a sandbox's ``exec``, or return :data:`REJECTED` (or
     :data:`POPULATED_SUBMODULE`)."""
     arguments = sys.argv[1:] if argv is None else list(argv)
     environment = os.environ if environ is None else environ
     user = "-"
+    call: SandboxCall | None = None
+    stdin = b""
     try:
         config = parse_config(arguments)
         user = config.user
-        invocation = plan(environment.get("SSH_ORIGINAL_COMMAND"), config)
-        check(invocation)
+        original = environment.get("SSH_ORIGINAL_COMMAND")
+        if original is not None and original.startswith(f"{SANDBOX_TAG} "):
+            call = sandbox_plan(original, config)
+            if call.op == "exec":
+                stdin = read_stdin(MAX_STDIN_BYTES)
+        else:
+            invocation = plan(original, config)
+            check(invocation)
     except Rejected as rejected:
         log(f"rejected user={user} reason={rejected.reason}")
         sys.stderr.write(f"paw-git-wrapper: rejected ({rejected.reason})\n")
         if rejected.reason == "populated_submodule":
             return POPULATED_SUBMODULE
         return REJECTED
+    if call is not None:
+        return _sandbox_main(call, config, stdin, execve=execve, chdir=chdir, log=log)
     log(f"accepted user={user} subcommand={invocation.subcommand}")
     sys.stdout.flush()
     sys.stderr.flush()
@@ -1334,6 +1986,48 @@ def main(
     except OSError:
         log(f"failed user={user} subcommand={invocation.subcommand} reason=exec")
         sys.stderr.write("paw-git-wrapper: git could not be started\n")
+        return REJECTED
+    return 0  # only reached when ``execve`` is a test double
+
+
+def _sandbox_main(
+    call: SandboxCall,
+    config: Config,
+    stdin: bytes,
+    *,
+    execve: Callable[[str, list[str], dict[str, str]], object],
+    chdir: Callable[[str], object],
+    log: Callable[[str], None],
+) -> int:
+    """Run an accepted sandbox command (Decision 0083 §6). The log names the
+    operation and the user only: never a path, a command or its output."""
+    user = config.user
+    if call.op == "exec":
+        try:
+            out, err = run_sandbox_exec(call, config, stdin)
+        except Rejected as rejected:
+            log(f"rejected user={user} reason={rejected.reason}")
+            sys.stderr.write(f"paw-git-wrapper: rejected ({rejected.reason})\n")
+            return REJECTED
+        except (OSError, subprocess.SubprocessError):
+            log(f"failed user={user} sandbox=exec reason=podman")
+            sys.stderr.write("paw-git-wrapper: the sandbox could not be used\n")
+            return REJECTED
+        log(f"accepted user={user} sandbox=exec kind={call.kind}")
+        sys.stdout.buffer.write(out)
+        sys.stdout.flush()
+        sys.stderr.buffer.write(err)
+        sys.stderr.flush()
+        return 0
+    log(f"accepted user={user} sandbox={call.op}")
+    sys.stdout.flush()
+    sys.stderr.flush()
+    try:
+        chdir(config.home)
+        execve(call.argv[0], call.argv, call.env)
+    except OSError:
+        log(f"failed user={user} sandbox={call.op} reason=exec")
+        sys.stderr.write("paw-git-wrapper: podman could not be started\n")
         return REJECTED
     return 0  # only reached when ``execve`` is a test double
 
