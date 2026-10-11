@@ -267,9 +267,20 @@ class NodeConnectionGateway:
         # be sent for it then.
         await self._guard.ensure_active()
         self._fence.ensure_open()
-        result = await self._service.execute_session(
-            principal, context, kind, request, gate=gate
-        )
+        try:
+            result = await self._service.execute_session(
+                principal, context, kind, request, gate=gate
+            )
+        except Exception as error:
+            # The admission's own fence (the task ended, the run was replaced,
+            # the lease was lost after the checks above): the attempt stops,
+            # as a tool call's would. Anything else is the runtime's to
+            # classify (``CloudGate``).
+            reason = _ADMISSION_STOPS.get(_refusal_of(error))
+            if reason is None:
+                raise
+            self._guard.stop(reason)
+            raise NodeStopped(reason) from None
         stopped = getattr(result, "stopped", None)
         if stopped is not None:
             reason = _SESSION_STOPS.get(stopped.value, StopReason.ABANDONED)
@@ -277,6 +288,26 @@ class NodeConnectionGateway:
                 self._guard.stop(reason)
             raise NodeStopped(reason)
         return result
+
+
+# ``connections.TaskNotUsableError`` reasons that stop the attempt (read by
+# value, as below). ``lease_unavailable`` (the lease could not be read) refuses
+# the call only, as for a tool call: the heartbeats decide about the lease.
+_ADMISSION_STOPS = {
+    "task_not_found": StopReason.TASK_ENDED,
+    "task_ended": StopReason.TASK_ENDED,
+    "task_superseded": StopReason.SUPERSEDED,
+    "lease_lost": StopReason.LEASE_LOST,
+}
+
+
+def _refusal_of(error: Exception) -> str | None:
+    """The reason of a ``connections.TaskNotUsableError`` (``None`` for any
+    other error)."""
+    if getattr(error, "code", None) != "task_not_usable":
+        return None
+    reason = getattr(error, "reason", None)
+    return getattr(reason, "value", None)
 
 
 # ``connections.SessionStop`` values (read by value: the orchestrator does not

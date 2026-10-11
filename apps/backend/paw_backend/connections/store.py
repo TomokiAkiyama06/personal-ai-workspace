@@ -235,6 +235,14 @@ class SessionTurn(StrEnum):
     CLOSED = "closed"  # the row is no longer in flight
 
 
+class _TurnRefused(Exception):
+    """Rolls a turn's transaction back (the lease or the row did not hold)."""
+
+    def __init__(self, turn: SessionTurn) -> None:
+        super().__init__(turn.value)
+        self.turn = turn
+
+
 @dataclass(frozen=True, slots=True)
 class Admitted:
     """The call may start: its usage row exists (``in_flight``) and the handle of the
@@ -982,6 +990,13 @@ class ConnectionStore:
         amount = input_tokens + output_tokens
         try:
             async with self._database.session() as session, session.begin():
+                # Lock order as everywhere else: the task row and the budget
+                # row first (``record_in``: its run fence), then the queue
+                # entry. A failed check below rolls the charge back.
+                if budget is not None and amount > 0:
+                    await budget.record_in(
+                        session, task_id, BudgetKind.TOKENS, amount, run=run
+                    )
                 held = await session.execute(
                     text(SESSION_LEASE_SQL),
                     {
@@ -992,17 +1007,15 @@ class ConnectionStore:
                     },
                 )
                 if held.first() is None:
-                    return SessionTurn.LEASE_LOST
+                    raise _TurnRefused(SessionTurn.LEASE_LOST)
                 added = await session.execute(
                     text(SESSION_ADD_SQL),
                     {"id": usage_id, "input": input_tokens, "output": output_tokens},
                 )
                 if added.first() is None:
-                    return SessionTurn.CLOSED
-                if budget is not None and amount > 0:
-                    await budget.record_in(
-                        session, task_id, BudgetKind.TOKENS, amount, run=run
-                    )
+                    raise _TurnRefused(SessionTurn.CLOSED)
+        except _TurnRefused as refused:
+            return refused.turn  # rolled back: nothing was written
         except StaleRunError:
             return SessionTurn.RUN_REPLACED  # rolled back: nothing was written
         except BudgetNotConfiguredError:
@@ -1014,33 +1027,54 @@ class ConnectionStore:
         usage_id: uuid.UUID,
         status: UsageStatus,
         failure: FailureCode | None,
-        input_tokens: int,
-        output_tokens: int,
-    ) -> UsageRecord | None:
-        """End a session's ``in_flight`` row with its final token counts (what
-        was counted turn by turn plus the remainder: never fewer than counted).
-        Conditional on ``in_flight``, as :meth:`settle`."""
+        totals: tuple[int, int] | None,
+        estimate: int,
+    ) -> tuple[UsageRecord, int] | None:
+        """End a session's ``in_flight`` row and say how many tokens its turns
+        had counted (read from the row itself, under its lock: what the turns
+        committed, whatever the caller saw of them).
+
+        ``totals``: the session's whole input and output tokens when the CLI
+        reported them; the row keeps the larger of each and what was counted
+        (never pulled back). ``None`` (not known): the row ends with the
+        ``estimate`` in all when the turns counted less (Decision 0083, 5 (d)).
+        Conditional on ``in_flight``, as :meth:`settle`; ``None`` when the row
+        was no longer in flight."""
         clock, params = self._clock_cte()
+        known = totals is not None
         rows = await self._fetch(
-            f"WITH {clock} UPDATE connection_usage SET status = %(status)s,"
+            f"WITH {clock}, counted AS (SELECT id AS counted_id,"
+            " COALESCE(input_tokens, 0) AS counted_input,"
+            " COALESCE(output_tokens, 0) AS counted_output FROM connection_usage"
+            " WHERE id = %(id)s AND status = 'in_flight' AND session FOR UPDATE)"
+            " UPDATE connection_usage SET status = %(status)s,"
             " failure_code = %(failure)s,"
-            " input_tokens = GREATEST(COALESCE(input_tokens, 0), %(input)s),"
-            " output_tokens = GREATEST(COALESCE(output_tokens, 0), %(output)s),"
+            " input_tokens = CASE WHEN %(known)s"
+            " THEN GREATEST(counted_input, %(input)s)"
+            " ELSE counted_input + GREATEST(0,"
+            " %(estimate)s - counted_input - counted_output) END,"
+            " output_tokens = CASE WHEN %(known)s"
+            " THEN GREATEST(counted_output, %(output)s) ELSE counted_output END,"
             " finished_at = GREATEST((SELECT ts FROM clock), started_at),"
             " duration_ms = GREATEST(0, floor(extract(epoch FROM"
             " ((SELECT ts FROM clock) - started_at)) * 1000))::bigint"
-            " WHERE id = %(id)s AND status = 'in_flight' AND session"
-            f" RETURNING {_USAGE_COLUMNS}",
+            " FROM counted WHERE id = counted_id"
+            f" RETURNING {_USAGE_COLUMNS}, counted_input + counted_output",
             {
                 **params,
                 "id": usage_id,
                 "status": status.value,
                 "failure": None if failure is None else failure.value,
-                "input": input_tokens,
-                "output": output_tokens,
+                "known": known,
+                "input": totals[0] if known else 0,
+                "output": totals[1] if known else 0,
+                "estimate": estimate,
             },
         )
-        return usage_record(rows[0]) if rows else None
+        if not rows:
+            return None
+        *columns, counted = rows[0]
+        return usage_record(tuple(columns)), int(counted)
 
     async def reap_abandoned(
         self, *, limit: int = MAX_REAPED_PER_CYCLE

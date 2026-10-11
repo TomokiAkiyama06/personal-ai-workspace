@@ -19,6 +19,7 @@ from paw_backend.connections import (
     SessionResult,
     SessionStop,
     TaskBudgetError,
+    TaskNotUsableError,
     UsagePurpose,
 )
 from paw_backend.orchestrator.domain import ExecutionPlacement, NodeRole
@@ -125,6 +126,9 @@ class CloudGateTest(unittest.IsolatedAsyncioTestCase):
     async def test_refusals_send_nothing(self):
         await self.refused(Failure.CLOUD_POLICY_DENIED, None)
         await self.refused(Failure.CLOUD_POLICY_DENIED, Policy(allows=False))
+        # Fail closed: a truthy answer that is not ``True`` allows nothing.
+        for answer in (1, "yes", object()):
+            await self.refused(Failure.CLOUD_POLICY_DENIED, Policy(allows=answer))
         await self.refused(Failure.CLOUD_POLICY_DENIED, Policy(), both=False)
         quota = QuotaExceededError(QuotaMetric.TOKENS, QuotaPeriod.DAY, None)
         await self.refused(Failure.CONNECTION_QUOTA_EXCEEDED, Policy(), error=quota)
@@ -184,19 +188,22 @@ class Principals:
 
 
 class Service:
-    def __init__(self, result):
+    def __init__(self, result, error=None):
         self.result = result
+        self.error = error
         self.calls = []
 
     async def execute_session(self, principal, context, kind, request, *, gate=None):
         self.calls.append((principal, context, kind))
+        if self.error is not None:
+            raise self.error
         return self.result
 
 
 class GatewayTest(unittest.IsolatedAsyncioTestCase):
-    async def gateway(self, result, principals=None, fence=None):
+    async def gateway(self, result, principals=None, fence=None, error=None):
         guard = Guard()
-        service = Service(result)
+        service = Service(result, error)
         context = object()
 
         async def factory():
@@ -231,6 +238,35 @@ class GatewayTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(NodeStopped):
             await gateway.execute_session(ConnectionKind.CODEX, REQUEST)
         self.assertEqual(service.calls, [])
+
+    async def test_an_admission_fenced_out_stops_the_node(self):
+        # The task ended, the run was replaced or the lease was lost between
+        # the gateway's checks and the admission: the attempt stops (not a
+        # connection failure for the runtime to retry or escalate).
+        for reason, stop in (
+            (RefusalReason.TASK_ENDED, StopReason.TASK_ENDED),
+            (RefusalReason.TASK_NOT_FOUND, StopReason.TASK_ENDED),
+            (RefusalReason.TASK_SUPERSEDED, StopReason.SUPERSEDED),
+            (RefusalReason.LEASE_LOST, StopReason.LEASE_LOST),
+        ):
+            gateway, guard, _, _ = await self.gateway(
+                DONE, error=TaskNotUsableError(reason)
+            )
+            with self.assertRaises(NodeStopped) as caught:
+                await gateway.execute_session(ConnectionKind.CODEX, REQUEST)
+            self.assertIs(caught.exception.reason, stop)
+            self.assertIs(guard.stopped, stop)
+
+    async def test_other_refusals_pass_to_the_runtime(self):
+        for error in (
+            TaskNotUsableError(RefusalReason.LEASE_UNAVAILABLE),
+            ConnectionUnavailableError(),
+            TaskBudgetError(RefusalReason.TASK_TOKEN_FLOOR),
+        ):
+            gateway, guard, _, _ = await self.gateway(DONE, error=error)
+            with self.assertRaises(type(error)):
+                await gateway.execute_session(ConnectionKind.CODEX, REQUEST)
+            self.assertIsNone(guard.stopped)
 
     async def test_an_attempt_abandoned_during_the_lookup_sends_nothing(self):
         # The orchestrator closes the fence while the principal is looked up

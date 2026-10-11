@@ -57,7 +57,9 @@ class CloudGate:
     ) -> SessionResult:
         """Run ``request`` as a session of ``kind`` for ``assignment`` through
         the four steps, or ``RuntimeFailure`` (nothing sent)."""
-        if self._policy is None or not await self._policy.allows(assignment):
+        # Fail closed: only an exact ``True`` allows a send (as
+        # ``HybridRuntime``'s own check of the policy).
+        if self._policy is None or await self._policy.allows(assignment) is not True:
             raise RuntimeFailure(Failure.CLOUD_POLICY_DENIED)
         placement = assignment.placement
         connections = assignment.connections

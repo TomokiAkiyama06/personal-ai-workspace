@@ -20,7 +20,7 @@ import dataclasses
 import unittest
 
 from sqlalchemy import text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 from paw_backend.connections import (
     AgentSessionResult,
@@ -262,6 +262,70 @@ class RunFenceTest(SessionCase):
         self.assertIs(result.stopped, SessionStop.RUN_REPLACED)
 
 
+class LockOrderTest(SessionCase):
+    async def test_a_turn_locks_the_budget_before_the_queue_entry(self):
+        # The order of every other writer (the task, its budget, then the
+        # queue entry: ``start_runtime_in``, a deletion's ``cancel_in``): a
+        # turn that waits for the queue entry already holds the budget row,
+        # so the two orders can never wait on each other.
+        holder = self.engine.connect()
+        transaction = holder.begin()
+
+        class Locking(FakeSession):
+            async def run_session(inner, secret, request):
+                holder.execute(
+                    text("SELECT 1 FROM queue_entries WHERE id = :id FOR UPDATE"),
+                    {"id": self.entry},
+                )
+                return await FakeSession.run_session(inner, secret, request)
+
+        adapter = Locking([(100, 10)])
+        running = asyncio.create_task(self.start(adapter))
+        try:
+            for _ in range(200):  # until the turn waits for the entry
+                await asyncio.sleep(0.025)
+                with self.engine.connect() as probe:
+                    waiting = probe.execute(
+                        text(
+                            "SELECT count(*) FROM pg_stat_activity"
+                            " WHERE wait_event_type = 'Lock'"
+                            " AND datname = current_database()"
+                        )
+                    ).scalar_one()
+                if waiting:
+                    break
+            self.assertTrue(waiting)
+            with self.engine.connect() as probe, self.assertRaises(OperationalError):
+                probe.execute(
+                    text(
+                        "SELECT 1 FROM budget_usages WHERE task_id = :task"
+                        " AND kind = 'tokens' FOR UPDATE NOWAIT"
+                    ),
+                    {"task": self.task},
+                )
+        finally:
+            transaction.rollback()
+            holder.close()
+        result = await running
+        self.assertEqual(adapter.answers, [True])
+        self.assertIsNone(result.stopped)
+
+    async def test_a_turn_refused_by_the_lease_charges_nothing(self):
+        # The charge comes first now: a lease that does not hold rolls it back.
+        before = await self.consumed()
+        adapter = FakeSession(
+            [(100, 10)], AgentSessionResult(input_tokens=100, output_tokens=10)
+        )
+
+        async def expire():
+            self.expire_entry()
+
+        result = await self.start(adapter, gate=expire)
+        self.assertIs(result.stopped, SessionStop.LEASE_LOST)
+        # The settlement charges the whole 110 once: the refused turn did not.
+        self.assertEqual(await self.consumed() - before, 110)
+
+
 class ReaperTest(SessionCase):
     async def test_the_reaper_keeps_what_a_session_counted(self):
         with self.engine.begin() as connection:
@@ -353,6 +417,26 @@ class CancelTest(SessionCase):
         row = self.row()
         self.assertEqual(row["status"], "cancelled")
         self.assertEqual(row["input_tokens"] + row["output_tokens"], 200_000)
+
+    async def test_a_cancellation_right_after_a_turns_commit_charges_it_once(self):
+        # The turn is committed, then the cancellation lands before the
+        # service has noted it: the settlement reads what was counted from
+        # the row, so the turn is neither charged twice nor counted twice.
+        before = await self.consumed()
+        service = self.session_service(FakeSession([(10, 1)]))
+        original = service._store.add_session_turn
+
+        async def committed_then_cancelled(*args, **kwargs):
+            await original(*args, **kwargs)
+            raise asyncio.CancelledError
+
+        service._store.add_session_turn = committed_then_cancelled
+        with self.assertRaises(asyncio.CancelledError):
+            await self.start(None, service=service)
+        row = self.row()
+        self.assertEqual(row["status"], "cancelled")
+        self.assertEqual(row["input_tokens"] + row["output_tokens"], 200_000)
+        self.assertEqual(await self.consumed() - before, 200_000)
 
 
 class SchemaTest(SessionCase):

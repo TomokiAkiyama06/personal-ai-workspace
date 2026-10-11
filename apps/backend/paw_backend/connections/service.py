@@ -1055,23 +1055,20 @@ class ConnectionService:
         admission: Admitted,
         state: "_Session",
     ) -> None:
-        """Settle the session's row with the remainder (never raises)."""
+        """Settle the session's row with the remainder (never raises).
+
+        What the turns counted is read from the row (under its lock), not from
+        ``state``: a cancellation between a turn's commit and its bookkeeping
+        here must not charge that turn twice."""
         counted = state.counted_input + state.counted_output
-        if state.known_totals is not None:
-            final_input = max(state.counted_input, state.known_totals[0])
-            final_output = max(state.counted_output, state.known_totals[1])
-        else:
-            # Decision 0083, 5 (d): unknown totals count the estimate in all.
-            final_input = state.counted_input + max(0, UNKNOWN_SESSION_TOKENS - counted)
-            final_output = state.counted_output
-        state.final_input, state.final_output = final_input, final_output
+        settled = None
         try:
-            await self._store.settle_session(
+            settled = await self._store.settle_session(
                 admission.usage_id,
                 state.status,
                 state.failure,
-                final_input,
-                final_output,
+                state.known_totals,
+                UNKNOWN_SESSION_TOKENS,
             )
         except Exception as error:
             logger.error(
@@ -1080,6 +1077,19 @@ class ConnectionService:
                 admission.usage_id,
                 log_type_name(error),
             )
+        if settled is not None:
+            record, counted = settled
+            final_input = record.input_tokens or 0
+            final_output = record.output_tokens or 0
+        elif state.known_totals is not None:
+            # Not settled here (an error, or someone else closed the row): the
+            # budget still gets what this side knows to be the remainder.
+            final_input = max(state.counted_input, state.known_totals[0])
+            final_output = max(state.counted_output, state.known_totals[1])
+        else:
+            final_input = state.counted_input + max(0, UNKNOWN_SESSION_TOKENS - counted)
+            final_output = state.counted_output
+        state.final_input, state.final_output = final_input, final_output
         remainder = final_input + final_output - counted
         if self._budget is not None and remainder > 0:
             try:
