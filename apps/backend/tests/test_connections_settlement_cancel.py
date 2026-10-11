@@ -118,11 +118,23 @@ class CancelDuringSettlementTest(CancelCase, ExecuteCase):
     async def test_a_timeout_around_execute_still_becomes_a_timeout_error(self):
         # The cancellation is preserved: ``asyncio.timeout`` turns the cancel it
         # delivered into ``TimeoutError`` once ``execute`` lets it through.
+        # The timeout expires only once the settlement is held (a fixed 0.1 s could
+        # expire before the call was even admitted on a loaded runner, leaving no
+        # usage row at all), and the settlement is released only after the
+        # timeout's cancel (timer callbacks run in the order of their times).
         gate = await self.gated_settle()
-        asyncio.get_running_loop().call_later(0.3, gate.release.set)
+        loop = asyncio.get_running_loop()
+
+        async def expire_during_the_settlement(deadline: asyncio.Timeout) -> None:
+            await asyncio.wait_for(gate.entered.wait(), DEADLINE)
+            deadline.reschedule(loop.time())
+            loop.call_later(0.01, gate.release.set)
+
         with self.assertRaises(TimeoutError):
-            async with asyncio.timeout(0.1):
+            async with asyncio.timeout(DEADLINE) as deadline:
+                await self.start(expire_during_the_settlement(deadline))
                 await self.call()
+        # Settled by the time the caller learns of the timeout.
         self.assertEqual(self.usage_status(), ["succeeded"])
 
     async def test_a_cancel_of_a_failed_call_waits_for_its_settlement_too(self):
