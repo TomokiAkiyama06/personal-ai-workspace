@@ -480,6 +480,32 @@ class SubmissionTest(SessionCase):
         self.assertIs(result.failure, FailureCode.INVALID_RESPONSE)
         self.assertIsNone(result.submission)
 
+    async def test_memory_running_out_passes_unchanged(self):
+        adapter = FakeSession(error=MemoryError())
+        with self.assertRaises(MemoryError):
+            await self.start(adapter)
+        self.assertEqual(self.row()["status"], "cancelled")
+
+    async def test_an_abandoned_attempt_gets_no_further_turn(self):
+        # The turn that was spent is counted; the next one is refused.
+        open_ = [True]
+        adapter = FakeSession([(100, 10), (5, 0)])
+
+        async def run():
+            return await self.session_service(adapter).execute_session(
+                self.principal(self.user),
+                self.session_context(),
+                CODEX,
+                SessionRequest("gpt-5-codex", UsagePurpose.CODING, "the task", 600),
+                alive=lambda: open_[0],
+            )
+
+        open_[0] = False  # the orchestrator closed the attempt's fence
+        result = await run()
+        self.assertEqual(adapter.answers, [False])
+        self.assertIs(result.stopped, SessionStop.ABANDONED)
+        self.assertGreaterEqual(result.input_tokens, 100)
+
     async def test_a_node_stop_from_the_bridge_passes_unchanged(self):
         adapter = FakeSession(error=NodeStopped(StopReason.LEASE_LOST))
         with self.assertRaises(NodeStopped) as caught:

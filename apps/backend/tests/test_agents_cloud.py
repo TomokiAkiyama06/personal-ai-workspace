@@ -197,8 +197,11 @@ class Service:
         self.error = error
         self.calls = []
 
-    async def execute_session(self, principal, context, kind, request, *, gate=None):
+    async def execute_session(
+        self, principal, context, kind, request, *, gate=None, alive=None
+    ):
         self.calls.append((principal, context, kind))
+        self.alive = alive
         if self.error is not None:
             raise self.error
         return self.result
@@ -271,6 +274,22 @@ class GatewayTest(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(type(error)):
                 await gateway.execute_session(ConnectionKind.CODEX, REQUEST)
             self.assertIsNone(guard.stopped)
+
+    async def test_the_session_asks_the_attempt_fence_after_every_turn(self):
+        fence = AttemptFence()
+        gateway, guard, service, _ = await self.gateway(DONE, fence=fence)
+        await gateway.execute_session(ConnectionKind.CODEX, REQUEST)
+        self.assertTrue(service.alive())
+        fence.close()  # the orchestrator abandons the attempt
+        self.assertFalse(service.alive())
+
+    async def test_an_abandoned_session_stops_the_attempt_only(self):
+        stopped = SessionResult(uuid.uuid4(), None, 1, 1, None, SessionStop.ABANDONED)
+        gateway, guard, _, _ = await self.gateway(stopped)
+        with self.assertRaises(NodeStopped) as caught:
+            await gateway.execute_session(ConnectionKind.CODEX, REQUEST)
+        self.assertIs(caught.exception.reason, StopReason.ABANDONED)
+        self.assertIsNone(guard.stopped)  # the fence closes the attempt, not the run
 
     async def test_an_attempt_abandoned_during_the_lookup_sends_nothing(self):
         # The orchestrator closes the fence while the principal is looked up

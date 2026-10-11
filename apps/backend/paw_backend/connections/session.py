@@ -141,6 +141,7 @@ class SessionStop(StrEnum):
     BUDGET_EXCEEDED = "budget_exceeded"
     LEASE_LOST = "lease_lost"
     RUN_REPLACED = "run_replaced"
+    ABANDONED = "abandoned"  # the caller's attempt fence closed
 
 
 @dataclass(frozen=True, slots=True)

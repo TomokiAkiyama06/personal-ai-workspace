@@ -920,6 +920,7 @@ class ConnectionService:
         request: SessionRequest,
         *,
         gate: Callable[[], Awaitable[None]] | None = None,
+        alive: Callable[[], bool] | None = None,
     ) -> SessionResult:
         """One CLI session of a node attempt through the shared connection of
         ``kind`` (Decision 0083, 1 and 5). The same checks as :meth:`execute`, in
@@ -940,6 +941,10 @@ class ConnectionService:
         never less than counted); unknown totals (an abnormal end, a
         cancellation) count ``UNKNOWN_SESSION_TOKENS`` less what was counted
         (5 (c), (d)). A cancellation is settled (``cancelled``) before it passes.
+
+        ``alive`` (the caller's attempt fence, Decision 0046): asked after every
+        turn is counted; once it answers ``False`` (the orchestrator abandoned
+        the attempt) the session stops (``SessionStop.ABANDONED``).
         """
         self._actor(principal)
         require_type("context", context, TaskContext)
@@ -947,6 +952,8 @@ class ConnectionService:
         require_type("request", request, SessionRequest)
         if gate is not None and not callable(gate):
             raise fail("gate", InputProblem.WRONG_TYPE)
+        if alive is not None and not callable(alive):
+            raise fail("alive", InputProblem.WRONG_TYPE)
         correlation_id = uuid.uuid4()
         await self._authorize(
             principal,
@@ -992,7 +999,9 @@ class ConnectionService:
                     state.known_totals = (0, 0)  # nothing was sent
                     raise
             try:
-                await self._run_session(adapter, admission, context, request, state)
+                await self._run_session(
+                    adapter, admission, context, request, state, alive
+                )
             except asyncio.CancelledError:
                 state.status = UsageStatus.CANCELLED
                 raise
@@ -1027,6 +1036,7 @@ class ConnectionService:
         context: TaskContext,
         request: SessionRequest,
         state: "_Session",
+        alive: Callable[[], bool] | None = None,
     ) -> None:
         async def on_usage(input_tokens: int, output_tokens: int) -> bool:
             if state.stopped is not None:
@@ -1064,6 +1074,10 @@ class ConnectionService:
                 )
                 if BudgetKind.TOKENS in verdict.exceeded:
                     state.stopped = SessionStop.BUDGET_EXCEEDED
+            # The turn was spent (and counted above) either way; an abandoned
+            # attempt must not get another one.
+            if state.stopped is None and alive is not None and alive() is not True:
+                state.stopped = SessionStop.ABANDONED
             return state.stopped is None
 
         try:
@@ -1082,9 +1096,10 @@ class ConnectionService:
             state.fail(FailureCode.TIMEOUT)
             return
         except Exception as error:
-            if _is_node_stop(error):
+            if _is_node_stop(error) or isinstance(error, MemoryError):
                 # The attempt was stopped (its bridge's tool call was fenced
-                # out): the stop passes to the runtime unchanged, after the
+                # out), or memory ran out (the orchestrator records it as
+                # such): either passes to the runtime unchanged, after the
                 # settlement (``execute_session``'s ``finally``).
                 state.status = UsageStatus.CANCELLED
                 raise

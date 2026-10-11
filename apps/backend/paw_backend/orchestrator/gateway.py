@@ -269,7 +269,12 @@ class NodeConnectionGateway:
         self._fence.ensure_open()
         try:
             result = await self._service.execute_session(
-                principal, context, kind, request, gate=gate
+                principal,
+                context,
+                kind,
+                request,
+                gate=gate,
+                alive=lambda: not self._fence.closed,
             )
         except Exception as error:
             # The admission's own fence (the task ended, the run was replaced,
@@ -284,7 +289,9 @@ class NodeConnectionGateway:
         stopped = getattr(result, "stopped", None)
         if stopped is not None:
             reason = _SESSION_STOPS.get(stopped.value, StopReason.ABANDONED)
-            if reason is not StopReason.BUDGET_EXCEEDED:
+            # The budget stops the node only (the orchestrator decides the
+            # rest), an abandoned attempt is closed by its fence already.
+            if reason not in (StopReason.BUDGET_EXCEEDED, StopReason.ABANDONED):
                 self._guard.stop(reason)
             raise NodeStopped(reason)
         return result
@@ -316,12 +323,13 @@ _SESSION_STOPS = {
     "budget_exceeded": StopReason.BUDGET_EXCEEDED,
     "lease_lost": StopReason.LEASE_LOST,
     "run_replaced": StopReason.SUPERSEDED,
+    "abandoned": StopReason.ABANDONED,
 }
 
 
 class SessionService(Protocol):
     async def execute_session(
-        self, principal, context, kind, request, *, gate=None
+        self, principal, context, kind, request, *, gate=None, alive=None
     ): ...
 
 
