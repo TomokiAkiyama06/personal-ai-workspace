@@ -105,8 +105,11 @@ def derive_child_scope(
     worktree, the worktree becomes a path root (the first ones, so that a
     relative path resolves inside a worktree), and the user's own checkout and
     the task's integration worktree (``NodeWorktree.protected``) become
-    ``excluded_paths``. A worktree of a repository outside the node's
-    repositories, or for a read-only role, is a ``ScopeEscalationError``."""
+    ``excluded_paths``. What the parent excludes inside the user's checkout
+    (or the checkout itself) is excluded at the same place in the worktree too
+    (issue #227); the parent's excluded paths stay as they are. A worktree of
+    a repository outside the node's repositories, or for a read-only role, is a
+    ``ScopeEscalationError``."""
     if not isinstance(parent, TaskScope):
         raise TypeError("parent must be a TaskScope")
     worktrees = _checked_worktrees(worktrees, role)
@@ -148,6 +151,7 @@ def derive_child_scope(
         path_roots = (*own, *parent.path_roots)
         excluded_paths = (
             *parent.excluded_paths,
+            *_moved_into_worktrees(parent, worktrees),
             *(
                 path
                 for repository in chosen
@@ -172,6 +176,27 @@ def derive_child_scope(
     if not scope_within(child, parent, worktrees=worktrees):
         raise ScopeEscalationError()
     return child
+
+
+def _moved_into_worktrees(
+    parent: TaskScope, worktrees: Mapping[uuid.UUID, NodeWorktree]
+) -> list[str]:
+    """The parent's excluded paths that lie in the checkout of a repository
+    with a worktree (the checkout itself included), at the same place in that
+    worktree (issue #227): the worktree is a copy of the checkout, so what the
+    parent keeps the node out of there it keeps the node out of here."""
+    moved: list[str] = []
+    for repo_id, worktree in worktrees.items():
+        original = parent.repository(repo_id)
+        checkout = None if original is None else original.root
+        if checkout is None:
+            continue
+        moved.extend(
+            worktree.path + path[len(checkout) :]
+            for path in parent.excluded_paths
+            if path_within(path, checkout)
+        )
+    return moved
 
 
 def _checked_worktrees(
@@ -204,7 +229,7 @@ def scope_within(
     state) is the parent's, every credential handle is the parent's with no more
     hosts, and every repository is the parent's, unchanged (its worktree, its ACL,
     its remotes and its Working Set role), and every path the parent excludes is
-    excluded.
+    excluded (inside a worktree's checkout, in the worktree too).
 
     ``worktrees`` are the only widening the backend itself makes (PAW-035): the
     worktree it prepared for a repository may be a path root and that
@@ -231,6 +256,11 @@ def scope_within(
     ):
         return False
     if not all(path in child.excluded_paths for path in parent.excluded_paths):
+        return False
+    if not all(
+        path in child.excluded_paths
+        for path in _moved_into_worktrees(parent, worktrees)
+    ):
         return False
     # A root strictly inside an excluded path carves it out (``TaskScope``): the
     # child may add one only for a worktree the backend prepared (and those were

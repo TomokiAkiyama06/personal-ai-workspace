@@ -248,6 +248,65 @@ class WorktreeScopeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(child.excluded_paths, parent.excluded_paths)
         self.assertFalse(scope_within(replace(child, excluded_paths=()), parent))
 
+    async def test_an_excluded_path_in_the_checkout_is_excluded_in_the_worktree(self):
+        # Issue #227: what the parent excludes inside the user's checkout is
+        # excluded at the same place in the node's worktree of that checkout.
+        parent = parent_scope(
+            excluded_paths=[
+                f"{CHECKOUT_1}/secrets",
+                f"{CHECKOUT_2}/private",
+                f"{WORKSPACES}/elsewhere",
+            ]
+        )
+        own = worktree(R1)
+
+        child = derive_child_scope(
+            parent, role=NodeRole.WORKER, repositories=None, worktrees={R1: own}
+        )
+
+        self.assertIn(f"{own.path}/secrets", child.excluded_paths)
+        # Paths outside that checkout stay as they are, and are not copied.
+        for path in parent.excluded_paths:
+            self.assertIn(path, child.excluded_paths)
+        self.assertNotIn(f"{own.path}/private", child.excluded_paths)
+        self.assertNotIn(f"{own.path}/elsewhere", child.excluded_paths)
+        cases = {
+            f"{own.path}/secrets/key": ScopeStatus.OUT_OF_SCOPE,
+            f"{own.path}/secrets": ScopeStatus.OUT_OF_SCOPE,
+            f"{own.path}/secrets-not": ScopeStatus.IN_SCOPE,
+            f"{own.path}/src/main.py": ScopeStatus.IN_SCOPE,
+            f"{CHECKOUT_2}/private/x": ScopeStatus.OUT_OF_SCOPE,
+        }
+        for path, status in cases.items():
+            with self.subTest(path=path):
+                self.assertEqual((await classify(child, path)).status, status)
+        self.assertTrue(scope_within(child, parent, worktrees={R1: own}))
+        # A child that leaves the translated path out is wider than the parent.
+        narrower = tuple(
+            path for path in child.excluded_paths if path != f"{own.path}/secrets"
+        )
+        self.assertFalse(
+            scope_within(
+                replace(child, excluded_paths=narrower), parent, worktrees={R1: own}
+            )
+        )
+
+    async def test_an_excluded_checkout_excludes_the_whole_worktree(self):
+        # Fail closed: the parent excluding the checkout itself keeps the node
+        # out of its worktree too.
+        parent = parent_scope(excluded_paths=[CHECKOUT_1])
+        own = worktree(R1)
+
+        child = derive_child_scope(
+            parent, role=NodeRole.WORKER, repositories=None, worktrees={R1: own}
+        )
+
+        self.assertIn(own.path, child.excluded_paths)
+        self.assertEqual(
+            (await classify(child, f"{own.path}/src/main.py")).status,
+            ScopeStatus.OUT_OF_SCOPE,
+        )
+
 
 class ExcludedPathsTest(unittest.IsolatedAsyncioTestCase):
     async def test_a_root_inside_an_excluded_path_is_carved_out(self):
