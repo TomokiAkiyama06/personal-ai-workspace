@@ -233,6 +233,23 @@ class ComputeLease:
             return
         self._scheduler._release(self)
 
+    def resize(self, context_tokens: int) -> None:
+        """Make the reservation ``context_tokens`` (the request about to be sent:
+        its prompt and its ``max_tokens``; Decision 0076, 3). It may grow or
+        shrink, and **never waits**: a running request's growth is granted
+        even past its class's share and ``kv_safety`` (making it wait could stop
+        agents that wait for each other, none giving its reservation back); new
+        requests then wait until the reservations are under the limit again (a
+        shrink admits the waiters that now fit).
+
+        Raises :class:`ComputeUnavailableError` (``CONTEXT_TOO_LONG``; the
+        reservation does not change) above the model's ``max_context_tokens``:
+        the runtime would refuse that request too. A CPU lease reserves nothing
+        (the limit still applies); a ``CLOUD`` lease does not change.
+        :class:`InvalidComputeArgumentError` for a released or an Exclusive
+        lease, or a wrong number."""
+        self._scheduler._resize(self, context_tokens)
+
     def hold_until(self, work: asyncio.Future) -> None:
         """Keep the capacity until ``work`` ends, even when ``release`` is called
         before: work that did not stop when it was cancelled still uses the GPU."""
@@ -338,6 +355,11 @@ class _Deployment:
     state: DeploymentState
     leases: set[ComputeLease] = field(default_factory=set)
     reserved_tokens: int = 0
+    # The same reservations by class (Decision 0076, 3: a new request counts
+    # the lower classes' only up to their shares).
+    reserved_by_class: dict[ResourceClass, int] = field(
+        default_factory=lambda: dict.fromkeys(SHARED_CLASSES, 0)
+    )
     pids: frozenset[int] | None = None
     observed: float | None = None
     draining: bool = False
@@ -741,8 +763,16 @@ class ComputeScheduler:
             # review #212): only what is left after that admits new ones.
             growth = sum(max(0, agent - lease.tokens) for lease in coding)
             kv = self._kv(entry)
+            by_class = dict(kv.reserved_by_class or {})
+            by_class[ResourceClass.CODING] = (
+                by_class.get(ResourceClass.CODING, 0) + growth
+            )
             more += parallelism(
-                replace(kv, reserved_tokens=kv.reserved_tokens + growth),
+                replace(
+                    kv,
+                    reserved_tokens=kv.reserved_tokens + growth,
+                    reserved_by_class=by_class,
+                ),
                 agent,
                 ResourceClass.CODING,
                 safety=self._config.kv_safety,
@@ -1014,6 +1044,7 @@ class ComputeScheduler:
             sequences=len(entry.leases),
             max_sequences=entry.spec.max_sequences,
             observed_fraction=entry.observed,
+            reserved_by_class=dict(entry.reserved_by_class),
         )
 
     def _judge(
@@ -1178,8 +1209,44 @@ class ComputeScheduler:
         if lease.vram_bytes:
             self._rebase()
         entry.leases.add(lease)
-        entry.reserved_tokens += tokens
+        self._reserve(entry, lease.resource_class, tokens)
         return lease
+
+    @staticmethod
+    def _reserve(entry: _Deployment, cls: ResourceClass, tokens: int) -> None:
+        """Change ``entry``'s reservations by ``tokens`` (negative: give back)."""
+        entry.reserved_tokens += tokens
+        entry.reserved_by_class[cls] += tokens
+
+    def _resize(self, lease: ComputeLease, context_tokens: int) -> None:
+        """See :meth:`ComputeLease.resize`."""
+        if (
+            isinstance(context_tokens, bool)
+            or not isinstance(context_tokens, int)
+            or not 0 <= context_tokens <= _MAX_TOKENS
+        ):
+            raise InvalidComputeArgumentError("context_tokens")
+        if (
+            lease._released
+            or lease._scheduler is not self
+            or lease.resource_class is ResourceClass.EXCLUSIVE
+        ):
+            raise InvalidComputeArgumentError("lease")
+        if lease.placement is Placement.CLOUD:
+            return  # the local model's limits do not apply to a cloud agent
+        entry = self._deployments[lease.deployment]
+        if context_tokens > entry.spec.max_context_tokens:
+            raise ComputeUnavailableError(Refusal.CONTEXT_TOO_LONG)
+        if lease not in entry.leases or (
+            lease.placement is not Placement.LOCAL_GPU
+            or not entry.spec.kv_capacity_tokens
+        ):
+            return  # a CPU lease (or a model without a pool) reserves no KV
+        change = context_tokens - lease.tokens
+        lease.tokens = context_tokens
+        self._reserve(entry, lease.resource_class, change)
+        if change < 0:
+            self._pump()
 
     def _release(self, lease: ComputeLease) -> None:
         if lease._released or lease._scheduler is not self:
@@ -1198,7 +1265,7 @@ class ComputeScheduler:
                 if lease.vram_bytes:
                     self._rebase(released=lease.vram_bytes)
                 entry.leases.discard(lease)
-                entry.reserved_tokens -= lease.tokens
+                self._reserve(entry, lease.resource_class, -lease.tokens)
         if self._drained is not None and not self._local_gpu_leases():
             self._drained.set()
         self._pump()
