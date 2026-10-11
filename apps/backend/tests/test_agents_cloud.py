@@ -23,7 +23,7 @@ from paw_backend.connections import (
 )
 from paw_backend.orchestrator.domain import ExecutionPlacement, NodeRole
 from paw_backend.orchestrator.errors import NodeStopped, StopReason
-from paw_backend.orchestrator.gateway import NodeConnectionGateway
+from paw_backend.orchestrator.gateway import AttemptFence, NodeConnectionGateway
 from paw_backend.orchestrator.runtime import NodeAssignment
 
 REQUEST = SessionRequest("gpt-5-codex", UsagePurpose.CODING, "the task", 600)
@@ -194,7 +194,7 @@ class Service:
 
 
 class GatewayTest(unittest.IsolatedAsyncioTestCase):
-    async def gateway(self, result, principals=None):
+    async def gateway(self, result, principals=None, fence=None):
         guard = Guard()
         service = Service(result)
         context = object()
@@ -203,7 +203,7 @@ class GatewayTest(unittest.IsolatedAsyncioTestCase):
             return context
 
         gateway = NodeConnectionGateway(
-            guard, service, principals or Principals(), uuid.uuid4(), factory
+            guard, service, principals or Principals(), uuid.uuid4(), factory, fence
         )
         return gateway, guard, service, context
 
@@ -230,6 +230,22 @@ class GatewayTest(unittest.IsolatedAsyncioTestCase):
         gateway, _, service, _ = await self.gateway(DONE, Principals(None))
         with self.assertRaises(NodeStopped):
             await gateway.execute_session(ConnectionKind.CODEX, REQUEST)
+        self.assertEqual(service.calls, [])
+
+    async def test_an_attempt_abandoned_during_the_lookup_sends_nothing(self):
+        # The orchestrator closes the fence while the principal is looked up
+        # (a runtime that ignored its cancellation): no session may start.
+        fence = AttemptFence()
+
+        class Closing(Principals):
+            async def get_principal_by_id(self, user_id):
+                fence.close()
+                return self.principal
+
+        gateway, _, service, _ = await self.gateway(DONE, Closing(), fence)
+        with self.assertRaises(NodeStopped) as caught:
+            await gateway.execute_session(ConnectionKind.CODEX, REQUEST)
+        self.assertIs(caught.exception.reason, StopReason.ABANDONED)
         self.assertEqual(service.calls, [])
 
 

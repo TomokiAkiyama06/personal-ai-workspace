@@ -263,6 +263,10 @@ class NodeConnectionGateway:
             # The creator is gone or inactive: the task cannot act for them.
             self._guard.stop(StopReason.TASK_ENDED)
             raise NodeStopped(StopReason.TASK_ENDED)
+        # The attempt may have been abandoned during the lookup: nothing may
+        # be sent for it then.
+        await self._guard.ensure_active()
+        self._fence.ensure_open()
         result = await self._service.execute_session(
             principal, context, kind, request, gate=gate
         )

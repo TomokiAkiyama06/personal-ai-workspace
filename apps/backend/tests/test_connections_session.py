@@ -206,6 +206,23 @@ class StopTest(SessionCase):
         self.assertIs(result.stopped, SessionStop.BUDGET_EXCEEDED)
         self.assertEqual(self.row()["status"], "cancelled")
 
+    async def test_a_turn_that_uses_the_budget_up_exactly_stops_the_session(self):
+        # "May the task do one more?": nothing is left, so the next turn
+        # must not run (consumed + 1 > limit, as at the start).
+        with self.engine.begin() as connection:
+            connection.execute(
+                text(
+                    "UPDATE budget_usages SET limit_value = 60000"
+                    " WHERE task_id = :task AND kind = 'tokens'"
+                ),
+                {"task": self.task},
+            )
+        adapter = FakeSession([(30_000, 0), (30_000, 0), (5, 0)])
+        result = await self.start(adapter)
+        self.assertEqual(adapter.answers, [True, False])
+        self.assertIs(result.stopped, SessionStop.BUDGET_EXCEEDED)
+        self.assertEqual(self.row()["status"], "cancelled")
+
     async def test_a_lost_lease_writes_nothing_and_stops(self):
         adapter = FakeSession([(100, 10)])
 

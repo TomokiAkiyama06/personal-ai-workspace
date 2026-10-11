@@ -1001,7 +1001,11 @@ class ConnectionService:
             else:
                 state.stopped = SessionStop.BUDGET_EXCEEDED
             if state.stopped is None and self._budget is not None:
-                verdict = await self._budget.check(context.task_id)
+                # "May the task do one more?" (as at the start): a turn that
+                # used the budget up exactly stops the session too.
+                verdict = await self._budget.check(
+                    context.task_id, planned={BudgetKind.TOKENS: 1}
+                )
                 if BudgetKind.TOKENS in verdict.exceeded:
                     state.stopped = SessionStop.BUDGET_EXCEEDED
             return state.stopped is None
