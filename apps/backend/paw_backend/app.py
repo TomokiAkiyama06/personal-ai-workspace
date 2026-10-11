@@ -3,6 +3,9 @@
 import asyncio
 import contextlib
 import logging
+import os
+import re
+import socket
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 
@@ -62,6 +65,26 @@ from paw_backend.sandbox.wiring import SandboxSetup, reap_idle_sandboxes
 from paw_backend.web import WebAppMiddleware
 
 logger = logging.getLogger(__name__)
+
+
+_WORKER_ID_CHARACTER = re.compile(r"[^A-Za-z0-9._:@/-]")
+
+
+def _retrieve(task: asyncio.Task) -> None:
+    """Read a finished task's result (so that no "never retrieved" warning)."""
+    if task.done() and not task.cancelled():
+        task.exception()
+
+
+def worker_ids(count: int) -> list[str]:
+    """The ids of this process's orchestrator workers (Decision 0086, 3):
+    ``<host>:<pid>:<n>``, the host name's other characters as ``-``, at most
+    100 characters (``check_worker_id``)."""
+    host = _WORKER_ID_CHARACTER.sub("-", socket.gethostname()) or "host"
+    if not host[0].isalnum():
+        host = "h" + host
+    suffix = lambda n: f":{os.getpid()}:{n}"  # noqa: E731
+    return [host[: 100 - len(suffix(n))] + suffix(n) for n in range(1, count + 1)]
 
 
 def create_app(
@@ -180,6 +203,10 @@ def create_app(
         maintenance = None
         health = app.state.system_health
         compute_stop = asyncio.Event()
+        # The workers have a stop of their own, set first at shutdown: none
+        # claims another entry while the rest of the shutdown runs.
+        workers_stop = asyncio.Event()
+        workers: set[asyncio.Task] = set()
         try:
             # The sandboxes of the repository tools (Decision 0083, 6): idle ones
             # are stopped, and every one at shutdown.
@@ -271,11 +298,43 @@ def create_app(
                     interval_seconds=settings.freshness_job_interval_seconds,
                 )
                 background.add(asyncio.create_task(maintenance.run()))
+            # The orchestrator's workers (Decision 0086, Approved): only when an
+            # orchestrator was composed; cancelled first at shutdown.
+            orchestrator = (
+                None if task_execution is None else task_execution.orchestrator
+            )
+            if orchestrator is not None:
+                for worker_id in worker_ids(settings.orchestrator_workers):
+                    workers.add(
+                        asyncio.create_task(orchestrator.serve(worker_id, workers_stop))
+                    )
             # The System Health history (PAW-066): sample, roll up, purge.
             if health.sampling:
                 background.add(asyncio.create_task(health.monitor.run()))
             yield
         finally:
+            workers_stop.set()
+            if workers:
+                # The workers are cancelled first (Decision 0086, 4): each gives
+                # its entry back and its running nodes become ready again, for
+                # the next process (a node attempt can take far longer than the
+                # shutdown timeout, and no new node or entry is started while
+                # the rest of the shutdown runs). The wait is bounded: a worker
+                # that ignores its cancellation is given up on.
+                for worker in workers:
+                    worker.cancel()
+                _, ignored = await asyncio.wait(
+                    workers, timeout=settings.shutdown_timeout_seconds
+                )
+                if ignored:
+                    logger.warning(
+                        "%d orchestrator worker(s) did not stop", len(ignored)
+                    )
+                for worker in workers:
+                    if worker.done():
+                        _retrieve(worker)
+                    else:
+                        worker.add_done_callback(_retrieve)
             if compute_services is not None and compute_services.full_gpu is not None:
                 # A start in progress is abandoned: the scheduler goes back to
                 # normal, the models it unloaded are loaded again and the held

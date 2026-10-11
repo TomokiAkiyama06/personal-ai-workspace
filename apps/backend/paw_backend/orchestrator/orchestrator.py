@@ -571,7 +571,20 @@ class Orchestrator:
             raise InvalidOrchestratorArgumentError("idle_seconds")
         while not stop.is_set():
             try:
-                report = await self.run_once(worker_id)
+                entry = await self._queue.claim_next(worker_id)
+                if entry is not None and stop.is_set():
+                    # Stopped while the claim was in flight (Decision 0086, 4):
+                    # the entry goes back to the queue unstarted.
+                    with contextlib.suppress(LeaseLostError):
+                        await self._queue.release(
+                            entry.id, worker_id, entry.claim_count
+                        )
+                    return
+                report = (
+                    RunReport(RunOutcome.IDLE)
+                    if entry is None
+                    else await self.run_entry(entry, worker_id)
+                )
             except asyncio.CancelledError:
                 raise
             except Exception as error:  # one bad entry must not end the worker

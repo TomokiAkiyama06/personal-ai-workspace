@@ -155,6 +155,11 @@ class Settings(BaseSettings):
     # then only runs right after the transition, and nothing is marked stale or
     # expired in storage (the retrieval still judges both by time).
     freshness_job_interval_seconds: int = Field(default=3_600, ge=0, le=86_400)
+    # How many orchestrator workers (``Orchestrator.serve``: claim a queued task
+    # and run its DAG) the lifespan starts when the application composed an
+    # orchestrator (agent runtimes and ``orchestrator_config`` given; Decision
+    # 0086, Approved). 0 starts none.
+    orchestrator_workers: int = Field(default=1, ge=0, le=8)
     # System Health (PAW-066, Decision 0059 Approved). How often the numeric
     # metrics are sampled into ``health_metric_samples``: the requirements' "last
     # 24 hours: 10-30 seconds" (FIXED), so no other value and no "off".
