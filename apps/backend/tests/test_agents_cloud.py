@@ -9,6 +9,7 @@ import uuid
 from paw_backend.agents.cloud import CloudGate
 from paw_backend.agents.failures import ErrorClassifier, Failure, RuntimeFailure
 from paw_backend.connections import (
+    ConnectionBusyError,
     ConnectionKind,
     ConnectionUnavailableError,
     QuotaExceededError,
@@ -138,6 +139,9 @@ class CloudGateTest(unittest.IsolatedAsyncioTestCase):
             Failure.CONNECTION_UNAVAILABLE,
             Policy(),
             error=ConnectionUnavailableError(),
+        )
+        await self.refused(
+            Failure.CONNECTION_BUSY, Policy(), error=ConnectionBusyError()
         )
 
     async def test_a_failed_placement_sends_nothing(self):

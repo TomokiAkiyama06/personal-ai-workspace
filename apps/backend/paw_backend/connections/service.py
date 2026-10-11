@@ -281,6 +281,62 @@ def _token_count(value: object) -> tuple[int | None, bool]:
         return None, False
 
 
+def _is_node_stop(error: BaseException) -> bool:
+    """Is ``error`` the orchestrator's ``NodeStopped`` (imported here, late:
+    the connections package does not depend on the orchestrator otherwise)?"""
+    from paw_backend.orchestrator.errors import NodeStopped
+
+    return isinstance(error, NodeStopped)
+
+
+_SUBMISSION_MAX_DEPTH = 32
+
+
+def _clean_submission(secret: Secret, submission: Mapping[str, Any]) -> dict | None:
+    """``submission`` with every text (keys too) cleaned as a one-call answer
+    is (scrub, redact the credential formats, scrub again), or ``None`` when a
+    text still shows the value or the shape is not JSON-like (str keys; str,
+    int, float, bool, None, lists and mappings, at most 32 levels deep)."""
+
+    def text(value: str) -> str | None:
+        cleaned = secret.scrub(value)
+        cleaned, _ = redact_text(cleaned)
+        cleaned = secret.scrub(cleaned)
+        return None if secret.visible_in(cleaned) else cleaned
+
+    def clean(value: Any, depth: int) -> tuple[bool, Any]:
+        if depth > _SUBMISSION_MAX_DEPTH:
+            return False, None
+        if isinstance(value, str):
+            cleaned = text(value)
+            return cleaned is not None, cleaned
+        if value is None or isinstance(value, (bool, int, float)):
+            return True, value
+        if isinstance(value, Mapping):
+            out = {}
+            for key, item in value.items():
+                if not isinstance(key, str):
+                    return False, None
+                cleaned_key = text(key)
+                ok, cleaned_item = clean(item, depth + 1)
+                if cleaned_key is None or not ok:
+                    return False, None
+                out[cleaned_key] = cleaned_item
+            return True, out
+        if isinstance(value, (list, tuple)):
+            items = []
+            for item in value:
+                ok, cleaned_item = clean(item, depth + 1)
+                if not ok:
+                    return False, None
+                items.append(cleaned_item)
+            return True, items
+        return False, None
+
+    ok, cleaned = clean(submission, 0)
+    return cleaned if ok else None
+
+
 def _failure_code_of(error: BaseException) -> FailureCode:
     """The closed code of an exception an adapter raised. By ``type()`` and the
     slot of ``AdapterFailure`` only: an adapter's property or ``__class__`` cannot
@@ -1026,6 +1082,12 @@ class ConnectionService:
             state.fail(FailureCode.TIMEOUT)
             return
         except Exception as error:
+            if _is_node_stop(error):
+                # The attempt was stopped (its bridge's tool call was fenced
+                # out): the stop passes to the runtime unchanged, after the
+                # settlement (``execute_session``'s ``finally``).
+                state.status = UsageStatus.CANCELLED
+                raise
             code = _failure_code_of(error)
             logger.warning(
                 "connection session failed: usage_id=%s code=%s exception_type=%s",
@@ -1038,7 +1100,21 @@ class ConnectionService:
         if type(raw) is not AgentSessionResult:
             state.fail(FailureCode.INVALID_RESPONSE)
             return
-        state.submission = raw.submission
+        if raw.submission is not None:
+            # The credential must not come back in the submission either (an
+            # adapter's bug, an echo of the CLI): every text is cleaned as the
+            # one-call answer is, and a submission that still holds the value
+            # is refused whole.
+            submission = _clean_submission(secret, raw.submission)
+            if submission is None:
+                logger.warning(
+                    "connection session returned a submission that holds the"
+                    " credential or is malformed: usage_id=%s",
+                    admission.usage_id,
+                )
+                state.fail(FailureCode.INVALID_RESPONSE)
+                return
+            state.submission = submission
         if raw.input_tokens is not None and raw.output_tokens is not None:
             state.known_totals = (raw.input_tokens, raw.output_tokens)
         if raw.failure is not None:

@@ -35,9 +35,11 @@ from paw_backend.connections import (
 )
 from paw_backend.connections.store import SESSION_LEASE_SQL
 from paw_backend.db import Database
+from paw_backend.orchestrator.errors import NodeStopped, StopReason
 from paw_backend.tasks.queueing import BudgetKind, BudgetPreset, BudgetTracker
 from paw_backend.tasks.queueing.domain import QueueLease
 
+from .connections_fakes import CANARY
 from .connections_support import PostgresConnectionTestCase, requires_postgres
 from .gate_support import ALWAYS_ACTIVE
 from .support import make_settings
@@ -452,6 +454,38 @@ class CancelTest(SessionCase):
         self.assertEqual(row["status"], "cancelled")
         self.assertEqual(row["input_tokens"] + row["output_tokens"], 200_000)
         self.assertEqual(await self.consumed() - before, 200_000)
+
+
+class SubmissionTest(SessionCase):
+    async def test_the_credential_is_scrubbed_from_the_submission(self):
+        token = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"  # split: a shape only
+        submitted = {
+            "summary": f"used {CANARY} here",
+            "notes": [{"line": "token " + token}, 3, None, True],
+            CANARY: "as a key",
+        }
+        adapter = FakeSession(result=AgentSessionResult(submission=submitted))
+        result = await self.start(adapter)
+        self.assertIsNone(result.failure)
+        text = repr(result.submission)
+        self.assertNotIn(CANARY, text)
+        self.assertNotIn(token, text)
+        self.assertEqual(result.submission["notes"][1:], [3, None, True])
+
+    async def test_a_malformed_submission_is_refused(self):
+        adapter = FakeSession(
+            result=AgentSessionResult(submission={"summary": object()})
+        )
+        result = await self.start(adapter)
+        self.assertIs(result.failure, FailureCode.INVALID_RESPONSE)
+        self.assertIsNone(result.submission)
+
+    async def test_a_node_stop_from_the_bridge_passes_unchanged(self):
+        adapter = FakeSession(error=NodeStopped(StopReason.LEASE_LOST))
+        with self.assertRaises(NodeStopped) as caught:
+            await self.start(adapter)
+        self.assertIs(caught.exception.reason, StopReason.LEASE_LOST)
+        self.assertEqual(self.row()["status"], "cancelled")
 
 
 class SchemaTest(SessionCase):

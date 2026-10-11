@@ -24,6 +24,7 @@ fallback=...)``).
 
 from paw_backend.agents.failures import Failure, RuntimeFailure
 from paw_backend.connections import (
+    ConnectionBusyError,
     ConnectionKind,
     ConnectionUnavailableError,
     QuotaExceededError,
@@ -71,6 +72,9 @@ class CloudGate:
 
         try:
             return await connections.execute_session(kind, request, gate=record)
+        except ConnectionBusyError:
+            # The database did not answer the admission in time.
+            raise RuntimeFailure(Failure.CONNECTION_BUSY) from None
         except QuotaExceededError:
             raise RuntimeFailure(Failure.CONNECTION_QUOTA_EXCEEDED) from None
         except TaskBudgetError:
