@@ -3,12 +3,11 @@
 A sandbox is started the first time a node's call needs it and kept for the
 node's later calls (the benchmark kept one container per task too), keyed by
 :class:`SandboxKey`: the task, its run (a Retry / Restart gets new sandboxes),
-the repository and whether it is the writable one. A writing node's key is its
-own worktree's repository, read-write; two read-only nodes of the same task that
-read the same checkout share one read-only sandbox (they see the same mounts and
-masks). A call whose :class:`~.spec.SandboxSpec` differs from the running one's
-(the scope changed: a Working Set change, a new excluded path) stops it and
-starts a new one: a sandbox never outlives the scope it was built for.
+the node attempt (its agent identity: two nodes, parallel or not, never share a
+sandbox, its ``/tmp`` or its processes), the repository and whether it is the
+writable one. A call whose :class:`~.spec.SandboxSpec` differs from the running
+one's (the scope changed: a Working Set change, a new excluded path) stops it
+and starts a new one: a sandbox never outlives the scope it was built for.
 
 It is stopped:
 
@@ -57,8 +56,13 @@ DEFAULT_IDLE_SECONDS = 900.0
 
 @dataclass(frozen=True, slots=True)
 class SandboxKey:
+    """Whose sandbox: the task, its run, the node attempt (its agent identity,
+    ``orchestrator.scope.agent_id_of``: one per node and attempt), the
+    repository and whether it is the writable one."""
+
     task_id: uuid.UUID
     run: TaskRun
+    agent_id: uuid.UUID
     repo_id: uuid.UUID
     writable: bool
 
@@ -226,12 +230,21 @@ class SandboxPool:
             except OSError as error:
                 logger.warning("A shim could not be removed (%s)", type(error).__name__)
 
-    async def release(self, task_id: uuid.UUID, run: TaskRun | None = None) -> None:
-        """Stop every sandbox of ``task_id`` (of ``run`` only, when given)."""
+    async def release(
+        self,
+        task_id: uuid.UUID,
+        run: TaskRun | None = None,
+        *,
+        agent_id: uuid.UUID | None = None,
+    ) -> None:
+        """Stop every sandbox of ``task_id`` (of ``run`` only, and of the node
+        attempt ``agent_id`` only, when given: a node that ended)."""
         for key in [
             k
             for k in self._sandboxes
-            if k.task_id == task_id and (run is None or k.run == run)
+            if k.task_id == task_id
+            and (run is None or k.run == run)
+            and (agent_id is None or k.agent_id == agent_id)
         ]:
             async with self._lock(key):
                 await self._discard(key)

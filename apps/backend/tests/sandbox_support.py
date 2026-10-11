@@ -52,6 +52,8 @@ class World:
 
     def __init__(self, *, writer: bool = True, base: bool = True) -> None:
         self.ws = Workspace()
+        # The node attempt's agent identity (one node in these tests).
+        self.agent_id = uuid.uuid4()
         self.repo_id = self.ws.add_checkout("repo")
         self.checkout = self.ws.checkout(self.repo_id)
         # The shared history: an old commit, then the secret's last change.
@@ -108,7 +110,7 @@ class World:
 
     def context(self, scope: TaskScope | None = None) -> TaskContext:
         project = self.ws.project_id
-        agent = uuid.uuid4()
+        agent = self.agent_id
         return TaskContext(
             task_id=self.ws.task.id,
             delegator_id=self.ws.user_id,

@@ -275,7 +275,13 @@ class RepoToolExecutor:
         plan = plan_sandbox(
             context.scope, repository, git, writable=writable, shim=self._pool.shims
         )
-        key = SandboxKey(context.task_id, context.run, repository.repo_id, writable)
+        key = SandboxKey(
+            context.task_id,
+            context.run,
+            context.grant.agent_id,
+            repository.repo_id,
+            writable,
+        )
         return _Place(repository.root, account, plan, key)
 
     # -- the git shim ----------------------------------------------------------------

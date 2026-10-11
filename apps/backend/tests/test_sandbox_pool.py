@@ -29,7 +29,8 @@ from paw_backend.tasks import TaskRun
 ACCOUNT = LinuxAccount(uuid.uuid4(), "alice", os.geteuid(), "/home/alice")
 TASK = uuid.uuid4()
 REPO = uuid.uuid4()
-KEY = SandboxKey(TASK, TaskRun(1, 0), REPO, True)
+AGENT = uuid.uuid4()
+KEY = SandboxKey(TASK, TaskRun(1, 0), AGENT, REPO, True)
 SPEC = SandboxSpec((SandboxMount("/w/repo", "/workspace", writable=True),))
 COMMAND = SandboxCommand(CommandKind.SHELL, "/workspace", "true")
 
@@ -68,9 +69,17 @@ class PoolTest(unittest.IsolatedAsyncioTestCase):
         await self.pool.run(KEY, ACCOUNT, SPEC, COMMAND)
         self.assertEqual(len(self.runner.started), 1)
         self.assertEqual(self.runner.execs, self.runner.started * 2)
-        other = SandboxKey(TASK, TaskRun(2, 0), REPO, True)
+        other = SandboxKey(TASK, TaskRun(2, 0), AGENT, REPO, True)
         await self.pool.run(other, ACCOUNT, SPEC, COMMAND)
         self.assertEqual(len(self.runner.started), 2)
+        # Another node of the same task and run gets a sandbox of its own.
+        sibling = SandboxKey(TASK, TaskRun(1, 0), uuid.uuid4(), REPO, True)
+        await self.pool.run(sibling, ACCOUNT, SPEC, COMMAND)
+        await self.pool.run(KEY, ACCOUNT, SPEC, COMMAND)
+        self.assertEqual(len(self.runner.started), 3)
+        self.assertEqual(self.runner.stopped, [])
+        await self.pool.release(TASK, TaskRun(1, 0), agent_id=sibling.agent_id)
+        self.assertEqual(len(self.runner.stopped), 1)
         self.assertEqual(self.pool.running(), 2)
 
     async def test_another_spec_or_account_replaces_the_sandbox(self):
@@ -150,7 +159,7 @@ class PoolTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_release_idleness_and_close(self):
         await self.pool.run(KEY, ACCOUNT, SPEC, COMMAND)
-        other = SandboxKey(uuid.uuid4(), TaskRun(1, 0), REPO, False)
+        other = SandboxKey(uuid.uuid4(), TaskRun(1, 0), AGENT, REPO, False)
         await self.pool.run(other, ACCOUNT, SPEC, COMMAND)
         await self.pool.release(TASK)
         self.assertEqual(self.pool.running(), 1)

@@ -27,7 +27,7 @@ Backend の Process（Linux User paw）
                            └─ /run/paw-shim   ← git の Shim の Socket（読み取り専用）
 ```
 
-- Sandbox は **Node と Repository ごとに 1 つ**（Task・Run・Repository・書き込みの有無が Key）。最初の呼び出しで起動し、同じ Node の次の呼び出しで使い回す（Benchmark と同じく `bash` の間で Container が続く）。Scope が変わって Mount・Mask が変われば止めて起動し直す。
+- Sandbox は **Node（の試行）と Repository ごとに 1 つ**（Task・Run・Node の試行の Agent の ID・Repository・書き込みの有無が Key。並列の Node どうしも共有しない）。最初の呼び出しで起動し、同じ Node の次の呼び出しで使い回す（Benchmark と同じく `bash` の間で Container が続く）。Scope が変わって Mount・Mask が変われば止めて起動し直す。
 - 止めるのは: Command が時間内に終わらない・取り消された（Decision 0083 の 8。`podman rm --force --time 5`: SIGTERM、5 秒で SIGKILL）、Node の終わり（`SandboxPool.release`）、使われないまま `idle_seconds`（既定 15 分。`reap_idle`）、`close`。Backend が落ちても Container の寿命（`--sandbox-lifetime`、既定 2 時間。`podman run --timeout`）で終わる。`--rm` なので止まれば消える。
 - `exec` の Shell の Command は `timeout -k 5 300 bash -lc <command>`（Benchmark と同じ。Command は Remote Command の行ではなく **stdin** で渡す）。File の Tool は Image の中の `paw-file-tool`。出力は stdout / stderr それぞれ 4 MiB まで（超えた分は捨てて「切り詰めた」と返す）。
 
