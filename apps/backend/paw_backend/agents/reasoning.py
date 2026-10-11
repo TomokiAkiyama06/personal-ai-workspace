@@ -142,7 +142,7 @@ class DropOlderReasoning:
         if prompt_tokens is None or prompt_tokens <= self.min_prompt_tokens:
             return prepared
         assistants = [m for m in prepared if m.get("role") == "assistant"]
-        older = assistants[: len(assistants) - self.keep_last]
+        older = assistants[: max(0, len(assistants) - self.keep_last)]
         for message in older:
             for name in REASONING_FIELDS:
                 message.pop(name, None)

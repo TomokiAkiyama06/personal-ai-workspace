@@ -208,6 +208,14 @@ class DropOlderTest(unittest.TestCase):
         )
         self.assertEqual(_reasoning_of(prepared), [None, None, None])
 
+    def test_a_keep_last_above_the_number_of_steps_drops_nothing(self):
+        # Codex P2 on #218: 3 steps and keep_last=5 must not drop the first.
+        history = _conversation(3)
+        prepared = DropOlderReasoning(keep_last=5).prepare(
+            history, prompt_tokens=100_000
+        )
+        self.assertEqual(prepared, history)
+
     def test_the_input_is_never_changed_or_shared(self):
         history = _conversation(4)
         snapshot = copy.deepcopy(history)
