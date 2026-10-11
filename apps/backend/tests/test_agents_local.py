@@ -609,6 +609,15 @@ class SubmitTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outcome.result.unresolved_questions, ("is the API stable?",))
         self.assertEqual(outcome.result.confidence, 0.8)
 
+    async def test_too_many_changed_files_are_corrected_before_any_commit(self):
+        many = [f"f{i}.py" for i in range(201)]
+        tools = Tools(**{"repo.git.changes": changes(changed=many, uncommitted=many)})
+        server = Server(*[answer(submit(changed=many)) for _ in range(4)])
+        outcome = await runtime(server).run_node(assignment(tools))
+        self.assertEqual(outcome.error_class, "InvalidNodeResultError")
+        self.assertIn("201 files changed", server.bodies[1]["messages"][-1]["content"])
+        self.assertFalse(any(c[0] == "repo.git.commit" for c in tools.calls))
+
     async def test_nothing_to_commit_and_nothing_changed(self):
         tools = Tools(**{"repo.git.changes": changes()})
         outcome = await runtime(Server(answer(submit()))).run_node(assignment(tools))

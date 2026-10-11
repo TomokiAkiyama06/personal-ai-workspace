@@ -506,7 +506,10 @@ class LocalAgentRuntime:
         dropped = _reasoning_bytes(attempt.messages) - _reasoning_bytes(prepared)
         attempt.messages = prepared  # what was sent is the history from now on
         attempt.new_tool_results = []
-        size = len(json.dumps(prepared, ensure_ascii=False).encode("utf-8"))
+        # The whole request's input: the messages and the tool definitions.
+        size = len(
+            json.dumps([prepared, attempt.tools], ensure_ascii=False).encode("utf-8")
+        )
         if estimate is None:
             prompt = _tokens(size)
         else:
@@ -714,7 +717,9 @@ class LocalAgentRuntime:
             f"approval needed: {tool} (approval {approval_id})"
             for approval_id, tool in attempt.waiting.items()
         ]
-        return tuple([*extra, *waiting][:MAX_LIST_ITEMS])
+        # The backend's own entries (approvals still waiting) come first: the
+        # model's questions fill what is left of the list.
+        return tuple([*waiting, *extra][:MAX_LIST_ITEMS])
 
     def _findings(self, arguments: dict[str, Any]) -> dict[str, Any]:
         summary = arguments.get("summary")
@@ -816,6 +821,14 @@ class LocalAgentRuntime:
                 attempt,
                 "ValueError: changed_files does not match the changes since the "
                 "start: " + "; ".join(problems[:50]),
+            )
+        total = sum(len(changes[r.repo_id]["changed"]) for r in writing)
+        if total > MAX_CHANGED_FILES:
+            # Checked before anything is committed: the model can narrow it.
+            self._correct(
+                attempt,
+                f"ValueError: {total} files changed; a node may change at most "
+                f"{MAX_CHANGED_FILES} (undo the changes that are not needed)",
             )
         commits: dict[uuid.UUID, str] = {}
         for repository in writing:
