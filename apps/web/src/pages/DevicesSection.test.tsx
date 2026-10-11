@@ -257,13 +257,13 @@ describe("設定 › 端末とセッション", () => {
       "GET /auth/pairing/pending": reply(200, { pending: [] }),
     });
     const tableFetch = globalThis.fetch;
-    let answerSessions: (response: Response) => void = () => {};
+    const sessionReads: Array<(response: Response) => void> = [];
     vi.stubGlobal(
       "fetch",
       vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
         if (String(input).endsWith("/auth/sessions")) {
           return new Promise<Response>((resolve) => {
-            answerSessions = resolve;
+            sessionReads.push(resolve);
           });
         }
         return tableFetch(input, init);
@@ -272,11 +272,16 @@ describe("設定 › 端末とセッション", () => {
     renderApp("/settings/devices");
     // Without the known sessions, the current one would later look like the new device.
     expect(await screen.findByRole("button", { name: "新しい端末を追加" })).toBeDisabled();
-    answerSessions(
-      new Response(JSON.stringify({ sessions: [session().session] }), {
-        headers: { "Content-Type": "application/json" },
-      }),
-    );
+    // The screen can show before its effect has asked for the list: answer the
+    // request once it has been made (an answer given earlier went nowhere).
+    await waitFor(() => expect(sessionReads.length).toBeGreaterThan(0));
+    for (const answer of sessionReads) {
+      answer(
+        new Response(JSON.stringify({ sessions: [session().session] }), {
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    }
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "新しい端末を追加" })).toBeEnabled(),
     );
