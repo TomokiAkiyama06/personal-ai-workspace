@@ -4254,7 +4254,8 @@ completed（Merge Ready。Human が Merge を判断する）/ 通らなければ
 | `domain.py`、`limits.py`、`errors.py` | Resource class（Interactive / Coding / Support / Background / Exclusive）、Placement（Local GPU / Local CPU / Cloud）、Model の Role と常駐方針、縮退の段（`Relief`）、断る理由（`Refusal`）、暫定値 |
 | `probe.py` | 読み取り専用の `NvidiaSmiProbe`（Command の Runner は注入）と、出力の厳密な Parse（使えない出力は `ProbeUnavailableError`） |
 | `accounting.py` | Actual / Reserved の VRAM と Safety Headroom の勘定（純粋関数） |
-| `concurrency.py` | KV Cache の Token による Admission と、Context 長に応じた並列数（純粋関数） |
+| `concurrency.py` | KV Cache の Token による Admission と、Context 長に応じた並列数（純粋関数。下の Class の予約は取り分までとして数える: Decision 0076 の 3） |
+| `metrics.py` | Runtime の `/metrics` から KV の使用率（`vllm:kv_cache_usage_perc`）を読む（Decision 0076 の 3） |
 | `config.py` | `DeploymentSpec`（Model の Footprint: Weight + KV Cache Pool + Runtime Buffer + Workspace）、`ComputeConfig` |
 | `control.py` | `ModelControl` の Protocol と、Admin が設定した Command を実行する `CommandModelControl`（GPU の Runtime の起動前にホストの `MemAvailable` を確かめる。Issue #182） |
 | `host.py` | ホストの `MemAvailable`（`/proc/meminfo`）の読み取り（Issue #182） |
@@ -4266,6 +4267,10 @@ completed（Merge Ready。Human が Merge を判断する）/ 通らなければ
 ### Admission（KV Cache に応じた動的な並列数）
 
 Local の Agent は Model ごとに 1 つの Runtime を共有します。`acquire(ComputeRequest(class, deployment=..., context_tokens=...))` は、Model が GPU にあり、Probe の読み取りが新しく（15 秒以内）、Context がその Model の KV Cache の Pool（`kv_safety` 90% のうち、Class の取り分: Interactive 100% / Coding 95% / Support 85% / Background 70%）と `max_sequences` に収まるときに `ComputeLease` を返します。Runtime が KV の使用率を報告できるときは、予約と観測の大きい方で数えます。長い Context の Request が多いと同時数が減り、短いものが多いと増えます（`parallelism()` が今の数を返します）。入れない Request は Class 順・到着順の待ち行列で待ち、容量不足で待つ Request を後ろの Request が追い越すことはありません。Priority は開始順だけに効き、走っている仕事は止めません。
+
+**会話の伸び（Issue #200、[Decision 0076](../../docs/decisions/0076-main-kv-context-under-coexistence.md) の 3、Approved）**: 走っている Request は `ComputeLease.resize(context_tokens)` で予約を変えられます（Local の Agent の Runtime が毎回の Request の前に「Prompt の見積もり + `max_tokens`」で呼ぶ。Runtime は #208 の PR 3）。予約の増加は**待たせず、Class の取り分と `kv_safety` を超えても認めます**（待たせると、互いの終わりを待つ Agent が止まりうるため）。超えている間は新しい Request が上限で待ち（上の待ち行列のまま）、予約が減ると入れる待ちを通します。Model の `max_context_tokens` を超える `resize` は `ComputeUnavailableError(CONTEXT_TOO_LONG)` で断り、予約は変えません。CPU の Lease は予約を持たず（上限だけ確かめる）、`CLOUD` の Lease は変わりません。下の Class の伸びで上の Class を締め出さないよう、Class C の新しい Request は、C と上の Class の予約はそのまま、C より下の Class の予約はそれぞれの取り分まで・その合計を下の Class の中で最も高い取り分までとして数えます（`concurrency.counted_tokens`。Interactive は少なくとも安全な Pool の 5%、Coding は 10% が残る）。伸びのない予約はどの Class も取り分の内側なので、数え方は前と同じです。
+
+**KV の使用率の観測**: `DeploymentCommands(metrics_url="http://127.0.0.1:8000/metrics")` を与えた Deployment は、`CommandModelControl.kv_usage` が vLLM の `/metrics` の `vllm:kv_cache_usage_perc`（0〜1。Engine が複数なら最大）を読みます（`compute/metrics.py`）。読めないとき（応答なし・200 以外・Redirect・4 MiB 超・Sample なし・0〜1 の外）は `None`（観測なし）で、応答の中身は Log にも例外にも出しません。環境の Proxy は使いません。読み取りの Timeout は既定 2 秒（`metrics_timeout`、5 秒まで）です。
 
 ### VRAM の勘定と Safety Headroom
 
@@ -4345,6 +4350,8 @@ control = CommandModelControl(
                 "/usr/bin/cat",
                 "/sys/fs/cgroup/system.slice/paw-llm-main.service/cgroup.procs",
             ),
+            # vLLM の KV の使用率（Decision 0076 の 3）。
+            metrics_url="http://127.0.0.1:8000/metrics",
         ),
     }
 )
@@ -4411,7 +4418,7 @@ python -m paw_backend.cli compute-status --headroom-min-mib 8192 --headroom-frac
 
 ### Test
 
-`apps/backend/tests/test_compute_*.py` と `compute_support.py`（Fake の Probe と Fake の `ModelControl`。Fake の Model を GPU に置くと Fake の Probe の使用量が増え、Unload すると減ります）。DB を使うのは `test_compute_full_gpu_holds.py` と `test_compute_app_holds.py`（`PAW_TEST_DATABASE_URL` がないと Skip）だけです。`test_compute_probe.py`（2 つの Command の固定、GPU を変える Option がないこと、Parse）、`test_compute_accounting.py`（勘定と KV の純粋関数、ランダムな Property Test）、`test_compute_config.py`（設定の検査と `CommandModelControl`。Runner は記録するだけで何も実行しません）、`test_compute_host.py`（Issue #182: `MemAvailable` の読み取り、足りない・読めないときに起動しないこと、JIT の環境変数、Load の上限 900 秒と検証の上限）、`test_compute_scheduler.py`（Admission・Class・待ち行列・Probe の鮮度・Hybrid）、`test_compute_relief.py`（縮退の各段・Drain・復帰・常駐）、`test_compute_exclusive.py`、`test_compute_free_vram.py`（Decision 0042: 空き VRAM による延期、二重に数えないこと、追い越し、警告と頻度、Exclusive の待ち）、`test_compute_runtimes.py`（`HybridRuntime`・`ScheduledMemoryWorker`・`PlacedEmbedder`）、`test_compute_cli.py`、`test_compute_full_gpu.py`（Full GPU Mode: 認可と Audit、Hold と Drain、Preempt、Unload と確認、終了後の Reload と再開。Task の保存は Fake）、`test_compute_full_gpu_holds.py`（実 PostgreSQL の `PostgresTaskHolds`: Hold、Hold した Task の見分け、再開と Queue、End to End）。`test_compute_app.py`（Issue #165: Lifespan での起動と停止、Database がない構成、`local_runtimes` の配線、警告の Sink、HTTP の経路の認可・非同期の開始・取りやめ・失敗・Body の検査、終了時に開始を取りやめて Model を戻すことと、その待ちの上限）、`test_compute_app_holds.py`（実 PostgreSQL: HTTP で始めて Task が Hold され、終えて再開する）。時間は注入した Clock で動かします。
+`apps/backend/tests/test_compute_*.py` と `compute_support.py`（Fake の Probe と Fake の `ModelControl`。Fake の Model を GPU に置くと Fake の Probe の使用量が増え、Unload すると減ります）。DB を使うのは `test_compute_full_gpu_holds.py` と `test_compute_app_holds.py`（`PAW_TEST_DATABASE_URL` がないと Skip）だけです。`test_compute_probe.py`（2 つの Command の固定、GPU を変える Option がないこと、Parse）、`test_compute_accounting.py`（勘定と KV の純粋関数、ランダムな Property Test）、`test_compute_config.py`（設定の検査と `CommandModelControl`。Runner は記録するだけで何も実行しません）、`test_compute_host.py`（Issue #182: `MemAvailable` の読み取り、足りない・読めないときに起動しないこと、JIT の環境変数、Load の上限 900 秒と検証の上限）、`test_compute_scheduler.py`（Admission・Class・待ち行列・Probe の鮮度・Hybrid）、`test_compute_kv_growth.py`（Decision 0076 の 3: `resize` の伸び縮み、取り分と `kv_safety` を超える伸びを待たせないこと、新しい Request が上限で待ち縮みで通ること、下の Class を取り分までとして数えること、`CONTEXT_TOO_LONG`）、`test_compute_metrics.py`（`/metrics` の Parse と読み取り。Fake の Server）、`test_compute_relief.py`（縮退の各段・Drain・復帰・常駐）、`test_compute_exclusive.py`、`test_compute_free_vram.py`（Decision 0042: 空き VRAM による延期、二重に数えないこと、追い越し、警告と頻度、Exclusive の待ち）、`test_compute_runtimes.py`（`HybridRuntime`・`ScheduledMemoryWorker`・`PlacedEmbedder`）、`test_compute_cli.py`、`test_compute_full_gpu.py`（Full GPU Mode: 認可と Audit、Hold と Drain、Preempt、Unload と確認、終了後の Reload と再開。Task の保存は Fake）、`test_compute_full_gpu_holds.py`（実 PostgreSQL の `PostgresTaskHolds`: Hold、Hold した Task の見分け、再開と Queue、End to End）。`test_compute_app.py`（Issue #165: Lifespan での起動と停止、Database がない構成、`local_runtimes` の配線、警告の Sink、HTTP の経路の認可・非同期の開始・取りやめ・失敗・Body の検査、終了時に開始を取りやめて Model を戻すことと、その待ちの上限）、`test_compute_app_holds.py`（実 PostgreSQL: HTTP で始めて Task が Hold され、終えて再開する）。時間は注入した Clock で動かします。
 実 GPU を読む Test は `RealProbeTest` の 1 つだけで、`PAW_TEST_REAL_GPU_PROBE=1` のときだけ動き（CI では Skip）、2 つの読み取りの Query だけを実行します。
 
 ## System Health / Observability

@@ -16,13 +16,26 @@ requests that fit follows the context length: few long ones or many short ones
   larger of the reservations and the observation counts.
 * A model without a pool (an embedding model) is limited by its number of
   sequences only.
+
+A running request's reservation may grow past its class's share and past
+``safety`` (Decision 0076, 3: ``ComputeLease.resize`` never waits). So a higher
+class is not shut out by the growth of lower ones, a new request of class C
+counts the reservations of C and the classes above it as they are, but each
+lower class's reservation only up to that class's share, and their sum only up
+to the highest share among the lower classes (``counted_tokens``): Interactive
+work keeps at least 1 − 0.95 of the safe pool, Coding 0.95 − 0.85.
 """
 
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from paw_backend.compute.domain import Refusal, ResourceClass
+from paw_backend.compute.domain import (
+    CLASS_RANK,
+    SHARED_CLASSES,
+    Refusal,
+    ResourceClass,
+)
 
 _EPSILON = 1e-9
 
@@ -34,6 +47,9 @@ class KvState:
     sequences: int
     max_sequences: int
     observed_fraction: float | None  # what the runtime reports, 0..1
+    # The reservations of each class (their sum is ``reserved_tokens``).
+    # ``None``: not known by class, every reservation counts as it is.
+    reserved_by_class: Mapping[ResourceClass, int] | None = None
 
 
 def usable_tokens(
@@ -48,11 +64,45 @@ def usable_tokens(
     )
 
 
-def used_tokens(state: KvState) -> int:
+def counted_tokens(
+    state: KvState,
+    resource_class: ResourceClass,
+    *,
+    safety: float,
+    ceilings: Mapping[ResourceClass, float],
+) -> int:
+    """The reservations a new request of ``resource_class`` is judged against
+    (Decision 0076, 3; see the module): its own class and the ones above as
+    they are, the lower ones each up to its share and in sum up to the highest
+    lower share."""
+    by_class = state.reserved_by_class
+    if by_class is None:
+        return state.reserved_tokens
+    rank = CLASS_RANK[resource_class]
+    counted = lower = lower_share = 0
+    for cls in SHARED_CLASSES:
+        tokens = by_class.get(cls, 0)
+        if CLASS_RANK[cls] <= rank:
+            counted += tokens
+            continue
+        share = usable_tokens(state, cls, safety=safety, ceilings=ceilings)
+        lower += min(tokens, share)
+        lower_share = max(lower_share, share)
+    return counted + min(lower, lower_share)
+
+
+def used_tokens(
+    state: KvState,
+    resource_class: ResourceClass,
+    *,
+    safety: float,
+    ceilings: Mapping[ResourceClass, float],
+) -> int:
     observed = 0
     if state.observed_fraction is not None:
         observed = math.ceil(state.capacity_tokens * state.observed_fraction - _EPSILON)
-    return max(state.reserved_tokens, observed)
+    reserved = counted_tokens(state, resource_class, safety=safety, ceilings=ceilings)
+    return max(reserved, observed)
 
 
 def kv_refusal(
@@ -69,7 +119,8 @@ def kv_refusal(
     if state.capacity_tokens == 0:
         return None
     usable = usable_tokens(state, resource_class, safety=safety, ceilings=ceilings)
-    if used_tokens(state) + tokens > usable:
+    used = used_tokens(state, resource_class, safety=safety, ceilings=ceilings)
+    if used + tokens > usable:
         return Refusal.KV_FULL
     return None
 
@@ -88,7 +139,7 @@ def parallelism(
         return sequences
     free = usable_tokens(
         state, resource_class, safety=safety, ceilings=ceilings
-    ) - used_tokens(state)
+    ) - used_tokens(state, resource_class, safety=safety, ceilings=ceilings)
     if tokens <= 0:
         return sequences if free >= 0 else 0
     return min(sequences, max(0, free) // tokens)

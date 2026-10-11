@@ -22,12 +22,19 @@ be read (:class:`HostMemoryLowError`, logged as a warning). Its commands run
 with ``MAX_JOBS`` / ``FLASHINFER_NVCC_THREADS`` capped (``DEFAULT_JIT_BUILD_ENV``)
 for a command that starts the runtime itself; a systemd unit does not inherit
 them and sets them itself (``docs/DEPLOYMENT_UPDATE.md``).
+
+How full a runtime's KV cache is (``kv_usage``; Decision 0076, 3): read from
+the deployment's ``metrics_url`` (vLLM's ``/metrics``, ``vllm:kv_cache_usage_perc``;
+:mod:`paw_backend.compute.metrics`), ``None`` without one or when it cannot be
+read.
 """
 
 import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Protocol
+
+import httpx
 
 from paw_backend.compute.config import check_int, check_name
 from paw_backend.compute.domain import Placement
@@ -43,6 +50,11 @@ from paw_backend.compute.limits import (
     DEFAULT_MIN_HOST_AVAILABLE_BYTES,
     MAX_CONTROL_TIMEOUT_SECONDS,
 )
+from paw_backend.compute.metrics import (
+    DEFAULT_METRICS_TIMEOUT_SECONDS,
+    check_metrics_url,
+    read_kv_usage,
+)
 from paw_backend.compute.probe import (
     CommandResult,
     CommandRunner,
@@ -56,6 +68,8 @@ logger = logging.getLogger("paw_backend.compute")
 _MAX_PIDS = 1_024
 _MAX_HOST_BYTES = 1 << 50
 _MIB = 1024**2
+# The KV usage is read at every refresh (5 s): a reading may not take longer.
+_MAX_METRICS_TIMEOUT = 5.0
 
 
 class ModelControl(Protocol):
@@ -104,7 +118,10 @@ def _argv(parameter: str, value: object) -> tuple[str, ...] | None:
 
 @dataclass(frozen=True, slots=True)
 class DeploymentCommands:
-    """The argv of each action for one deployment (``None``: not available)."""
+    """The argv of each action for one deployment (``None``: not available),
+    and where its runtime's Prometheus metrics are (``metrics_url``, e.g.
+    ``http://127.0.0.1:8000/metrics`` for vLLM; ``None``: its KV usage is not
+    known)."""
 
     gpu: tuple[str, ...] | None = None  # start the GPU runtime
     unload: tuple[str, ...] | None = None  # stop every runtime of the deployment
@@ -112,12 +129,14 @@ class DeploymentCommands:
     # Print the pids of every process of the runtime, whitespace separated (for
     # a systemd unit: ``cat .../<unit>/cgroup.procs``, not only its MainPID).
     pids: tuple[str, ...] | None = None
+    metrics_url: str | None = None
 
     def __post_init__(self) -> None:
         for parameter in ("gpu", "unload", "cpu", "pids"):
             object.__setattr__(
                 self, parameter, _argv(parameter, getattr(self, parameter))
             )
+        check_metrics_url(self.metrics_url)
 
 
 class CommandModelControl:
@@ -131,6 +150,8 @@ class CommandModelControl:
         timeout: float = DEFAULT_CONTROL_TIMEOUT_SECONDS,
         min_host_available_bytes: int = DEFAULT_MIN_HOST_AVAILABLE_BYTES,
         host_memory: Callable[[], int] = read_mem_available_bytes,
+        metrics_timeout: float = DEFAULT_METRICS_TIMEOUT_SECONDS,
+        metrics_transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         if not isinstance(commands, Mapping):
             raise InvalidComputeArgumentError("commands")
@@ -150,6 +171,11 @@ class CommandModelControl:
         if not callable(host_memory):
             raise InvalidComputeArgumentError("host_memory")
         self._host_memory = host_memory
+        # ``metrics_transport``: tests pass an ``httpx.MockTransport``.
+        self._metrics_timeout = check_timeout(
+            metrics_timeout, "metrics_timeout", maximum=_MAX_METRICS_TIMEOUT
+        )
+        self._metrics_transport = metrics_transport
         self._runner = (
             runner
             if runner is not None
@@ -235,5 +261,11 @@ class CommandModelControl:
         return frozenset(pids)
 
     async def kv_usage(self, deployment: str) -> float | None:
-        # The runtimes' metrics endpoints are chosen with the runtime (PAW-017).
-        return None
+        entry = self._commands.get(deployment)
+        if entry is None or entry.metrics_url is None:
+            return None
+        return await read_kv_usage(
+            entry.metrics_url,
+            timeout_seconds=self._metrics_timeout,
+            transport=self._metrics_transport,
+        )
