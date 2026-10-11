@@ -17,7 +17,7 @@ GPU / Compute Resource Scheduler（KV Cache に応じた動的な並列数、Act
 Workspace 共有の Codex / Claude Connection（Credential は不透明な Handle だけ）、User 別 Quota、User と Task への利用量の帰属は [PAW-030](#shared-codex--claude-connection) で実装済みです（Service のみ。実 Adapter と HTTP の Endpoint はまだありません。Quota の意味・期間・実行中の Task の扱いは [Decision 0016](../../docs/decisions/0016-shared-connection-adapter-policy.md)（Approved、2026-09-26）に従います）。
 Project への Repository の登録（GitHub から clone、Ubuntu 上の既存 Repository、新規作成）と、User ごとに分離した Checkout は [PAW-027](#repository-registration--per-user-checkout) で実装済みです（Service のみ）。
 Linux User ごとの GitHub 接続状態（`gh auth status`）の認識と、GitHub への新規作成（`create_github`）を対象 User 自身の Identity で実行する経路は [PAW-028](#github-user-connectiongh-auth) で実装済みです（Service のみ。Migration・新しい Capability はありません）。
-System Health / Observability の Backend（PostgreSQL・GPU と Model・Task Queue・Memory Worker・Codex / Claude の接続・Connection Reaper・Recovery Backup・Memory Projection・Audit retention の状態、Downsampling する時系列、Severity の変化の Event、`/api/v1/system/health*`）は [PAW-066](#system-health--observability) で実装済みです（通知と UI はまだありません。選択は [Decision 0059](../../docs/decisions/0059-system-health-observability.md)（Proposed））。
+System Health / Observability の Backend（PostgreSQL・GPU と Model・Task Queue・Memory Worker・Codex / Claude の接続・Connection Reaper・Recovery Backup・Memory Projection・Audit retention の状態、Downsampling する時系列、Severity の変化の Event、`/api/v1/system/health*`）は [PAW-066](#system-health--observability) で実装済みです（通知と UI はまだありません。選択は [Decision 0059](../../docs/decisions/0059-system-health-observability.md)（Approved））。
 User の招待（invite-only registration）、信頼済み端末からの QR / リンクによる新規端末の追加（Owner / Admin は信頼済み端末の承認が必須）、User の状態（Invited / Active / Pending deletion / Deleted）の遷移は [PAW-024](#user-invite--device-pairing--lifecycle) で実装済みです（Backend だけ。値と流れは [Decision 0033](../../docs/decisions/0033-user-invitation-and-device-pairing.md)（Approved、2026-09-28。判断点 12 は確認 Code を要る形に変更）のとおり）。
 
 [Architecture](../../docs/ARCHITECTURE.md) に基づき、最終的に以下の機能を Backend 側で扱います。
@@ -172,7 +172,7 @@ Database には pgvector が必要です（CI は `pgvector/pgvector:pg18` を�
 | `PAW_PASSKEY_RP_NAME` / `PAW_PASSKEY_CHALLENGE_TTL_SECONDS` | `Personal AI Workspace` / `300` | Authenticator に見せる名前と、Challenge に答えられる秒（30〜900） |
 | `PAW_SCRATCH_PURGE_INTERVAL_SECONDS` | `3600` | 期限切れの Research Scratch Item を消す Janitor の間隔（秒）。`0` で Janitor を止める（期限切れの行が DB に残り続ける）。それ以外は 60〜86400。DB が未設定のときも起動しない。[Janitor](#janitor期限切れの削除) |
 | `PAW_MEMORY_PROJECTION_DIR` | なし | Memory Markdown Projection の出力先（絶対 Path。例 `/srv/personal-ai/memory`）。未設定なら `memory-projection-run` は動かない。git の Work Tree の中・Home の中や上・Projection の Marker のない空でない Directory は拒否する。[Memory Markdown Projection](#memory-markdown-projection)（Decision 0038、Approved） |
-| `PAW_RECOVERY_REPOSITORY_DIR` / `PAW_RECOVERY_GIT_TIMEOUT_SECONDS` | なし / `300` | Recovery Repository（専用の Private Repository）の Clone の場所（絶対 Path。例 `/srv/personal-ai/recovery`）と、git の 1 Command の Timeout。未設定なら `recovery-backup-run` と `recovery-restore` は動かない。Home・Projection と重なる場所、Work Tree の最上位でない場所、Marker がなく空でない Checkout は拒否する。[Recovery Repository](#recovery-repositorybackup--restore)（Decision 0054、Proposed） |
+| `PAW_RECOVERY_REPOSITORY_DIR` / `PAW_RECOVERY_GIT_TIMEOUT_SECONDS` | なし / `300` | Recovery Repository（専用の Private Repository）の Clone の場所（絶対 Path。例 `/srv/personal-ai/recovery`）と、git の 1 Command の Timeout。未設定なら `recovery-backup-run` と `recovery-restore` は動かない。Home・Projection と重なる場所、Work Tree の最上位でない場所、Marker がなく空でない Checkout は拒否する。[Recovery Repository](#recovery-repositorybackup--restore)（Decision 0054、Approved） |
 | `PAW_REPOSITORY_WORKSPACE_SUBDIR` | `workspaces` | Backend が作る Checkout の置き場所（`<home>/<この名前>/<project>/<repo>`）。1 つの安全な名前（[Repository 登録](#repository-registration--per-user-checkout)） |
 | `PAW_REPOSITORY_EXISTING_ROOTS` | `{home}` | 既存 Repository を登録してよい Root（Comma 区切り、8 つまで）。各 Root は絶対 Path で `{home}`（先頭だけ）か `{user}` を含む（全員で共有する Directory は拒否） |
 | `PAW_REPOSITORY_CLONE_HOSTS` | `github.com` | Clone してよい Host（Comma 区切り、8 つまで。小文字の DNS 名。IP Address は不可） |
@@ -209,7 +209,7 @@ TLS を終端する Reverse Proxy の背後で Backend が HTTP を受ける場�
 
 ## Web App の配信
 
-[Decision 0044](../../docs/decisions/0044-web-app-serving-and-session.md)（Proposed。推奨どおりに実装）により、Build 済みの [Web App](../web/README.md) は Backend が **API と同じ Origin** で配信します（`paw_backend/web.py` の `WebAppMiddleware`）。
+[Decision 0044](../../docs/decisions/0044-web-app-serving-and-session.md)（Approved。推奨どおりに実装）により、Build 済みの [Web App](../web/README.md) は Backend が **API と同じ Origin** で配信します（`paw_backend/web.py` の `WebAppMiddleware`）。
 Session Cookie（`__Host-`、`Secure`、`SameSite=Strict`）と Origin 検査（`OriginCheckMiddleware`）は同じ Origin を前提にしているため、Web App を別の Origin に置く構成（CORS）は取りません。
 
 - `PAW_WEB_DIST_DIR` を設定したときだけ有効です。起動時に、絶対 Path で `index.html` を含む Directory であることを検査します。
@@ -234,10 +234,10 @@ Endpoint は `/api/v1` 以下です。OpenAPI Schema は `/api/v1/openapi.json` 
 | `/api/v1/system/health/summary` | 全体の Severity と Codex / Claude の可否（全 User）。[System Health](#system-health--observability) |
 | `/api/v1/system/health`、`/metrics/{name}`、`/events` | 全 Component の状態・時系列・Severity の変化（Owner / Admin） |
 | `/api/v1/auth/invitations/*`、`/api/v1/auth/users/*`、`/api/v1/auth/pairing/*` | 招待、User の削除・復元、端末の Pairing（13 個の Endpoint。うち 3 個が公開）。[User Invite / Device Pairing / Lifecycle](#user-invite--device-pairing--lifecycle) |
-| `/api/v1/admin/compute/full-gpu` | Kaggle / Full GPU Mode の状態・開始・終了（`GET` / `POST` / `DELETE`、`admin.compute.full_gpu`。Scheduler がない構成は 503）。[Application への組み込み](#application-への組み込みissue-165decision-0058proposed) |
-| `/api/v1/memory/*` | Memory 画面の Scope の木と件数・一覧（検索）・履歴・出典、編集と復元（`expected_version`、衝突は 409 `memory_version_conflict`）。入口は本人の Memory への `memory.read`。[Memory の HTTP API](#memory-の-http-apiissue-186decision-0068proposed) |
+| `/api/v1/admin/compute/full-gpu` | Kaggle / Full GPU Mode の状態・開始・終了（`GET` / `POST` / `DELETE`、`admin.compute.full_gpu`。Scheduler がない構成は 503）。[Application への組み込み](#application-への組み込みissue-165decision-0058approved) |
+| `/api/v1/memory/*` | Memory 画面の Scope の木と件数・一覧（検索）・履歴・出典、編集と復元（`expected_version`、衝突は 409 `memory_version_conflict`）。入口は本人の Memory への `memory.read`。[Memory の HTTP API](#memory-の-http-apiissue-186decision-0068approved) |
 | `/api/v1/memory/preferences/*` | Inferred Preference の候補と根拠・推奨 Scope、確認（`acknowledge_high_risk` なしの高リスクは 409）・保存しない・自由入力の構造化プレビュー。入口は本人の Memory への `memory.read`。[Inferred Preference の確認 Flow](#inferred-preference-の確認-flowissue-38paw-044decision-0081) |
-| `/api/v1/usage`、`/api/v1/quotas/me`、`/api/v1/users/{id}/quotas*`、`/api/v1/admin/users` | 使用状況の集計、Quota の閲覧と変更（Passkey Step-up）、User の一覧。[使用状況と Quota の HTTP API](#使用状況と-quota-の-http-apiissue-187decision-0069proposed) |
+| `/api/v1/usage`、`/api/v1/quotas/me`、`/api/v1/users/{id}/quotas*`、`/api/v1/admin/users` | 使用状況の集計、Quota の閲覧と変更（Passkey Step-up）、User の一覧。[使用状況と Quota の HTTP API](#使用状況と-quota-の-http-apiissue-187decision-0069approved) |
 
 Readiness は 200 または 503 で、Body の形は同じです。
 
@@ -824,7 +824,7 @@ Table は加えて `recorded_at`（Database の時計。INSERT 時に Trigger �
 | Mode | 対象 | 記録 | Audit を書けないとき |
 | --- | --- | --- | --- |
 | `REQUIRED`（既定） | 上記以外のすべて（副作用のある操作、管理系、`admin.audit.view` / `admin.usage.view` も含む） | 許可も拒否も記録する | **許可を拒否に変える**（`audit_unavailable`、HTTP 503）。拒否は拒否のまま |
-| `DENIED_ONLY` | 読み取り専用の許可リスト（`project.read`、`shared_memory.read`、`account.read`、`memory.read`、System Health の `system_health.summary.read` と `admin.system_health.view`（Decision 0059、Proposed）、Task / PR の一覧の `tasks.list`（Decision 0067、Approved））だけ | 拒否だけを Best Effort で記録し、許可した読み取りは記録しない | 読み取りは止めない |
+| `DENIED_ONLY` | 読み取り専用の許可リスト（`project.read`、`shared_memory.read`、`account.read`、`memory.read`、System Health の `system_health.summary.read` と `admin.system_health.view`（Decision 0059、Approved）、Task / PR の一覧の `tasks.list`（Decision 0067、Approved））だけ | 拒否だけを Best Effort で記録し、許可した読み取りは記録しない | 読み取りは止めない |
 
 - **認証されていない Request の拒否は Database に書きません。** 誰でも作れる行になり、Table は削除できないためです。
   代わりに `INFO` の Log（Reason、Action、Resource の種類、`correlation_id`、`client_request_id`。例外の文は含めない）に出します。
@@ -2110,7 +2110,7 @@ CHECK 制約が、状態と終了・時間・Token・失敗の種類の対応（
 - 使用量の保存期間は未定。集計と HTTP の経路は Issue #187（下の節）。専用の Capability（#82）と、Credential の差し替え・削除への Step-up（PAW-023 の後）は、Decision 0016 で承認された後続の Issue です（今は `admin.config.manage` の通常の認可だけ）。
 - Health Check を動かす Scheduler と、状態の変化の Owner への通知は Orchestrator / 通知の Issue です。
 
-### 使用状況と Quota の HTTP API（Issue #187、Decision 0069（Proposed））
+### 使用状況と Quota の HTTP API（Issue #187、Decision 0069（Approved））
 
 `paw_backend/api/v1/usage.py`。`create_app` が Database のある構成で HTTP 用の `ConnectionService` を作ります（`app.state.connections`。Adapter なし、Secret は解決しない `NoSecretStore`。`connections/wiring.py`）。Database がない構成は 503 です。
 
@@ -3236,7 +3236,7 @@ DB を使わない Test（`records`、`validation`、`rules`、`store_validation
 [PAW-026](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/23)（Revision `0026`）で実装しました。設計は [要件](../../REQUIREMENTS.md)の「Project roles and membership」「Project lifecycle」「New Project defaults」と
 [Decision 0004](../../docs/decisions/0004-rbac-capability-and-audit-policy.md)（承認済み）に従い、要件が決めていない選択は [Decision 0008（承認済み）](../../docs/decisions/0008-project-membership-and-lifecycle-policy.md)にまとめています。
 **Decision 0008 は 2026-09-25 に Human が承認しました。** 招待の期限（14 日）、Member と招待の合計（200）、Project 名と説明の長さ（1〜100 文字、2,000 文字）は暫定値として承認されました。Project 名と説明の長さは DB の CHECK 制約にも書かれているため、変えるには新しい Migration と `models.py` の変更が要ります（`limits.py` の定数だけでは足りません）。Member と招待の合計は `limits.MAX_MEMBERS_PER_PROJECT` で、招待の期限は `domain.invite_expiry` で決まり、どちらも Migration は要りません（詳しくは Decision 0008 の「背景」）。
-HTTP の API は Issue [#184](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/184) で足しました（[HTTP の API](#http-の-apiissue-184decision-0066-proposed)）。`ProjectService` は、認証済みの `Principal` を受け取り、`Authorizer` で判定します。
+HTTP の API は Issue [#184](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/184) で足しました（[HTTP の API](#http-の-apiissue-184decision-0066-approved)）。`ProjectService` は、認証済みの `Principal` を受け取り、`Authorizer` で判定します。
 作成・招待への応答・退出の Capability（`project.create`、`project.invitation.respond`、`project.leave`）は [Decision 0022（Approved、2026-09-26。0008 の 5 を置き換え、0004 を拡張する）](../../docs/decisions/0022-project-lifecycle-capabilities.md) に従った、Issue [#82](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/82) の実装です（[認可と Audit](#認可と-audit)）。
 
 | ファイル | 内容 |
@@ -3448,7 +3448,7 @@ Method の全ての引数を、DB にも Authorizer にも触れる前に検証�
 
 #### HTTP の Endpoint
 
-`GET /api/v1/admin/projects?status=&limit=&cursor=`（Issue #184。`require_capability(Capability.ADMIN_PROJECTS_MANAGE)` の Guard の後に `list_all_projects` を呼ぶ）。Guard の判定も Audit に 1 行残るので、1 回の呼び出しで `admin.projects.manage` の行は 2 つになります（Decision 0066 の 1、Proposed）。応答は `{projects: [{id, name, status, created_at, deletion_scheduled_at}], next_cursor}` です。
+`GET /api/v1/admin/projects?status=&limit=&cursor=`（Issue #184。`require_capability(Capability.ADMIN_PROJECTS_MANAGE)` の Guard の後に `list_all_projects` を呼ぶ）。Guard の判定も Audit に 1 行残るので、1 回の呼び出しで `admin.projects.manage` の行は 2 つになります（Decision 0066 の 1、Approved）。応答は `{projects: [{id, name, status, created_at, deletion_scheduled_at}], next_cursor}` です。
 
 #### 制限と未確認の点
 
@@ -3463,7 +3463,7 @@ Method の全ての引数を、DB にも Authorizer にも触れる前に検証�
 `test_projects_admin_list.py`（実 PostgreSQL: 全 Project、状態、削除待ちの期限、Deleted の除外、Keyset の安定（ページの間の挿入・削除・状態変更・同時に走る Writer）、Audit の行）、`test_projects_admin_grants.py`（Application の Role で上の Test を全て実行し、`projects` の 5 列の `SELECT` だけを持つ Role でも一覧が動くこと）です。
 実装の変異 23 個（並びの向き、`id` の向き、行値比較の等号、`id` を落とす、Deleted を含める、Filter の無視、`limit + 1` の先読み、Cursor を先読みの行から作る、認可を外す、別の Capability、Filter を Audit に残さない、Cursor の Filter・正規形・長さ・時刻の範囲・型・先頭の 0・大文字の UUID の検証を緩める、`deleted` の Filter、`status` の大文字小文字、`limit` の検証、認可の前の引数の検証の順序、`description` を SELECT に足す）を、すべて Test が検出しました。
 
-### HTTP の API（Issue #184、Decision 0066 Proposed）
+### HTTP の API（Issue #184、Decision 0066 Approved）
 
 `paw_backend/api/v1/projects.py`。Web の プロジェクト の画面（PAW-061、`apps/web/src/projects/api.ts`）が使います。振る舞いは `ProjectService` と `RepositoryService` にあり、Route は変換と、画面の一覧・詳細の組み立てだけをします。`create_app` は Database があるとき `app.state.projects` / `app.state.repositories` を作ります（ないときは 503 `projects_unavailable`）。
 
@@ -3629,7 +3629,7 @@ Rerank（Reranker Protocol）→ 構造化 Score（confirmed・鮮度・importan
 要件は [REQUIREMENTS.md](../../REQUIREMENTS.md) の「Memory Conflict / Versioning / Retrieval」「Memory Freshness / Revalidate Policy」「Manual Memory Editing / Concurrency」と
 [Memory Architecture](../../docs/MEMORY_ARCHITECTURE.md) の 10・11・15・17 節です。要件が決めていない選択（Relation ごとの意味、誰がどの Scope を変えられるか、手動で書ける鮮度、Stale Candidate・期限・Session 終了の処理）は
 [Decision 0034](../../docs/decisions/0034-memory-versioning-freshness.md)（**Approved、2026-09-28。Human が全点を推奨どおりに承認**）の推奨どおりに実装しました。
-編集と復元の HTTP の Endpoint は Issue #186 で足しました（[Memory の HTTP API](#memory-の-http-apiissue-186decision-0068proposed)）。廃止・Revalidate・Relation の Endpoint はまだありません。定期 Job と Task の終了の配線は Issue #125（Decision 0047）です。
+編集と復元の HTTP の Endpoint は Issue #186 で足しました（[Memory の HTTP API](#memory-の-http-apiissue-186decision-0068approved)）。廃止・Revalidate・Relation の Endpoint はまだありません。定期 Job と Task の終了の配線は Issue #125（Decision 0047）です。
 
 ### Version（`MemoryVersioningService`）
 
@@ -3697,10 +3697,10 @@ Service と Job は、Revision `0026` / `0040` / `0071` が与えた権限（`me
 それ以外は実 PostgreSQL（`PAW_TEST_DATABASE_URL`）を使い、未設定なら Skip します。時刻は注入した Clock です。
 `test_memory_versioning_grants.py` は Service と Job の Test を非 Superuser の Application の Role で実行し、その Role が Version の本文や `verified_at` を書き換えられず、履歴を消せず、Index を落とせないことを確かめます。
 
-## Memory の HTTP API（Issue #186、Decision 0068、Proposed）
+## Memory の HTTP API（Issue #186、Decision 0068、Approved）
 
 [Issue #186](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/186) で実装しました（`paw_backend/memory/board/`、`api/v1/memory.py`）。Web の Memory 画面（PAW-063）の `MemorySource` の接続先です（`apps/web/src/memory/apiSource.ts`）。
-要件と既存の Decision が決めていない選択（読み取りの置き場所、件数と一覧の意味、一覧の上限、検索、履歴に出す範囲、`can_write`、変更者の名前）は [Decision 0068](../../docs/decisions/0068-memory-http-api.md)（**Proposed**）の推奨どおりに実装しました。Migration はありません。
+要件と既存の Decision が決めていない選択（読み取りの置き場所、件数と一覧の意味、一覧の上限、検索、履歴に出す範囲、`can_write`、変更者の名前）は [Decision 0068](../../docs/decisions/0068-memory-http-api.md)（**Approved**）の推奨どおりに実装しました。Migration はありません。
 
 | Method / Path（`/api/v1/memory` 以下） | 内容 |
 | --- | --- |
@@ -3808,7 +3808,7 @@ python -m paw_backend.cli memory-projection-check --max-age-minutes 30   # 監�
 
 [PAW-047](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/41)（`paw_backend/recovery/`、`paw_backend/cli/recovery.py`、`deploy/systemd/paw-recovery-backup*`）で実装しました。**Migration はありません。**
 要件は [REQUIREMENTS.md](../../REQUIREMENTS.md) の「Memory Markdown Backup / Backup Authority」「Dedicated Recovery Repository」「User Deletion Retention」です。
-要件が決めていない選択（Checkout の置き場所と安全の条件、形式、入れないもの、削除中の User、Restore の範囲・上書き・誰が実行するか、Restore の元の検証、戻さないもの）は [Decision 0054](../../docs/decisions/0054-recovery-repository-projection-restore.md)（**Proposed**）の推奨どおりに実装しました。承認されるまで、実運用の Server で Timer を有効にしません。
+要件が決めていない選択（Checkout の置き場所と安全の条件、形式、入れないもの、削除中の User、Restore の範囲・上書き・誰が実行するか、Restore の元の検証、戻さないもの）は [Decision 0054](../../docs/decisions/0054-recovery-repository-projection-restore.md)（**Approved**）の推奨どおりに実装しました。承認されるまで、実運用の Server で Timer を有効にしません。
 
 PostgreSQL が Operational Source of Truth で、Recovery Repository（専用の Private Repository）は Disaster Recovery Source です。通常時は Git から DB へ同期しません。
 
@@ -3859,7 +3859,7 @@ python -m paw_backend.cli recovery-restore --apply  # 1 Transaction で書く
 - Checkout の Lock は確認から書き込みと Audit の記録が終わるまで持ち続けるので、その間に Backup が Checkout を書き換えたり Push したりしません。
 - Restore は確かめた Commit の Object から File を読みます（Work Tree は読まない）。`--apply` は対象の Table を Lock して空であることを確かめ直し、User・Quota・Project・Member・Repository・Remote・Memory・Version・Relation・Source（`conversation` を除く）と `recovery.restore.applied` を同じ Transaction で書きます。失敗は Rollback（`recovery.restore.failed`、終了コード 3）。Ctrl-C・SIGTERM で打ち切られた Restore も、結果をまだ記録していなければ `recovery.restore.failed`（`CancelledError`）を記録してから終わります（記録の最中なら記録を終えてから。終了コード 3）。Commit の最中に打ち切られると、Commit が済んでいて `recovery.restore.applied` の後に `recovery.restore.failed` が残ることがあります。そのため打ち切られたときの表示は「Rollback した」とは言い切らず、まず `audit_events` に `recovery.restore.applied` があるかを確かめるよう求めます。
 - 戻さないもの（表示する手作業）: Credential（Owner は `sudo python -m paw_backend.cli owner-recover --confirm-owner-recovery`、他の Account は Decision 0032 の Reset）、Auth Policy（Owner が設定画面で Step-up して設定し直す）、Shared Connection（再登録）、Checkout（Clone し直し、各 User が `gh auth login`）、Task（Summary だけ）、`conversation` の Source、Audit。Restore の後に `memory-projection-run` を実行します。
-- **飛ばした Repository の Repo 単位の記憶**（[Decision 0061](../../docs/decisions/0061-restore-skipped-repository-memories.md)、**Proposed**）: 名前・既定の Branch の Credential を伏せ字にしたため戻さない Repository を指す `repo` Scope の Version を 1 つでも持つ記憶は、全体（すべての Version・Source・Relation。戻す記憶との間の Relation を含む）を戻しません。登録し直した Repository は新しい ID になり、古い `repo_id` の記憶には誰も届かないためです。Dry run と `--apply` の両方で、手作業の手順に Repository ごとに 1 行（伏せ字の名前、Backup の上の Repository の ID、記憶の件数と ID、Version・Relation・Source の件数）を表示します。**出力を保存し**、Repository を登録し直した後に、必要な記憶を Backup の `memory-records/<記憶の ID>.json` から新しい Repository の下に作り直してください（自動では付け直しません）。Audit の `recovery.restore.planned` / `applied` の `reason` には、Repository を飛ばしたときだけ `skipped_repos=N held_memories=N held_versions=N held_relations=N held_sources=N` を足します（`memories=` などは戻す件数）。Backup の外の削除記録の確認は、Backup に削除記録がなくても毎回表示します（最後の Push の後に始まった削除はどの記録にもないため）。Dry run の Audit の行を書けなければ、Dry run は失敗です（終了コード 3）。
+- **飛ばした Repository の Repo 単位の記憶**（[Decision 0061](../../docs/decisions/0061-restore-skipped-repository-memories.md)、**Approved**）: 名前・既定の Branch の Credential を伏せ字にしたため戻さない Repository を指す `repo` Scope の Version を 1 つでも持つ記憶は、全体（すべての Version・Source・Relation。戻す記憶との間の Relation を含む）を戻しません。登録し直した Repository は新しい ID になり、古い `repo_id` の記憶には誰も届かないためです。Dry run と `--apply` の両方で、手作業の手順に Repository ごとに 1 行（伏せ字の名前、Backup の上の Repository の ID、記憶の件数と ID、Version・Relation・Source の件数）を表示します。**出力を保存し**、Repository を登録し直した後に、必要な記憶を Backup の `memory-records/<記憶の ID>.json` から新しい Repository の下に作り直してください（自動では付け直しません）。Audit の `recovery.restore.planned` / `applied` の `reason` には、Repository を飛ばしたときだけ `skipped_repos=N held_memories=N held_versions=N held_relations=N held_sources=N` を足します（`memories=` などは戻す件数）。Backup の外の削除記録の確認は、Backup に削除記録がなくても毎回表示します（最後の Push の後に始まった削除はどの記録にもないため）。Dry run の Audit の行を書けなければ、Dry run は失敗です（終了コード 3）。
 
 ### 制限と未確認の点
 
@@ -4060,7 +4060,7 @@ Decision 0037 の 14（Approved）は、Cloud（Codex / Claude）へ回した No
 - **`waiting` は穏やかな停止**: 他の誰か（承認、User、Resource）が Task を `waiting` にしたら、Pause と同じく新しい Node を起動せず、走っている Node を終わらせてから Run を終えます（`RunOutcome.WAITING`。Task は `waiting` のまま、Unblock した側が Enqueue します）。終わらせている間に Unblock されたら続けます。Planner の実行中も同じです。
 - **Lease を失った Run と、Entry ごと Cancel された Task**: 削除する Project の Task の停止は Task と Entry を 1 つの Transaction で Cancel するので、Worker は Heartbeat で Lease の喪失として知ります。その DAG を走らせる者はもういないので、Task が `cancelled` なら DAG を Cancel します（自分の `epoch` で Fencing。別の Worker が引き継いでいれば拒否されます）。予期しない Error で Task を失敗にするときは、まず走っていた Node を `ready` に戻します。**戻せなければ Task を失敗にせず、Entry を Claim したまま残し**、Lease が切れた後の引き継ぎ（`acquire`）が戻します（失敗にすると、Restart は新しい DAG を使うため、古い試行が `running` のまま残るため）。Cancel された Task の DAG を閉じる処理は数回やり直します（失敗は Log だけ）。
 - **Node の書き込みは Task の Run でも Fencing します**: `start_node` / `complete_node` / `fail_node` / `give_up_node` / `finalize` は、DAG の行の Lock の後に Task の行を `FOR SHARE` で読み、Task の `attempt` / `retry_count` が DAG を最後に引き継いだ Run と違うか、Task が終わっていれば（`completed` / `failed` / `cancelled`）`StaleRunError` で何も書きません。Epoch だけでは、Task が Fail・Retry（や Restart）された後、新しい Worker が DAG を引き継ぐ前に、古い Worker の結果が書かれて新しい Run に使われてしまうためです。Orchestrator はそれを受けたら書かずに次の `_watch` で Run を閉じます（`NodeWritesAreFencedByTheRunTest`）。
-- **Runtime が報告する失敗の Class は閉じた一覧だけ**: `NodeOutcome.failed` の `error_class` は、`errors.RUNTIME_ERROR_CLASSES`（標準の例外の固定の名前と、Agent の Memory 不足を表す `AgentOutOfMemory`。Decision 0071、Proposed）にあるときだけそのまま記録し、それ以外は `AdapterError` にします（Decision 0021 の 3: 固定の名前だけ、Adapter の独自の Class は `AdapterError`）。Orchestrator 自身の名前（`NodeTimeout` など）は Runtime には名乗らせません。OOM の失敗と Escalation は `agent_incidents` にも 1 行ずつ残り、System Health の `task_queue` が数えます（[System Health](#agent-の-oom-と-escalation)）。
+- **Runtime が報告する失敗の Class は閉じた一覧だけ**: `NodeOutcome.failed` の `error_class` は、`errors.RUNTIME_ERROR_CLASSES`（標準の例外の固定の名前と、Agent の Memory 不足を表す `AgentOutOfMemory`。Decision 0071、Approved）にあるときだけそのまま記録し、それ以外は `AdapterError` にします（Decision 0021 の 3: 固定の名前だけ、Adapter の独自の Class は `AdapterError`）。Orchestrator 自身の名前（`NodeTimeout` など）は Runtime には名乗らせません。OOM の失敗と Escalation は `agent_incidents` にも 1 行ずつ残り、System Health の `task_queue` が数えます（[System Health](#agent-の-oom-と-escalation)）。
 - **一部の Repository だけを受け取った Node**: 親の Path Root と Host はそのままなので、除いた Repository は子の `TaskScope.excluded_repositories` に残し、その Worktree の Path と Remote の下の URL は範囲外（`OUT_OF_SCOPE`）にします（fail closed）。孫は親の除外を引き継ぎ、`scope_within` は除外を忘れた Scope を広すぎるとして拒否します。
 - **Planner の Identity**: Planner の Runtime には Node の Key として `plan` を渡しますが、Sub-Agent の ID（`agent_id_of`）と Loop 検知の `step` には `@planner` を使います。Node の Key は英字で始まるので、Plan が `plan` という Node を持っても、Planner と ID や失敗の履歴を共有しません。
 - **Cancel に応じない Runtime**: Timeout・Cancel・Budget の停止で Runtime の Coroutine を Cancel したら、その終わりを待つのは `CANCEL_GRACE_SECONDS`（10 秒。実時間）までです（Node の Task を束ねて待つ側はその 2 倍）。`CancelledError` を握りつぶす Runtime は**見捨て**（Log は件数だけ）、Node は通常どおり（`NodeTimeout` などで）失敗し、DAG の書き込みは `epoch` で Fencing され、Run は終わって Entry と Runtime の Timer も解放されます。見捨てた Coroutine はまだ動いているかもしれないので、試行ごとの `AttemptFence` を閉じ、その後の Tool 呼び出しと Budget の `charge` / `remaining` は `NodeStopped(ABANDONED)` になります（何も記録しません。`remaining` は `charge` と同じく、止まった Run でも `NodeStopped` です）。Orchestrator は試行を待ち終えたら、正常な終わりでも Fence を閉じます（`test_orchestrator_abandon.py`）。
@@ -4214,7 +4214,7 @@ completed（Merge Ready。Human が Merge を判断する）/ 通らなければ
 - **default branch へ直接統合しない**: Backend が書く branch はすべて `paw/` の下で、default branch が `paw/` の下の Repository は拒否します。統合では `push` / `fetch` / `checkout` / `reset` / `rebase` は使いません。利用者の Checkout の HEAD・作業ツリー・default branch は変わりません（Test が毎回確かめます）。PR の作成と Push は Gate の後の別の段です（下の「Push と PR の作成」。Decision 0036 の 10、#132）。
 - **統合後の Test / Evaluator / Review**: `IntegrationGate.evaluate(task_id)` は `evaluating` の Task の integration worktree を、Test → Evaluator → Review の順に検査へ渡し（3 種すべて必須）、全部通れば Task を `completed`、通らなければ `failed` にします（Run と Version に Fence。integration worktree に未 Commit・未追跡の変更や進行中の merge があれば検査せずに `failed`（`dirty`）、検査の間に integration branch が動くか worktree が書き換わったら `failed`（`changed`）。完了した Repository ごとの Commit を Task Log に書く）。結果の記録は、Task 行の Lock の中で Task がまだ `evaluating` のときだけ行います（`update_attempt(..., in_state=TaskState.EVALUATING)`、違えば `TaskStateChangedError`。Cancel は Run を替えないので、Cancel の後に終わった検査が `passed` / `approved` を書かないため。Gate は `superseded` を返す）。結果は検査した Repository ごとの試行の `ReviewState`（`evaluation_result`、`review_status`。`update_attempt(repository_id=...)`）に記録し、検査の文章は保存しません。**Complete は `TaskService` が判定します**: Decision 0030 の 5 節は `target` の Repository に届いた PR（`open` / `merged`）を求めます。Gate に `publisher` を渡すと、下の「Push と PR の作成」で PR を作って記録してから完了にします。`publisher` がない、PR が `draft` / `closed`、統合結果のない `target` があるときは、結果を記録したうえで Task は `evaluating` のまま残ります（`requirements_not_met`）。Tool Broker が許可した書き込みがまだ動いているかもしれない間は、通った結果を記録できず、完了も失敗もしません（`not_recorded`。後で Gate をもう一度動かす）。実際の検査は別の Issue です（Protocol だけ）。
 - **git は Task の作成者の Linux Account として**、配備の `GitRunner` で動きます（`SubprocessGitRunner`、または他の Linux User には `SshGitRunner`。Decision 0029）。worktree の確認は Local の File System ではなく git に尋ねるので、Backend が他の User の Home を読めなくても成り立ちます。**worktree の中の `.git` は信用しません。** worktree の中で動かす git の Command はすべて、Checkout の `.git/worktrees/<name>` を `--git-dir` / `--work-tree` で明示して動かし（`WorktreeGit.pin`）、その Directory が Checkout の worktree の Directory で、期待する branch を checkout していることを確かめます（Agent が作った `.git` の設定、たとえば Filter Driver は読まれない）。SSH での動作には、Wrapper の許可リストへの追加（Decision 0036 の 13、条件つきで承認済み。実装は [#134](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/134)）が要ります。
-- **Push と PR の作成（[#132](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/132)、[Decision 0052（Approved）](../../docs/decisions/0052-integration-push-and-pull-request.md)）**: `IntegrationGate(publisher=GitHubPullRequestPublisher(...))` は、3 種の検査がすべて通り、検査の後に integration branch と worktree が変わっていないことを確かめた後、読み直した今の Scope で Working Set の Role が `target` の Repository ごとに、`publisher.publish` を呼んで PR を試行の Repository の状態（`update_attempt(pull_request=...)`）と Task Log に記録し、それから Task を完了にします。作れなかった Repository があれば Task は `evaluating` のまま（`not_published`。Task Log に `Pull request of repository <id> not made (<理由>)`）で、Gate をもう一度動かすとやり直します（冪等）。`GitHubPullRequestPublisher` は、(1) `project.pr.create` を Task の作成者の Agent の行為として Authorizer で判定し（作成者の今の権限・Repository の ACL・Project の状態。Audit は `REQUIRED`）、(2) Backend が登録した GitHub の Remote の URL へ、**検査した Commit** を `paw/<task>/<attempt>/_integration` に Force なしで Push し（`-c credential.helper= -c credential.helper=!<gh> auth git-credential push --quiet --no-follow-tags --no-recurse-submodules --no-signed -- <URL> <commit>:refs/heads/paw/...`。作成者の Linux User として配備の `GitRunner` で。Checkout の `push.followTags` / `push.recurseSubmodules` / `push.gpgSign` は打ち消し（[Decision 0062（Proposed）](../../docs/decisions/0062-integration-push-fixed-form-no-options.md)）、Checkout の設定に Command を名指しする設定（`core.askPass` など。gh の Helper が Credential を返せないと git が動かす）・`include`・`url.<base>.insteadOf` / `pushInsteadOf`・`http.*` があれば、`SubprocessGitRunner` は Push の前に設定を一覧にして拒否し（`GitFailure.UNSAFE_CONFIGURATION`。SSH の Wrapper と同じ集合）、SSH の Wrapper も同じく拒否する）、(3) その branch の default branch に向けた PR を `gh api` で探し（一覧は `--jq` で判定に使う項目だけにし、比べる文字列は比べる値より 1 文字長いところで切る。1 回に求める件数は、名前の長さから gh の出力の上限 64 KiB に必ず収まる数（通常 100、とても長い名前では 35 程度）にし、Page が埋まっている間は次の Page も合わせて 100 件まで読む。一覧は GitHub の `base` で default branch に向けたものだけにする）、なければ Checkout の default branch に向けて作ります（`[PAW] <Task の title>`、本文は Task・試行・Commit・検査の種類ごとの結果だけで、検査の文章は入れません）。既存の `open` / `merged` / `draft` / `closed` の PR はそのまま記録し、`closed` のときに新しい PR は作りません。
+- **Push と PR の作成（[#132](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/132)、[Decision 0052（Approved）](../../docs/decisions/0052-integration-push-and-pull-request.md)）**: `IntegrationGate(publisher=GitHubPullRequestPublisher(...))` は、3 種の検査がすべて通り、検査の後に integration branch と worktree が変わっていないことを確かめた後、読み直した今の Scope で Working Set の Role が `target` の Repository ごとに、`publisher.publish` を呼んで PR を試行の Repository の状態（`update_attempt(pull_request=...)`）と Task Log に記録し、それから Task を完了にします。作れなかった Repository があれば Task は `evaluating` のまま（`not_published`。Task Log に `Pull request of repository <id> not made (<理由>)`）で、Gate をもう一度動かすとやり直します（冪等）。`GitHubPullRequestPublisher` は、(1) `project.pr.create` を Task の作成者の Agent の行為として Authorizer で判定し（作成者の今の権限・Repository の ACL・Project の状態。Audit は `REQUIRED`）、(2) Backend が登録した GitHub の Remote の URL へ、**検査した Commit** を `paw/<task>/<attempt>/_integration` に Force なしで Push し（`-c credential.helper= -c credential.helper=!<gh> auth git-credential push --quiet --no-follow-tags --no-recurse-submodules --no-signed -- <URL> <commit>:refs/heads/paw/...`。作成者の Linux User として配備の `GitRunner` で。Checkout の `push.followTags` / `push.recurseSubmodules` / `push.gpgSign` は打ち消し（[Decision 0062（Approved）](../../docs/decisions/0062-integration-push-fixed-form-no-options.md)）、Checkout の設定に Command を名指しする設定（`core.askPass` など。gh の Helper が Credential を返せないと git が動かす）・`include`・`url.<base>.insteadOf` / `pushInsteadOf`・`http.*` があれば、`SubprocessGitRunner` は Push の前に設定を一覧にして拒否し（`GitFailure.UNSAFE_CONFIGURATION`。SSH の Wrapper と同じ集合）、SSH の Wrapper も同じく拒否する）、(3) その branch の default branch に向けた PR を `gh api` で探し（一覧は `--jq` で判定に使う項目だけにし、比べる文字列は比べる値より 1 文字長いところで切る。1 回に求める件数は、名前の長さから gh の出力の上限 64 KiB に必ず収まる数（通常 100、とても長い名前では 35 程度）にし、Page が埋まっている間は次の Page も合わせて 100 件まで読む。一覧は GitHub の `base` で default branch に向けたものだけにする）、なければ Checkout の default branch に向けて作ります（`[PAW] <Task の title>`、本文は Task・試行・Commit・検査の種類ごとの結果だけで、検査の文章は入れません）。既存の `open` / `merged` / `draft` / `closed` の PR はそのまま記録し、`closed` のときに新しい PR は作りません。
 - **本番の組み立て（Issue #155、[Decision 0056（Approved）](../../docs/decisions/0056-production-worktree-wiring.md)）**: `build_task_execution` は、Agent の Runtime が渡されて `Orchestrator` を組み立てるときだけ `GitWorktreeCoordinator` を作り、`Orchestrator(worktrees=...)` に渡します（Decision 0047 の 5。Runtime がなければ作らない）。`GitRunner` は配備のもの（`create_app(git_runner=...)`、既定 `SubprocessGitRunner()`。Backend の Process の User でない Account の git は `identity_mismatch` で拒否され、その Node は `WorktreeUnavailable`（`git_failed`）で失敗する。Fail closed）、Account は `LoginNameAccountDirectory`、`workspace_subdir`・git の Timeout・最小 uid は `RepositoryPolicy.from_settings(settings)` です。worktree の置き場所は Account ごとに `<home>/<workspace_subdir>/.paw-worktrees` と決まるので、別の設定も起動時の確認もありません（他の User の Home を Backend が読まないため。git が必要になったときに作る）。**worktree を受け取る Repository（Checkout があり `working` / `target`）がない Task は、Account を尋ねず git も動かさず、配線の前と同じく評価へ進みます**（`prepare_node` / `integrate` / `targets` が空を返す）。`IntegrationGate` は検査の実体（PAW-011 / PAW-013）がまだないため組み立てません。
 - 状態の正本は git です（名前が ID から決まるので、Worker が死んでも次の Worker が同じ worktree を見つけます）。統合した Repository ごとに、試行のその Repository の worktree の状態に integration branch・Path・Commit を記録します（Multi-Repo でも全 Repository。Decision 0036 の 11。新しい HEAD はその Repository の Review と Evaluation の結果を戻します）。この記録に失敗したら（試行にない Repository を除く）、統合の失敗として Task を `failed` にし（`Integration failed (<型名>)`）、記録されていない HEAD を評価しません。Retry が統合と記録をやり直します。
 
@@ -4245,7 +4245,7 @@ completed（Merge Ready。Human が Merge を判断する）/ 通らなければ
 ## GPU / Compute Resource Scheduler
 
 [PAW-036](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/32)（`paw_backend/compute/`、`paw_backend/cli/compute.py`。Migration はありません）で実装しました。設計は [要件](../../REQUIREMENTS.md)の「GPU / Compute Resource Scheduler」（FIXED）に従い、要件が決めていない選択（状態の置き場所、Admission の単位、Safety Headroom などの数値、Class の取り分と待ち行列の順、縮退を進める・戻す条件、Main Model の構成変更を自動で行わないこと、Exclusive の手順、Cloud へ回す条件、Context の見積もり、GPU 時間の計上）は **[Decision 0037（Approved。2026-09-28 に Human が 14 点すべて推奨どおりと承認）](../../docs/decisions/0037-gpu-compute-scheduler.md)** にまとめ、実装はその決定どおりです。数値はすべて `compute/limits.py` の暫定値で、`ComputeConfig` の設定で変えられます（DB に書いたものはありません）。
-**Application への組み込みは Issue #165（下の「Application への組み込み」、[Decision 0058](../../docs/decisions/0058-compute-scheduler-application-wiring.md)、Proposed）です。** Deployment が `create_app(compute=ComputeSetup(...))` を渡したときだけ動きます。本番の起動（`python -m paw_backend`）はまだ渡しません（実際の Model と Runtime は Benchmark（PAW-017 / PAW-019）で決まり、Runtime の Adapter と、`ComputeSetup` を設定から組み立てることは別の Issue です）。
+**Application への組み込みは Issue #165（下の「Application への組み込み」、[Decision 0058](../../docs/decisions/0058-compute-scheduler-application-wiring.md)、Approved）です。** Deployment が `create_app(compute=ComputeSetup(...))` を渡したときだけ動きます。本番の起動（`python -m paw_backend`）はまだ渡しません（実際の Model と Runtime は Benchmark（PAW-017 / PAW-019）で決まり、Runtime の Adapter と、`ComputeSetup` を設定から組み立てることは別の Issue です）。
 
 **GPU の安全性**: Scheduler は GPU を**読むだけ**です。Probe（`NvidiaSmiProbe`）が実行するのは `nvidia-smi --query-gpu=index,uuid,name,memory.total,memory.used,utilization.gpu` と `nvidia-smi --query-compute-apps=gpu_uuid,pid,used_memory`（どちらも `--format=csv,noheader,nounits`）の 2 つだけで、Clock・Persistence・Power limit・Compute mode・MIG を変えず、GPU を Reset せず、Process に Signal を送りません（止めるのは Timeout か出力の上限（1 MiB）を超えた自分の `nvidia-smi` の子 Process だけ。出力は最後まで読みます: `nvidia-smi` は 1 行を複数回に分けて書くことがあり、最初の断片だけを読むと Probe が使えないと判断していました。PAW-037 で修正）。`test_compute_probe.py` が 2 つの Command を固定し、`compute/` の Code にそうした Option や `os.kill` がないことを確かめます。Model の Load / Unload / CPU fallback は注入した `ModelControl` を通してだけ行い、**Test は Fake だけを使います**（実際の Model を Load / Unload する Test、VRAM を確保する Test はありません）。
 
@@ -4364,9 +4364,9 @@ runtime = HybridRuntime(
 # Orchestrator(..., runtimes={"local": runtime, ...}) と、別の Task で scheduler.serve(stop)
 ```
 
-### Application への組み込み（Issue #165、Decision 0058、Proposed）
+### Application への組み込み（Issue #165、Decision 0058、Approved）
 
-要件と Decision 0037 / 0042 / 0055 が決めていない選択（有効にする方法、警告の Sink、HTTP の経路の非同期の開始・取りやめ・認可・応答の形、Local の Runtime の配線、終了時）は **[Decision 0058（Proposed）](../../docs/decisions/0058-compute-scheduler-application-wiring.md)** にまとめ、実装はその推奨どおりです。
+要件と Decision 0037 / 0042 / 0055 が決めていない選択（有効にする方法、警告の Sink、HTTP の経路の非同期の開始・取りやめ・認可・応答の形、Local の Runtime の配線、終了時）は **[Decision 0058（Approved）](../../docs/decisions/0058-compute-scheduler-application-wiring.md)** にまとめ、実装はその推奨どおりです。
 
 - **有効にする**: `create_app(settings, compute=ComputeSetup(ComputeConfig(...), NvidiaSmiProbe(), control=CommandModelControl(...)))`。渡したときだけ `app.state.compute` に Scheduler（プロセスに 1 つ）ができ、Lifespan が `scheduler.serve`（既定 5 秒ごと、`refresh_seconds`）を動かします。Database があれば `FullGpuMode(scheduler, PostgresTaskHolds(...), authorizer)` も作って `serve` を動かします（Database がなければ Scheduler だけ）。環境変数はありません（`ModelControl` の Command を設定から読む形式と保護は Runtime の Adapter の Issue で決めます）。
 - **Local の Runtime**: `create_app(..., compute=..., local_runtimes={"local": LocalRuntime(runtime, deployment="main", local_model="...")}, orchestrator_config=...)`。組み立て（`build_task_execution`）が `HybridRuntime(scheduler, runtime, deployment=..., late_gpu_charge=TrackerLateGpuCharge(budget), usage=PostgresLocalUsage(database))` で包み、`agent_runtimes` と同じ Label の集合に入れます（重複は `TypeError`）。`CloudPolicy` は渡しません（Decision 0037 の 14）。`local_runtimes` は `compute`・Database・`orchestrator_config` がないと `TypeError` です。
@@ -4416,7 +4416,7 @@ python -m paw_backend.cli compute-status --headroom-min-mib 8192 --headroom-frac
 
 ## System Health / Observability
 
-[PAW-066](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/52) の Backend です（`paw_backend/health/`）。方針は [Decision 0059](../../docs/decisions/0059-system-health-observability.md)（Proposed）です。通知（Notification Center）と UI（PAW-067）はまだありません。
+[PAW-066](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/52) の Backend です（`paw_backend/health/`）。方針は [Decision 0059](../../docs/decisions/0059-system-health-observability.md)（Approved）です。通知（Notification Center）と UI（PAW-067）はまだありません。
 
 ### Component
 
@@ -4442,7 +4442,7 @@ Component の Severity が前の Event と変わったときだけ `health_event
 
 ### Agent の OOM と Escalation
 
-Issue [#183](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/183)。方針は [Decision 0071](../../docs/decisions/0071-agent-oom-and-escalation-records.md)（Proposed）です。
+Issue [#183](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/183)。方針は [Decision 0071](../../docs/decisions/0071-agent-oom-and-escalation-records.md)（Approved）です。
 
 - Agent の Runtime（Adapter）は、Model の Server が GPU の Memory 不足（CUDA OOM）を返したとき、または Process が Memory 不足で落とされた（Kernel の OOM Killer）ときに、`NodeOutcome.failed("AgentOutOfMemory")` を返します（`orchestrator.errors.AGENT_OUT_OF_MEMORY`。Runtime が名乗れる閉じた Error Class の一覧に加えた）。Runtime が Python の `MemoryError` を上げた場合も OOM として数えます（`OUT_OF_MEMORY_CLASSES`）。
 - Orchestrator は、Node の失敗を記録する Transaction（`DagStore.fail_node`）の中で、OOM の Class なら `agent_incidents` に `out_of_memory` を、次の手が `escalate` なら `escalation` を 1 行ずつ入れます。古い Epoch・Attempt の報告は拒まれ、何も残しません。Planner（Node がない）の OOM は `DagStore.record_incident` で別に残します（失敗しても Log だけで、Run は止めない）。

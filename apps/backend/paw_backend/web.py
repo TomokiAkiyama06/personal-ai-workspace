@@ -1,6 +1,6 @@
 """Serve the built Web App (``apps/web/dist``) on the API's own origin.
 
-PAW-060, Decision 0044 (Proposed; this implements its recommendation). The session
+PAW-060, Decision 0044 (Approved; this implements its recommendation). The session
 cookie is ``__Host-``, ``Secure``, ``SameSite=Strict`` and every state-changing
 request must come from this origin (``OriginCheckMiddleware``), so the browser app
 has to be served by the same origin as ``/api/v1``. Setting

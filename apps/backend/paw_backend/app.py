@@ -88,7 +88,7 @@ def create_app(
     a database it is ``None``.
 
     ``compute`` turns on the Compute Resource Scheduler (issue #165, Decision
-    0058, Proposed): the process's ``ComputeScheduler`` is built from it
+    0058, Approved): the process's ``ComputeScheduler`` is built from it
     (``app.state.compute``), the lifespan runs its ``serve`` and, with a
     database, Kaggle / Full GPU Mode (``FullGpuMode.serve``; the HTTP routes of
     ``api/v1/compute.py``). ``local_runtimes`` (with ``compute`` and

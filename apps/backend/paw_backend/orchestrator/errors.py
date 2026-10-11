@@ -231,7 +231,7 @@ _NAMED: dict[int, str] = {
         TaskError,
     )
 }
-# An agent ran out of memory (Decision 0071, Proposed): a runtime reports it with
+# An agent ran out of memory (Decision 0071, Approved): a runtime reports it with
 # ``NodeOutcome.failed(AGENT_OUT_OF_MEMORY)`` when its model server answers that the
 # GPU memory ran out (a CUDA OOM) or its process was killed for memory (the
 # kernel's OOM killer). Python's own ``MemoryError`` raised by a runtime is an

@@ -1,4 +1,4 @@
-"""Bounds of the Memory Board read model (issue #186, Decision 0068, Proposed)."""
+"""Bounds of the Memory Board read model (issue #186, Decision 0068, Approved)."""
 
 # The most memories one list answers (the newest first); ``MemoryList.truncated``
 # says that there were more.

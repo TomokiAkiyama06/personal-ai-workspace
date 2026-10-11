@@ -6,10 +6,10 @@ pressure (Memory Worker unload, Embedding / Reranker CPU fallback), the Exclusiv
 class, and Local / Cloud hybrid placement. See ``scheduler.py``,
 ``docs/decisions/0037-gpu-compute-scheduler.md`` (Approved) and, for the check
 on the observed free VRAM, ``docs/decisions/0042-gpu-free-vram-admission.md``
-(Proposed). Kaggle / Full GPU Mode (PAW-037) holds the local GPU tasks around an
+(Approved). Kaggle / Full GPU Mode (PAW-037) holds the local GPU tasks around an
 Exclusive lease: see ``full_gpu.py``, ``holds.py`` and
 ``docs/decisions/0055-kaggle-full-gpu-mode.md``
-(Proposed).
+(Approved).
 
 GPU safety: the probe only reads (``nvidia-smi --query-*``); models are loaded
 and unloaded only through an injected :class:`ModelControl`, whose real adapter

@@ -5,7 +5,7 @@ version of each memory of a scope, the History Graph of one memory and the sourc
 of one version. ``MemoryVersioningService`` writes the versions and reads one
 memory's versions (``history``) for a person who may change it; this module is the
 read side the screen needs on top of that. It changes nothing. The choices it
-makes (what is listed, counted and named) are Decision 0068 (Proposed).
+makes (what is listed, counted and named) are Decision 0068 (Approved).
 
 What the reader may see
 -----------------------

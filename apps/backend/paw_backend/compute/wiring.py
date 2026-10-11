@@ -1,4 +1,4 @@
-"""The scheduler in the application (issue #165, Decision 0058, Proposed).
+"""The scheduler in the application (issue #165, Decision 0058, Approved).
 
 What ``paw_backend.app`` needs to run the Compute Resource Scheduler (PAW-036)
 and Kaggle / Full GPU Mode (PAW-037) in the backend process, only when the

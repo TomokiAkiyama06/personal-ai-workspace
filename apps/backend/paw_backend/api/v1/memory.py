@@ -2,7 +2,7 @@
 
 ``/api/v1/memory/*``. The reads are ``paw_backend.memory.board.MemoryBoard``, the
 writes ``MemoryVersioningService``; this module only translates. Decision 0068
-(Proposed) records the choices.
+(Approved) records the choices.
 
 * ``GET /scopes``: the Scope Tree with counts.
 * ``GET /memories?scope=user|project|repo|shared[&project_id][&repo_id][&q]``:

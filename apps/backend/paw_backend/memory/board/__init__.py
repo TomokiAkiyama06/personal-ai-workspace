@@ -4,7 +4,7 @@
 each memory of a scope (with a search), the History Graph of one memory and the
 sources of one version, for an authenticated person, through the ACL in SQL
 (``memory/acl.py``). The writes (edit, restore) stay in
-``versioning.MemoryVersioningService``. The choices are Decision 0068 (Proposed).
+``versioning.MemoryVersioningService``. The choices are Decision 0068 (Approved).
 """
 
 from paw_backend.memory.board.records import (

@@ -1,4 +1,4 @@
-"""The on-disk format of the Recovery Repository (PAW-047, Decision 0054 Proposed).
+"""The on-disk format of the Recovery Repository (PAW-047, Decision 0054 Approved).
 
 ```text
 <PAW_RECOVERY_REPOSITORY_DIR>/          # a git checkout of the private repository
