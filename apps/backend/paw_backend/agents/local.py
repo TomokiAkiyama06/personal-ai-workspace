@@ -487,6 +487,9 @@ class LocalAgentRuntime:
                 if attempt.nudges >= limits.nudges:
                     raise RuntimeFailure(Failure.NO_TOOL_CALLS)
                 attempt.messages.append({"role": "user", "content": NUDGE})
+                # Part of the next prompt too (the estimate adds what was added
+                # after the last answer).
+                attempt.new_tool_results.append(NUDGE)
                 continue
             outcome = await self._calls(attempt, answer.tool_calls)
             if outcome is not None:
@@ -830,6 +833,51 @@ class LocalAgentRuntime:
                 f"ValueError: {total} files changed; a node may change at most "
                 f"{MAX_CHANGED_FILES} (undo the changes that are not needed)",
             )
+        changed_files = sorted(
+            (p if attempt.workspace.single else f"{r.repo_id}/{p}")
+            for r in writing
+            for p in changes[r.repo_id]["changed"]
+        )
+        single = len(writing) == 1 and attempt.workspace.single
+
+        def result_of(commits: Mapping[uuid.UUID, str]) -> NodeResult:
+            return NodeResult(
+                summary=findings["summary"],
+                changed_files=tuple(changed_files),
+                commit=(commits.get(writing[0].repo_id) if single else None),
+                discovered_facts=findings["discovered_facts"],
+                unresolved_questions=self._unresolved(
+                    attempt, findings["unresolved_questions"]
+                ),
+                confidence=findings["confidence"],
+                artifacts=(
+                    ()
+                    if single
+                    else tuple(f"commit:{rid}:{sha}" for rid, sha in commits.items())
+                ),
+            )
+
+        # The whole result is checked before anything is committed (a path too
+        # long, a summary with control characters, a result too large): the
+        # model can still correct it, and the branch is not changed for nothing.
+        # A repository that will have a commit (uncommitted paths, or a head past
+        # its base) counts with the longest id there is; the others with none.
+        try:
+            result_of(
+                {
+                    r.repo_id: "f" * 64
+                    for r in writing
+                    if changes[r.repo_id]["uncommitted"]
+                    or str(changes[r.repo_id]["head"])
+                    != str(changes[r.repo_id]["base"])
+                }
+            )
+        except InvalidNodeResultError as error:
+            self._correct(
+                attempt,
+                f"ValueError: the result is not acceptable ({error.reason.value}); "
+                "shorten the summary or the lists, or the paths you changed",
+            )
         commits: dict[uuid.UUID, str] = {}
         for repository in writing:
             found = changes[repository.repo_id]
@@ -846,29 +894,7 @@ class LocalAgentRuntime:
                 head = str(committed["commit"])
             if head != str(found["base"]):
                 commits[repository.repo_id] = head
-        changed_files = sorted(
-            (p if attempt.workspace.single else f"{r.repo_id}/{p}")
-            for r in writing
-            for p in changes[r.repo_id]["changed"]
-        )
-        if len(changed_files) > MAX_CHANGED_FILES:
-            raise InvalidNodeResultError(ResultReason.TOO_MANY_ITEMS)
-        single = len(writing) == 1 and attempt.workspace.single
-        result = NodeResult(
-            summary=findings["summary"],
-            changed_files=tuple(changed_files),
-            commit=(commits.get(writing[0].repo_id) if single else None),
-            discovered_facts=findings["discovered_facts"],
-            unresolved_questions=self._unresolved(
-                attempt, findings["unresolved_questions"]
-            ),
-            confidence=findings["confidence"],
-            artifacts=(
-                ()
-                if single
-                else tuple(f"commit:{rid}:{sha}" for rid, sha in commits.items())
-            ),
-        )
+        result = result_of(commits)
         return "Submitted.", NodeOutcome.succeeded(result)
 
 
