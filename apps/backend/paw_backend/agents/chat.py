@@ -41,7 +41,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from paw_backend.agents.failures import Failure, RuntimeFailure
-from paw_backend.agents.reasoning import REASONING_FIELD
+from paw_backend.agents.reasoning import REASONING_FIELD, REASONING_FIELDS
 
 # The largest answer read (a 16,384-token answer with its reasoning and tool
 # calls is far below this).
@@ -56,8 +56,6 @@ MAX_OUTPUT_TOKENS = 1 << 20
 
 _OOM_MARKERS = ("cuda out of memory", "outofmemoryerror")
 _CONTEXT_MARKERS = ("maximum context length", "maximum model length")
-# vLLM before and after its rename of the reasoning field.
-_REASONING_FIELDS = (REASONING_FIELD, "reasoning")
 
 
 @dataclass(frozen=True, slots=True)
@@ -348,7 +346,7 @@ def _parse(raw: bytes) -> ChatCompletion:
         raise _malformed()
     message = choice["message"]
     reasoning = None
-    for name in _REASONING_FIELDS:
+    for name in REASONING_FIELDS:
         reasoning = _optional_text(message.get(name))
         if reasoning is not None:
             break
