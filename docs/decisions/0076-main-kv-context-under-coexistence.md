@@ -1,8 +1,9 @@
 # Qwen3.8-27B-FP8 を Main にしたときの共存時の KV / Context の不足への対策（古い Reasoning を外す、会話の伸びを予約に反映する、割り当てと並列の上限は変えない）
 
-- Status: Proposed
+- Status: Approved
+- Approval: 2026-10-08、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで直接回答して承認（approved as recommended, all 5 points: 決めてほしいことの 1〜5 をすべて推奨どおり承認。2 の GPU の Run はその場で開始を許可）。2 の Run は 2026-10-11 に合格（末尾の「承認時の決定」と「2 の Run の結果」）
 - Date: 2026-10-08
-- Scope: Issue [#200](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/200)（[Decision 0074](0074-seed-v2-and-qwen-27b-comparison.md) の後続）。根拠は [KV / Context の不足の分析](../benchmarks/paw-017-kv-context-qwen38-2026-10.md)、[共存の確認 Run（0.51）の報告](../benchmarks/paw-017-coexist-qwen38-2026-10.md)（[Decision 0075](0075-coexistence-footprints-qwen38.md)）、[paw-seed-v2 の報告](../benchmarks/paw-017-seed-v2-2026-10.md)。Reasoning の履歴の方針の差し込み口は [Decision 0083](https://github.com/TomokiAkiyama06/personal-ai-workspace/pull/209)（Proposed）の 3 の `ReasoningHistoryPolicy` を前提にする
+- Scope: Issue [#200](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/200)（[Decision 0074](0074-seed-v2-and-qwen-27b-comparison.md) の後続）。根拠は [KV / Context の不足の分析](../benchmarks/paw-017-kv-context-qwen38-2026-10.md)、[共存の確認 Run（0.51）の報告](../benchmarks/paw-017-coexist-qwen38-2026-10.md)（[Decision 0075](0075-coexistence-footprints-qwen38.md)）、[paw-seed-v2 の報告](../benchmarks/paw-017-seed-v2-2026-10.md)。Reasoning の履歴の方針の差し込み口は [Decision 0083](0083-agent-runtime-adapters.md)（Approved）の 3 の `ReasoningHistoryPolicy` を前提にする
 - Supersedes: [Decision 0037](0037-gpu-compute-scheduler.md) の 2 のうち「各 Request は `context_tokens` を Pool から予約する。Pool の `kv_safety`（推奨 90%）までしか予約できない」の部分だけ（承認されたら、この Decision の 3 で置き換える: 新しい Node の Admission はこれまでどおり上限までしか予約できないが、実行中の Node の予約の増加は上限を超えてよい）。0037 のほかの点（Admission の単位、Class の上限、待ち行列、縮退、9 の開始時の見積もり）、[Decision 0039](0039-compute-scheduler-calibration.md)、[Decision 0073](0073-main-coexistence-confirmation.md) の 2（0.51）、[Decision 0074](0074-seed-v2-and-qwen-27b-comparison.md)、[Decision 0075](0075-coexistence-footprints-qwen38.md)（Footprint と `restore_margin_bytes`）、[Decision 0021](0021-dag-orchestrator-policy.md) の `max_parallel_nodes` は変えない
 
 ## 背景
@@ -105,3 +106,16 @@ Issue #200 は次の 4 つの候補を比べて提案することを求めてい
 
 承認されたら `Approval` に記録し、Status を Approved に改める。2 の Run の結果は報告（`docs/benchmarks/paw-017-kv-context-qwen38-2026-10.md`）に追記し、1 の既定の変更はその結果で決める。
 方針を変えるときは、この Decision を書き換えず、新しい Decision から `Supersedes` する。
+
+## 承認時の決定（2026-10-08）
+
+Human は、作業 Session で判断が必要な点について推奨つきの説明を受け、直接回答して承認した（2026-10-08、Human (approved as recommended, all 5 points)。決めてほしいことの 1〜5 をすべて推奨どおり承認し、2 の GPU の Run の開始を許可）。
+
+## 2 の Run の結果（2026-10-11）
+
+2 の Run（`/data/results/paw-bench-2026-10-08-kv`、10-05 の基準と同じ条件で `DropOlderReasoning(keep_last=2, min_prompt_tokens=32768)` だけを変えた）は、正解数の規則と KV の条件をすべて満たした。詳細は[報告](../benchmarks/paw-017-kv-context-qwen38-2026-10.md)の 5。
+
+- 正解数: 36 / 36 / 36（平均 36.0、ちょうど閾値）、Resolved@3 37（基準 37 / 37 / 37、Resolved@3 37）。
+- KV: Prompt の最大の p90 69.5k（基準 106.8k）、`context_exhausted` 0 回（基準 9 回）、再現で Pool の 95% 以上の時間 0.0%（基準 10.1%）、所要の平均 286.9 分（基準 257.4 分の 1.115 倍）。
+
+このため 2 の規則に従い、1 を Main の Local Agent の既定にする（実装は 5 の PR 1）。

@@ -85,8 +85,32 @@ Pool の大きさ（Footprint の勘定は Decision 0075 と同じ。Main の予
 
 ## 4. 測っていないこと
 
-- **古い Reasoning を外したときの正解数**（Model の振る舞いの変化）。GPU で paw-seed-v2 を走らせる必要がある（Decision 0076 の 2 の Run の計画）。
-- Prefix cache の Hit 率の変化と、それによる所要の変化。
+- ~~古い Reasoning を外したときの正解数~~ → 5 で測った（Decision 0076 の 2 の Run）。
+- Prefix cache の Hit 率の変化（5 の Run でも `/metrics` に記録されなかった）。所要の変化は 5 で測った。
 - Embedding / Reranker を CPU に置いたときの Retrieval の Latency（GPU は使わずに測れる）。
 - Interactive の Request（Chat）の応答の速さ。
 - Main の割り当てを 0.51 から変えたときの、予算を超える分（今は 2.18 GiB）。
+
+## 5. Decision 0076 の 2 の Run の結果（2026-10-10〜11）
+
+- 置き場所: `/data/results/paw-bench-2026-10-08-kv`（`STATUS.md`、`STATUS.log`）。条件は 10-05 の基準（Qwen3.8-27B-FP8 単独 0.90、paw-seed-v2 の 49 Task × 3 回）と同じで、`DropOlderReasoning(keep_last=2, min_prompt_tokens=32768)` だけを変えた。
+- GPU を研究に使うため 2 回止め、止めた Run は最初からやり直した。途中の Run（`_archive`）は数えていない。
+- 集計は 3 の Script（`/data/results/paw-analysis-200-2026-10-08` の `load.py`・`a_tasks.py`・`b_sim.py`）を変えずに使った。基準の Trace で 10.1%・p90 106.8k・最大 114.6k・Peak 382k がそのまま出ることを確かめた。
+
+| 条件（Decision 0076 の 2） | 閾値 | 今回 | 基準（10-05） | 判定 |
+| --- | --- | ---: | ---: | --- |
+| Resolved@3 | 36 以上 | 37 | 37 | 合格 |
+| 平均の正解数 | 36.0 以上 | 36.0（36 / 36 / 36） | 37.0 | 合格（ちょうど閾値） |
+| Task ごとの Prompt の最大の p90（147 Task-run） | 80k 以下 | 69.5k（中央値 49.4k、最大 101.4k） | 106.8k（中央値 67.4k、最大 114.6k） | 合格 |
+| `context_exhausted` | 0 回 | 0 回 | 9 回 | 合格 |
+| 4 Agent の再現で Pool（305,081）の 95% 以上の時間 | 1% 以下 | 0.0%（Peak 274k、Pool の 90%） | 10.1%（Peak 382k） | 合格 |
+| 3 回の所要の平均（Harness の start〜end） | 基準の 1.15 倍以下 | 286.9 分（280.4 / 287.5 / 292.8、1.115 倍） | 257.4 分 | 合格 |
+
+- 正解が基準と違ったのは 3 Task で、どれも 3 回のうち 1 回だけ外した（spec-08-policy-overrides、spec-11-retention-layout-check、spec-15-task-json-patch）。3 回とも解けた Task は 34（基準 37）。
+- 終わり方: timeout 4 → 16、max_steps 22 → 31、submitted 112 → 100。基準で Context の上限に当たっていた Task（hist-06 / 07 / 09 / 10、spec-11）は、今は 45 分か 60 Step まで走る。出力 token は 5.09M → 5.78M（+13.5%）で、所要が延びたのは主にこのため。
+- Prompt の最大は 101.4k で、2 の見積もり（84k）より大きい（run3 の hist-10-admin-project-list、timeout）。上限の 131,072 には達していない。
+- 外した Reasoning: 147 Task-run のうち 120、6,055 呼び出しのうち 3,307、Message 5,226、約 13.9M 文字。
+- 0.90 単独での実測の KV の使用率は最大 27〜32%、Preemption は 0 回。
+- Prefix cache の Hit 率は `/metrics` の記録の項目になく、測れていない。
+- `llm_errors` の 11 回は、どれも 45 分の Task の期限に重なった Request の Timeout（基準の 10 回のうち 9 回は Context の長さの超過の HTTP 400）。
+
