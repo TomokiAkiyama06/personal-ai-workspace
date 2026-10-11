@@ -3808,7 +3808,7 @@ python -m paw_backend.cli memory-projection-check --max-age-minutes 30   # 監�
 
 [PAW-047](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/41)（`paw_backend/recovery/`、`paw_backend/cli/recovery.py`、`deploy/systemd/paw-recovery-backup*`）で実装しました。**Migration はありません。**
 要件は [REQUIREMENTS.md](../../REQUIREMENTS.md) の「Memory Markdown Backup / Backup Authority」「Dedicated Recovery Repository」「User Deletion Retention」です。
-要件が決めていない選択（Checkout の置き場所と安全の条件、形式、入れないもの、削除中の User、Restore の範囲・上書き・誰が実行するか、Restore の元の検証、戻さないもの）は [Decision 0054](../../docs/decisions/0054-recovery-repository-projection-restore.md)（**Approved**）の推奨どおりに実装しました。承認されるまで、実運用の Server で Timer を有効にしません。
+要件が決めていない選択（Checkout の置き場所と安全の条件、形式、入れないもの、削除中の User、Restore の範囲・上書き・誰が実行するか、Restore の元の検証、戻さないもの）は [Decision 0054](../../docs/decisions/0054-recovery-repository-projection-restore.md)（**Approved**）の推奨どおりに実装しました。Timer の有効化は、運用者が Private Repository・Deploy Key・Checkout・環境 File を用意し、Unit File を配備してから行います（Decision 0054 の「承認後の扱い」）。
 
 PostgreSQL が Operational Source of Truth で、Recovery Repository（専用の Private Repository）は Disaster Recovery Source です。通常時は Git から DB へ同期しません。
 
