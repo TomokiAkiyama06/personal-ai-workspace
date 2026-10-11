@@ -860,9 +860,18 @@ class LocalAgentRuntime:
         # The whole result is checked before anything is committed (a path too
         # long, a summary with control characters, a result too large): the
         # model can still correct it, and the branch is not changed for nothing.
-        # Every repository counts as committed, with the longest id there is.
+        # A repository that will have a commit (uncommitted paths, or a head past
+        # its base) counts with the longest id there is; the others with none.
         try:
-            result_of({r.repo_id: "f" * 64 for r in writing})
+            result_of(
+                {
+                    r.repo_id: "f" * 64
+                    for r in writing
+                    if changes[r.repo_id]["uncommitted"]
+                    or str(changes[r.repo_id]["head"])
+                    != str(changes[r.repo_id]["base"])
+                }
+            )
         except InvalidNodeResultError as error:
             self._correct(
                 attempt,
