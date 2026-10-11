@@ -72,7 +72,7 @@ class Capability(StrEnum):
     ACCOUNT_MANAGE = "account.manage"
     # The compact System Health state for the Global Header: the overall severity
     # and whether Codex / Claude are available (PAW-066, Decision 0059
-    # Proposed). Any human role; read-only; never an Agent's.
+    # Approved). Any human role; read-only; never an Agent's.
     SYSTEM_HEALTH_SUMMARY_READ = "system_health.summary.read"
     # The lists of the Task / PR screens (issue #185, Decision 0067 Approved):
     # only that the person may ask for them. Every task and pull request in the
@@ -105,7 +105,7 @@ class Capability(StrEnum):
     # GPU. Owner / Admin, never an Agent.
     ADMIN_COMPUTE_FULL_GPU = "admin.compute.full_gpu"
     # The System Health detail: every component, its metrics, the time series and
-    # the health events (PAW-066, Decision 0059 Proposed). Owner / Admin;
+    # the health events (PAW-066, Decision 0059 Approved). Owner / Admin;
     # read-only; never an Agent's.
     ADMIN_SYSTEM_HEALTH_VIEW = "admin.system_health.view"
     # Owner only.

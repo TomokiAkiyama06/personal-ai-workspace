@@ -3,7 +3,7 @@
 A read of ``users`` only: id, login name, system role, status and when the account
 was created. No credential, session, Passkey or e-mail (there is none). Who may read
 it is the HTTP layer's check (``GET /api/v1/admin/users``: ``admin.users.manage``,
-Decision 0069, Proposed); this module does not authorize.
+Decision 0069, Approved); this module does not authorize.
 
 A deleted user (``status = 'deleted'``) is not listed: the account is gone and
 cannot be restored (Decision 0033). One pending deletion is (the Owner may still

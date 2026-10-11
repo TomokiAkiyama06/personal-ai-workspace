@@ -1,5 +1,5 @@
 """Agent incidents: the out-of-memory failures and the escalations that System
-Health counts (issue #183, Decision 0071 Proposed).
+Health counts (issue #183, Decision 0071 Approved).
 
 Revision ID: 0183
 Revises: 0066

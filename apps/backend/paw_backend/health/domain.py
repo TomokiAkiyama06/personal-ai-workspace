@@ -5,7 +5,7 @@ is watched and ties the severity to the Notification Policy (``INFO`` /
 ``WARNING`` / ``ERROR`` / ``CRITICAL``); this module turns both into closed enums.
 The choices the requirements leave open (which checks, their thresholds, who may
 read what) are ``docs/decisions/0059-system-health-observability.md``
-(Proposed).
+(Approved).
 
 A component's report holds codes and numbers only: never a message from a
 dependency, a path, a URL, a user's text or a process id (``docs/OBSERVABILITY.md``:

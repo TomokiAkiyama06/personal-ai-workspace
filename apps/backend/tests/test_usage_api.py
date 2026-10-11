@@ -1,4 +1,4 @@
-"""Usage and quotas over HTTP (issue #187, Decision 0069, Proposed): real PostgreSQL.
+"""Usage and quotas over HTTP (issue #187, Decision 0069, Approved): real PostgreSQL.
 
 The sums themselves are tested on the service (``test_connections_report``); here
 the routes: their guards, the authorization of the service behind them, the

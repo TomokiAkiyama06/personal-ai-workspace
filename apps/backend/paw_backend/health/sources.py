@@ -2,7 +2,7 @@
 
 Each source is read-only and returns a :class:`ComponentHealth` (codes and
 numbers only). Its ``max_age_seconds`` is how long the monitor reuses its answer.
-The thresholds are ``limits.py`` (Decision 0059, Proposed).
+The thresholds are ``limits.py`` (Decision 0059, Approved).
 
 * :class:`DatabaseSource`: ``Database.check()`` (``SELECT 1``) and its latency.
 * :class:`ComputeSource`: the Compute Resource Scheduler's ``status()`` (PAW-036)
@@ -435,7 +435,7 @@ SELECT count(DISTINCT task_id) FROM (
 ) AS repeated
 """
 
-# The agent incidents (Decision 0071, Proposed) of the last hour and day:
+# The agent incidents (Decision 0071, Approved) of the last hour and day:
 # ``ix_agent_incidents_occurred_at``.
 _INCIDENTS = """
 SELECT

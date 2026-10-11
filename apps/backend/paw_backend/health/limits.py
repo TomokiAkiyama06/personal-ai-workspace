@@ -1,4 +1,4 @@
-"""The thresholds and bounds of System Health (PAW-066, Decision 0059 Proposed).
+"""The thresholds and bounds of System Health (PAW-066, Decision 0059 Approved).
 
 Each value is the recommendation of the Decision; ``REQUIREMENTS.md`` fixes only
 the downsampling tiers ("Observability retention / downsampling"). The
@@ -25,7 +25,7 @@ TASK_FAILURES_ERROR = 5
 # Tasks in a detected loop (repeated failures) in the last hour: one is a
 # warning, this many an error. A retry is always a warning.
 TASK_LOOPS_ERROR = 3
-# Agents that ran out of memory in the last hour (Decision 0071, Proposed): one is
+# Agents that ran out of memory in the last hour (Decision 0071, Approved): one is
 # a warning, this many an error (the requirements' "OOM連発"). An escalation in
 # the last hour is always a warning, never an error by itself.
 AGENT_OOM_ERROR = 3

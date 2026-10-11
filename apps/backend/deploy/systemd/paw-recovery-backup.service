@@ -1,5 +1,5 @@
 # Recovery Repository backup of the Personal AI Workspace (PAW-047,
-# Decision 0054 Proposed). Started every 30 minutes by paw-recovery-backup.timer;
+# Decision 0054 Approved). Started every 30 minutes by paw-recovery-backup.timer;
 # run it by hand for a manual backup.
 #
 # It copies the Memory Markdown Projection (PAW_MEMORY_PROJECTION_DIR) and writes

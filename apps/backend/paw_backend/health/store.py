@@ -177,7 +177,7 @@ WITH doomed AS (
 SELECT count(*) FROM gone
 """
 
-# The agent incidents (Decision 0071, Proposed) are kept as long as the events.
+# The agent incidents (Decision 0071, Approved) are kept as long as the events.
 _PURGE_INCIDENTS = """
 WITH doomed AS (
     SELECT id FROM agent_incidents

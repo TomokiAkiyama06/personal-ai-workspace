@@ -86,7 +86,7 @@ class NextStep(StrEnum):
 
 
 class IncidentKind(StrEnum):
-    """An agent incident that System Health counts (Decision 0071, Proposed):
+    """An agent incident that System Health counts (Decision 0071, Approved):
     one row of ``agent_incidents`` each, never aggregated."""
 
     OUT_OF_MEMORY = "out_of_memory"  # an attempt failed with an OOM class

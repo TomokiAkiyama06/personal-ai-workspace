@@ -68,7 +68,7 @@ class Settings(BaseSettings):
     # origins are refused. Requests without an Origin header (non-browser
     # clients) are not affected.
     allowed_origins: Annotated[list[str], NoDecode] = Field(default_factory=list)
-    # The built Web App (``apps/web/dist``, PAW-060, Decision 0044 Proposed), served
+    # The built Web App (``apps/web/dist``, PAW-060, Decision 0044 Approved), served
     # on this same origin by ``paw_backend.web.WebAppMiddleware``. Unset: API only.
     web_dist_dir: Path | None = None
 
@@ -155,7 +155,7 @@ class Settings(BaseSettings):
     # then only runs right after the transition, and nothing is marked stale or
     # expired in storage (the retrieval still judges both by time).
     freshness_job_interval_seconds: int = Field(default=3_600, ge=0, le=86_400)
-    # System Health (PAW-066, Decision 0059 Proposed). How often the numeric
+    # System Health (PAW-066, Decision 0059 Approved). How often the numeric
     # metrics are sampled into ``health_metric_samples``: the requirements' "last
     # 24 hours: 10-30 seconds" (FIXED), so no other value and no "off".
     health_sample_interval_seconds: int = Field(default=30, ge=10, le=30)
@@ -174,7 +174,7 @@ class Settings(BaseSettings):
     # checked when the command runs (``memory/projection/writer.py``): absolute,
     # canonical, outside every git work tree and every home directory.
     memory_projection_dir: Path | None = None
-    # Recovery Repository (PAW-047, Decision 0054 Proposed): the git checkout of
+    # Recovery Repository (PAW-047, Decision 0054 Approved): the git checkout of
     # the dedicated private repository that ``recovery-backup-run`` writes and
     # commits (every 30 minutes) and ``recovery-restore`` reads (for example
     # ``/srv/personal-ai/recovery``). Unset: both commands refuse to run. Checked
