@@ -1678,8 +1678,13 @@ def _start_mounts(spec: object, places: Places, config: Config, name: str) -> li
         raise Rejected("bad_spec")
     if not os.path.isdir(source):
         raise Rejected("bad_path")
-    if writable and not stat.S_ISREG(_lstat(os.path.join(source, ".git")).st_mode):
-        raise Rejected("not_a_worktree")
+    if writable:
+        try:
+            own_git = os.lstat(os.path.join(source, ".git"))
+        except OSError:
+            raise Rejected("not_a_worktree") from None
+        if not stat.S_ISREG(own_git.st_mode):
+            raise Rejected("not_a_worktree")
     options = [
         f"type=bind,source={source},destination={target}"
         + ("" if writable else ",ro=true")
