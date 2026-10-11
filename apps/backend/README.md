@@ -4179,18 +4179,37 @@ Test: `test_orchestrator_authority.py`（本番の `TaskAuthority`。最後の T
 
 ## Agent Runtime の共有部品（Issue #208、Decision 0083、Approved）
 
-`paw_backend/agents/` は Orchestrator の実 Runtime（Local の Main Model の Tool loop、Codex / Claude Code の CLI）とその共有部品の Package です。Decision 0083 の 11 の段階ごとに入り、いまは段階 1（共有部品）だけです。Tool・Sandbox・CLI はまだ何も動かしません。
+`paw_backend/agents/` は Orchestrator の実 Runtime（Local の Main Model の Tool loop、Codex / Claude Code の CLI）とその共有部品の Package です。Decision 0083 の 11 の段階ごとに入り、いまは段階 1（共有部品）と段階 2（[Tool Broker のファイル・Shell・Git の Tool と Sandbox](#tool-broker-のファイルshellgit-の-tool-と-sandboxissue-208decision-0083-の段階-2)、`paw_backend/sandbox/`）です。Runtime と CLI はまだ何も動かしません。
 
 | File | 内容 |
 | --- | --- |
 | `failures.py` | 閉じた失敗の対応表（`ErrorClassifier`、Decision 0083 の 4）。`Failure`（理由ごとの固定の文）→ `error_class`（すべて `RUNTIME_ERROR_CLASSES` の名前）と `escalate`。`retryable=False` の行はありません。Cloud の振り替えの経路（`fallback=True`）の Gate の拒否だけは `HybridRuntime` の `ComputeUnavailable`。`from_error` は `NodeStopped`・Cancel・`MemoryError` を握りつぶさずに上げ、他の例外の文は読みません |
-| `reasoning.py` | Reasoning の履歴の方針の差し込み口 `ReasoningHistoryPolicy.prepare(messages) -> messages`（Decision 0083 の 3）。既定は Benchmark と同じ `KeepAllReasoning`（入力を変えない写し）。古い Reasoning を外す方針は #200 の Decision 0076 の承認の後に足します。Reasoning は DB・Log・Audit・`NodeResult` に書きません（Log には `reasoning_chars` の文字数だけ） |
+| `reasoning.py` | Reasoning の履歴の方針の差し込み口 `ReasoningHistoryPolicy.prepare(messages, prompt_tokens=...) -> messages`（Decision 0083 の 3）。Runtime は返った Message を送り、以後はそれを履歴として持ちます（外した Reasoning は元に戻りません）。方針は 2 つ: **Main（Qwen3.8-27B-FP8）の既定の `DropOlderReasoning(keep_last=2, min_prompt_tokens=32_768)`**（`MAIN_REASONING_POLICY`。[Decision 0076](../../docs/decisions/0076-main-kv-context-under-coexistence.md) の 1、Approved。2 の GPU の Run は 2026-10-11 に合格）は、この Request の Prompt の見積もり（`estimate_prompt_tokens`: 直前の `usage.prompt_tokens` + 直前の `completion_tokens` + その後の Tool の結果の UTF-8 の Byte ÷ 3。直前の答えがなければ `None` で何も外さない）が 32,768 を超えたら、直近 2 つより前の Assistant の Message の `reasoning_content` と `reasoning` を外します（本文・Tool 呼び出し・Tool の結果は外しません）。Benchmark と同じ `KeepAllReasoning`（入力を変えない写し）は `LocalModelSetup(reasoning_history=KeepAllReasoning())` で選べます。Reasoning は DB・Log・Audit・`NodeResult` に書かず、外した Reasoning は保存も Log もしません（Log には `reasoning_chars` の文字数だけ） |
 | `chat.py` | `ChatCompletionsClient`: OpenAI 互換の `/chat/completions` への非 Stream の 1 回の呼び出し（httpx。環境の Proxy を使わず、Redirect を追わない）。答えの文・Reasoning（`reasoning_content` / `reasoning`）・Tool 呼び出し・`usage`（無ければ `None`。0 にしない）。失敗は表の `RuntimeFailure` だけ（繋がらない・503 → `SERVER_UNAVAILABLE`、CUDA OOM → `OUT_OF_MEMORY`、`maximum context length` → `CONTEXT_LIMIT`、全体の Timeout → `TIMEOUT`、壊れた・大きすぎる答え → `MALFORMED_RESPONSE`、その他 → `OTHER`）。Server の Error の本文は印を探すだけで、Log・例外・保存に出しません。Compute の Lease の内側でだけ使います |
 | `preferences.py`・`wiring.py` | #38 の Model の Interpreter（`ModelPreferenceInterpreter`。本人の文と候補を JSON の Data として渡し、`enable_thinking: false`）と、`LocalModelSetup` / `build_preference_interpreter`（`create_app(local_model=...)`。[Inferred Preference の確認 Flow](#inferred-preference-の確認-flowissue-38paw-044decision-0081)） |
 
 `NodeOutcome.failed(..., escalate=True)` と `_retry_step` の扱いは [Node ごとの Retry / Escalate](#node-ごとの-retry--escalate) の表のとおりです（Decision 0007 / 0021 の一部 Supersede）。
 
 Test は `tests/test_agents_failures.py`（表の各行と不変条件）、`test_agents_reasoning.py`、`test_agents_chat.py`（Fake の Server: `httpx.MockTransport`）、`test_agents_preferences.py`（Fake の Server と `compute_support` の Fake の GPU。実 PostgreSQL の Service の Test は `PAW_TEST_DATABASE_URL` がないと Skip）、`test_orchestrator_escalate.py`（実 PostgreSQL）です。GPU・Network・本物の CLI は使いません。
+
+## Tool Broker のファイル・Shell・Git の Tool と Sandbox（Issue #208、Decision 0083 の段階 2）
+
+`paw_backend/sandbox/` は、Local の Model の Tool loop（段階 3 の `LocalAgentRuntime`）が Benchmark の `bash`・`str_replace`・`write_file` を Tool Broker を通して動かすための Tool と、その実行先の Sandbox です（Decision 0083 の 2・6・8、Approved）。**まだ本番の組み立てには配線していません**（Runtime と一緒に段階 3 で `ToolRunner(execution_timeout=300)` に `ToolExecutors({...WorkingSetExecutor..., ...RepoToolExecutor...})` を渡します）。配備と Server の確認は [`deploy/sandbox/README.md`](deploy/sandbox/README.md)。
+
+| Tool | Class | PAW-025 の Capability | 範囲内の Level | 引数 |
+| --- | --- | --- | --- | --- |
+| `repo.file.write` | `write` | `project.repo.write` | `SCOPED_AUTO` | `path`（必須）・`content` |
+| `repo.file.str_replace` | `write` | `project.repo.write` | `SCOPED_AUTO` | `path`・`old_str`・`new_str`（1 回だけ現れるときだけ置き換える） |
+| `repo.shell.run` | `execute` | `project.repo.write` | `SCOPED_AUTO` | `workdir`（必須）・`command` |
+| `repo.shell.read` | `execute` | `project.read` | `SCOPED_AUTO` | `workdir`・`command`（書けない Node の `bash`。読み取り専用の Sandbox） |
+| `repo.git.read` | `read` | `project.read` | `AUTO` | `workdir`・`arguments`（Sandbox の `git` の Shim が呼ぶ。Model に Tool として見せない） |
+
+- どれも触れる Path を必須の引数にするので、Broker はその Repository の ACL・Working Set の Role（`referenced` には書かず、実行もしない）・Scope の除外（`.git`・利用者の Checkout・他の worktree）で判定します。Executor は判定済みの Path の Symbolic Link が Repository の外へ出ないことをもう一度確かめます。
+- **Sandbox**（`plan.py`・`pool.py`）: 呼び出しの Path を含む 1 つの Repository だけを Mount します。読み書きは書き込む Node 自身の worktree だけ（pin した git directory で確かめる。`.git` の File は読み取り専用で重ね直す）、それ以外は読み取り専用で Checkout の `.git` と git directory を Mask。どちらも Scope の除外の Path・`NodeWorktree.protected`・入れ子の他の Repository を空の tmpfs / File で Mask します（置けなければ起動せず `SandboxUnavailableError`、`PermissionError` の `sandbox_unavailable`）。Container は Task の作成者の Linux Account の Rootless の Podman で、`--network none`・CPU / Memory / PID の上限・認証情報なし。経路は Decision 0029 の SSH の Wrapper を広げた `paw-sandbox/v1`（`SshSandboxRunner`。単一 User の配備は `LocalWrapperSandboxRunner`。Backend の User は Podman・Docker を直接動かしません）。Node の試行と Repository ごとに 1 つ（並列の Node どうしも共有しない）を使い回し、Command の Timeout・取り消し・Node の終わり（`release`）・Idle（`reap_idle`）で止めます（SIGTERM、5 秒で SIGKILL。取り消しは止め終わってから上げる）。
+- **Sandbox の `git`**（`gitargs.py`・`gitread.py`・`shim.py`）: Sandbox の中の `git` は Shim で、引数を Sandbox ごとの Unix Socket（Token つき）で Backend に送り、Backend はそれを `repo.git.read` として **Tool Broker に通して** から、Host で `--git-dir` を固定した読み取りの git（`GitRunner`）を動かします。`status`・`diff`・`log`・`show` と決まった Option だけ、Revision は Node の起点（`refs/paw/base/<branch>`。段階 3 で作る。それまでは今の状態だけ）から `HEAD` までの Commit だけ（Tree・Blob・Tag の ID は拒否）、Pathspec は Backend が `:(literal)` で作り、除外の Path を `:(exclude,literal)` で常に外します。拒否は `git: <理由> (<code>)`・終了コード 128。
+- 結果は JSON（`{"exit_code", "output", "truncated"}`、File の Tool は `{"ok": true}` か `{"error": "occurrences", "count": n}` など）で、`ToolRunner` が Redact します。Log には Path・Command・出力を書きません。
+
+Test は `tests/test_sandbox_gitargs.py`（Shim の語の許可リスト）、`test_sandbox_gitread.py`（本物の git と `GitWorktreeCoordinator` の worktree で、範囲・Object の種類・除外の Path）、`test_sandbox_plan.py`、`test_sandbox_pool.py`、`test_sandbox_runner.py`、`test_sandbox_shim.py`（本物の Shim の Program と File の Helper）、`test_sandbox_tools.py`（本物の Tool Broker を通る `bash` の中の `git` まで）、`test_ssh_git_wrapper_sandbox.py`（本物の Wrapper・Fake の `ssh`・Fake の `podman`）。Container・Podman・他の Linux User は使いません。
 
 ## Parallel Worktree / Integration Node
 
@@ -4254,7 +4273,8 @@ completed（Merge Ready。Human が Merge を判断する）/ 通らなければ
 | `domain.py`、`limits.py`、`errors.py` | Resource class（Interactive / Coding / Support / Background / Exclusive）、Placement（Local GPU / Local CPU / Cloud）、Model の Role と常駐方針、縮退の段（`Relief`）、断る理由（`Refusal`）、暫定値 |
 | `probe.py` | 読み取り専用の `NvidiaSmiProbe`（Command の Runner は注入）と、出力の厳密な Parse（使えない出力は `ProbeUnavailableError`） |
 | `accounting.py` | Actual / Reserved の VRAM と Safety Headroom の勘定（純粋関数） |
-| `concurrency.py` | KV Cache の Token による Admission と、Context 長に応じた並列数（純粋関数） |
+| `concurrency.py` | KV Cache の Token による Admission と、Context 長に応じた並列数（純粋関数。下の Class の予約は取り分までとして数える: Decision 0076 の 3） |
+| `metrics.py` | Runtime の `/metrics` から KV の使用率（`vllm:kv_cache_usage_perc`）を読む（Decision 0076 の 3） |
 | `config.py` | `DeploymentSpec`（Model の Footprint: Weight + KV Cache Pool + Runtime Buffer + Workspace）、`ComputeConfig` |
 | `control.py` | `ModelControl` の Protocol と、Admin が設定した Command を実行する `CommandModelControl`（GPU の Runtime の起動前にホストの `MemAvailable` を確かめる。Issue #182） |
 | `host.py` | ホストの `MemAvailable`（`/proc/meminfo`）の読み取り（Issue #182） |
@@ -4266,6 +4286,10 @@ completed（Merge Ready。Human が Merge を判断する）/ 通らなければ
 ### Admission（KV Cache に応じた動的な並列数）
 
 Local の Agent は Model ごとに 1 つの Runtime を共有します。`acquire(ComputeRequest(class, deployment=..., context_tokens=...))` は、Model が GPU にあり、Probe の読み取りが新しく（15 秒以内）、Context がその Model の KV Cache の Pool（`kv_safety` 90% のうち、Class の取り分: Interactive 100% / Coding 95% / Support 85% / Background 70%）と `max_sequences` に収まるときに `ComputeLease` を返します。Runtime が KV の使用率を報告できるときは、予約と観測の大きい方で数えます。長い Context の Request が多いと同時数が減り、短いものが多いと増えます（`parallelism()` が今の数を返します）。入れない Request は Class 順・到着順の待ち行列で待ち、容量不足で待つ Request を後ろの Request が追い越すことはありません。Priority は開始順だけに効き、走っている仕事は止めません。
+
+**会話の伸び（Issue #200、[Decision 0076](../../docs/decisions/0076-main-kv-context-under-coexistence.md) の 3、Approved）**: 走っている Request は `ComputeLease.resize(context_tokens)` で予約を変えられます（Local の Agent の Runtime が毎回の Request の前に「Prompt の見積もり + `max_tokens`」で呼ぶ。Runtime は #208 の PR 3）。予約の増加は**待たせず、Class の取り分と `kv_safety` を超えても認めます**（待たせると、互いの終わりを待つ Agent が止まりうるため）。超えている間は新しい Request が上限で待ち（上の待ち行列のまま）、予約が減ると入れる待ちを通します。Model の `max_context_tokens` を超える `resize` は `ComputeUnavailableError(CONTEXT_TOO_LONG)` で断り、予約は変えません。CPU の Lease は予約を持たず（上限だけ確かめる）、`CLOUD` の Lease は変わりません。下の Class の伸びで上の Class を締め出さないよう、Class C の新しい Request は、C と上の Class の予約はそのまま、C より下の Class の予約はそれぞれの取り分まで・その合計を下の Class の中で最も高い取り分までとして数えます（`concurrency.counted_tokens`。Interactive は少なくとも安全な Pool の 5%、Coding は 10% が残る）。伸びのない予約はどの Class も取り分の内側なので、数え方は前と同じです。
+
+**KV の使用率の観測**: `DeploymentCommands(metrics_url="http://127.0.0.1:8000/metrics")` を与えた Deployment は、`CommandModelControl.kv_usage` が vLLM の `/metrics` の `vllm:kv_cache_usage_perc`（0〜1。Engine が複数なら最大）を読みます（`compute/metrics.py`）。読めないとき（応答なし・200 以外・Redirect・4 MiB 超・Sample なし・0〜1 の外）は `None`（観測なし）で、応答の中身は Log にも例外にも出しません。環境の Proxy は使いません。読み取りの Timeout は既定 2 秒（`metrics_timeout`、5 秒まで）です。
 
 ### VRAM の勘定と Safety Headroom
 
@@ -4345,6 +4369,8 @@ control = CommandModelControl(
                 "/usr/bin/cat",
                 "/sys/fs/cgroup/system.slice/paw-llm-main.service/cgroup.procs",
             ),
+            # vLLM の KV の使用率（Decision 0076 の 3）。
+            metrics_url="http://127.0.0.1:8000/metrics",
         ),
     }
 )
@@ -4411,7 +4437,7 @@ python -m paw_backend.cli compute-status --headroom-min-mib 8192 --headroom-frac
 
 ### Test
 
-`apps/backend/tests/test_compute_*.py` と `compute_support.py`（Fake の Probe と Fake の `ModelControl`。Fake の Model を GPU に置くと Fake の Probe の使用量が増え、Unload すると減ります）。DB を使うのは `test_compute_full_gpu_holds.py` と `test_compute_app_holds.py`（`PAW_TEST_DATABASE_URL` がないと Skip）だけです。`test_compute_probe.py`（2 つの Command の固定、GPU を変える Option がないこと、Parse）、`test_compute_accounting.py`（勘定と KV の純粋関数、ランダムな Property Test）、`test_compute_config.py`（設定の検査と `CommandModelControl`。Runner は記録するだけで何も実行しません）、`test_compute_host.py`（Issue #182: `MemAvailable` の読み取り、足りない・読めないときに起動しないこと、JIT の環境変数、Load の上限 900 秒と検証の上限）、`test_compute_scheduler.py`（Admission・Class・待ち行列・Probe の鮮度・Hybrid）、`test_compute_relief.py`（縮退の各段・Drain・復帰・常駐）、`test_compute_exclusive.py`、`test_compute_free_vram.py`（Decision 0042: 空き VRAM による延期、二重に数えないこと、追い越し、警告と頻度、Exclusive の待ち）、`test_compute_runtimes.py`（`HybridRuntime`・`ScheduledMemoryWorker`・`PlacedEmbedder`）、`test_compute_cli.py`、`test_compute_full_gpu.py`（Full GPU Mode: 認可と Audit、Hold と Drain、Preempt、Unload と確認、終了後の Reload と再開。Task の保存は Fake）、`test_compute_full_gpu_holds.py`（実 PostgreSQL の `PostgresTaskHolds`: Hold、Hold した Task の見分け、再開と Queue、End to End）。`test_compute_app.py`（Issue #165: Lifespan での起動と停止、Database がない構成、`local_runtimes` の配線、警告の Sink、HTTP の経路の認可・非同期の開始・取りやめ・失敗・Body の検査、終了時に開始を取りやめて Model を戻すことと、その待ちの上限）、`test_compute_app_holds.py`（実 PostgreSQL: HTTP で始めて Task が Hold され、終えて再開する）。時間は注入した Clock で動かします。
+`apps/backend/tests/test_compute_*.py` と `compute_support.py`（Fake の Probe と Fake の `ModelControl`。Fake の Model を GPU に置くと Fake の Probe の使用量が増え、Unload すると減ります）。DB を使うのは `test_compute_full_gpu_holds.py` と `test_compute_app_holds.py`（`PAW_TEST_DATABASE_URL` がないと Skip）だけです。`test_compute_probe.py`（2 つの Command の固定、GPU を変える Option がないこと、Parse）、`test_compute_accounting.py`（勘定と KV の純粋関数、ランダムな Property Test）、`test_compute_config.py`（設定の検査と `CommandModelControl`。Runner は記録するだけで何も実行しません）、`test_compute_host.py`（Issue #182: `MemAvailable` の読み取り、足りない・読めないときに起動しないこと、JIT の環境変数、Load の上限 900 秒と検証の上限）、`test_compute_scheduler.py`（Admission・Class・待ち行列・Probe の鮮度・Hybrid）、`test_compute_kv_growth.py`（Decision 0076 の 3: `resize` の伸び縮み、取り分と `kv_safety` を超える伸びを待たせないこと、新しい Request が上限で待ち縮みで通ること、下の Class を取り分までとして数えること、`CONTEXT_TOO_LONG`）、`test_compute_metrics.py`（`/metrics` の Parse と読み取り。Fake の Server）、`test_compute_relief.py`（縮退の各段・Drain・復帰・常駐）、`test_compute_exclusive.py`、`test_compute_free_vram.py`（Decision 0042: 空き VRAM による延期、二重に数えないこと、追い越し、警告と頻度、Exclusive の待ち）、`test_compute_runtimes.py`（`HybridRuntime`・`ScheduledMemoryWorker`・`PlacedEmbedder`）、`test_compute_cli.py`、`test_compute_full_gpu.py`（Full GPU Mode: 認可と Audit、Hold と Drain、Preempt、Unload と確認、終了後の Reload と再開。Task の保存は Fake）、`test_compute_full_gpu_holds.py`（実 PostgreSQL の `PostgresTaskHolds`: Hold、Hold した Task の見分け、再開と Queue、End to End）。`test_compute_app.py`（Issue #165: Lifespan での起動と停止、Database がない構成、`local_runtimes` の配線、警告の Sink、HTTP の経路の認可・非同期の開始・取りやめ・失敗・Body の検査、終了時に開始を取りやめて Model を戻すことと、その待ちの上限）、`test_compute_app_holds.py`（実 PostgreSQL: HTTP で始めて Task が Hold され、終えて再開する）。時間は注入した Clock で動かします。
 実 GPU を読む Test は `RealProbeTest` の 1 つだけで、`PAW_TEST_REAL_GPU_PROBE=1` のときだけ動き（CI では Skip）、2 つの読み取りの Query だけを実行します。
 
 ## System Health / Observability

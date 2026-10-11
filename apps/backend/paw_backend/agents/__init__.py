@@ -9,7 +9,9 @@ stages (section 11). This package has the first stage, the shared parts:
   (:class:`ErrorClassifier`, section 4), on ``RUNTIME_ERROR_CLASSES``, with
   ``NodeOutcome.escalate`` for the failures a higher rung may solve;
 * ``reasoning.py``: the seam for what of the model's reasoning goes back to it
-  (:class:`ReasoningHistoryPolicy`, section 3), keep-all by default;
+  (:class:`ReasoningHistoryPolicy`, section 3) and its policies: the main
+  model's default drops the older steps' reasoning (:class:`DropOlderReasoning`,
+  Decision 0076, 1), keep-all (:class:`KeepAllReasoning`) stays selectable;
 * ``chat.py``: one call of the local model server's OpenAI-compatible chat API
   (:class:`ChatCompletionsClient`), used only inside a compute lease;
 * ``preferences.py`` and ``wiring.py``: the Inferred Preference interpreter (#38)
@@ -34,17 +36,22 @@ from paw_backend.agents.failures import (
 )
 from paw_backend.agents.preferences import ModelPreferenceInterpreter
 from paw_backend.agents.reasoning import (
+    MAIN_REASONING_POLICY,
+    DropOlderReasoning,
     KeepAllReasoning,
     ReasoningHistoryPolicy,
     check_reasoning_policy,
+    estimate_prompt_tokens,
     reasoning_chars,
 )
 from paw_backend.agents.wiring import LocalModelSetup, build_preference_interpreter
 
 __all__ = [
     "FAILURE_TABLE",
+    "MAIN_REASONING_POLICY",
     "ChatCompletion",
     "ChatCompletionsClient",
+    "DropOlderReasoning",
     "ErrorClassifier",
     "Failure",
     "FailureRow",
@@ -57,5 +64,6 @@ __all__ = [
     "Usage",
     "build_preference_interpreter",
     "check_reasoning_policy",
+    "estimate_prompt_tokens",
     "reasoning_chars",
 ]

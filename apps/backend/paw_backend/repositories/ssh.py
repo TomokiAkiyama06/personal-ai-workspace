@@ -285,6 +285,59 @@ def build_remote_command(
     return " ".join(shlex.quote(word) for word in words)
 
 
+def ssh_arguments(
+    executable: str,
+    *,
+    identity: str,
+    config_path: str,
+    policy: SshGitRunnerPolicy,
+    account: LinuxAccount,
+    remote_command: str,
+) -> list[str]:
+    """The ``ssh`` argument list of one call as ``account``: the restricted,
+    non-interactive connection of Decision 0029 (a fixed key, no agent, no
+    forwarding, no local configuration, a pinned host key). Shared by
+    :class:`SshGitRunner` and the sandbox runner of Decision 0083
+    (``paw_backend.sandbox.runner``), which send other remote commands to the
+    same forced-command wrapper."""
+    return [
+        executable,
+        "-i",
+        identity,
+        "-F",
+        config_path,
+        "-p",
+        str(policy.port),
+        "-o",
+        "IdentitiesOnly=yes",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "StrictHostKeyChecking=yes",
+        "-o",
+        f"UserKnownHostsFile={policy.known_hosts_path}",
+        "-o",
+        "GlobalKnownHostsFile=/dev/null",
+        "-o",
+        f"ConnectTimeout={policy.connect_timeout_s}",
+        "-o",
+        "RequestTTY=no",
+        "-o",
+        "ForwardAgent=no",
+        "-o",
+        "ForwardX11=no",
+        "-o",
+        "ClearAllForwardings=yes",
+        "-o",
+        "PermitLocalCommand=no",
+        "-o",
+        "LogLevel=ERROR",
+        "--",
+        f"{account.username}@{policy.host}",
+        remote_command,
+    ]
+
+
 class SshGitRunner:
     """Runs git as the account's own Linux user over a restricted SSH connection.
 
@@ -372,42 +425,14 @@ class SshGitRunner:
             allowed_protocols=self._protocols,
             extra_config=self._extra,
         )
-        argv = [
+        argv = ssh_arguments(
             self._ssh(),
-            "-i",
-            identity,
-            "-F",
-            self._ssh_config,
-            "-p",
-            str(policy.port),
-            "-o",
-            "IdentitiesOnly=yes",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "StrictHostKeyChecking=yes",
-            "-o",
-            f"UserKnownHostsFile={policy.known_hosts_path}",
-            "-o",
-            "GlobalKnownHostsFile=/dev/null",
-            "-o",
-            f"ConnectTimeout={policy.connect_timeout_s}",
-            "-o",
-            "RequestTTY=no",
-            "-o",
-            "ForwardAgent=no",
-            "-o",
-            "ForwardX11=no",
-            "-o",
-            "ClearAllForwardings=yes",
-            "-o",
-            "PermitLocalCommand=no",
-            "-o",
-            "LogLevel=ERROR",
-            "--",
-            f"{account.username}@{policy.host}",
-            command,
-        ]
+            identity=identity,
+            config_path=self._ssh_config,
+            policy=policy,
+            account=account,
+            remote_command=command,
+        )
         result = await run_subprocess(
             argv,
             env={"PATH": self._path},
