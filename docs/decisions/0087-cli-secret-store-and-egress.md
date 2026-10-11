@@ -5,7 +5,7 @@
 - Scope: Issue [#208](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/208) の PR 4b（[Decision 0083](0083-agent-runtime-adapters.md) の 11 の 4 のうち、`CodexCliRuntime` / `ClaudeCliRuntime`・Credential の Proxy・`rotate_credential`・PAW の Tool の MCP の Bridge）の前提。この Decision は設計だけで、コードは承認の後に PR 4b で書く。関係する既存の口: `apps/backend/paw_backend/connections/secret.py`（`Secret`・`SecretResolver`。Store はまだない）、`connections/service.py`（`register` / `replace_credential` は Handle だけを受ける）、`apps/backend/deploy/systemd/`。
 - Supersedes（一部）:
   - [Decision 0083](0083-agent-runtime-adapters.md)（Approved）の 6 のうち「nftables の `meta skuid paw-egress` の規則でその Account の外への通信を Provider の宛先と DNS だけに限る」を、下の 3 の推奨を選んだ場合に限って置き換える（宛先の IP の集合ではなく「Private の範囲を除いた TCP 443 と、決まった DNS」に絞り、宛先の Host 名の判定は Proxy に置く）。3 で代替 (a) を選べば置き換えない。
-  - 同じく 6 の「認証情報は、できる限り Credential を付ける Proxy で扱う（推奨）。Backend が専用の Account で動かす Proxy が…」を、下の 4 の Credential の種類ごとの表で具体化する（Subscription の OAuth は Proxy で付けない。Proxy は専用の Account ではなく、Secret Store を読める Backend の Process の中に置く）。Proxy で付けない Credential の扱い（tmpfs・Connection ごとに 1 Session・Compare-and-swap の書き戻し）は 0083 の 6 のまま。
+  - 同じく 6 の「認証情報は、できる限り Credential を付ける Proxy で扱う（推奨）。Backend が専用の Account で動かす Proxy が…」を、下の 4 の Credential の種類ごとの表で具体化する（Subscription の OAuth は Proxy で付けない。Proxy は専用の Account ではなく、Secret Store を読める Backend の Process の中に置く）。Proxy で付けない Credential の扱い（tmpfs・Connection ごとに 1 Session・Compare-and-swap の書き戻し）は 0083 の 6 のまま。**ただし Claude の `setup-token` の Token（1 年で Refresh のない静的な Token。CLI が書き換えないので並列の Session が互いを失効させない）だけは、0083 の 6 の「Connection ごとに同時に 1 つの Session」と書き戻しの対象から外す**（下の 4 の表。この点で 0083 の 6 を置き換える）。
   - 次は書き換えず、その中で作る: [Decision 0016](0016-shared-connection-adapter-policy.md)（Approved）の 1（平文は Secret Store の Resolver の内側と 1 回の呼び出しの間の `Secret` だけ、DB・Audit・Log には Handle だけ）・7（Credential の置き換えは `admin.config.manage`）、0083 のその他（CLI の Container・`paw-agent-cli`・systemd の Template Unit・polkit・Bridge・1 接続 1 Session の DB Lease）、[Decision 0054](0054-recovery-repository-projection-restore.md)（Recovery に Credential を入れず、復旧の後に再登録する）、[Decision 0079](0079-deploy-update-rollback.md)（Deploy と Restore Point）。
 
 ## 背景
@@ -69,7 +69,7 @@
 
 ### 2. 平文を Store に入れる口
 
-- **推奨: Server の上の管理 Command だけで入れる（Web からは入れない）。** `python -m paw_backend.cli connection-credential put --kind codex|claude`（Backend の User で実行。平文は stdin からだけ読み、引数・環境変数・履歴に置かない。Echo しない）が Store に書いて Handle を返し、Owner / Admin は既存の `register` / `replace_credential`（`admin.config.manage`）にその Handle を渡す。Codex の ChatGPT の Login は `auth.json` を（Device Code の Login をした別の機械か、同じ Host の使い捨ての `CODEX_HOME` で作り）この Command に流し込む。Command は `connection.credential_store` の Audit（Handle・種類・版。値なし）を System の Actor で残す。
+- **推奨: Server の上の管理 Command だけで入れる（Web からは入れない）。** `python -m paw_backend.cli connection-credential put --kind codex|claude`（平文は stdin からだけ読み、引数・環境変数・履歴に置かない。Echo しない）。主鍵は `paw-backend.service` の `$CREDENTIALS_DIRECTORY` にしかないので、この Command は**専用の oneshot の Unit を通して**動かす: Deploy に入れる Wrapper `paw-connection-credential-put`（root が実行）が `systemd-run --pipe --wait --uid=paw -p LoadCredentialEncrypted=paw-secret-key:/etc/paw/credentials/paw-secret-key.cred …` で同じ暗号化した Credential を読み込んだ一時の Unit を作り、stdin をそのまま渡す（`paw-backend.service` と同じ硬さの設定を付ける）。Host の root の操作なので、Admin の側の操作として受け入れる（0083 と同じ）が Store に書いて Handle を返し、Owner / Admin は既存の `register` / `replace_credential`（`admin.config.manage`）にその Handle を渡す。Codex の ChatGPT の Login は `auth.json` を（Device Code の Login をした別の機械か、同じ Host の使い捨ての `CODEX_HOME` で作り）この Command に流し込む。Command は `connection.credential_store` の Audit（Handle・種類・版。値なし）を System の Actor で残す。
   - 理由: 平文が Web の経路（Request の Log・Proxy・Browser）を通らない。要件の Owner の初期設定・Recovery の Command と同じ置き場所（Decision 0005）。Step-up（Passkey）がなくても、Server の上の操作であること自体が強い確認になる。
 - 代替: (a) Admin の画面の Form で平文を送る（Passkey の Step-up の後、HTTPS で 1 回だけ、Response にも Log にも出さない）: 使いやすいが、Step-up の対象の Policy と Redact の範囲を広げる別の作業になる。後続の Issue にする。(b) Store の Directory に Admin が File を手で置く: 形の検証・Audit・版の管理ができない。推奨しない。
 
@@ -132,7 +132,7 @@
 
 - CLI の Option・Stream の形・認証の形は版で変わる（2026-10-12 の Document でも、`--restricted`・`--permission-prompts` は最近の版で入った）。CLI の版を Image の Digest で固定し、上げるときは Fake の CLI の Stream と Smoke をやり直す。
 - Codex の `apply_patch` を止める方法が見つからなければ、Codex の CLI の段は使えない（Claude の CLI の段と Local だけになる）。
-- Claude の Message ごとの `output_tokens` が仮の値であることを見落とすと、Turn ごとの計上が少なくなる。`message_delta` が来ない版では、Turn ごとの出力は 0 として、終わりの精算（0083 の 5 (c)）で埋まる（途中の Budget の停止が遅れる）。
+- Claude の Message ごとの `output_tokens` が仮の値であることを見落とすと、Turn ごとの計上が少なくなる。`message_delta` の `usage` が来ない版は、Turn ごとの出力を報告できないので**有効にしない**（0083 の 5 の「Turn ごとの Token を報告しない CLI・版は有効にしない」のまま。Smoke と Fake の CLI の Test で確かめる）。
 - `setup-token` の Token は 1 年で切れ、Refresh がない。期限の通知を見落とすと Connection が `expired` になる（Admin が入れ替える）。
 - 主鍵を Host の鍵と TPM2 に結び付けると、Host の入れ替え・TPM の Clear で Store が読めなくなる。そのときは Credential の再登録（Recovery と同じ）。
 - nftables を Provider の IP に絞らないので、`paw-egress` が侵害されると Public の任意の 443 に出られる。Proxy は小さく保ち、Log を見る。
