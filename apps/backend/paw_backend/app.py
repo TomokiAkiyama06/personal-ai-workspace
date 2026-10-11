@@ -3,6 +3,9 @@
 import asyncio
 import contextlib
 import logging
+import os
+import re
+import socket
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 
@@ -57,6 +60,20 @@ from paw_backend.research.scratch import ScratchJanitor, ScratchStore
 from paw_backend.web import WebAppMiddleware
 
 logger = logging.getLogger(__name__)
+
+
+_WORKER_ID_CHARACTER = re.compile(r"[^A-Za-z0-9._:@/-]")
+
+
+def worker_ids(count: int) -> list[str]:
+    """The ids of this process's orchestrator workers (Decision 0086, 3):
+    ``<host>:<pid>:<n>``, the host name's other characters as ``-``, at most
+    100 characters (``check_worker_id``)."""
+    host = _WORKER_ID_CHARACTER.sub("-", socket.gethostname()) or "host"
+    if not host[0].isalnum():
+        host = "h" + host
+    suffix = lambda n: f":{os.getpid()}:{n}"  # noqa: E731
+    return [host[: 100 - len(suffix(n))] + suffix(n) for n in range(1, count + 1)]
 
 
 def create_app(
@@ -160,6 +177,7 @@ def create_app(
         maintenance = None
         health = app.state.system_health
         compute_stop = asyncio.Event()
+        workers: set[asyncio.Task] = set()
         try:
             # The Compute Resource Scheduler, when the deployment configured one
             # (issue #165): its refresh loop, and Kaggle / Full GPU Mode next to
@@ -243,6 +261,17 @@ def create_app(
                     interval_seconds=settings.freshness_job_interval_seconds,
                 )
                 background.add(asyncio.create_task(maintenance.run()))
+            # The orchestrator's workers (Decision 0086, Proposed): only when an
+            # orchestrator was composed; stopped through ``compute_stop`` first,
+            # cancelled after the shutdown timeout below.
+            orchestrator = (
+                None if task_execution is None else task_execution.orchestrator
+            )
+            if orchestrator is not None:
+                for worker_id in worker_ids(settings.orchestrator_workers):
+                    workers.add(
+                        asyncio.create_task(orchestrator.serve(worker_id, compute_stop))
+                    )
             # The System Health history (PAW-066): sample, roll up, purge.
             if health.sampling:
                 background.add(asyncio.create_task(health.monitor.run()))
@@ -271,6 +300,16 @@ def create_app(
                 compute_services.full_gpu = None
                 health.compute.attach(compute_services.scheduler)
             compute_stop.set()
+            if workers:
+                # Each worker ends after its current node attempt; past the
+                # shutdown timeout it is cancelled (it gives its entry back and
+                # its running nodes become ready again: Decision 0086, 4).
+                _, running = await asyncio.wait(
+                    workers, timeout=settings.shutdown_timeout_seconds
+                )
+                for worker in running:
+                    worker.cancel()
+                await asyncio.gather(*workers, return_exceptions=True)
             health.monitor.stop()
             health.reaper.attach(None)
             if stop_loop is not None:
