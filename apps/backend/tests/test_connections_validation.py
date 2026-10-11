@@ -47,6 +47,7 @@ from paw_backend.connections.validation import (
     validate_uuid,
 )
 from paw_backend.db import Database, DatabaseNotConfiguredError
+from paw_backend.tasks.queueing import BudgetTracker
 
 from .connections_support import (
     CANARY,
@@ -162,6 +163,7 @@ def make_service() -> ConnectionService:
         adapters,
         FakeResolver(),
         lease=FakeLeaseVerifier(),
+        budget=BudgetTracker(database),
         session_adapters={kind: _SessionAdapter(kind) for kind in ConnectionKind},
     )
     service.audit_events = sink.events  # type: ignore[attr-defined]
@@ -483,6 +485,13 @@ class ConstructionTest(unittest.TestCase):
             # ``check(task_id, lease)``, or nothing (the fail-closed default).
             {"lease": object()},
             {"lease": SimpleNamespace(check=lambda task_id, lease: None)},
+            # A session is counted into the task's budget turn by turn (with
+            # its run fence): session adapters need a budget.
+            {
+                "session_adapters": {
+                    ConnectionKind.CODEX: _SessionAdapter(ConnectionKind.CODEX)
+                }
+            },
         ]
         for options in bad:
             with self.subTest(options=str(options)):

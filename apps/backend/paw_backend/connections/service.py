@@ -213,7 +213,7 @@ from paw_backend.tasks.queueing.budget import BudgetTracker
 from paw_backend.tasks.queueing.domain import BudgetKind
 from paw_backend.tasks.queueing.errors import BudgetNotConfiguredError
 from paw_backend.tools.calls import TaskContext
-from paw_backend.tools.credentials import MAX_TEXT_CHARS, redact_text
+from paw_backend.tools.credentials import MAX_TEXT_CHARS, redact_text, redact_value
 from paw_backend.tools.interfaces import require_async_method
 from paw_backend.tools.lease import FailClosedLeaseVerifier, LeaseStatus, LeaseVerifier
 
@@ -334,6 +334,14 @@ def _clean_submission(secret: Secret, submission: Mapping[str, Any]) -> dict | N
         return False, None
 
     ok, cleaned = clean(submission, 0)
+    if not ok:
+        return None
+    # Then the structured rules of a tool result (``redact_value``): the value
+    # under a sensitive-looking key (``api_key``, ``password``, ...) goes
+    # whatever it holds. Its normalisation can compose text again, so the
+    # value is looked for once more afterwards.
+    redacted, _ = redact_value(cleaned)
+    ok, cleaned = clean(redacted, 0)
     return cleaned if ok else None
 
 
@@ -458,6 +466,11 @@ class ConnectionService:
         self._secrets = secrets
         self._budget = budget
         self._session_adapters = _session_adapters(session_adapters)
+        if self._session_adapters and budget is None:
+            # A session is counted turn by turn into the task's budget, with
+            # the run fence of ``BudgetTracker.record_in`` (Decision 0083, 5):
+            # without a budget there is neither, so sessions are not offered.
+            raise fail("budget", InputProblem.WRONG_TYPE)
         self._lease: LeaseVerifier = (
             FailClosedLeaseVerifier() if lease is None else lease
         )

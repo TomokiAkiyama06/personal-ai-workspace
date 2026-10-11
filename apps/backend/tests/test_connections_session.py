@@ -472,6 +472,18 @@ class SubmissionTest(SessionCase):
         self.assertNotIn(token, text)
         self.assertEqual(result.submission["notes"][1:], [3, None, True])
 
+    async def test_a_value_under_a_sensitive_key_is_redacted(self):
+        opaque = "opaque" + "-value-without-a-known-shape"  # split: a shape only
+        adapter = FakeSession(
+            result=AgentSessionResult(
+                submission={"config": {"api_key": opaque}, "summary": "s"}
+            )
+        )
+        result = await self.start(adapter)
+        self.assertIsNone(result.failure)
+        self.assertNotIn(opaque, repr(result.submission))
+        self.assertEqual(result.submission["summary"], "s")
+
     async def test_a_malformed_submission_is_refused(self):
         adapter = FakeSession(
             result=AgentSessionResult(submission={"summary": object()})
