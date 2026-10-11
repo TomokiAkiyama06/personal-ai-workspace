@@ -113,6 +113,7 @@ class OptionTest(unittest.TestCase):
             ["diff", "-U99999"],
             ["log", "--exec=x"],
             ["show", "--show-signature"],
+            ["log", "--follow", "a.py"],
         ):
             with self.subTest(argv=argv):
                 with self.assertRaises(GitReadRefused) as caught:

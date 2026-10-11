@@ -168,7 +168,6 @@ _OPTIONS: Mapping[str, Mapping[str, str]] = MappingProxyType(
                 "--no-merges": "--no-merges",
                 "--merges": "--merges",
                 "--graph": "--graph",
-                "--follow": "--follow",
             }
         ),
         "show": MappingProxyType(

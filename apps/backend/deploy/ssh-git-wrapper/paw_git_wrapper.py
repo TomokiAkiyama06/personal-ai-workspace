@@ -52,6 +52,15 @@ undoes ``shlex.quote``) into the words of Decision 0029 §2::
   clone's promisor remote): :func:`check_configuration`; for ``push``, also
   no ``url.<base>.insteadOf`` / ``pushInsteadOf`` (:func:`redirects_push`).
 
+Decision 0083 adds two things. The sandbox git shim's reads (§2): ``status``,
+``diff``, ``log``, ``show`` in the forms of :func:`check_read`, ``cat-file -t``,
+``merge-base --is-ancestor`` of two object ids and more ``rev-parse --verify``
+revisions. And the tool sandbox (§6): a command whose first word is
+``paw-sandbox/v1`` (:data:`SANDBOX_TAG`) starts, runs a command in or stops a
+rootless Podman container of a fixed image (``--sandbox-image``, by digest),
+with the mounts and masks re-checked here (:func:`sandbox_plan`); see
+``../sandbox/README.md``.
+
 The client's ``-c`` values are checked, then **dropped**: git always gets this
 file's own hardening (:func:`hardening`) and, for ``merge``, this file's own
 merge identity, never the client's copy. The environment of git is a fixed
@@ -801,7 +810,6 @@ READ_OPTIONS: Mapping[str, frozenset[str]] = {
         "--no-merges",
         "--merges",
         "--graph",
-        "--follow",
     },
     "show": _READ_DIFF_OUTPUT | {"--no-patch", "--oneline", "--abbrev-commit"},
 }
