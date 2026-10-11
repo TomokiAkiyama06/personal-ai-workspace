@@ -1,6 +1,6 @@
 # Qwen3.8-27B-FP8 を Main にしたときの共存時の KV / Context の不足の分析（2026-10）
 
-- Issue: [#200](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/200)（[Decision 0074](../decisions/0074-seed-v2-and-qwen-27b-comparison.md) の後続）。提案は [Decision 0076](../decisions/0076-main-kv-context-under-coexistence.md)（Proposed）
+- Issue: [#200](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/200)（[Decision 0074](../decisions/0074-seed-v2-and-qwen-27b-comparison.md) の後続）。提案は [Decision 0076](../decisions/0076-main-kv-context-under-coexistence.md)（Approved。2 の Run は 5 のとおり合格）
 - 材料（どれも既にある Run の記録で、この分析のために GPU は使っていない）:
   - 10-07 の共存の確認 Run（Qwen3.8-27B-FP8、0.51、paw-seed-v1 の 24 Task × 3 回。[共存の確認 Run の報告](paw-017-coexist-qwen38-2026-10.md)）: Trace と vLLM の `/metrics`（5 秒ごと）。`/data/results/paw-bench-2026-10-07`
   - 10-05 / 10-06 の paw-seed-v2 の比較 Run（Qwen3.8-27B-FP8、単独 0.90、49 Task × 3 回。[paw-seed-v2 の報告](paw-017-seed-v2-2026-10.md)）: Trace。`/data/results/paw-bench-2026-10-05`
