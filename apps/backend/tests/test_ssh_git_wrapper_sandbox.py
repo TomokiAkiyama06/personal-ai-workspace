@@ -47,6 +47,7 @@ from paw_backend.tools.scope import RealpathResolver
 from .repositories_support import requires_git
 from .sandbox_support import FILE_HELPER, World
 from .test_ssh_git_wrapper import _FAKE_SSHD, WRAPPER_PATH, _FixedKey, wrapper
+from .worktrees_support import git as git_out
 
 IMAGE = "registry.example/paw-sandbox@sha256:" + "a" * 64
 SANDBOX = uuid.UUID("12345678-1234-5678-1234-567812345678")
@@ -494,6 +495,110 @@ class ReadFormTest(unittest.TestCase):
                 checker(args[1:], None, None)
 
 
+class WorkerFormTest(unittest.TestCase):
+    """Decision 0083 §10: the base ref, the base history, the changes and the
+    commit, as the coordinator and ``gitread.py`` send them."""
+
+    def check(self, args):
+        checker, _ = wrapper.SUBCOMMANDS[args[0]]
+        checker(args[1:], None, None)
+
+    def test_accepted(self):
+        sha = "2" * 40
+        marker = "12345678-1234-5678-1234-567812345678/impl"
+        for args in (
+            ["update-ref", "refs/paw/base/paw/t/1/a", sha, "0" * 40],
+            [
+                "ls-files",
+                "--others",
+                "--exclude-standard",
+                "-z",
+                "--",
+                ".",
+                ":(exclude,literal)secret",
+            ],
+            ["add", "-A", "--", ":(literal)a.py", ":(literal)src/b c.py"],
+            [
+                "commit",
+                "--quiet",
+                "--no-verify",
+                "-m",
+                f"paw: node work\n\nPAW-Node: {marker}\n",
+                "--",
+                ":(literal)a.py",
+            ],
+        ):
+            self.check(args)
+        self.assertTrue(
+            wrapper.is_base_history(
+                [
+                    "--first-parent",
+                    "--max-count=1000",
+                    wrapper.BASE_LOG_FORMAT,
+                    "refs/heads/paw/t/1/a",
+                ]
+            )
+        )
+
+    def test_refused(self):
+        sha = "2" * 40
+        for args in (
+            ["update-ref", "refs/heads/main", sha, "0" * 40],
+            ["update-ref", "refs/paw/base/paw/t/1/a", sha, "1" * 40],
+            ["update-ref", "-d", "refs/paw/base/paw/t/1/a"],
+            ["ls-files", "--others", "-z", "--", "."],
+            ["ls-files", "--others", "--exclude-standard", "-z", "--"],
+            ["add", "-A", "--", "."],
+            ["add", "--", ":(literal)a.py"],
+            ["add", "-A", "--", ":(literal)../a.py"],
+            [
+                "commit",
+                "--quiet",
+                "--no-verify",
+                "-m",
+                "anything",
+                "--",
+                ":(literal)a.py",
+            ],
+            [
+                "commit",
+                "--quiet",
+                "-m",
+                "paw: node work\n\nPAW-Node: x/y\n",
+                "--",
+                ":(literal)a.py",
+            ],
+            ["commit", "--amend"],
+        ):
+            with self.assertRaises(wrapper.Rejected, msg=args):
+                self.check(args)
+        self.assertFalse(
+            wrapper.is_base_history(
+                [
+                    "--first-parent",
+                    "--max-count=1000",
+                    "--format=%H %B",
+                    "refs/heads/paw/t/1/a",
+                ]
+            )
+        )
+        self.assertFalse(
+            wrapper.is_base_history(
+                [
+                    "--first-parent",
+                    "--max-count=1000",
+                    wrapper.BASE_LOG_FORMAT,
+                    "refs/heads/main",
+                ]
+            )
+        )
+
+    def test_the_commit_identity_is_the_backends(self):
+        from paw_backend.sandbox.gitread import COMMIT_CONFIG
+
+        self.assertEqual(wrapper.COMMIT_CONFIG, COMMIT_CONFIG)
+
+
 @requires_git
 class EndToEndTest(unittest.IsolatedAsyncioTestCase):
     """The real wrapper behind the SSH runners, a fake ``podman``, real git."""
@@ -636,6 +741,31 @@ class EndToEndTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("+one", outputs[2])
         self.assertIn(commit, outputs[3])
         self.assertNotIn("s3cret", "".join(outputs))
+        # The base diff and the commit of the node (Decision 0083, 10).
+        from paw_backend.sandbox.gitread import branch_changes, commit_paths
+
+        await asyncio.to_thread(Path(world.worktree, "late.py").write_text, "x\n")
+        everything = await pathspecs(
+            (),
+            workdir=world.root,
+            root=world.root,
+            scope=world.scope,
+            resolver=RealpathResolver(),
+            hidden=hidden,
+        )
+        found = await branch_changes(
+            reader, located, account=world.account, pathspecs=everything
+        )
+        self.assertEqual(found.changed, ("late.py", "src/a.py"))
+        self.assertEqual(found.uncommitted, ("late.py",))
+        head = await commit_paths(
+            reader,
+            located,
+            ["late.py"],
+            account=world.account,
+            marker=f"{world.ws.task.id}/a",
+        )
+        self.assertEqual(head, git_out("rev-parse", "HEAD", cwd=world.worktree))
 
 
 if __name__ == "__main__":

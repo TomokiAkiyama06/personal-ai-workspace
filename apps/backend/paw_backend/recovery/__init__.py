@@ -1,4 +1,4 @@
-"""Recovery Repository projection and restore (PAW-047, Decision 0054 Proposed).
+"""Recovery Repository projection and restore (PAW-047, Decision 0054 Approved).
 
 PostgreSQL is the operational source of truth; the Dedicated Recovery
 Repository is the disaster-recovery source (REQUIREMENTS.md "Dedicated Recovery

@@ -1,4 +1,4 @@
-"""The orchestrator's workers in the application (Decision 0086, Proposed).
+"""The orchestrator's workers in the application (Decision 0086, Approved).
 
 The lifespan starts ``PAW_ORCHESTRATOR_WORKERS`` workers (``Orchestrator.serve``)
 only when the application composed an orchestrator, stops them through its stop

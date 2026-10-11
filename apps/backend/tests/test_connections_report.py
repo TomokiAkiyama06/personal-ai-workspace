@@ -1,4 +1,4 @@
-"""The usage report of the Usage screen (issue #187, Decision 0069, Proposed).
+"""The usage report of the Usage screen (issue #187, Decision 0069, Approved).
 
 The periods are pure (``report_window``); the sums and the authorization run on a
 real PostgreSQL with the clock seam of the store (Asia/Tokyo calendar days).

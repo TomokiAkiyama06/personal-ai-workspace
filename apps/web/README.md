@@ -3,7 +3,7 @@
 Personal AI Workspace の Web UI です。
 [PAW-060 — Web UI Application Shell / Authentication UI](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/46) で、Application Shell と認証の画面を実装しました。
 言語と Framework は React + TypeScript + Vite です（[Decision 0003](../../docs/decisions/0003-backend-cli-web-implementation-stack.md)、Approved）。
-配信・Session / CSRF・Tooling などの選択は [Decision 0044](../../docs/decisions/0044-web-app-serving-and-session.md)（**Proposed**。推奨どおりに実装）にまとめています。
+配信・Session / CSRF・Tooling などの選択は [Decision 0044](../../docs/decisions/0044-web-app-serving-and-session.md)（**Approved**。推奨どおりに実装）にまとめています。
 
 画面のレイアウト・Design Token・文言・役割ごとの Menu・Breakpoint は、Human が承認した **PAW-060 の Design Canvas**（claude.ai Artifact `BkiwvDocfuuXxfU9TA14pa`、36 Artboard、v10）に合わせています。Backend の API や承認済みの Decision と食い違う箇所は Backend / Decision を優先し、その一覧を Decision 0044 の「Design Canvas との差分」に置いています。
 画面の方針は [UI Design](../../docs/UI_DESIGN.md)、Backend との境界は [Architecture](../../docs/ARCHITECTURE.md)、後続の UI の Issue は [Implementation Backlog](../../docs/IMPLEMENTATION_BACKLOG.md) を参照してください。
@@ -30,7 +30,7 @@ Step-up が要る操作（Passkey の登録・削除、新しい端末の承認�
 ## プロジェクト（PAW-061）
 
 [PAW-061](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/47) のプロジェクトの画面（`/projects`、`/projects/<id>`、`src/projects/`）は Design Canvas の Projects に合わせています: 招待制のプロジェクトの一覧（絞り込み、Archived / Pending deletion は「アーカイブ済みを表示」の後ろ）、選んだプロジェクトの概要・リポジトリ・メンバーのタブ、リポジトリごとの ACL Override（`Project 継承` / `Repo 個別設定` と残る権限）、メンバーの役割（Manager / Contributor / Viewer）と Override で狭まった後に使えるリポジトリ、作成・アーカイブ・Active に戻す・削除（プロジェクト名の入力と 30 日の保留）・復元、リポジトリの登録（GitHub から Clone / 既存のディレクトリ / 新規（ローカル）/ 新規（GitHub））、Manager による役割の変更。
-Data は `ProjectsSource`（`src/projects/model.ts`）で受けます。本番では Backend の `/api/v1/projects` の Route（Issue #184、`paw_backend/api/v1/projects.py`、Decision 0066 Proposed）を呼ぶ `projectsApi`（`src/projects/api.ts`）が既定の Source で、Test は `ProjectsSourceProvider` で Fake の Source（`src/test/projectsFixture.ts`）を渡します。`ProjectsSourceProvider` に `null` を渡すと「プロジェクトはまだ表示できません」を表示します。ACL Override で `read` が閉じたリポジトリは Backend の一覧に入らないため、表に「アクセス不可」の行は出ません。
+Data は `ProjectsSource`（`src/projects/model.ts`）で受けます。本番では Backend の `/api/v1/projects` の Route（Issue #184、`paw_backend/api/v1/projects.py`、Decision 0066 Approved）を呼ぶ `projectsApi`（`src/projects/api.ts`）が既定の Source で、Test は `ProjectsSourceProvider` で Fake の Source（`src/test/projectsFixture.ts`）を渡します。`ProjectsSourceProvider` に `null` を渡すと「プロジェクトはまだ表示できません」を表示します。ACL Override で `read` が閉じたリポジトリは Backend の一覧に入らないため、表に「アクセス不可」の行は出ません。
 
 ## エージェント / タスクとプルリクエスト（PAW-062）
 

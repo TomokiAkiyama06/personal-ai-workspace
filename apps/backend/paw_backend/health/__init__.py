@@ -8,7 +8,7 @@ status, reason codes and numbers. The monitor (``monitor.py``) combines them int
 a report and, in the application, samples the numbers into a downsampled time
 series and records severity changes (``store.py``). ``/api/v1/system/health*``
 serves them. See ``docs/decisions/0059-system-health-observability.md``
-(Proposed).
+(Approved).
 """
 
 from paw_backend.health.domain import (

@@ -1,5 +1,5 @@
 """Kaggle / Full GPU Mode over HTTP (PAW-037, Decision 0055 8; issue #165,
-Decision 0058, Proposed).
+Decision 0058, Approved).
 
 ``/api/v1/admin/compute/full-gpu``: ``GET`` the state, ``POST`` to start (the GPU
 for one exclusive job), ``DELETE`` to end. Every operation needs

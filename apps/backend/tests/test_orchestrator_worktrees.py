@@ -165,10 +165,19 @@ class NodeWorktreeTest(WorktreeTestCase):
                 assignment.worktrees[uuid.uuid4()] = worktree
             with self.assertRaises((TypeError, AttributeError)):
                 assignment.worktrees.clear()
+            # Decision 0083, 6: the roots the node's tools may name, its own
+            # worktree in place of the checkout (read only as well).
+            (root,) = assignment.roots.values()
+            self.assertEqual(root, worktree.path)
+            with self.assertRaises(TypeError):
+                assignment.roots[uuid.uuid4()] = "/x"
         for key in ("research", "readonly", "review"):
             (assignment,) = runtime.calls_of(key)
             self.assertEqual(dict(assignment.worktrees), {})
             self.assertIsNotNone(assignment.placement)
+            # A node without a worktree reads the checkout.
+            self.assertNotIn("/srv/paw-orch/trees", "".join(assignment.roots.values()))
+            self.assertEqual(len(assignment.roots), 1)
 
     async def test_a_conflict_between_upstream_branches_fails_the_node_at_once(self):
         runtime = FakeRuntime("local")

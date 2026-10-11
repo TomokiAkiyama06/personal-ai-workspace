@@ -1,4 +1,4 @@
-"""System Health (PAW-066, Decision 0059 Proposed): ``/api/v1/system/health*``.
+"""System Health (PAW-066, Decision 0059 Approved): ``/api/v1/system/health*``.
 
 * ``GET /system/health/summary`` (``system_health.summary.read``, every human
   role): the compact state for the Global Header, the overall severity and

@@ -28,6 +28,13 @@ class FakeEventSource extends EventTarget {
   }
 }
 
+// The stream is opened by an effect, which can run after the screen it belongs to
+// is already shown: wait for it rather than reading the list at once.
+async function openedStream(): Promise<FakeEventSource> {
+  await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
+  return FakeEventSource.instances[0] as FakeEventSource;
+}
+
 beforeEach(() => {
   FakeEventSource.instances = [];
   vi.stubGlobal("EventSource", FakeEventSource);
@@ -160,12 +167,12 @@ describe("stored notifications in the Notification Center", () => {
     });
     renderApp("/");
     expect(await screen.findByRole("button", { name: "通知" })).toBeInTheDocument();
-    const [stream] = FakeEventSource.instances;
-    expect(stream?.url).toBe("/api/v1/events/stream");
-    await act(async () => stream?.emit("notification.changed"));
+    const stream = await openedStream();
+    expect(stream.url).toBe("/api/v1/events/stream");
+    await act(async () => stream.emit("notification.changed"));
     expect(await screen.findByRole("button", { name: "通知 1 件未読" })).toBeInTheDocument();
     // Dismissed on another device (or resolved): gone from the next list.
-    await act(async () => stream?.emit("notification.changed"));
+    await act(async () => stream.emit("notification.changed"));
     await waitFor(() => expect(screen.getByRole("button", { name: "通知" })).toBeInTheDocument());
   });
 
@@ -179,10 +186,11 @@ describe("stored notifications in the Notification Center", () => {
     });
     const { unmount } = renderApp("/");
     expect(await screen.findByRole("button", { name: "通知 1 件未読" })).toBeInTheDocument();
-    await act(async () => FakeEventSource.instances[0]?.emit("notification.changed"));
+    const stream = await openedStream();
+    await act(async () => stream.emit("notification.changed"));
     expect(screen.getByRole("button", { name: "通知 1 件未読" })).toBeInTheDocument();
     unmount();
-    expect(FakeEventSource.instances[0]?.closed).toBe(true);
+    expect(stream.closed).toBe(true);
   });
 
   it("counts the Backend's unread total, not only the entries loaded", async () => {
@@ -250,8 +258,8 @@ describe("stored notifications in the Notification Center", () => {
     });
     renderApp("/settings/devices");
     expect(await screen.findByRole("navigation", { name: "設定メニュー" })).toBeInTheDocument();
-    const [stream] = FakeEventSource.instances;
-    await act(async () => stream?.emit("notification.changed"));
+    const stream = await openedStream();
+    await act(async () => stream.emit("notification.changed"));
     expect(await screen.findByRole("button", { name: "バナーを閉じる" })).toBeInTheDocument();
   });
 });

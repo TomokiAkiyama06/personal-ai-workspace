@@ -1,5 +1,5 @@
 """System Health: the metric time series, the health events and the index of the
-connection reaper (PAW-066, issue #52, Decision 0059 Proposed).
+connection reaper (PAW-066, issue #52, Decision 0059 Approved).
 
 Revision ID: 0066
 Revises: 0154

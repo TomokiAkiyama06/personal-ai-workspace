@@ -153,6 +153,7 @@ _OPTIONS: Mapping[str, Mapping[str, str]] = MappingProxyType(
                 "-R": "-R",
                 "--exit-code": "--exit-code",
                 "--quiet": "--quiet",
+                "-z": "-z",
             }
         ),
         "log": MappingProxyType(

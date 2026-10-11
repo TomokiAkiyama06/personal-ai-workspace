@@ -1,6 +1,7 @@
 # Orchestrator の Worker（Queue を Claim して Task を動かす `Orchestrator.serve`）を Application の起動で動かす方針（起動する条件、数、Worker の ID、終了時の取り消し）
 
-- Status: Proposed
+- Status: Approved
+- Approval: 2026-10-12、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで直接回答して承認（approved as recommended, all 4 points: 決めてほしいことの 1〜4 をすべて推奨どおり承認。末尾の「承認時の決定」）
 - Date: 2026-10-11
 - Scope: Issue [#208](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/208)（Decision 0083 の 11 の 3: 「Orchestrator の Worker（`Orchestrator.serve`）を起動するかどうかは、Decision 0047 の 5 のとおりこの段階の PR で提案する」）。`paw_backend/app.py`（Lifespan）、`paw_backend/config.py`（`PAW_ORCHESTRATOR_WORKERS`）。Migration はない
 - Supersedes（一部）: [Decision 0047](0047-task-execution-composition-and-task-end-effects.md)（Approved）の 5 のうち「Queue を Claim する Worker（`Orchestrator.serve`）は起動しない」を、下の 1 の条件の範囲で置き換える。0047 のその他（組み立ての範囲、定期実行）は変えない
@@ -48,3 +49,7 @@
 
 承認されたら `Approval` に記録し、Status を Approved に改める。
 方針を変えるときは、この Decision を書き換えず、新しい Decision から `Supersedes` する。
+
+## 承認時の決定（2026-10-12）
+
+Human は、作業 Session で判断が必要な点について推奨つきの説明を受け、直接回答して承認した（2026-10-12、Human (approved as recommended, all 4 points)。決めてほしいことの 1〜4 をすべて推奨どおり承認）。

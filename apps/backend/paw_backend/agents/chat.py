@@ -165,7 +165,7 @@ def _timeout(value: object) -> float:
 
 class ChatCompletionsClient:
     """Calls ``<base_url>/chat/completions`` (``base_url`` ends with the API's
-    version, e.g. ``http://127.0.0.1:8000/v1``) as ``model`` (the server's
+    version, e.g. ``http://127.0.0.1:18080/v1``) as ``model`` (the server's
     ``--served-model-name``). ``transport``: tests pass an
     ``httpx.MockTransport``. The client ignores the environment's proxies and
     never follows a redirect."""

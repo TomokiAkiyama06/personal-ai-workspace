@@ -1,6 +1,6 @@
 """``python -m paw_backend.cli recovery-backup-run | -check | recovery-restore``.
 
-The Recovery Repository (PAW-047, Decision 0054 Proposed):
+The Recovery Repository (PAW-047, Decision 0054 Approved):
 
 * ``recovery-backup-run``: one backup (the systemd timer of
   ``apps/backend/deploy/systemd`` runs it every 30 minutes; run by hand it is the

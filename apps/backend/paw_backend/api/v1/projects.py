@@ -1,5 +1,5 @@
 """Projects, their repositories and members over HTTP (issue #184, Decision 0066,
-Proposed).
+Approved).
 
 ``/api/v1/projects/*`` and ``/api/v1/admin/projects``: the routes the Web App's
 プロジェクト screen (PAW-061, ``apps/web/src/projects``) reads and changes

@@ -60,8 +60,10 @@ from dataclasses import dataclass
 from paw_backend.integration.git import PinnedWorktree, WorktreeGit
 from paw_backend.integration.layout import (
     INTEGRATION_KEY,
+    base_ref,
     branch_name,
     in_namespace,
+    node_marker,
     worktree_base,
     worktree_path,
 )
@@ -382,6 +384,7 @@ class GitWorktreeCoordinator:
             account, base, task_id, run, repository
         )
         place = self._place(base, task_id, run, repository, request.node_key)
+        existed = await self._git.branch_commit(checkout, place.branch, account)
         start = await self._git.branch_commit(checkout, integration.branch, account)
         pinned = await self._ensure(checkout, place, account, start=start)
         # The work of the Worker nodes this one builds on (idempotent: a branch
@@ -399,6 +402,9 @@ class GitWorktreeCoordinator:
             if not await self._git.merge(pinned, branch, account):
                 # merge-tree said it merges: git failed otherwise (a Retry).
                 raise GitCommandError("merge", GitFailure.NONZERO_EXIT)
+        base_commit = await self._base(
+            checkout, place.branch, account, task_id, request.node_key, existed
+        )
         return NodeWorktree(
             repository.repo_id,
             place.path,
@@ -407,7 +413,43 @@ class GitWorktreeCoordinator:
             # worktree of the account (the area; the node's own worktree is a
             # root inside it) and the worktree's own ``.git``.
             protected=(checkout, integration.path, base, f"{place.path}/.git"),
+            base_commit=base_commit,
         )
+
+    async def _base(
+        self,
+        checkout: str,
+        branch: str,
+        account: LinuxAccount,
+        task_id: uuid.UUID,
+        node_key: str,
+        existed: str | None,
+    ) -> str:
+        """The branch's base (Decision 0083, 10): ``refs/paw/base/<branch>``,
+        made now when the branch is new (after the upstream merges) and never
+        moved. A branch made earlier whose ref is missing (the process ended
+        between the two) gets it back from its first-parent history: the
+        newest commit that is not the node's own (only the runtime's commits
+        carry the node's ``PAW-Node`` trailer). None found: not guessed."""
+        ref = base_ref(branch)
+        recorded = await self._git.commit_of(checkout, ref, account)
+        if recorded is not None:
+            return recorded
+        if existed is None:
+            commit = await self._git.branch_commit(checkout, branch, account)
+        else:
+            marker = node_marker(task_id, node_key)
+            history = await self._git.first_parent_trailers(checkout, branch, account)
+            commit = next((c for c, values in history if marker not in values), None)
+        if commit is None:
+            raise WorktreeUnavailableError(WorktreeProblem.BASE_UNKNOWN)
+        if not await self._git.create_ref(checkout, ref, commit, account):
+            # Made meanwhile by another process: that one is the base.
+            recorded = await self._git.commit_of(checkout, ref, account)
+            if recorded is None:
+                raise GitCommandError("update-ref", GitFailure.NONZERO_EXIT)
+            return recorded
+        return commit
 
     async def _integrate(
         self,

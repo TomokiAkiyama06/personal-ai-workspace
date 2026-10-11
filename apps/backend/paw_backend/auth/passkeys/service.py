@@ -37,7 +37,7 @@ The rules (Decision 0025), and where each lives:
   own, best effort. No credential id, key, challenge or name is ever recorded.
 * **Throttle.** A registration attempt counts against the account and the source like
   a wrong password (``Throttle``); a success resets the account's count.
-* **Another account's reset (#108, Decision 0032 proposed).** The Owner may reset an
+* **Another account's reset (#108, Decision 0032 Approved).** The Owner may reset an
   Admin's or a User's Passkeys, an Admin a User's (the rule of unlocking an account);
   nobody resets the Owner (``owner-recover`` is the Owner's way back) or themselves.
   It needs a recent Passkey Step-up of the actor's own session, judged before the

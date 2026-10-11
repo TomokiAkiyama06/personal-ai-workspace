@@ -1,4 +1,4 @@
-"""Usage and quotas over HTTP (issue #187, Decision 0069, Proposed; the rules of
+"""Usage and quotas over HTTP (issue #187, Decision 0069, Approved; the rules of
 quotas are Decision 0016, Approved).
 
 * ``GET /usage?scope=self|workspace&range=last14|last30|month``: the Usage screen's

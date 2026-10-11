@@ -1746,6 +1746,17 @@ class Orchestrator:
                 ),
                 budget=NodeBudgetHandle(run.guard, self._budget, run.task.id, fence),
                 worktrees=worktrees,
+                roots=MappingProxyType(
+                    {
+                        repository.repo_id: (
+                            worktrees[repository.repo_id].path
+                            if repository.repo_id in worktrees
+                            else repository.root
+                        )
+                        for repository in context.scope.repositories
+                        if repository.root is not None
+                    }
+                ),
                 placement=self._placement(run, spec, fence),
             )
             outcome = await self._with_timeout(

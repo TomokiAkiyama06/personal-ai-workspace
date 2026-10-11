@@ -3,7 +3,7 @@
 - Issue: [#14](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/14)（PAW-017）
 - 実施: 2026-09-28（8 Model）と 2026-09-30（09-28 に起動できなかった 4 Model の再開）。Decision 0040 の確認 Run（同時に動かす構成と Resolved@3）は 2026-10-01（[#180](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/180)、6）
 - Dataset: paw-seed-v1（[Decision 0041](../decisions/0041-seed-benchmark-dataset.md)、24 Task: Historical 11 / Spec 6 / Injected Bug 7）
-- 判断の提案: [Decision 0040](../decisions/0040-main-coding-model-selection.md)（採用 Model）、[Decision 0039](../decisions/0039-compute-scheduler-calibration.md)（Scheduler の暫定値の較正）。どちらも Proposed
+- 判断の提案: [Decision 0040](../decisions/0040-main-coding-model-selection.md)（採用 Model）、[Decision 0039](../decisions/0039-compute-scheduler-calibration.md)（Scheduler の暫定値の較正）。どちらも Approved
 - 生の結果（Trace・Patch・Server の Log・VRAM の記録）は Repository に入れない（Hidden check の内容を含むため。Decision 0041 の 4）。Server の `/data/results/paw-bench-2026-09-28` と `/data/results/paw-bench-2026-09-30` にある
 
 ## 1. 条件（全 Model で同じ）

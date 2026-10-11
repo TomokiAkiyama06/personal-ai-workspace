@@ -306,10 +306,20 @@ export interface Answered {
  * the checkbox, then [確認して保存].
  */
 export function AnswerControls(props: AnswerControlsProps) {
-  // A new revision of the candidate (a newer memory version, or other words)
-  // starts over: the choice and the acknowledgement were given for the old one.
+  // A new revision of the candidate (a newer memory version, other words, or
+  // new observations that changed the offered scopes, the recommendation or
+  // the risk without a new version) starts over: the choice and the
+  // acknowledgement were given for the old one.
   const { candidate } = props;
-  const revision = `${candidateId(candidate)}#${candidate.version_number ?? ""}#${candidate.content}`;
+  const revision = JSON.stringify([
+    candidateId(candidate),
+    candidate.version_number,
+    candidate.content,
+    candidate.options,
+    candidate.recommendation,
+    candidate.evidence.risk_level,
+    candidate.held_reason,
+  ]);
   return <Controls key={revision} {...props} />;
 }
 
