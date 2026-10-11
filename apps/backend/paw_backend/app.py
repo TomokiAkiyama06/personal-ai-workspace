@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from paw_backend import __version__
+from paw_backend.agents.wiring import LocalModelSetup, build_preference_interpreter
 from paw_backend.api.v1 import router as api_v1
 from paw_backend.auth.body_limit import AuthBodyLimitMiddleware
 from paw_backend.auth.csrf import OriginCheckMiddleware
@@ -70,6 +71,7 @@ def create_app(
     compute: ComputeSetup | None = None,
     local_runtimes: Mapping[str, LocalRuntime] | None = None,
     gh_runner: GhRunner | None = None,
+    local_model: LocalModelSetup | None = None,
 ) -> FastAPI:
     """Build the FastAPI application.
 
@@ -106,6 +108,13 @@ def create_app(
     lifespan. It reports the Compute Scheduler built from ``compute`` and, while
     the lifespan runs it, Full GPU Mode; without ``compute``, the read-only GPU
     probe when ``PAW_HEALTH_GPU_PROBE`` is set.
+
+    ``local_model`` (with ``compute``; issue #208, Decision 0083) is where the
+    main model's OpenAI-compatible API is: the Inferred Preference interpreter
+    (``app.state.preference_interpreter``, #38) then asks it, under an
+    ``INTERACTIVE`` lease of the scheduler (without one, or without
+    ``local_model``, the rule interpreter answers). Its client is closed at
+    shutdown.
     """
     settings = settings or Settings()
     database = database or Database(settings)
@@ -115,10 +124,18 @@ def create_app(
     auth = auth or build_auth(settings, database)
     if local_runtimes is not None and compute is None:
         raise TypeError("local_runtimes need compute")
+    if local_model is not None and compute is None:
+        raise TypeError("local_model needs compute")
     compute_services: ComputeServices | None = None
     if compute is not None:
         scheduler, vram_warnings = build_compute(compute)
         compute_services = ComputeServices(compute, scheduler, vram_warnings)
+    preference_interpreter = None
+    local_model_client = None
+    if local_model is not None:
+        preference_interpreter, local_model_client = build_preference_interpreter(
+            local_model, compute_services.scheduler
+        )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -280,6 +297,8 @@ def create_app(
             heartbeat.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await heartbeat
+            if local_model_client is not None:
+                await local_model_client.aclose()
             await database.dispose()
             auth.close()
 
@@ -338,6 +357,9 @@ def create_app(
         else None
     )
     app.state.compute = compute_services
+    # The model of the Inferred Preference interpreter (#38), or ``None``: the
+    # rule interpreter answers.
+    app.state.preference_interpreter = preference_interpreter
     probe = NvidiaSmiProbe() if settings.health_gpu_probe and compute is None else None
     app.state.system_health = build_system_health(
         settings,

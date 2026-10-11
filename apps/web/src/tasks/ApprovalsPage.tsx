@@ -4,6 +4,10 @@
 // person the agent works for may decide, once, for that one call. A strong
 // approval (merging to main, changing a credential) needs a Passkey
 // re-authentication and is never allowed here; it can be rejected.
+// 「このタスクの間は許可」 (Decision 0085) is offered only for an approval the
+// Backend marks `task_grant_allowed`: it approves this call and lets the later
+// calls of the same tool on the same or a narrower target run without asking
+// until the task ends (revocable on the task screen).
 import { useCallback, useEffect, useRef, useState } from "react";
 import { isApiError } from "../api/client";
 import { useI18n } from "../i18n";
@@ -198,7 +202,7 @@ function ApprovalsView({ source }: { source: TaskSource }) {
           onClose={close}
           onDecided={(decision) => {
             setDone(
-              t(decision === "approve" ? "approvals.approved" : "approvals.rejected", {
+              t(DECIDED[decision], {
                 tool: selected.tool,
               }),
             );
@@ -219,6 +223,12 @@ function ApprovalsView({ source }: { source: TaskSource }) {
     </div>
   );
 }
+
+const DECIDED = {
+  approve: "approvals.approved",
+  approve_for_task: "approvals.approvedForTask",
+  reject: "approvals.rejected",
+} as const satisfies Record<ApprovalDecision, string>;
 
 function ApprovalSheet({
   source,
@@ -320,6 +330,23 @@ function ApprovalSheet({
             >
               {t("approvals.approveOnce")}
             </button>
+          )}
+          {!strong && approval.taskGrantAllowed && (
+            <>
+              <button
+                type="button"
+                className="secondary wide"
+                disabled={pending !== null}
+                aria-busy={pending === "approve_for_task"}
+                aria-describedby="approval-for-task-hint"
+                onClick={() => decide("approve_for_task")}
+              >
+                {t("approvals.approveForTask")}
+              </button>
+              <p id="approval-for-task-hint" className="small muted approval-for-task-hint">
+                {t("approvals.forTaskHint")}
+              </p>
+            </>
           )}
           <button
             type="button"

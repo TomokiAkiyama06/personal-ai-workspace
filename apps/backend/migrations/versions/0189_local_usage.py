@@ -1,5 +1,4 @@
-"""Local usage and the task of an agent incident (issue #187 item 5, Decision 0077
-Proposed).
+"""Local usage and the task of an agent incident (issue #187 item 5, Decision 0077).
 
 Revision ID: 0189
 Revises: 0188

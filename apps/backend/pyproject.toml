@@ -27,6 +27,8 @@ dependencies = [
     "argon2-cffi==25.1.0",
     "webauthn==3.0.1",
     "cryptography==50.0.1",
+    # The local model server's OpenAI-compatible API (paw_backend/agents, #208).
+    "httpx==0.28.1",
 ]
 
 [project.scripts]
@@ -34,7 +36,6 @@ paw-backend = "paw_backend.server:main"
 
 [dependency-groups]
 dev = [
-    "httpx==0.28.1",
     "ruff==0.16.8",
 ]
 

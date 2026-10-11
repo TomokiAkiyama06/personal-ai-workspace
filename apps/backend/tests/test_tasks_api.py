@@ -15,6 +15,8 @@ from sqlalchemy import text
 from paw_backend.app import create_app
 from paw_backend.authz import Authorizer, InMemoryAuditSink, Principal
 from paw_backend.authz.roles import ProjectRole, SystemRole
+from paw_backend.compute import ComputeConfig, ComputeRequest, ResourceClass
+from paw_backend.compute.wiring import ComputeSetup
 from paw_backend.orchestrator.domain import ExecutionPlacement
 from paw_backend.orchestrator.store import DagStore
 from paw_backend.projects.records import ProjectStatus
@@ -28,6 +30,7 @@ from paw_backend.tasks import (
 from paw_backend.tasks.queueing import BudgetPreset, Priority
 
 from .authz_support import StaticProvider
+from .compute_support import GIB, FakeControl, FakeProbe, ManualClock, default_specs
 from .orchestrator_support import make_plan, node
 from .projects_support import DELETION_RETENTION, T0
 from .repositories_support import PostgresRepositoryTestCase
@@ -177,6 +180,86 @@ class TasksApiTest(PostgresRepositoryTestCase):
         for limit in (0, 201, "x"):
             response = await self.client.get("/api/v1/tasks", params={"limit": limit})
             self.assertEqual(response.status_code, 422)
+
+    async def test_no_capacity_without_a_compute_scheduler(self):
+        self.as_creator()
+        response = await self.client.get("/api/v1/tasks")
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(response.json()["capacity"])
+
+    async def with_compute(self) -> FakeProbe:
+        """The application again, with a compute scheduler over the fake GPU (the
+        main model, the Memory Worker and the embedding model on it)."""
+        specs = default_specs()
+        probe = FakeProbe(total=96 * GIB)
+        control = FakeControl(probe, specs)
+        for spec in specs:
+            control.start_on_gpu(spec.name)
+        self.app = create_app(
+            make_settings(database_url=TEST_DATABASE_URL),
+            compute=ComputeSetup(
+                ComputeConfig(deployments=specs),
+                probe,
+                control=control,
+                clock=ManualClock(),
+            ),
+        )
+        self.app.state.authorizer = Authorizer(self.audit)
+        self.app.state.principal_provider = self.provider
+        self.addAsyncCleanup(self.app.state.database.dispose)
+        self.client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=self.app), base_url="http://localhost"
+        )
+        self.addAsyncCleanup(self.client.aclose)
+        await self.app.state.compute.scheduler.refresh()
+        return probe
+
+    async def test_the_list_has_the_parallel_limit_of_the_scheduler(self):
+        await self.with_compute()
+        scheduler = self.app.state.compute.scheduler
+        lease = (
+            await scheduler.try_acquire(
+                ComputeRequest(
+                    ResourceClass.CODING, deployment="main", context_tokens=8_000
+                )
+            )
+        ).lease
+        self.addAsyncCleanup(lease.release)
+        self.sign_in(uuid.uuid4(), {self.project: ProjectRole.VIEWER})
+
+        response = await self.client.get("/api/v1/tasks")
+
+        self.assertEqual(response.status_code, 200)
+        # The running agent, counted as grown to a whole context: (112,066 -
+        # 65,536) // 65,536 = no more. A person without System Health's detail
+        # sees no VRAM.
+        self.assertEqual(
+            response.json()["capacity"],
+            {
+                "parallel_limit": 1,
+                "running": 1,
+                "vram_used_bytes": None,
+                "vram_total_bytes": None,
+            },
+        )
+        self.assertEqual(self.denials(), [])  # a filter, not a denial
+
+    async def test_system_healths_viewers_also_see_the_vram(self):
+        probe = await self.with_compute()
+        for role in (SystemRole.OWNER, SystemRole.ADMIN):
+            with self.subTest(role=role):
+                self.sign_in(uuid.uuid4(), system_role=role)
+                capacity = (await self.client.get("/api/v1/tasks")).json()["capacity"]
+                self.assertEqual(capacity["parallel_limit"], 1)
+                self.assertEqual(capacity["vram_total_bytes"], 96 * GIB)
+                self.assertEqual(capacity["vram_used_bytes"], probe.used)
+        # Without a fresh reading: no VRAM, and no local agent would start.
+        probe.fail = True
+        await self.app.state.compute.scheduler.refresh()
+        capacity = (await self.client.get("/api/v1/tasks")).json()["capacity"]
+        self.assertEqual(capacity["parallel_limit"], 0)
+        self.assertIsNone(capacity["vram_used_bytes"])
+        self.assertIsNone(capacity["vram_total_bytes"])
 
     async def test_an_invitation_or_a_deleted_project_shows_nothing(self):
         await self.new_task()

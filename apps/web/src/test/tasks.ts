@@ -11,6 +11,7 @@ import type {
   PullRequestRecord,
   ReviewSummary,
   TaskDetail,
+  TaskGrant,
   TaskList,
   TaskState,
   ToolApproval,
@@ -344,6 +345,7 @@ export function sampleApprovals(): ToolApproval[] {
       repositories: ["backend"],
       createdAt: "2026-10-07T05:20:00Z",
       expiresAt: "2026-10-07T06:20:00Z",
+      taskGrantAllowed: false,
     },
     {
       id: "approval-2",
@@ -359,6 +361,7 @@ export function sampleApprovals(): ToolApproval[] {
       repositories: ["backend"],
       createdAt: "2026-10-07T05:10:00Z",
       expiresAt: "2026-10-07T06:10:00Z",
+      taskGrantAllowed: false,
     },
   ];
 }
@@ -379,7 +382,10 @@ export function fakeTaskSource(
 ) {
   const calls: { id: string; command: ControlCommand; options: ControlOptions }[] = [];
   const decisions: { id: string; decision: string }[] = [];
+  const revoked: string[] = [];
   let approvals = sampleApprovals();
+  // 「このタスクの間は許可」 grants, by task (Decision 0085).
+  let grants: (TaskGrant & { taskId: string })[] = [];
   const changes = sampleChanges();
   const state = [...tasks];
   const find = (id: string) => {
@@ -449,8 +455,34 @@ export function fakeTaskSource(
       if (item.level === "strong_approval" && decision === "approve") {
         throw new ApiError(403, "strong_approval_unavailable", "unavailable");
       }
+      if (item.level === "strong_approval" && decision === "approve_for_task") {
+        throw new ApiError(409, "task_grant_not_allowed", "not allowed");
+      }
       approvals = approvals.filter((entry) => entry.id !== id);
+      if (decision === "approve_for_task") {
+        grants.push({
+          id: `grant-${grants.length + 1}`,
+          approvalId: item.id,
+          taskId: item.taskId,
+          tool: item.tool,
+          summary: item.summary,
+          createdAt: "2026-10-07T05:21:00Z",
+          uses: 0,
+        });
+      }
+    },
+    async listTaskGrants(taskId) {
+      return grants
+        .filter((grant) => grant.taskId === taskId)
+        .map(({ taskId: _task, ...grant }) => grant);
+    },
+    async revokeTaskGrant(id) {
+      if (!grants.some((grant) => grant.id === id)) {
+        throw new ApiError(404, "grant_not_found", "not found");
+      }
+      revoked.push(id);
+      grants = grants.filter((grant) => grant.id !== id);
     },
   };
-  return { source, calls, decisions };
+  return { source, calls, decisions, revoked };
 }

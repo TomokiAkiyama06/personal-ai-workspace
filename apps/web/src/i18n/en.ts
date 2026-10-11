@@ -1,6 +1,7 @@
 import { healthEn } from "./health";
 import type { MessageKey } from "./ja";
 import { memoryEn } from "./memory.en";
+import { preferencesEn } from "./preferences.en";
 import { tasksEn } from "./tasks";
 
 // English. Every key of the Japanese catalog must be here (the type enforces it).
@@ -549,4 +550,5 @@ export const en: Record<MessageKey, string> = {
   "usage.users.empty": "No users recorded.",
 
   ...memoryEn,
+  ...preferencesEn,
 };

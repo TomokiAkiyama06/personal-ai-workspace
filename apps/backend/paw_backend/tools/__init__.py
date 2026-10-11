@@ -56,6 +56,13 @@ from paw_backend.tools.credentials import (
     redact_value,
 )
 from paw_backend.tools.decisions import BrokerDecision, BrokerReason, Verdict
+from paw_backend.tools.grant_pattern import (
+    GrantArgument,
+    GrantMatch,
+    GrantPattern,
+    grant_pattern_of,
+    grantable,
+)
 from paw_backend.tools.lease import (
     FailClosedLeaseVerifier,
     LeaseStatus,
@@ -83,6 +90,17 @@ from paw_backend.tools.scope import (
     TargetError,
     TaskScope,
     with_working_set_roles,
+)
+from paw_backend.tools.task_grant_memory import InMemoryTaskGrantStore
+from paw_backend.tools.task_grant_store import PostgresTaskGrantStore
+from paw_backend.tools.task_grants import (
+    GrantOutcome,
+    GrantResult,
+    GrantUse,
+    GrantUseOutcome,
+    TaskGrantRecord,
+    TaskGrantStatus,
+    TaskGrantStore,
 )
 from paw_backend.tools.task_state import (
     FailClosedTaskActivity,
@@ -133,7 +151,15 @@ __all__ = [
     "FailClosedStepUp",
     "FailClosedTaskActivity",
     "FailClosedUseGate",
+    "GrantArgument",
+    "GrantMatch",
+    "GrantOutcome",
+    "GrantPattern",
+    "GrantResult",
+    "GrantUse",
+    "GrantUseOutcome",
     "InMemoryApprovalStore",
+    "InMemoryTaskGrantStore",
     "LeaseStatus",
     "LeaseVerifier",
     "LexicalPathResolver",
@@ -143,6 +169,7 @@ __all__ = [
     "PathResolver",
     "PostgresApprovalStore",
     "PostgresTaskActivity",
+    "PostgresTaskGrantStore",
     "RealpathResolver",
     "RepositoryUseGate",
     "RevokeOutcome",
@@ -154,6 +181,9 @@ __all__ = [
     "TaskActivity",
     "TaskActivityProvider",
     "TaskContext",
+    "TaskGrantRecord",
+    "TaskGrantStatus",
+    "TaskGrantStore",
     "TaskRun",
     "TaskScope",
     "ToolBroker",
@@ -170,6 +200,8 @@ __all__ = [
     "WorkingSetExecutor",
     "WorkingSetRegistrations",
     "contains_credential_plaintext",
+    "grant_pattern_of",
+    "grantable",
     "is_credential_handle",
     "redact_value",
     "with_working_set_roles",

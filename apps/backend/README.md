@@ -53,7 +53,7 @@ Python 側の Package（`pgvector-python`）は使わず、`paw_backend/memory/v
 apps/backend/
 ├─ pyproject.toml          # 依存（完全一致で固定）と Ruff 設定
 ├─ alembic.ini             # Alembic 設定（DB URL は持たない）
-├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0022 は Password / Session / Login Throttle / 認証 Policy、0023 は Passkey / Passkey の Challenge / Session の Gate、0026 は Project、0027 は Repository 登録・Remote・Checkout、0030 は Shared Connection・Quota・Usage、0031 は Tool Approval、0033 は Queue / Budget / Loop、0034 は DAG Agent Orchestrator（Plan・DAG・Node の試行）、0040 は Memory Schema、0041 は Memory Journal / Consolidation Queue、0042 は Memory の鮮度の Job の Index、0043 は `memory_versions` の全文検索の Index、0046 は Shared Memory Candidate、0050 は Research Scratch、0052 は Evidence / Claim Provenance、0071 は Memory の Status / Stale 状態の変更履歴、0083 は `tasks (project_id, state)` の Index、0085 は Task の Working Set、0087 は外部送信の Audit の `audit_events.details`、0108 は他の Account の Passkey の Reset（`admin_reset`）と 1 回限りの Password 再設定 Token（`password_reset`）とその発行の関数、0124 は招待・端末の Pairing・User の状態の履歴、0133 は Node の試行の Placement（Local / Cloud と Agent・Model）と Cloud の外部送信の Audit の対応、0147 は `memory_versions.content` の長さの上限（20,000 文字）、0154 は承認つきの Pairing の Session の Passkey の登録（`device_pairings.passkey_allowance_ended_at`）、0066 は System Health の時系列・Event と `connection_usage` の実行中の行の部分 Index、0183 は System Health が数える Agent の OOM と Escalation（`agent_incidents`）、0188 は保存される通知と User ごとの既読・非表示、0189 は Local の Model での実行の使用量（`local_usage`）と `agent_incidents.task_id`
+├─ migrations/             # env.py と Revision（0001 は空の Baseline、0021 は users / setup_tokens、0022 は Password / Session / Login Throttle / 認証 Policy、0023 は Passkey / Passkey の Challenge / Session の Gate、0026 は Project、0027 は Repository 登録・Remote・Checkout、0030 は Shared Connection・Quota・Usage、0031 は Tool Approval、0033 は Queue / Budget / Loop、0034 は DAG Agent Orchestrator（Plan・DAG・Node の試行）、0040 は Memory Schema、0041 は Memory Journal / Consolidation Queue、0042 は Memory の鮮度の Job の Index、0043 は `memory_versions` の全文検索の Index、0046 は Shared Memory Candidate、0050 は Research Scratch、0052 は Evidence / Claim Provenance、0071 は Memory の Status / Stale 状態の変更履歴、0083 は `tasks (project_id, state)` の Index、0085 は Task の Working Set、0087 は外部送信の Audit の `audit_events.details`、0108 は他の Account の Passkey の Reset（`admin_reset`）と 1 回限りの Password 再設定 Token（`password_reset`）とその発行の関数、0124 は招待・端末の Pairing・User の状態の履歴、0133 は Node の試行の Placement（Local / Cloud と Agent・Model）と Cloud の外部送信の Audit の対応、0147 は `memory_versions.content` の長さの上限（20,000 文字）、0154 は承認つきの Pairing の Session の Passkey の登録（`device_pairings.passkey_allowance_ended_at`）、0066 は System Health の時系列・Event と `connection_usage` の実行中の行の部分 Index、0183 は System Health が数える Agent の OOM と Escalation（`agent_incidents`）、0188 は保存される通知と User ごとの既読・非表示、0189 は Local の Model での実行の使用量（`local_usage`、0191 は Update の保守（`deploy_maintenance`。ある間は Task が始まらない））と `agent_incidents.task_id`、0193 は Tool の承認の「このタスクの間は許可」（`tool_task_grants`・`tool_task_grant_uses`）
 ├─ paw_backend/
 │  ├─ app.py               # create_app(settings)
 │  ├─ config.py            # PAW_ 環境変数から読む Settings
@@ -68,7 +68,7 @@ apps/backend/
 │  │  ├─ passkeys/         # Passkey（WebAuthn）: Ceremony の検証、Challenge、登録・認証・失効、Passkey の Step-up の Verifier、Tool Broker の強い承認の Step-up（PAW-023）
 │  │  └─ onboarding/       # 招待、QR / リンクの端末の Pairing、User の Lifecycle（削除・復元）、1 回限りの Token（PAW-024）
 │  ├─ identity/            # 最小の users、One-time Token。`redeemer.py` は Web 側、`operator.py`（Owner の作成・Token の発行）は cli だけが使う（PAW-021）
-│  ├─ cli/                 # server-local の管理コマンド `python -m paw_backend.cli`（PAW-021。`audit-retention-*` は Issue #117、`memory-projection-*` は PAW-045、`compute-status` は PAW-036、`user-erasure-run` は Issue #127）
+│  ├─ cli/                 # server-local の管理コマンド `python -m paw_backend.cli`（PAW-021。`deploy-*` は PAW-068。`audit-retention-*` は Issue #117、`memory-projection-*` は PAW-045、`compute-status` は PAW-036、`user-erasure-run` は Issue #127）
 │  ├─ compute/             # GPU / Compute Resource Scheduler: 読み取り専用の GPU Probe、VRAM の勘定、KV Cache の Admission、縮退と常駐、Exclusive、Hybrid の Runtime（PAW-036）、Kaggle / Full GPU Mode（PAW-037）
 │  ├─ orchestrator/        # DAG Agent Orchestrator: Plan、Scheduler、DAG の永続化と Fencing、Runtime の Protocol、Tool・Budget の Gateway、Project 削除の Sweep（PAW-034）、worktree と統合の継ぎ目 `workspaces.py`（PAW-035）
 │  ├─ integration/         # Parallel Worktree / Integration Node: Worker ごとの worktree・branch、integration branch への統合と Conflict の検知、統合後の Test → Evaluator → Review の Gate（PAW-035）、Gate を通った `target` の Push と PR の作成（#132）
@@ -82,6 +82,7 @@ apps/backend/
 │  │  └─ projection/       # Memory Markdown Projection: 決定的な Renderer、Snapshot の読み取り、安全な Writer（0700 / 0600、Link を辿らない）、実行と Audit（PAW-045）
 │  ├─ recovery/            # Recovery Repository: 形式（JSON・Manifest・Checksum）、列の Allow-list の Snapshot、Renderer、Checkout（Marker・Lock）、git（Fast-forward の Push だけ）、Backup、Dry run が既定の Restore（PAW-047）
 │  ├─ projects/            # Project、Membership（招待制）、Lifecycle（PAW-026）、管理者向けの全 Project 一覧（Issue #84）。`task_gate.py` は Task Lane に渡す Project の状態 Gate（Issue #83）、`task_stop.py` は Delete 開始時の Task 停止
+│  ├─ deploy/              # Update の保守（受付停止・Drain・再開）、DB の復旧点（作成・隔離した検証・復元）、その Audit（PAW-068）。Command は `cli/deploy.py`
 │  ├─ health/              # System Health: Component ごとの Source（読み取りだけ）、Monitor、時系列と Event の Store（PAW-066）
 │  ├─ connections/         # Shared Codex / Claude Connection: Adapter の Interface、Secret（Handle）、User 別 Quota、利用量の帰属（PAW-030）
 │  ├─ repositories/        # Repository の登録、Remote、User ごとの Checkout、Path の安全性、git の安全な実行（PAW-027）
@@ -93,7 +94,8 @@ apps/backend/
 │  └─ api/
 │     ├─ deps.py           # FastAPI Dependency
 │     └─ v1/               # /api/v1 の Router（health、events、auth、passkeys、accounts、system_health、compute、usage、projects、memory、tasks、notifications）
-├─ deploy/systemd/         # Audit の保存期間・退避（Issue #117）、Memory Markdown Projection（PAW-045）、Recovery Repository の Backup（PAW-047）の定期実行の Unit File の例、Main の LLM の Runtime の Unit の例（Issue #182）
+├─ deploy/systemd/         # Audit の保存期間・退避（Issue #117）、Memory Markdown Projection（PAW-045）、Recovery Repository の Backup（PAW-047）の定期実行の Unit File の例、Main の LLM の Runtime の Unit の例（Issue #182）、Backend の Unit の例（PAW-068）
+├─ deploy/release/        # Release の Tool `paw_release.py`（標準 Library だけ）と設定の例（PAW-068）
 ├─ deploy/ssh-git-wrapper/ # SshGitRunner の Forced Command の Wrapper と配備の手順（Issue #134）
 └─ tests/                  # unittest
 ```
@@ -149,6 +151,7 @@ Database には pgvector が必要です（CI は `pgvector/pgvector:pg18` を�
 | `PAW_MIGRATION_DATABASE_URL` | なし | Migration 専用の接続先（Schema の Owner の Role）。設定すると Alembic は `PAW_DATABASE_URL` の代わりにこれを使う。認可・Audit の節を参照 |
 | `PAW_APP_DATABASE_ROLE` | なし | Web の Application が接続する PostgreSQL の Role 名（英数字と `_`、63 文字まで。`public`、`pg_` で始まる名前、`postgres` などの予約名は拒否）。Audit Table の Migration が、実在するこの Role に INSERT と SELECT だけを与える（存在しなければ Migration が失敗する）。Migration `0021` は `users` / `setup_tokens` について Token の使用に必要な最小限の権限だけを与える |
 | `PAW_DATABASE_READINESS_CACHE_SECONDS` | `1` | Readiness の結果（失敗を含む）を再利用する秒数。`0` で再利用しない |
+| `PAW_DEPLOY_ADMIN_DATABASE_URL` | なし | Update の復旧点の検証と復元（`deploy-restore-point-verify` / `-restore`）が Database を作成・改名・削除する接続先（`CREATEDB` を持ち Workspace の Database を所有する Role。普通は Migration の Role で `postgres` Database に接続）。[Deploy / Update / Rollback](#deploy--update--rollbackpaw-068)（Decision 0079） |
 | `PAW_OPERATOR_DATABASE_URL` | なし | Owner の管理コマンド（`python -m paw_backend.cli`）の接続先（Token を作れる Role）。未設定のときだけ `PAW_DATABASE_URL` を使い、警告する。[Owner の初期設定と復旧](#owner-の初期設定と復旧) |
 | `PAW_OPERATOR_DATABASE_ROLE` | なし | 上の Role 名（`PAW_APP_DATABASE_ROLE` と同じ検証）。Migration `0021` が、実在するこの Role に管理コマンドの権限を与える |
 | `PAW_SETUP_TOKEN_TTL_SECONDS` | `1800` | Owner の Setup / Recovery Token の有効期間（60〜14400 秒） |
@@ -902,7 +905,7 @@ Issue [#117](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/117
   `PAW_MIGRATION_DATABASE_URL` は root だけが読める `/etc/paw/audit-retention.env`（`chmod 600`）に置く。cron でも同じ Command を使える。
 - **Backend を動かす OS User で実行しない。** この Job は Table の Owner の Credential を持つ。同じ uid の Process は `/proc/<pid>/environ` からそれを読め、
   Job が実行する Code や venv に書き込める User は次の実行に何でもさせられる。例の Unit は専用の `paw-maint`（`useradd --system --no-create-home --shell /usr/sbin/nologin paw-maint`）で動かす。
-  `/opt/paw/apps/backend` と `/opt/paw/venv` は root が所有し、Backend の User にも `paw-maint` にも書き込ませない（Operator の Credential を Backend の User に読ませないのと同じ規則）。
+  `/opt/paw/releases/`（`/opt/paw/current` が指す Release。[Deploy / Update / Rollback](#deploy--update--rollbackpaw-068)）は root が所有し、Backend の User にも `paw-maint` にも書き込ませない（Operator の Credential を Backend の User に読ませないのと同じ規則）。
 
 ```bash
 # 配備（root。Path と User は配備に合わせて Unit File を直す）
@@ -1845,6 +1848,22 @@ Test（要求と使用）: `tests/test_tools_postgres.py` の `StalledServerTest
 **承認と消費の Role の分離（実装しない。理由）。** Agent 側の Process が承認できない、を Database の権限で保証するには、承認する Process と Agent 側の Process が別の Role で接続する必要があります。
 今の構成は Application の Role が 1 つで、その Role は合法な遷移（`pending` → `approved`）を実行できるため、**Application の Process が侵害されれば、その User の名前で承認を書ける**（承認者は委任元 User でなければならず、強い承認は `step_up_verified` を偽るだけ）ことは、Database では防げません。
 分離には、承認の Endpoint 用の別 Role（と、その接続を持つ別 Process）が要ります。認証（PAW-022）と Step-up（PAW-023）の Endpoint ができる時に、承認の Endpoint だけが `UPDATE (status = 'approved' ...)` を実行できる構成（別 Role、または `SECURITY DEFINER` 関数）へ進めてください（Decision 0006 の後続の課題）。それまでは、**Agent の Runtime に Application の Role の DB 接続を渡さず、Broker だけを渡すことが前提条件です**（Decision 0006 で承認）。分離は PAW-022 / PAW-023 の受け入れ条件に入っています。
+
+### Task の間の許可（「このタスクの間は許可」、Decision 0085、Approved）
+
+[Decision 0085](../../docs/decisions/0085-task-scoped-tool-approval-grant.md)（**Approved**。推奨どおりに実装）。承認を求められた本人が「このタスクの間は許可」で答えると、`ApprovalService.approve_for_task` が、その承認を承認し、**同じ Transaction で** Grant（`tool_task_grants`、Migration `0193`）を作ります。Broker は以後、同じ Task の**同じ Run**・同じ Agent・同じ本人・同じ Tool で、Scope の状態と引数が**同じか狭い**呼び出しを、人に聞かずに通します（`task_grant_applied`）。
+
+- **同じか狭い**（`tools/grant_pattern.py` の `GrantPattern`）: Path は同じかその下（`/` の区切りで比べる）、Query のない URL は同じかその下（`scope.url_within`）、Query のある URL・Host・Project・Repository・文字列・整数・真偽値は完全一致（文字列などは SHA-256 だけを保存）、省略できる引数はあるかないかも同じ。Scope の状態は `in_scope` ⊂ `host_out_of_scope`。
+- **対象外**（`grantable`）: `STRONG_APPROVAL`、`destructive`、`credential-use` と Credential の handle の引数、`network` と `write` の両方（外部送信）、Working Set の Tool、`admin.*` / `owner.*` と Project の設定・Member・Agent Policy・Lifecycle・Repository の追加などの Capability。Broker は承認を開くときに型を `tool_approvals.grant_pattern` に保存し（NULL は対象外）、Web はそれが真のときだけボタンを出します。
+- **毎回の検査はそのまま**: Policy・認可・Path・Budget・Lease・Working Set の役割（`admit_repository_use`）は Grant があっても毎回通します。Grant は人のクリックの代わりにだけなります。
+- **期間**: Grant の Run の間だけ。`PostgresTaskGrantStore.use` は、Task の行を `FOR SHARE` で Lock して、Task が動いていて Run が Grant の Run であることを、使用の行（`tool_task_grant_uses`）の挿入と同じ Transaction で確かめます。Task の終了の Listener（`revoke_task`）は Open な承認と一緒に Grant も取り消します（記録のため。失敗しても上の確認で使えない）。(Task の Run, User) ごとの有効な Grant は 20 まで（`max_task_grants`、Advisory Lock で直列化）。
+- **記録**: 使うたびに、Broker の判断の行（`tool.<name>`、`task_grant_applied`）と、Grant の ID を Resource にした `tool.approval.grant.use` の行（同じ Correlation ID）。後者が書けなければ実行しません（`audit_unavailable`）。作成と取り消しも `tool.approval.grant` / `tool.approval.grant.revoke`。
+- **取り消し**: `ApprovalService.revoke_grant`（本人と Admin / Owner。他の人には `not_found`）。取り消しと使用は Grant の行の Lock で順序づけます。
+- **Grant が読めない・使えないとき**は、毎回の承認に戻ります（人に聞く向き）。Task が終わった・Run が替わった・Repository の利用が拒否された・Audit が書けないときは拒否します。
+- **Migration `0193`**: `tool_approvals.grant_pattern`（Trigger で変更を拒否、Application の Role に UPDATE なし）、`tool_task_grants`（作成は `active` だけ、変更は `active` → `revoked` だけ、DELETE / TRUNCATE は拒否）、`tool_task_grant_uses`（追記のみ）。Application の Role は Grant に SELECT・INSERT・状態の列の UPDATE、使用に SELECT・INSERT。
+- **いま本番で効く範囲**: 本番の Registry の Tool（Working Set の変更）はすべて対象外なので、`APPROVAL` の Tool が登録されるまで、ボタンは出ません。
+
+Test: `tests/test_tools_task_grants.py`（型・対象外・Broker・Service。In-memory）、`tests/test_task_grants_postgres.py`（PostgreSQL の Store: 承認と Grant の 1 Transaction、Run と終了、並行での上限、Trigger）、`tests/test_task_grants_api.py`（HTTP）。
 
 ### Audit
 
@@ -3721,7 +3740,7 @@ Test は `tests/test_memory_board.py`（読み取りモデル。見えてはい�
 - **確認**は `MemoryVersioningService` と同じ Lock・認可・履歴の規則で書きます（`PreferenceConfirmationService` はその Subclass）。同じ Memory の `n + 1` を `confirmed` で選んだ Scope に書き、`supersedes` と `confirmed_from` を張り、出典を写して本人の `user_confirmation` を足します。Project / Repository に広げるにはそこでの `project.memory.use`（Repository は保存された ACL つき）が要ります。広げる前の Private な版は Private のままです。
 - **保留された候補**（`held_high_risk` / `held_confirmed` / `held_widened`）の確認は key の Memory の次の Version か新しい登録済みの Memory を書き、答えを `memory_preference_resolutions` に残します。保存しないも答えとして残り、同じ key の新しい保留が来たら新しい質問になります。
 - **高リスク**（Merge・削除・公開・ACL / 権限・Credential・外部送信、または「必須」の規則）は `acknowledge_high_risk: true` がなければ 409 `preference_high_risk_unacknowledged` で何も書きません。確定しても Memory だけで（`attributes.preference.policy_effect = "none"`）、権限・ACL・Merge Policy は何も変わりません。
-- **自由入力**は、`app.state.preference_interpreter`（`PreferenceInterpreter` の Port。`preference-interpretation-v1` の JSON を返すモデル）があればそれが、なければ・失敗したら規則の Interpreter が構造にします（`interpreted_by`）。モデルは ID を名指せず、Risk は Backend の判定より下げられません。`project_group` は本人の Memory に条件（`適用対象: …`）を書いて保存します。モデルの本番の配線はまだありません。
+- **自由入力**は、`app.state.preference_interpreter`（`PreferenceInterpreter` の Port。`preference-interpretation-v1` の JSON を返すモデル）があればそれが、なければ・失敗したら規則の Interpreter が構造にします（`interpreted_by`）。モデルは ID を名指せず、Risk は Backend の判定より下げられません。`project_group` は本人の Memory に条件（`適用対象: …`）を書いて保存します。本番の配線（Issue #208、Decision 0083 の 1）: `create_app(compute=..., local_model=LocalModelSetup(base_url=...))` のとき、Local の Main Model（vLLM の OpenAI 互換 API）に Tool なしの 1 回の Request で聞く `agents.ModelPreferenceInterpreter` を、`compute.ScheduledInterpreter`（Scheduler の Main Model の `INTERACTIVE` の Lease の中でだけ呼ぶ。取れない・`revoked` になったら `InterpreterUnavailableError` ですぐに規則の Interpreter）で包んで置きます。Task に属さないので、Task の Budget と `local_usage` には入りません。`local_model` がなければ今までどおり規則の Interpreter だけです（環境変数の設定はなく、`ComputeSetup` と同じく配備が渡します）。
 - 誤り: 候補が答えられた・変わった 409 `preference_candidate_changed`、版の衝突 409 `memory_version_conflict`、書けない Scope 403 `forbidden`、広げた Memory を別の Project に移す 422 `validation_error`。入口は Memory 画面と同じ `memory.read`（本人の Memory）です。
 
 Test は `tests/test_preference_rules.py`・`test_preference_interpretation.py`（純粋な規則と構造）、`test_preference_service.py`（PostgreSQL。候補と根拠、確認・保存しない、権限、高リスク、自由入力）、`test_preference_flow.py`（Journal と Consolidator を通した end-to-end）、`test_preference_http.py`、`test_preference_grants.py`（Application の Role で実行）、`test_preference_migration.py` です。
@@ -3853,6 +3872,63 @@ python -m paw_backend.cli recovery-restore --apply  # 1 Transaction で書く
 
 `apps/backend/tests/test_recovery_*.py` と `recovery_support.py` です。`test_recovery_render.py`・`_backup.py` は DB を使わず、`tempfile` の Directory の Bare Repository とその Clone にだけ書きます（git は現在の User で実行し、Remote は Local の Bare Repository）。`test_recovery_postgres.py`・`_cli.py`・`_grants.py` は実 PostgreSQL（`PAW_TEST_DATABASE_URL`）を使い、未設定なら Skip します。`_grants.py` は Backup を非 Superuser の Application の Role で実行し、その Role では Restore できないことを確かめます。
 
+## Deploy / Update / Rollback（PAW-068）
+
+[Issue #54](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/54)。方式は [Decision 0079](../../docs/decisions/0079-deploy-update-rollback.md)（2026-10-08 Approved）。要件は [DEPLOYMENT_UPDATE.md](../../docs/DEPLOYMENT_UPDATE.md)。
+
+- **Release Tool** [`deploy/release/paw_release.py`](deploy/release/paw_release.py)（標準 Library だけ。Host の `python3` 3.12 以上で動く）: Commit ごとの不変の Release（`/opt/paw/releases/<YYYYMMDD-sha12>/`、`release.json` に Schema の Head と Migration の鎖・互換性・Source の Digest）、`/opt/paw/current` の Symlink の切り替え、更新前の確認、Update、Rollback、最初の Install、古い復旧点の削除。Service の停止・起動・Health・通知は設定（[`release.example.toml`](deploy/release/release.example.toml)）の Command だけで行い、Tool 自身は `systemctl` / `sudo` を呼ばない。
+- **DB 側の Command** `python -m paw_backend.cli deploy-*`（`paw_backend/cli/deploy.py`、`paw_backend/deploy/`。`PAW_MIGRATION_DATABASE_URL` で接続）: `deploy-status` / `deploy-precheck`（JSON）、`deploy-maintenance-begin` / `deploy-drain` / `deploy-maintenance-end`、`deploy-restore-point-create` / `-verify` / `-restore`。終了コードは 0（成功）・1（拒否）・2（環境）・3（失敗）。
+- **保守**（Migration `0191`、`deploy_maintenance`、Application の Role は SELECT だけ）: 行がある間 `TaskQueue.claim_next` は何も渡さない（Task の作成と Queue への追加は受け付ける）。Running の Task は Full GPU Mode と同じ Policy の Hold（理由 `Deploy / Update maintenance`）で Node の終わりまで Drain し、終わりに自分が Hold した Task だけを同じ Priority で Queue に戻す。
+- **復旧点**（Migration があるときだけ）: `pg_dump --format=custom`（0700 の `restore_point_dir`、Recovery Repository の外）、`PAW_DEPLOY_ADMIN_DATABASE_URL` で作る Scratch の DB への `pg_restore` で検証、戻すときは新しい DB に戻して名前を入れ替え（置き換えた DB は `<db>_replaced_<時刻>` として残る）。取得した後に User が削除されていれば Restore を拒否。Credential は `PG*` 環境変数で渡し、Command 行・出力・Audit に出さない。
+- **互換な Migration**: Migration の File の `paw_compatibility = "expand"` は「一つ前の Release がこの Schema で動く」という宣言。間がすべて `expand` なら Rollback は DB を戻さない。宣言なし・`contract`・`data` は非互換（復旧点が要る）。新しい Migration は可能なら Table・Nullable な Column の追加などの `expand` にし、削除・改名は次の Release の別の Migration にする。
+
+### Update の手順（`paw-release update <version>`）
+
+1. 更新前の確認（1 つでも失敗すれば何も変えずに終了コード 1）: Release の Digest、進行中の操作がない、Disk の空き、`deploy-precheck`（DB、保守中でない、**`audit_events` の Partition が翌月末まで**（`audit-retention-check` と同じ）、Recovery Backup が 90 分以内に成功、`PAW_RECOVERY_REPOSITORY_DIR`）、Schema の互換性、設定の `precheck`（例: `paw-audit-retention.timer` と `paw-recovery-backup.timer` が有効）。
+2. 保守の開始（新しい Task は始まらない）と Running の Task の Hold。
+3. Drain（既定 900 秒）。終わらなければ中止して再開（終了コード 3）。`--stop-now` は待たずに進む。
+4. `recovery-backup-run`（Recovery Projection の最新化）。
+5. 設定の `stop`（Backend と、DB に書く Timer）。
+6. Migration があれば復旧点の作成と検証（失敗すれば元の Release を起動し直して中止）、`python -m alembic upgrade head`（新しい Release）。
+7. `current` の切り替え、設定の `start`、Health（`deploy-status` の Revision と設定の `health`。既定 300 秒まで再試行）。
+8. 成功: known-good に加え、保守を終えて Task を再開し、古い復旧点を消す（終了コード 0）。失敗: 新しい Release を止め、復旧点を戻し（Migration をした場合）、元の Release に切り替え、`post_restore`（`user-erasure-run`）、起動、Health、再開（終了コード 4）。戻せなければ保守のまま `notify` を実行して止まる（終了コード 5。直した後 `paw-release end-maintenance`）。
+
+`paw-release rollback [--to <version>] [--restore-point <label>]` は known-good の Release へ戻す。間の Migration が `expand` だけなら Application だけ、そうでなければ戻り先の Head と同じ Revision の検証済みの復旧点が要る。
+
+### 配置（承認の後、運用者が行う。root で）
+
+```bash
+useradd --system --no-create-home --shell /usr/sbin/nologin paw-maint  # Decision 0031 6
+install -d -m 0755 /opt/paw/releases
+install -d -m 0700 /var/lib/paw/deploy
+install -d -m 0700 -o paw-maint /var/lib/paw/restore-points
+cp deploy/release/paw_release.py /usr/local/sbin/paw-release && chmod 0755 /usr/local/sbin/paw-release
+cp deploy/release/release.example.toml /etc/paw/release.toml        # Path と Unit 名を合わせる
+# /etc/paw/deploy.env（chmod 600、root）: PAW_MIGRATION_DATABASE_URL、PAW_DATABASE_URL、
+# PAW_RECOVERY_REPOSITORY_DIR、PAW_DEPLOY_ADMIN_DATABASE_URL、PAW_APP_DATABASE_ROLE など
+cp deploy/systemd/*.service deploy/systemd/*.timer /etc/systemd/system/
+systemctl daemon-reload
+paw-release build --repo /srv/paw/source --commit origin/main
+paw-release install <version>
+# Audit の保存期間（Decision 0031、Issue #54 のコメント）と他の定期実行
+systemctl enable --now paw-audit-retention.timer paw-recovery-backup.timer \
+  paw-memory-projection.timer paw-user-erasure.timer paw-release-prune.timer \
+  paw-backend.service
+python3 /usr/local/sbin/paw-release precheck <next version>   # Timer と Partition の確認を含む
+```
+
+`/opt/paw/releases` は root が所有し、Backend の User（`paw`）にも `paw-maint` にも書き込ませない。復旧点の Directory は `backend_prefix` の User（例 `paw-maint`）の 0700。
+
+### 制限と未確認の点
+
+- 実際のサーバーではまだ動かしていない（Decision 0079 は 2026-10-08 に承認。本番への配置は「配置」の手順で Human が行う）。Test は一時 Directory と Fake（Service、Health、`pg_dump` / `pg_restore`）。`pg_dump` / `pg_restore` の実物では、作業環境の Docker（`pgvector/pgvector:pg18` の Client）で全 Schema の作成・検証・名前の入れ替えを手で確かめた。
+- 「Update available」の通知、Model の Update（Application と独立。`paw-llm-main.service` は別）は後続。
+- `install` は既存の DB の復旧点を取らない（Tool を使う前の配備から移るときは手で `pg_dump` を取る）。
+
+### Test
+
+`tests/test_deploy_release.py`（Tool。Fake の世界で手順の順序・失敗・Rollback・互換性・Lock・Build と不変性）、`tests/test_deploy_maintenance.py` / `test_deploy_maintenance_migration.py`（保守と Migration 0191）、`tests/test_deploy_restore_points.py` / `test_deploy_cli.py`（復旧点と Command。実 PostgreSQL が要る Test は `PAW_TEST_DATABASE_URL` がなければ Skip）。
+
 ## DAG Agent Orchestrator
 
 [PAW-034](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/30)（Revision `0034`、`paw_backend/orchestrator/`）で実装しました。設計は [要件](../../REQUIREMENTS.md)の「Agent Orchestration / Parallel-first execution」に従い、要件が決めていない選択（Plan の形、Role の上限、Escalation の段、並列数、結果の大きさ、Sub-Agent の予算、Sweep の周期）は **[Decision 0021（Approved、2026-09-26）](../../docs/decisions/0021-dag-orchestrator-policy.md)** にまとめ、人間が承認しました。数値は暫定値として承認されたもので、`orchestrator/limits.py` と Test の期待値で変えられます（DB の CHECK に書いた項目を除く）。
@@ -3937,6 +4013,7 @@ Node が失敗するたび（Runtime が失敗を返す、例外を送出する�
 | `WAIT_FOR_USER`（Budget、Loop で上位がない） | Node を残して Run を止め、Task を `waiting`（理由 `user`） |
 | `FAIL`（`retries` の超過） | Node を失敗にして Run を止め、Task を `failed` |
 | `retryable=False` の失敗 | 再試行せず Node を失敗にする |
+| `escalate=True` の失敗（Decision 0083 の 4） | 上の段があり、`MAX_APPROACH` と Budget が許すなら、Loop 検知と代替（`TRY_ALTERNATIVE`）を待たずに `ESCALATE_AGENT`。上の段がなければ今までどおり。Planner の失敗では普通の失敗と同じ |
 
 再試行の前に Back-off（`retry_backoff_seconds`、倍で最大 60 秒）で待ちます。Escalation の段は `OrchestratorConfig.ladders`（Role ごとの Agent の並び）です。
 
@@ -3953,7 +4030,7 @@ class AgentRuntime(Protocol):
     async def run_node(self, assignment: NodeAssignment) -> NodeOutcome: ...
 ```
 
-`Orchestrator(...)` を作るとき、全ての Runtime を `validate_runtime`（`async run_node` が 1 引数か）で検査し、Ladder が名前を挙げる Agent の Runtime がなければ失敗します。`NodeAssignment` は Goal・Input・上流の結果・Agent の Label・試行と方法の番号と、`tools`（Tool の呼び出し）、`budget`（消費の報告）を持ちます。**Runtime は Broker、Runner、`TaskContext`、Grant、Scope、DB 接続を受け取りません。** `NodeStopped`（Task が終わった、Lease を失った、Budget が尽きた）は Runtime が通さなければなりません。`NodeOutcome.succeeded(result, plan=...)` / `NodeOutcome.failed(error_class, message, retryable=...)`。
+`Orchestrator(...)` を作るとき、全ての Runtime を `validate_runtime`（`async run_node` が 1 引数か）で検査し、Ladder が名前を挙げる Agent の Runtime がなければ失敗します。`NodeAssignment` は Goal・Input・上流の結果・Agent の Label・試行と方法の番号と、`tools`（Tool の呼び出し）、`budget`（消費の報告）を持ちます。**Runtime は Broker、Runner、`TaskContext`、Grant、Scope、DB 接続を受け取りません。** `NodeStopped`（Task が終わった、Lease を失った、Budget が尽きた）は Runtime が通さなければなりません。`NodeOutcome.succeeded(result, plan=...)` / `NodeOutcome.failed(error_class, message, retryable=..., escalate=...)`（`escalate=True` と `retryable=False` は同時に付けられません。`InvalidOrchestratorArgumentError`）。
 
 ### Placement（Node をどこで走らせたか。Issue #133）
 
@@ -4100,6 +4177,21 @@ Test: `test_orchestrator_authority.py`（本番の `TaskAuthority`。最後の T
 `apps/backend/tests/test_orchestrator_*.py`、`orchestrator_support.py`、`test_authz_delegation.py`。標準 `unittest` だけで、`test_orchestrator_plan.py`（Plan の検査の表と、ランダムな DAG の位相順・Cycle 検出）、`test_orchestrator_result.py`、`test_orchestrator_scheduling.py`（純粋な規則と、ランダムな DAG の Property Test）、`test_orchestrator_scope.py`、`test_orchestrator_argument_validation.py`（全 Public Method × 全引数 × 誤った値の表。DB を設定しない Database を渡し、DB に届く前に型付きのエラーになること）、`test_orchestrator_migration.py` の前半と `test_orchestrator_project_sweep.py` の前半は DB を使いません。
 それ以外は実 PostgreSQL（`PAW_TEST_DATABASE_URL`）を使い、未設定なら Skip します: 永続化と Fencing の競合（`test_orchestrator_store.py`: 引き継ぎ・書き込み・Lock 待ちの順序、同時に終わる 2 Node、同じ Node の 2 重の起動）、実行・並列・結果の受け渡し（`test_orchestrator_run.py`）、失敗・Retry・Escalation・Isolation（`test_orchestrator_failures.py`）、Plan の受け入れ（`test_orchestrator_planning.py`）、Budget（`test_orchestrator_budget.py`）、Pause / Cancel / Retry / Restart（`test_orchestrator_control.py`）、Lease・Crash・引き継ぎ（`test_orchestrator_lease.py`）、Tool 呼び出しの Lease の Fencing と `tool_calls` の Run への計上（`test_orchestrator_lease_fencing.py`。Issue #126）、終了の Command と Start の Fencing（`test_orchestrator_fenced_commands.py`: Barrier で「最後の確認の後、Command の前」に `fail` → Retry → Start を割り込ませる）、`succeeded` の DAG の Retry と予期しない Error の後始末（`test_orchestrator_recovery.py`）、走っている間の Runtime の Budget（`test_orchestrator_runtime_budget.py`）、Gate の明示的な組み立て（`test_orchestrator_wiring.py`）、Project が Active でないときの Claim・Start・走行中の Task（実際の `ProjectStateGate`。`test_orchestrator_project_gate.py`）、Worker の停止と `serve`（`test_orchestrator_shutdown.py`）、実際の Tool Broker と（`test_orchestrator_tools.py`）、ランダムな DAG を Orchestrator 全体で動かす Property Test（`test_orchestrator_property.py`）、Migration の上げ下げと Model との一致（`test_orchestrator_migration.py`、Revision `0133` は `test_orchestrator_placement_migration.py`）、Placement の記録と Cloud の外部送信の Audit（`test_orchestrator_placement.py`: Fencing・1 回だけ・Audit の行と同じ Transaction・DB の CHECK と Trigger・`HybridRuntime` を Orchestrator に入れた Local / Cloud）、Sweep（`test_orchestrator_project_sweep.py`）、非 Superuser の Role（`test_orchestrator_grants.py`）。時間は注入した `ManualClock` で、速度に依存する Test はありません（Lock 待ちや非同期の進行は上限を長く取った待機で確かめます）。
 
+## Agent Runtime の共有部品（Issue #208、Decision 0083、Approved）
+
+`paw_backend/agents/` は Orchestrator の実 Runtime（Local の Main Model の Tool loop、Codex / Claude Code の CLI）とその共有部品の Package です。Decision 0083 の 11 の段階ごとに入り、いまは段階 1（共有部品）だけです。Tool・Sandbox・CLI はまだ何も動かしません。
+
+| File | 内容 |
+| --- | --- |
+| `failures.py` | 閉じた失敗の対応表（`ErrorClassifier`、Decision 0083 の 4）。`Failure`（理由ごとの固定の文）→ `error_class`（すべて `RUNTIME_ERROR_CLASSES` の名前）と `escalate`。`retryable=False` の行はありません。Cloud の振り替えの経路（`fallback=True`）の Gate の拒否だけは `HybridRuntime` の `ComputeUnavailable`。`from_error` は `NodeStopped`・Cancel・`MemoryError` を握りつぶさずに上げ、他の例外の文は読みません |
+| `reasoning.py` | Reasoning の履歴の方針の差し込み口 `ReasoningHistoryPolicy.prepare(messages) -> messages`（Decision 0083 の 3）。既定は Benchmark と同じ `KeepAllReasoning`（入力を変えない写し）。古い Reasoning を外す方針は #200 の Decision 0076 の承認の後に足します。Reasoning は DB・Log・Audit・`NodeResult` に書きません（Log には `reasoning_chars` の文字数だけ） |
+| `chat.py` | `ChatCompletionsClient`: OpenAI 互換の `/chat/completions` への非 Stream の 1 回の呼び出し（httpx。環境の Proxy を使わず、Redirect を追わない）。答えの文・Reasoning（`reasoning_content` / `reasoning`）・Tool 呼び出し・`usage`（無ければ `None`。0 にしない）。失敗は表の `RuntimeFailure` だけ（繋がらない・503 → `SERVER_UNAVAILABLE`、CUDA OOM → `OUT_OF_MEMORY`、`maximum context length` → `CONTEXT_LIMIT`、全体の Timeout → `TIMEOUT`、壊れた・大きすぎる答え → `MALFORMED_RESPONSE`、その他 → `OTHER`）。Server の Error の本文は印を探すだけで、Log・例外・保存に出しません。Compute の Lease の内側でだけ使います |
+| `preferences.py`・`wiring.py` | #38 の Model の Interpreter（`ModelPreferenceInterpreter`。本人の文と候補を JSON の Data として渡し、`enable_thinking: false`）と、`LocalModelSetup` / `build_preference_interpreter`（`create_app(local_model=...)`。[Inferred Preference の確認 Flow](#inferred-preference-の確認-flowissue-38paw-044decision-0081)） |
+
+`NodeOutcome.failed(..., escalate=True)` と `_retry_step` の扱いは [Node ごとの Retry / Escalate](#node-ごとの-retry--escalate) の表のとおりです（Decision 0007 / 0021 の一部 Supersede）。
+
+Test は `tests/test_agents_failures.py`（表の各行と不変条件）、`test_agents_reasoning.py`、`test_agents_chat.py`（Fake の Server: `httpx.MockTransport`）、`test_agents_preferences.py`（Fake の Server と `compute_support` の Fake の GPU。実 PostgreSQL の Service の Test は `PAW_TEST_DATABASE_URL` がないと Skip）、`test_orchestrator_escalate.py`（実 PostgreSQL）です。GPU・Network・本物の CLI は使いません。
+
 ## Parallel Worktree / Integration Node
 
 [PAW-035](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/31)（`paw_backend/integration/`、Orchestrator の継ぎ目 `paw_backend/orchestrator/workspaces.py`）で実装しました。**Migration はありません。** 設計は [要件](../../REQUIREMENTS.md)の「Repository isolation」「Review independence」に従い、要件が決めていない選択（置き場所と名前、Worker の branch の起点、統合の base・順序・方法、Conflict と未 Commit の変更の扱い、統合後の検査、PR / Push を行わないこと、後片付け、SSH の Wrapper の許可リストへの追加）は **[Decision 0036（Approved）](../../docs/decisions/0036-parallel-worktree-integration.md)** にまとめ、Human が 2026-09-28 に全点を推奨どおり承認しました（13 の Wrapper は条件つきで [#134](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/134)、PR の作成と Push は [#132](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/132)）。
@@ -4167,7 +4259,7 @@ completed（Merge Ready。Human が Merge を判断する）/ 通らなければ
 | `control.py` | `ModelControl` の Protocol と、Admin が設定した Command を実行する `CommandModelControl`（GPU の Runtime の起動前にホストの `MemAvailable` を確かめる。Issue #182） |
 | `host.py` | ホストの `MemAvailable`（`/proc/meminfo`）の読み取り（Issue #182） |
 | `scheduler.py` | `ComputeScheduler`: Admission と待ち行列、縮退と常駐、Exclusive |
-| `runtimes.py` | `HybridRuntime`（Orchestrator の Runtime。Local / Cloud）、`ScheduledMemoryWorker`、`PlacedEmbedder` |
+| `runtimes.py` | `HybridRuntime`（Orchestrator の Runtime。Local / Cloud）、`ScheduledMemoryWorker`、`ScheduledInterpreter`（Issue #208）、`PlacedEmbedder` |
 | `usage.py`、`models.py`、Migration `0189` | `local_usage`（Local の Model での実行の使用量。Application の Role は SELECT / INSERT）と `PostgresLocalUsage`（Decision 0077） |
 | `wiring.py` | Application への組み込み（Issue #165）: `ComputeSetup`、`LocalRuntime`、VRAM の警告の Sink `RecentVramWarnings`、HTTP の経路が使う `FullGpuController` |
 
@@ -4563,9 +4655,9 @@ PAW-062 の画面（`/agents`、`/pulls`、Web の `src/tasks/apiSource.ts`）�
 - 一覧の Project は Session の Membership から、Project ごとに Policy で `project.read` を判定します。Repository は、その ACL で `project.read` があるものだけを出し、ない Repository は名前も PR も出しません。
 - 存在しない Task と、読めない Project の Task はどちらも 403 です（Guard が区別しない）。
 - Task の入力、Log、Node の Goal / 結果、Event の詳細は返しません。
-- 未実装: 一覧の並列の上限 / VRAM（Decision 0067 の 6）。
+- 一覧の `capacity` は Compute Scheduler の並列の上限と VRAM です（[Decision 0084](../../docs/decisions/0084-task-list-parallel-limit-and-vram.md)。推奨どおりに実装）。`parallel_limit` は Main Model の GPU で動いている Coding の Lease（`running`）と、Main の最も長い Context（KV Pool の Coding の取り分まで）の Agent をあと何件受け付けるか（動いている Agent も最も長い Context まで伸びるとして数えた残りで。`ComputeScheduler.coding_capacity()`。読むだけで何も予約しない）の和で、Context が埋まるほど下がり、Main が GPU にいない・Probe が古い・Exclusive・縮退の 4 段目以降は `running` だけです。`vram_used_bytes` / `vram_total_bytes` は Probe の最新の読み取り（新しいときだけ）で、System Health の詳細を見られる人（`admin.system_health.view`、Owner / Admin。Decision 0059 の 3）にだけ返し、他は `null` です（判定は Policy だけで Audit しない）。Scheduler のない構成（`create_app(compute=None)`）と Main Model のない構成では `capacity` が `null` で、画面は表示しません。
 
-Test: `tests/test_tasks_api.py`（PostgreSQL。見える範囲、ACL、操作の権限、Version、遷移表、Queue、Merge Ready）。
+Test: `tests/test_tasks_api.py`（PostgreSQL。見える範囲、ACL、操作の権限、Version、遷移表、Queue、Merge Ready、並列の上限と VRAM の見える範囲）、`tests/test_compute_scheduler.py` の `CodingCapacityTest`（並列の上限の計算）。
 
 ### PR 画面とモバイルの Board（Issue #185 の 6、Decision 0078）
 
@@ -4579,14 +4671,17 @@ PR 画面の「変更されたファイル」「レビューの要点」「監�
 | `GET /api/v1/pull-requests/{record_id}/audit` | `tasks.list` | その Task と、その Task の Tool の承認の `audit_events` の行（新しい順、`limit` 1〜100、既定 50）。時刻・Action・allow / deny・理由・`agent` / `person` / `system` だけ |
 | `GET /api/v1/approvals` | `tasks.list` | 本人が決める（`requester_user_id` が本人の）、読める Project の `pending` で期限内の Tool の承認（`task_id` で絞れる、`limit` 1〜100）。`summary`・Level・Task の題名と Agent・読める Repository の名前・期限 |
 | `GET /api/v1/approvals/{approval_id}` | `tasks.list` | 上の 1 件（一覧の上限の外の承認を Sheet で開く）。本人のものでない・決定済み・期限切れ・ないものは同じ 404 `approval_not_found` |
-| `POST /api/v1/approvals/{approval_id}/decision` | 承認の Project の `project.task.run`（Audit 必須） | `{"decision": "approve" \| "reject"}` を `ApprovalService` で。本人以外は 404 `approval_not_found`、決定済みは 409 `approval_not_pending`、期限切れは 409 `approval_expired`。`strong_approval` の承認は 403 `strong_approval_unavailable`（Step-up は Fail closed のまま。拒否はできる） |
+| `POST /api/v1/approvals/{approval_id}/decision` | 承認の Project の `project.task.run`（Audit 必須） | `{"decision": "approve" \| "reject" \| "approve_for_task"}` を `ApprovalService` で。本人以外は 404 `approval_not_found`、決定済みは 409 `approval_not_pending`、期限切れは 409 `approval_expired`。`strong_approval` の承認は 403 `strong_approval_unavailable`（Step-up は Fail closed のまま。拒否はできる） |
+| 〃 `approve_for_task` | 同上 | 「このタスクの間は許可」（[Decision 0085](../../docs/decisions/0085-task-scoped-tool-approval-grant.md)、**Approved**）。承認し、同じ Transaction で Grant を作る（`{"outcome": "approved_for_task", "grant_id": ...}`）。一覧の `task_grant_allowed` が偽の承認は 409 `task_grant_not_allowed`（承認は pending のまま）、Task が動いていない・Run が替わったは 409 `task_not_active`、上限は 409 `task_grant_limit_reached` |
+| `GET /api/v1/tasks/{task_id}/approval-grants` | `tasks.list` | 本人の、Task の現在の Run の有効な Grant（「このタスクで許可中」）。Tool・元の承認の `summary`・作った時刻・使った回数。読めない Project の Task は空 |
+| `POST /api/v1/approval-grants/{grant_id}/revoke` | `tasks.list`（Service が本人と Admin / Owner だけに許す） | Grant を取り消す（後の呼び出しは毎回の承認に戻る）。他の人とない Grant は 404 `grant_not_found`、取り消し済みは 409 `grant_not_active` |
 
 - PR の 4 つの経路は、`GET /api/v1/pull-requests/{record_id}` と同じく、PR を読める人だけに答えます（Project と Repository の `project.read`。それ以外とない記録は 404 `pull_request_not_found`）。
 - 変更ファイルと差分は、Integration Gate が PR を記録し、Task を完了させた後で `integration/changes.py` の `ChangeRecorder` が（Gate が Task を完了させた後で）GitHub の `pulls/{n}/files` を作成者の `gh api` で読み、`pull_request_changes`（Migration `0190`）に保存したものです。ファイルは最大 300、Patch は先頭 50 ファイル・各 9,000 文字まで（Redact の後で行の切れ目で切る）、`gh` の出力の上限に最悪の名前でも収まる Page の大きさで読みます。全体で 120 秒、読む前と後に PR の Head が確認した Commit であることを確かめ、失敗しても Task は止めません（Best effort。完了の経路の外）。`IntegrationGate(changes=...)` に渡します（Gate の本番の組み立ては Gate を動かす Issue で行うため、それまで本番では「記録されていません」）。
 - Migration `0190` は `pull_request_changes`（Application の Role は SELECT・INSERT・記録の列の UPDATE）と、Index `ix_audit_events_resource (resource_id, occurred_at)`・`ix_tool_approvals_pending_requester`（`pending` の行だけ）を足します。
 - Merge の経路はありません。
 
-Test: `tests/test_pull_request_boards_api.py`（PostgreSQL。見える範囲、差分、Reviewer、Audit の行の範囲と形、承認の一覧と承認・拒否・Strong Approval・本人以外）、`tests/test_pull_request_changes.py`（GitHub の Fake と実際の `jq`: 上限・Redact・出力の上限・途中で変わった PR、Recorder の Best effort、Migration 0190 と Model の一致）、`tests/test_worktrees_gate.py`（PR の記録の後にだけ読み、失敗しても Task は完了する）。
+Test: `tests/test_pull_request_boards_api.py`（PostgreSQL。見える範囲、差分、Reviewer、Audit の行の範囲と形、承認の一覧と承認・拒否・Strong Approval・本人以外）、`tests/test_task_grants_api.py`（PostgreSQL。「このタスクの間は許可」の経路）、`tests/test_pull_request_changes.py`（GitHub の Fake と実際の `jq`: 上限・Redact・出力の上限・途中で変わった PR、Recorder の Best effort、Migration 0190 と Model の一致）、`tests/test_worktrees_gate.py`（PR の記録の後にだけ読み、失敗しても Task は完了する）。
 
 ## 依存 Package
 
@@ -4598,6 +4693,7 @@ CI は pre-commit の専用環境で Test を実行するため、同じ Version
 [test_dependency_pins.py](../../.github/scripts/test_dependency_pins.py) が検査します。
 依存を追加・更新する場合は 3 か所を同時に変更してください。
 PAW-023 は `webauthn`（py_webauthn。WebAuthn の検証。`auth/passkeys/ceremony.py` だけが import する）と `cryptography`（Test の Software Authenticator が実際に署名するために直接 import する）を追加しました。どちらも最新の Version を固定しています（選定の理由は Decision 0025）。
+Issue #208（Decision 0083）は、Test だけで使っていた `httpx` を実行時の依存に移しました（`agents/chat.py` が Local の Model の Server を呼ぶため。Release は dev の依存を入れないので、Application が import する Package は実行時の依存でなければなりません。`test_dependency_pins.py` が検査します）。
 
 ## 今後の Issue
 

@@ -8,6 +8,7 @@ Authorizer on an in-memory audit sink; the principal is a static one with the
 memberships a session's provider would read.
 """
 
+import dataclasses
 import hashlib
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -36,6 +37,7 @@ from paw_backend.tasks import (
 )
 from paw_backend.tools import (
     ApprovalLevel,
+    ApprovalService,
     ApprovalStatus,
     NewApproval,
     OpenLimits,
@@ -645,6 +647,39 @@ class PullRequestBoardsApiTest(PostgresRepositoryTestCase):
         )
         self.assertEqual(self.status_of(approval), ApprovalStatus.PENDING.value)
         # Rejecting one needs no step-up.
+        response = await self.decide(approval, "reject")
+        self.assertEqual(response.json()["outcome"], "rejected")
+
+    async def test_a_strong_approval_is_refused_even_with_a_step_up_verifier(self):
+        # Codex P2 on PR #206: with ``ApprovalService(step_up=...)`` wired (the
+        # Passkey verifier is bound to the user, not to this approval), the route
+        # must still refuse to grant a STRONG_APPROVAL (Decision 0078 6).
+        class AlwaysSteppedUp:
+            async def verify(self, user_id, approval_id):
+                return True
+
+        execution = self.app.state.task_execution
+        self.app.state.task_execution = dataclasses.replace(
+            execution,
+            approvals=ApprovalService(
+                PostgresApprovalStore(self.database),
+                PostgresAuditSink(self.database),
+                step_up=AlwaysSteppedUp(),
+            ),
+        )
+        task_id = await self.running_task()
+        approval = await self.open_approval(
+            task_id, level=ApprovalLevel.STRONG_APPROVAL
+        )
+        self.as_creator()
+
+        response = await self.decide(approval)
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(
+            response.json()["error"]["code"], "strong_approval_unavailable"
+        )
+        self.assertEqual(self.status_of(approval), ApprovalStatus.PENDING.value)
         response = await self.decide(approval, "reject")
         self.assertEqual(response.json()["outcome"], "rejected")
 

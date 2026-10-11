@@ -69,6 +69,18 @@ class ComputeUnavailableError(ComputeError):
         super().__init__(f"Compute is unavailable ({reason.value})")
 
 
+class InterpreterUnavailableError(ComputeError):
+    """The model interpreter of Inferred Preferences got no lease now, or lost
+    it (``ScheduledInterpreter``): the rule interpreter answers instead.
+    ``reason`` is the refusal, or ``None`` for a revoked lease."""
+
+    code = "interpreter_unavailable"
+
+    def __init__(self, reason: Refusal | None = None) -> None:
+        self.reason = reason
+        super().__init__("The model interpreter is unavailable now")
+
+
 class ExclusiveUnavailableError(ComputeError):
     """An Exclusive lease was not granted; the scheduler is back to normal."""
 

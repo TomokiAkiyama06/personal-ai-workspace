@@ -8,6 +8,8 @@ import { I18nProvider } from "./i18n";
 import { apiMemorySource } from "./memory/apiSource";
 import { MemorySourceProvider } from "./memory/source";
 import { NotificationProvider } from "./notifications/store";
+import { apiPreferenceSource } from "./preferences/api";
+import { PreferenceSourceProvider } from "./preferences/source";
 import { RouterProvider } from "./router";
 import { apiTaskSource } from "./tasks/apiSource";
 import { TaskSourceProvider } from "./tasks/source";
@@ -33,13 +35,15 @@ if (root) {
             <SessionProvider>
               <NotificationProvider>
                 <MemorySourceProvider source={apiMemorySource}>
-                  <UsageSourceProvider source={apiUsageSource}>
-                    <TaskSourceProvider source={apiTaskSource}>
-                      <HealthSourceProvider source={apiHealthSource}>
-                        <App />
-                      </HealthSourceProvider>
-                    </TaskSourceProvider>
-                  </UsageSourceProvider>
+                  <PreferenceSourceProvider source={apiPreferenceSource}>
+                    <UsageSourceProvider source={apiUsageSource}>
+                      <TaskSourceProvider source={apiTaskSource}>
+                        <HealthSourceProvider source={apiHealthSource}>
+                          <App />
+                        </HealthSourceProvider>
+                      </TaskSourceProvider>
+                    </UsageSourceProvider>
+                  </PreferenceSourceProvider>
                 </MemorySourceProvider>
               </NotificationProvider>
             </SessionProvider>

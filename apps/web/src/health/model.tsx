@@ -159,6 +159,16 @@ export const GROUPS: readonly { name: GroupName; components: readonly ComponentN
   { name: "external", components: ["connections", "connection_reaper"] },
 ];
 
+/**
+ * An area of the board: one of the groups, or その他 for the components this
+ * version does not know (a newer Backend's). その他 is there only while the
+ * report has such a component, and it is selected like any other area when one
+ * is the worst problem, so a component's reasons and numbers are never hidden
+ * (Decision 0080 3; the Human's choice for the Codex P2 on PR #203).
+ */
+export const OTHER = "other";
+export type AreaName = GroupName | typeof OTHER;
+
 export function groupOf(component: string): GroupName | null {
   return (
     GROUPS.find((group) => (group.components as readonly string[]).includes(component))?.name ??
@@ -170,16 +180,24 @@ export function componentOf(report: HealthReport, name: ComponentName): Componen
   return report.components.find((entry) => entry.component === name) ?? null;
 }
 
-export function groupComponents(report: HealthReport, group: GroupName): ComponentHealth[] {
-  const names = GROUPS.find((entry) => entry.name === group)?.components ?? [];
+/** The components of an area: a group's in its order, その他's in the report's order. */
+export function groupComponents(report: HealthReport, area: AreaName): ComponentHealth[] {
+  if (area === OTHER) return report.components.filter((entry) => groupOf(entry.component) === null);
+  const names = GROUPS.find((entry) => entry.name === area)?.components ?? [];
   return names.flatMap((name) => {
     const found = componentOf(report, name);
     return found ? [found] : [];
   });
 }
 
-export function groupSeverity(report: HealthReport, group: GroupName): Severity {
-  return worstSeverity(groupComponents(report, group).map((entry) => entry.severity));
+/** The areas to show: the five groups, and その他 when a component is in none of them. */
+export function areasOf(report: HealthReport): AreaName[] {
+  const areas: AreaName[] = GROUPS.map((group) => group.name);
+  return groupComponents(report, OTHER).length > 0 ? [...areas, OTHER] : areas;
+}
+
+export function groupSeverity(report: HealthReport, area: AreaName): Severity {
+  return worstSeverity(groupComponents(report, area).map((entry) => entry.severity));
 }
 
 /** The components that are not normal, worst first (the report's order within a level). */
@@ -189,10 +207,11 @@ export function abnormal(report: HealthReport): ComponentHealth[] {
     .sort((a, b) => severityRank(b.severity) - severityRank(a.severity));
 }
 
-/** The group to open first: the worst one, or GPU / VRAM when all are normal. */
-export function initialGroup(report: HealthReport): GroupName {
+/** The area to open first: the worst one's, or GPU / VRAM when all are normal. */
+export function initialGroup(report: HealthReport): AreaName {
   const worst = abnormal(report)[0];
-  return (worst && groupOf(worst.component)) || "gpu";
+  if (!worst) return "gpu";
+  return groupOf(worst.component) ?? OTHER;
 }
 
 // ---------- Reading metrics ----------
@@ -294,11 +313,16 @@ export interface PercentPoint {
   vramReserved: number | null;
 }
 
+/** The Backend's bucket origin (`date_bin`'s, `health/store.py`). */
+const BUCKET_ORIGIN = Date.UTC(2000, 0, 1);
+
 /**
  * The buckets of the four series as percentages: GPU utilization as it is, VRAM
  * used and reserved of the total of the same bucket (else the latest total
  * before it). A bucket with no value of a series leaves a gap in that line; with
- * `stepSeconds`, so does a bucket missing from every series.
+ * `stepSeconds`, so does a bucket missing from every series, and with `range`
+ * also the whole buckets of the period before the first and after the last
+ * sample (when anything was sampled at all).
  */
 export function percentPoints(
   series: {
@@ -308,6 +332,7 @@ export function percentPoints(
     total: readonly SeriesPoint[];
   },
   stepSeconds?: number,
+  range?: { since: Date; until: Date },
 ): PercentPoint[] {
   const byTime = (points: readonly SeriesPoint[]) =>
     new Map(points.map((point) => [Date.parse(point.bucket_start), point.mean]));
@@ -323,6 +348,18 @@ export function percentPoints(
   // (Codex P2, PR #203).
   const times: number[] = [];
   const step = (stepSeconds ?? 0) * 1000;
+  // The period's own ends: monitoring that started late or stopped (an outage
+  // now) shows as an empty start or end, not as samples stretched over the chart
+  // (Codex P2, PR #203). Only whole buckets, so the one still filling is no gap.
+  const first = recorded[0];
+  const last = recorded[recorded.length - 1];
+  if (step > 0 && range && first !== undefined && last !== undefined) {
+    const since = range.since.getTime();
+    const until = range.until.getTime();
+    const start = BUCKET_ORIGIN + Math.ceil((since - BUCKET_ORIGIN) / step) * step;
+    for (let time = start; time < first - step / 2; time += step) times.push(time);
+    for (let time = last + step; time + step <= until; time += step) recorded.push(time);
+  }
   for (const time of recorded) {
     const previous = times[times.length - 1];
     if (step > 0 && previous !== undefined) {

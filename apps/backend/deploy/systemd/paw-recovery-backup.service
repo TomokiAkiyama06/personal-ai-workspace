@@ -47,8 +47,8 @@ OnFailure=paw-recovery-backup-failure.service
 Type=oneshot
 User=paw
 EnvironmentFile=/etc/paw/recovery-backup.env
-WorkingDirectory=/opt/paw/apps/backend
-ExecStart=/opt/paw/venv/bin/python -m paw_backend.cli recovery-backup-run
+WorkingDirectory=/opt/paw/current/apps/backend
+ExecStart=/opt/paw/current/venv/bin/python -m paw_backend.cli recovery-backup-run
 UMask=0077
 # systemd sends SIGTERM when this is exceeded: the command waits for the running
 # file or git step, records recovery.backup.failed and exits 3 (OnFailure=

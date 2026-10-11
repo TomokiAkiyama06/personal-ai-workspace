@@ -654,6 +654,26 @@ class ApprovalFlowTest(unittest.IsolatedAsyncioTestCase):
             (Verdict.ALLOW, R.APPROVAL_CONSUMED, ApprovalLevel.STRONG_APPROVAL),
         )
 
+    async def test_a_caller_may_refuse_strong_approvals_whatever_the_step_up(self):
+        # The board route (Decision 0078 6) passes allow_strong=False: a step-up
+        # bound to the user is not asked and does not grant this approval.
+        pending = await self.open_merge()
+        step_up = StepUp(True)
+        service = ApprovalService(
+            self.h.approvals, self.h.sink, step_up=step_up, clock=self.h.clock
+        )
+        result = await service.approve(
+            pending.approval_id, self.user, allow_strong=False
+        )
+        self.assertEqual(result.outcome, ApprovalOutcome.STEP_UP_REQUIRED)
+        self.assertEqual(step_up.calls, [])
+        self.assertEqual(
+            (await self.h.approvals.get(pending.approval_id)).status,
+            ApprovalStatus.PENDING,
+        )
+        rejected = await service.reject(pending.approval_id, self.user)
+        self.assertEqual(rejected.outcome, ApprovalOutcome.REJECTED)
+
     async def test_anything_but_an_explicit_yes_is_no_step_up(self):
         answers = [False, None, "yes", 1, "True", [True], RuntimeError(SECRET)]
         for answer in answers:

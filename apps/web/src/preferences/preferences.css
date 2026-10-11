@@ -1,0 +1,1220 @@
+/* 推定された好みの確認 (issue #38): the P1008Pref* boards of the PAW-060 design
+   canvas (F. 推定された好みの確認), on the shell's tokens (styles.css). Kept apart
+   so the other screens do not edit the same file. */
+
+.pref-icon {
+  flex-shrink: 0;
+}
+
+/* Tones of chips and pills (never colour alone: every chip has its words). */
+.pref-chip,
+.pref-pill,
+.pref-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+.pref-chip {
+  padding: 2px 8px;
+  border-radius: var(--r-badge);
+  background: var(--input);
+  color: var(--text-2);
+  font-size: 11px;
+}
+
+.pref-pill {
+  padding: 3px 9px;
+  border-radius: var(--r-chip);
+  font-size: 10.5px;
+  font-weight: 600;
+}
+
+.pref-tag {
+  padding: 3px 9px;
+  border-radius: var(--r-badge);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.pref-chip.tone-neutral,
+.pref-pill.tone-neutral,
+.pref-tag.tone-neutral {
+  background: var(--input);
+  color: var(--text-2);
+}
+
+.pref-chip.tone-strong {
+  background: var(--input);
+  color: var(--text);
+}
+
+.pref-chip.tone-info,
+.pref-pill.tone-info,
+.pref-tag.tone-info {
+  background: var(--info-bg);
+  color: var(--info-text);
+}
+
+.pref-chip.tone-ok,
+.pref-pill.tone-ok,
+.pref-tag.tone-ok {
+  background: var(--ok-bg);
+  color: var(--ok);
+}
+
+.pref-chip.tone-warning,
+.pref-pill.tone-warning,
+.pref-tag.tone-warning {
+  background: var(--warning-bg);
+  color: var(--warning);
+}
+
+.pref-chip.tone-error,
+.pref-pill.tone-error,
+.pref-tag.tone-error {
+  background: var(--error-bg);
+  color: var(--error);
+}
+
+.pref-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.pref-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  color: var(--text-3);
+}
+
+/* Notes (info / danger / lock) */
+
+.pref-note {
+  display: flex;
+  gap: 10px;
+  padding: 11px 13px;
+  border-radius: 11px;
+  background: var(--nav);
+  color: var(--text-3);
+}
+
+.pref-note .pref-icon {
+  margin-top: 3px;
+}
+
+.pref-note p {
+  font-size: 11.5px;
+  line-height: 1.75;
+  color: var(--text-2);
+}
+
+.pref-note.danger {
+  border: 1px solid var(--danger-border);
+  background: var(--error-bg);
+  color: var(--error);
+}
+
+/* The scope buttons */
+
+.pref-scopes {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+button.pref-scope {
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 2px;
+  min-height: 48px;
+  padding: 6px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--input);
+  color: var(--text);
+  text-align: left;
+}
+
+button.pref-scope.recommended,
+button.pref-scope[aria-pressed="true"] {
+  border-color: var(--selected-border);
+  background: var(--selected);
+}
+
+button.pref-scope[aria-pressed="false"].recommended {
+  border-color: var(--border-strong);
+  background: var(--input);
+}
+
+button.pref-scope:disabled {
+  color: var(--text-disabled);
+}
+
+.pref-scope-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.pref-scope-target {
+  font-size: 10.5px;
+  font-weight: 400;
+  color: var(--text-3);
+}
+
+.pref-recommended {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 6px;
+  border-radius: var(--r-chip);
+  background: color-mix(in srgb, var(--selected) 60%, var(--bg));
+  color: var(--link);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.pref-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+button.secondary.pref-ghost {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--text-2);
+  font-weight: 400;
+}
+
+.pref-hint {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.pref-error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--danger-border);
+  background: var(--error-bg);
+  color: var(--error);
+  font-size: 12.5px;
+}
+
+.pref-error p {
+  flex: 1;
+  min-width: 200px;
+}
+
+/* The high-risk acknowledgement */
+
+.pref-risk-boxes {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.pref-risk-boxes > div {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border-soft);
+  background: var(--nav);
+}
+
+.pref-risk-boxes span {
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.pref-risk-boxes p {
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--text-2);
+}
+
+.pref-ack {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 11px 13px;
+  border-radius: 10px;
+  border: 1px solid var(--danger-border);
+  font-size: 12.5px;
+  line-height: 1.7;
+  cursor: pointer;
+}
+
+.pref-ack input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  margin: 1px 0 0;
+  flex-shrink: 0;
+}
+
+/* The chat's card (P1008PrefCard / PrefHighRisk / PrefOther) */
+
+.chat-thread {
+  width: 100%;
+  max-width: 680px;
+  margin: 18px auto 0;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.pref-card {
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.pref-card.risk {
+  border-color: var(--danger-border);
+}
+
+.pref-card.other {
+  border-color: var(--selected-border);
+}
+
+.pref-card-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  padding: 0 10px 0 16px;
+  border-bottom: 1px solid var(--border-soft);
+  color: var(--link);
+}
+
+.pref-card-question {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.pref-card-question:focus-visible {
+  box-shadow: none;
+}
+
+.pref-card-meta {
+  flex: 1;
+  min-width: 0;
+  text-align: right;
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.pref-close.icon-button {
+  width: 32px;
+  height: 32px;
+  color: var(--text-3);
+}
+
+.pref-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 16px 16px;
+}
+
+.pref-card-text {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.pref-card-text h3 {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.pref-card-text p {
+  font-size: 13px;
+  line-height: 1.8;
+  color: var(--text-2);
+}
+
+.pref-card-foot {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--border-soft);
+  background: var(--nav);
+  color: var(--text-3);
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+
+.pref-answered {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 42px;
+  padding: 0 14px;
+  border-radius: 11px;
+  border: 1px solid var(--border-soft);
+  background: var(--nav);
+  font-size: 12.5px;
+}
+
+.pref-answered-mark {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--ok-bg);
+  color: var(--ok);
+}
+
+.pref-answered-title {
+  flex: 1;
+  min-width: 0;
+  font-weight: 600;
+}
+
+.pref-answered .mono {
+  font-size: 11px;
+}
+
+/* その他 (P1008PrefOther) */
+
+.pref-other {
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+}
+
+.pref-other-text {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.pref-other-input {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.pref-other-input textarea {
+  flex: 1;
+  min-width: 0;
+  padding: 9px 12px;
+  border-radius: 9px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.7;
+  resize: vertical;
+}
+
+.pref-other-input button {
+  white-space: nowrap;
+}
+
+.pref-preview {
+  display: flex;
+  flex-direction: column;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--info) 30%, var(--border));
+  background: color-mix(in srgb, var(--info-bg) 45%, var(--surface));
+}
+
+.pref-preview-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 9px;
+  padding: 10px 14px;
+  border-bottom: 1px solid color-mix(in srgb, var(--info) 30%, var(--border));
+}
+
+.pref-preview-head > span:first-child {
+  flex: 1;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  color: var(--info-text);
+}
+
+.pref-preview-body {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 10px 14px 12px;
+}
+
+.pref-field {
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+}
+
+.pref-field > :first-child {
+  font-size: 11.5px;
+  color: var(--text-3);
+}
+
+.pref-field input,
+.pref-field select {
+  min-height: 32px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg);
+  font-size: 12.5px;
+}
+
+.pref-exceptions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.pref-exception {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 4px 0 10px;
+  border-radius: 7px;
+  background: var(--input);
+  font-size: 12px;
+}
+
+.pref-exception .icon-button {
+  width: 22px;
+  height: 22px;
+  border-radius: 5px;
+  color: var(--text-3);
+}
+
+button.pref-add {
+  min-height: 28px;
+  padding: 0 10px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-2);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.pref-field input.pref-add-input {
+  width: 200px;
+  min-height: 28px;
+}
+
+.pref-segments {
+  display: flex;
+  width: fit-content;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.pref-segments button {
+  min-height: 30px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-2);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.pref-segments button + button {
+  border-left: 1px solid var(--border-strong);
+}
+
+.pref-segments button[aria-pressed="true"] {
+  background: var(--selected);
+  color: var(--text);
+  font-weight: 600;
+}
+
+.pref-expires {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 11.5px;
+  color: var(--text-3);
+}
+
+.pref-field .pref-expires input {
+  width: 180px;
+}
+
+.pref-small-note {
+  font-size: 11px;
+  line-height: 1.65;
+  color: var(--text-3);
+}
+
+/* The phone: the card is a bottom sheet (P1008MobilePrefCard, like MobileApproval)
+   and その他 is a page of its own (P1008MobilePrefOther). */
+
+.pref-sheet-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+
+.pref-sheet-backdrop {
+  position: absolute;
+  inset: 0;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: rgba(0, 0, 0, 0.55);
+  cursor: default;
+}
+
+.pref-sheet {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+  max-width: 480px;
+  max-height: 92vh;
+  overflow-y: auto;
+  padding: 10px 16px 22px;
+  border-radius: 20px 20px 0 0;
+  border-top: 1px solid var(--border-strong);
+  background: var(--surface);
+}
+
+.pref-sheet-grip {
+  width: 40px;
+  height: 4px;
+  margin: 0 auto 2px;
+  border-radius: var(--r-chip);
+  background: var(--border-strong);
+}
+
+.pref-sheet-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--link);
+}
+
+.pref-sheet-head .pref-close.icon-button {
+  width: var(--tap);
+  height: var(--tap);
+  margin: 0 -10px 0 auto;
+}
+
+.pref-sheet-meta {
+  margin-top: -10px;
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.pref-sheet .pref-card-text p {
+  line-height: 1.75;
+}
+
+.pref-sheet .pref-scopes {
+  grid-template-columns: 1fr;
+}
+
+.pref-sheet button.pref-scope {
+  min-height: 52px;
+  padding: 0 14px;
+  border-radius: 12px;
+}
+
+.pref-sheet .pref-scope-label {
+  font-size: 14px;
+}
+
+.pref-sheet .pref-scope-target {
+  font-size: 11px;
+}
+
+.pref-sheet .pref-actions button {
+  flex: 1 1 0;
+  min-height: 46px;
+  border-radius: 12px;
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+.pref-sheet .pref-hint {
+  flex-basis: 100%;
+  margin-left: 0;
+}
+
+.pref-sheet .pref-hint:empty {
+  display: none;
+}
+
+.pref-sheet .pref-risk-boxes {
+  grid-template-columns: 1fr;
+}
+
+.pref-sheet-foot {
+  font-size: 11px;
+  line-height: 1.7;
+  color: var(--text-3);
+}
+
+.pref-page {
+  position: fixed;
+  inset: 0;
+  z-index: 45;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+
+.pref-page-head {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 56px;
+  padding: 0 16px 0 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.pref-page-head .icon-button {
+  width: var(--tap);
+  height: var(--tap);
+}
+
+.pref-page-head h1 {
+  flex: 1;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.pref-page-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+  padding: 14px 16px;
+}
+
+.pref-page .pref-other-input {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.pref-page .pref-other-input textarea {
+  font-size: 14px;
+}
+
+.pref-page .pref-preview-body {
+  gap: 9px;
+  padding: 12px;
+}
+
+.pref-page .pref-field {
+  grid-template-columns: 1fr;
+  gap: 4px;
+}
+
+.pref-page .pref-field input,
+.pref-page .pref-field select {
+  min-height: 40px;
+  font-size: 13px;
+}
+
+.pref-page .pref-segments {
+  width: 100%;
+}
+
+.pref-page .pref-segments button {
+  flex: 1;
+  min-height: 40px;
+  font-size: 13px;
+}
+
+.pref-page .pref-ack {
+  font-size: 13px;
+}
+
+.pref-page .pref-ack input[type="checkbox"] {
+  width: 22px;
+  height: 22px;
+}
+
+.pref-page-foot {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 16px 20px;
+  border-top: 1px solid var(--border-soft);
+  text-align: center;
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.pref-page-foot button.wide {
+  min-height: 50px;
+  border-radius: 12px;
+  font-size: 15px;
+}
+
+/* The navigation's Memory count (ShellDark: an amber pill). */
+
+.nav-count {
+  margin-left: auto;
+  padding: 2px 7px;
+  border-radius: var(--r-chip);
+  background: var(--warning-bg);
+  color: var(--warning);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+/* メモリ › 推定の候補 / 保留中 (P1008PrefMemory / PrefHeld / MobilePrefList) */
+
+a.chip.pref-toolbar-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  padding: 0 11px;
+  color: var(--text-2);
+  text-decoration: none;
+}
+
+a.chip.pref-toolbar-chip.held {
+  color: var(--warning);
+}
+
+a.chip.pref-toolbar-chip[aria-current="page"] {
+  border-color: var(--selected-border);
+  background: var(--selected);
+  color: var(--text);
+  font-weight: 600;
+}
+
+a.chip.pref-toolbar-chip.held[aria-current="page"] {
+  border-color: color-mix(in srgb, var(--warning) 45%, var(--border));
+  background: var(--warning-bg);
+  color: var(--warning);
+}
+
+.pref-synced {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11.5px;
+  color: var(--ok);
+}
+
+.pref-synced > span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ok);
+}
+
+.pref-segments-bar {
+  display: none;
+}
+
+.pref-section {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.pref-section-label {
+  padding: 0 10px 6px;
+  font-size: 10.5px;
+}
+
+a.pref-scope-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  padding: 0 10px;
+  border-radius: 8px;
+  color: var(--text-2);
+  font-size: 12.5px;
+  text-decoration: none;
+}
+
+a.pref-scope-row:hover {
+  background: var(--input);
+}
+
+a.pref-scope-row[aria-current="page"] {
+  background: var(--selected);
+  color: var(--text);
+  font-weight: 600;
+}
+
+.pref-scope-row .pref-count {
+  color: var(--warning);
+}
+
+a.pref-scope-row[aria-current="page"] .pref-count {
+  color: var(--link);
+}
+
+.pref-privacy {
+  margin: auto 0 0;
+  padding: 16px 10px 4px;
+  font-size: 11px;
+  line-height: 1.7;
+  color: var(--text-3);
+}
+
+.pref-section hr {
+  width: calc(100% - 8px);
+  margin: 8px 4px;
+  border: 0;
+  border-top: 1px solid var(--border-soft);
+}
+
+.pref-list-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.pref-list-hint {
+  padding: 0 2px 2px;
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.pref-hint-phone {
+  display: none;
+}
+
+.pref-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+a.pref-list-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 13px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--surface);
+  color: var(--text);
+  text-decoration: none;
+}
+
+a.pref-list-card:hover {
+  border-color: var(--border-strong);
+}
+
+a.pref-list-card[aria-current="page"] {
+  border-color: var(--selected-border);
+  background: var(--row-current);
+}
+
+.pref-list-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.pref-list-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.pref-list-card .pref-chip {
+  font-size: 10px;
+}
+
+.pref-list-meta {
+  font-size: 10.5px;
+  color: var(--text-3);
+}
+
+.pref-answer-button {
+  display: none;
+}
+
+.pref-kinds {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 11px 12px;
+  border-radius: 11px;
+  background: var(--nav);
+  font-size: 11px;
+  line-height: 1.65;
+  color: var(--text-3);
+}
+
+.pref-kinds .strong {
+  color: var(--text-2);
+}
+
+.pref-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.pref-detail-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.pref-detail-head h2 {
+  font-size: 17px;
+  font-weight: 600;
+}
+
+.pref-detail-head .mono {
+  font-size: 11px;
+}
+
+.pref-detail-head a {
+  font-size: 12px;
+}
+
+.pref-content {
+  padding: 11px 14px;
+  border-radius: 9px;
+  background: var(--surface);
+  font-size: 13px;
+  line-height: 1.8;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.pref-tab-panel {
+  min-height: 0;
+}
+
+.pref-evidence-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.pref-evidence {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 11px 13px;
+  border-radius: 11px;
+  border: 1px solid var(--border-soft);
+  background: var(--nav);
+}
+
+.pref-evidence-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.pref-evidence-head > span + span {
+  margin-left: auto;
+  font-size: 10.5px;
+}
+
+.pref-evidence-value {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.pref-evidence-text {
+  font-size: 11px;
+  line-height: 1.65;
+  color: var(--text-3);
+}
+
+@media (max-width: 1279px) {
+  .nav-count {
+    display: none;
+  }
+
+  .pref-evidence-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+/* < 768px: the drawer shows the count again; the Memory screen gets the
+   segments (すべて / 推定の候補 / 保留) and the list's 答える buttons. */
+@media (max-width: 767px) {
+  .nav-count {
+    display: inline;
+  }
+
+  .memory-toolbar a.chip.pref-toolbar-chip {
+    display: none;
+  }
+
+  .pref-segments-bar {
+    display: flex;
+    margin: 10px 14px;
+    border: 1px solid var(--border-strong);
+    border-radius: 10px;
+    overflow: hidden;
+  }
+
+  .has-selection .pref-segments-bar {
+    display: none;
+  }
+
+  .pref-segments-bar a {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 40px;
+    color: var(--text-2);
+    font-size: 13px;
+    text-decoration: none;
+  }
+
+  .pref-segments-bar a + a {
+    border-left: 1px solid var(--border-strong);
+  }
+
+  .pref-segments-bar a.held {
+    color: var(--warning);
+  }
+
+  .pref-segments-bar a[aria-current="page"] {
+    background: var(--selected);
+    color: var(--text);
+    font-weight: 600;
+  }
+
+  .pref-hint-desktop {
+    display: none;
+  }
+
+  .pref-hint-phone {
+    display: inline;
+  }
+
+  a.pref-list-card {
+    border-radius: 12px;
+  }
+
+  .pref-list-title {
+    white-space: normal;
+    font-size: 13.5px;
+    line-height: 1.45;
+  }
+
+  .pref-answer-button {
+    display: inline-flex;
+    align-items: center;
+    flex-shrink: 0;
+    min-height: var(--tap);
+    padding: 0 14px;
+    border: 1px solid var(--border-strong);
+    border-radius: 10px;
+    background: var(--input);
+    font-size: 13px;
+    font-weight: 600;
+  }
+
+  .pref-scopes,
+  .pref-risk-boxes,
+  .pref-evidence-grid {
+    grid-template-columns: 1fr;
+  }
+
+  button.pref-scope {
+    min-height: 52px;
+  }
+
+  .pref-actions button {
+    min-height: var(--tap);
+  }
+
+  .pref-hint {
+    flex-basis: 100%;
+    margin-left: 0;
+  }
+
+  .pref-kinds {
+    margin-top: 8px;
+  }
+}
+
+@media (max-width: 767px) {
+  .pref-mode .memory-toolbar {
+    display: none;
+  }
+}
+
+/* More specific rules last (they win by specificity; kept here for the linter's order). */
+
+.pref-note.danger p {
+  color: var(--danger-title);
+}
+
+button.pref-scope.recommended .pref-scope-target {
+  color: var(--text-2);
+}
+
+.pref-sheet .pref-card-text h2 {
+  font-size: 17px;
+  font-weight: 600;
+  line-height: 1.5;
+}

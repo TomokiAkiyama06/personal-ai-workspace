@@ -256,6 +256,15 @@ def _safe_tail(tail: str) -> bool:
     return all(segment.strip(" .") for segment in tail.split("/") if segment)
 
 
+def url_path_is_safe(url: str) -> bool:
+    """Whether the path of the canonical ``url`` cannot climb out of itself
+    (:func:`_safe_tail`): what a URL must be for anything to count as "below"
+    it (a task-scoped approval grant, Decision 0085)."""
+    _scheme, _, rest = url.split("?", 1)[0].partition("://")
+    _authority, _, path = rest.partition("/")
+    return _safe_tail(path)
+
+
 def normalise_remote(value: object) -> str:
     """The canonical remote URL of a repository, or :class:`TargetError`.
 

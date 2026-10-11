@@ -111,19 +111,20 @@ function ConflictNotice({
   );
 }
 
-function SourcesTab({
+/** The sources of one version (also the 推定の候補 detail's ソース tab, issue #38). */
+export function SourcesTab({
   source,
   memoryId,
-  version,
+  versionNumber,
 }: {
   source: MemorySource;
   memoryId: string;
-  version: MemoryVersion;
+  versionNumber: number;
 }) {
   const { t, formatDate } = useI18n();
   const loaded = useLoad(
-    () => source.sources(memoryId, version.version_number),
-    [source, memoryId, version.version_number],
+    () => source.sources(memoryId, versionNumber),
+    [source, memoryId, versionNumber],
   );
   const label = (record: MemorySourceRecord): string => {
     switch (record.source_type) {
@@ -139,9 +140,7 @@ function SourcesTab({
   };
   return (
     <div className="stack">
-      <h3 className="section-label">
-        {t("memory.sources.heading", { number: version.version_number })}
-      </h3>
+      <h3 className="section-label">{t("memory.sources.heading", { number: versionNumber })}</h3>
       {loaded.loading && !loaded.data ? (
         <p className="muted small" role="status">
           {t("app.loading")}
@@ -578,7 +577,7 @@ export function MemoryDetail({
           <SourcesTab
             source={source}
             memoryId={selectedNode.version.memory_id}
-            version={selectedNode.version}
+            versionNumber={selectedNode.version.version_number}
           />
         )}
         {tab === "details" && selectedNode && <DetailsTab version={selectedNode.version} />}

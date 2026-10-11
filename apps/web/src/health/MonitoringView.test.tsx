@@ -8,6 +8,7 @@ import {
   fakeHealthSource,
   healthEvents,
   normalReport,
+  withUnknownComponent,
 } from "../test/healthFixture";
 import { mockApi, Providers, reply, session } from "../test/helpers";
 import { REFRESH_SECONDS } from "./MonitoringView";
@@ -31,7 +32,9 @@ function renderMonitoring(source: HealthSource | null, role = "owner") {
 }
 
 function panel() {
-  return screen.getByRole("region", { name: /^(GPU \/ VRAM|Recovery Repository|PostgreSQL)$/ });
+  return screen.getByRole("region", {
+    name: /^(GPU \/ VRAM|Recovery Repository|PostgreSQL|その他)$/,
+  });
 }
 
 describe("サーバー監視", () => {
@@ -141,6 +144,10 @@ describe("サーバー監視", () => {
   });
 
   it("draws GPU / VRAM and shows the same values as a table", async () => {
+    // The last 24 hours end at 04:00 the next day: the fixture's samples are at
+    // the start of the period.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-08T04:00:00Z"));
     renderMonitoring(fakeHealthSource(normalReport()));
     expect(
       await screen.findByRole("img", { name: /GPU \/ VRAM の推移（直近 24 時間/ }),
@@ -149,16 +156,19 @@ describe("サーバー監視", () => {
     await user.click(screen.getByRole("button", { name: "表で見る" }));
     const table = screen.getByRole("table", { name: "GPU / VRAM の推移" });
     const rows = within(table).getAllByRole("row");
-    // The header and the buckets of 12 minutes from 04:00 to 05:00: the two that
-    // were sampled (GPU, VRAM used and reserved of 48 GB) and the empty ones between.
+    // The header and the 120 buckets of 12 minutes of the period: the two that
+    // were sampled (04:00 and 05:00: GPU, VRAM used and reserved of 48 GB) and
+    // the empty ones between and after them (sampling stopped, Codex P2 on #203).
     const cells = (row: number) =>
       within(rows[row] as HTMLElement)
         .getAllByRole("cell")
         .map((cell) => cell.textContent);
-    expect(rows).toHaveLength(7);
+    expect(rows).toHaveLength(121);
     expect(cells(1)).toEqual(["40%", "25%", "38%"]);
     expect(cells(2)).toEqual(["—", "—", "—"]);
     expect(cells(6)).toEqual(["50%", "50%", "38%"]);
+    expect(cells(7)).toEqual(["—", "—", "—"]);
+    expect(cells(120)).toEqual(["—", "—", "—"]);
   });
 
   it("reads the history of the chosen period", async () => {
@@ -225,6 +235,119 @@ describe("サーバー監視", () => {
     if (backup) backup.reasons = ["failing", "a_code_from_later"];
     renderMonitoring(fakeHealthSource(report, { events: async () => healthEvents().slice(0, 1) }));
     expect(await screen.findByText("a_code_from_later")).toBeVisible();
+  });
+
+  it("shows a component this version does not know under その他 (Codex P2, PR #203)", async () => {
+    const report = withUnknownComponent(normalReport(), "error");
+    renderMonitoring(fakeHealthSource(report));
+    const banner = await screen.findByRole("alert");
+    expect(
+      within(banner).getByText("inference_gateway: 確認が時間内に終わりませんでした"),
+    ).toBeVisible();
+    // Its area is there and selected, not GPU / VRAM.
+    const areas = screen.getByRole("group", { name: "監視の対象" });
+    expect(within(areas).getByRole("button", { name: /その他.*低下/ })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(within(areas).getByRole("button", { name: /GPU \/ VRAM/ })).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+    // The panel shows it by its code, every reason and its numbers as they are.
+    const detail = panel();
+    expect(detail).toHaveAccessibleName("その他");
+    expect(
+      within(detail).getByText("この画面が知らない監視項目です", { exact: false }),
+    ).toBeVisible();
+    expect(
+      within(detail).getByRole("button", { name: "inference_gateway の詳細" }),
+    ).toHaveAttribute("aria-expanded", "true");
+    expect(within(detail).getByText("確認が時間内に終わりませんでした")).toBeVisible();
+    expect(within(detail).getByText("gateway_backlog")).toBeVisible();
+    expect(within(detail).getByText("backlog 7")).toBeVisible();
+    expect(within(detail).getByText("mode drain")).toBeVisible();
+    expect(within(detail).getByText("healthy false")).toBeVisible();
+    // A value the Backend did not read is not made up.
+    expect(within(detail).queryByText(/last_seen/)).not.toBeInTheDocument();
+    // The known areas still hold only their own components.
+    const user = userEvent.setup();
+    await user.click(within(areas).getByRole("button", { name: /GPU \/ VRAM/ }));
+    expect(within(panel()).queryByText("inference_gateway")).not.toBeInTheDocument();
+  });
+
+  it("shows the parts of a component this version does not know (Codex P2, PR #215)", async () => {
+    const report = withUnknownComponent(normalReport(), "error");
+    const unknown = report.components.find((entry) => entry.component === "inference_gateway");
+    if (!unknown) throw new Error("fixture");
+    unknown.parts = [
+      { kind: "replica_a", healthy: true, backlog: 0 },
+      { kind: "replica_b", healthy: false, backlog: 7, last_seen: null },
+    ];
+    renderMonitoring(fakeHealthSource(report));
+    await screen.findByRole("alert");
+    const detail = panel();
+    // Each part on its own line, numbered, with its values as the Backend names them.
+    expect(within(detail).getByText("#1 kind replica_a · healthy true · backlog 0")).toBeVisible();
+    expect(within(detail).getByText("#2 kind replica_b · healthy false · backlog 7")).toBeVisible();
+  });
+
+  it("shows その他 only while there is a component this version does not know", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let current = withUnknownComponent(normalReport(), "info");
+    renderMonitoring(fakeHealthSource(normalReport(), { report: async () => current }));
+    const areas = await screen.findByRole("group", { name: "監視の対象" });
+    // Normal: the area is there, GPU / VRAM stays the one opened first.
+    expect(within(areas).getByRole("button", { name: /その他.*正常/ })).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+    expect(within(areas).getByRole("button", { name: /GPU \/ VRAM/ })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    await user.click(within(areas).getByRole("button", { name: /その他/ }));
+    expect(within(panel()).getByText("inference_gateway")).toBeVisible();
+
+    // The component goes away (or this version learns it): the area goes too,
+    // and the selection falls back instead of showing an empty panel.
+    current = normalReport();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(REFRESH_SECONDS * 1000);
+    });
+    await waitFor(() =>
+      expect(within(areas).queryByRole("button", { name: /その他/ })).not.toBeInTheDocument(),
+    );
+    expect(within(areas).getByRole("button", { name: /GPU \/ VRAM/ })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+
+    // It comes back, normal: その他 is shown again but not selected by itself
+    // (the gone selection was dropped, not kept) (Codex P2, PR #215).
+    current = withUnknownComponent(normalReport(), "info");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(REFRESH_SECONDS * 1000);
+    });
+    await waitFor(() =>
+      expect(within(areas).getByRole("button", { name: /その他/ })).toBeInTheDocument(),
+    );
+    expect(within(areas).getByRole("button", { name: /その他/ })).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+    expect(within(areas).getByRole("button", { name: /GPU \/ VRAM/ })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+  });
+
+  it("has no その他 when every component is known", async () => {
+    renderMonitoring(fakeHealthSource(abnormalReport()));
+    const areas = await screen.findByRole("group", { name: "監視の対象" });
+    expect(within(areas).getAllByRole("button")).toHaveLength(5);
+    expect(within(areas).queryByRole("button", { name: /その他/ })).not.toBeInTheDocument();
   });
 
   it("does not show numbers a failed check did not read (Codex P2)", async () => {

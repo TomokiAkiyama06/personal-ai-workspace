@@ -31,6 +31,8 @@ class BrokerReason(StrEnum):
     AUTO = "auto"
     SCOPED_AUTO = "scoped_auto"
     APPROVAL_CONSUMED = "approval_consumed"
+    # A task-scoped grant ("このタスクの間は許可", Decision 0085) covered it.
+    TASK_GRANT_APPLIED = "task_grant_applied"
     # --- NEEDS_APPROVAL ---
     APPROVAL_REQUIRED = "approval_required"
     STRONG_APPROVAL_REQUIRED = "strong_approval_required"
@@ -131,6 +133,8 @@ class BrokerDecision:
     # A lower-case hex SHA-256 binding tool, normalised arguments, task and requester.
     call_hash: str | None = None
     approval_id: uuid.UUID | None = None
+    # The task-scoped grant that let it run (``TASK_GRANT_APPLIED`` only).
+    grant_id: uuid.UUID | None = None
     # The PAW-025 reason, when the authorization layer was the one to refuse.
     authz_reason: Reason | None = None
     # Present exactly when ``verdict`` is ALLOW: what the executor may run.

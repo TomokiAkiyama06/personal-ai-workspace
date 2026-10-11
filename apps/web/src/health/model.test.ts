@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { translate } from "../i18n";
-import { abnormalReport, normalReport } from "../test/healthFixture";
+import { abnormalReport, normalReport, withUnknownComponent } from "../test/healthFixture";
 import {
   abnormal,
+  areasOf,
   chartStepSeconds,
+  groupComponents,
   groupOf,
   groupSeverity,
   initialGroup,
@@ -43,6 +45,27 @@ describe("System Health model", () => {
     expect(initialGroup(report)).toBe("recovery");
     expect(groupSeverity(report, "recovery")).toBe("error");
     expect(groupSeverity(report, "database")).toBe("info");
+  });
+
+  it("puts components this version does not know under その他, shown only when there are some", () => {
+    expect(areasOf(normalReport())).toEqual(["gpu", "queue", "database", "recovery", "external"]);
+    expect(groupComponents(normalReport(), "other")).toEqual([]);
+
+    const quiet = withUnknownComponent(normalReport(), "info");
+    expect(areasOf(quiet)).toEqual(["gpu", "queue", "database", "recovery", "external", "other"]);
+    expect(groupComponents(quiet, "other").map((entry) => entry.component)).toEqual([
+      "inference_gateway",
+    ]);
+    expect(groupSeverity(quiet, "other")).toBe("info");
+    // Normal: GPU / VRAM still opens first.
+    expect(initialGroup(quiet)).toBe("gpu");
+
+    // Abnormal: its area is selected like any other (Decision 0080 3), not GPU.
+    const report = withUnknownComponent(normalReport(), "error");
+    expect(groupSeverity(report, "other")).toBe("error");
+    expect(initialGroup(report)).toBe("other");
+    // The worst one still wins over an unknown one that is less bad.
+    expect(initialGroup(withUnknownComponent(abnormalReport(), "warning"))).toBe("recovery");
   });
 
   it("reads VRAM and the queue from the metrics, or nothing", () => {
@@ -116,6 +139,39 @@ describe("System Health model", () => {
       ["2026-10-07T04:24:00.000Z", null],
       ["2026-10-07T04:36:00.000Z", 60],
     ]);
+  });
+
+  it("keeps the empty buckets before the first and after the last sample (Codex P2)", () => {
+    // Monitoring that started late or an outage now must not stretch the samples
+    // over the whole period (PR #203); the bucket still filling is no gap.
+    const point = (bucket_start: string, mean: number) => ({
+      bucket_start,
+      mean,
+      min: mean,
+      max: mean,
+    });
+    const series = {
+      gpu: [point("2026-10-07T04:12:00Z", 40), point("2026-10-07T04:24:00Z", 50)],
+      used: [],
+      reserved: [],
+      total: [],
+    };
+    const range = {
+      since: new Date("2026-10-07T03:50:00Z"),
+      until: new Date("2026-10-07T05:05:00Z"),
+    };
+    expect(
+      percentPoints(series, 720, range).map((entry) => [entry.at.slice(11, 16), entry.gpu]),
+    ).toEqual([
+      ["04:00", null],
+      ["04:12", 40],
+      ["04:24", 50],
+      ["04:36", null],
+      ["04:48", null],
+    ]);
+    // Nothing sampled stays "no records"; without a step nothing is added.
+    expect(percentPoints({ gpu: [], used: [], reserved: [], total: [] }, 720, range)).toEqual([]);
+    expect(percentPoints(series, undefined, range)).toHaveLength(2);
   });
 
   it("asks for about 120 points per period, never finer than 10 seconds", () => {

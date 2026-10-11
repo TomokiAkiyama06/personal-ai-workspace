@@ -7,7 +7,7 @@
 # venv this runs can make the next run do anything as the table owner. So a
 # compromised web process must not be that user: create it with
 #   useradd --system --no-create-home --shell /usr/sbin/nologin paw-maint
-# and keep /opt/paw/apps/backend and /opt/paw/venv root-owned and not writable
+# and keep /opt/paw/current/apps/backend and /opt/paw/current/venv root-owned and not writable
 # by the backend's user nor by paw-maint (the same rule as the operator
 # credential in apps/backend/README.md: the backend user must never be able
 # to read it).
@@ -35,8 +35,8 @@ OnFailure=paw-audit-retention-failure.service
 Type=oneshot
 User=paw-maint
 EnvironmentFile=/etc/paw/audit-retention.env
-WorkingDirectory=/opt/paw/apps/backend
-ExecStart=/opt/paw/venv/bin/python -m paw_backend.cli audit-retention-run
+WorkingDirectory=/opt/paw/current/apps/backend
+ExecStart=/opt/paw/current/venv/bin/python -m paw_backend.cli audit-retention-run
 # Each step waits at most a few seconds for a lock (DDL_LOCK_TIMEOUT_MS of
 # paw_backend.cli.retention), so a healthy run takes seconds. This is the
 # backstop for anything else that hangs: systemd then sends SIGTERM, the

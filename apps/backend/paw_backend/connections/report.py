@@ -1,8 +1,8 @@
 """The usage report of the Usage screen (issue #187, Decisions 0069 and 0077).
 
 A read model over ``connection_usage`` (the calls through the shared Codex / Claude
-connections), ``local_usage`` (the calls of the local models, Decision 0077
-Proposed) and the escalations of ``agent_incidents``: totals, tasks per calendar
+connections), ``local_usage`` (the calls of the local models, Decision 0077)
+and the escalations of ``agent_incidents``: totals, tasks per calendar
 day and agent, per agent, per usage category and, for the whole workspace, per
 user. It holds counts, closed enums, ids and login names only: no prompt, answer,
 model name or text (Decision 0016, section 6).

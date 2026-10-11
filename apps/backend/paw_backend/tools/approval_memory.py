@@ -160,6 +160,7 @@ class InMemoryApprovalStore:
                 status=ApprovalStatus.PENDING,
                 created_at=now,
                 expires_at=new.expires_at,
+                grant_pattern=new.grant_pattern,
             )
             if record.expires_at <= record.created_at:
                 raise ValueError("an approval must expire after it is created")

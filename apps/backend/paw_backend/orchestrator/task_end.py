@@ -123,6 +123,19 @@ _WITH_OPEN_APPROVALS = text(
     " AND (CAST(:after AS uuid) IS NULL OR a.task_id > :after)"
     " ORDER BY a.task_id LIMIT :limit"
 )
+# Ended tasks that still hold an active 「このタスクの間は許可」 grant (Decision
+# 0085): unusable already (the store checks the task's run at every use), but
+# shown and not yet audited as revoked until ``revoke_task`` ran (Codex review
+# of #216: the approval it was made from may have been used, so the query above
+# does not find the task).
+_WITH_ACTIVE_GRANTS = text(
+    "SELECT DISTINCT g.task_id FROM tool_task_grants g"
+    " JOIN tasks t ON t.id = g.task_id"
+    " WHERE g.status = 'active'"
+    f" AND {_RUN_ENDED}"
+    " AND (CAST(:after AS uuid) IS NULL OR g.task_id > :after)"
+    " ORDER BY g.task_id LIMIT :limit"
+)
 # Ended tasks named (by the canonical text of the id, as ``end_task`` matches
 # it) by a task source of an active ``session_only`` version.
 _WITH_SESSION_MEMORIES = text(
@@ -166,7 +179,11 @@ class TaskEndResidue:
             check_uuid("after", after)
         found: dict[uuid.UUID, None] = {}
         async with self._database.session() as session, session.begin():
-            for statement in (_WITH_OPEN_APPROVALS, _WITH_SESSION_MEMORIES):
+            for statement in (
+                _WITH_OPEN_APPROVALS,
+                _WITH_ACTIVE_GRANTS,
+                _WITH_SESSION_MEMORIES,
+            ):
                 rows = await session.execute(
                     statement, {"limit": limit, "after": after}
                 )

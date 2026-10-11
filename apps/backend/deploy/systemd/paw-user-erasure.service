@@ -50,8 +50,8 @@ OnFailure=paw-user-erasure-failure.service
 Type=oneshot
 User=paw-maint
 EnvironmentFile=/etc/paw/user-erasure.env
-WorkingDirectory=/opt/paw/apps/backend
-ExecStart=/opt/paw/venv/bin/python -m paw_backend.cli user-erasure-run
+WorkingDirectory=/opt/paw/current/apps/backend
+ExecStart=/opt/paw/current/venv/bin/python -m paw_backend.cli user-erasure-run
 # Each user is one transaction whose lock wait is bounded (LOCK_TIMEOUT_MS of
 # paw_backend.auth.onboarding.erasure). This is the backstop: systemd sends
 # SIGTERM, the command rolls the current user back and exits 3.

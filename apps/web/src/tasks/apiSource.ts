@@ -26,7 +26,9 @@ import type {
   RepoRole,
   ReviewStatus,
   ReviewSummary,
+  TaskCapacity,
   TaskDetail,
+  TaskGrant,
   TaskList,
   TaskRepository,
   TaskState,
@@ -48,6 +50,13 @@ interface TaskSummaryWire {
   repository: string | null;
   started_at: string | null;
   updated_at: string;
+}
+
+interface TaskCapacityWire {
+  parallel_limit: number;
+  running: number;
+  vram_used_bytes: number | null;
+  vram_total_bytes: number | null;
 }
 
 interface NodeAttemptWire {
@@ -127,6 +136,27 @@ interface PullRequestWire {
   evaluation: EvaluationResult;
   merge_ready: boolean;
   updated_at: string;
+}
+
+const GB = 1024 ** 3;
+
+/** 18.2 of a byte count: the GB the header shows, one decimal (as System Health). */
+function gigabytes(bytes: number): number {
+  return Math.round((bytes / GB) * 10) / 10;
+}
+
+// The scheduler's parallel limit (Decision 0084); the VRAM only comes
+// to a person who may see System Health's detail, and only from a fresh reading.
+function capacity(wire: TaskCapacityWire | null | undefined): TaskCapacity | undefined {
+  if (!wire) return undefined;
+  const vram =
+    wire.vram_used_bytes !== null && wire.vram_total_bytes !== null && wire.vram_total_bytes > 0
+      ? {
+          vramUsedGb: gigabytes(wire.vram_used_bytes),
+          vramTotalGb: gigabytes(wire.vram_total_bytes),
+        }
+      : {};
+  return { parallelLimit: wire.parallel_limit, ...vram };
 }
 
 function summary(wire: TaskSummaryWire): TaskSummary {
@@ -308,6 +338,16 @@ interface ApprovalWire {
   repositories: string[];
   created_at: string;
   expires_at: string;
+  task_grant_allowed: boolean;
+}
+
+interface TaskGrantWire {
+  id: string;
+  approval_id: string;
+  tool: string;
+  summary: { name: string; kind: string; value: string }[];
+  created_at: string;
+  uses: number;
 }
 
 function changedFile(wire: ChangedFileWire): ChangedFile {
@@ -335,6 +375,18 @@ function approval(wire: ApprovalWire): ToolApproval {
     repositories: wire.repositories,
     createdAt: wire.created_at,
     expiresAt: wire.expires_at,
+    taskGrantAllowed: wire.task_grant_allowed === true,
+  };
+}
+
+function taskGrant(wire: TaskGrantWire): TaskGrant {
+  return {
+    id: wire.id,
+    approvalId: wire.approval_id,
+    tool: wire.tool,
+    summary: wire.summary,
+    createdAt: wire.created_at,
+    uses: wire.uses,
   };
 }
 
@@ -344,8 +396,14 @@ const pullPath = (id: string) => `/pull-requests/${encodeURIComponent(id)}`;
 /** The production source: the Backend's /api/v1 task routes. */
 export const apiTaskSource: TaskSource = {
   async listTasks(): Promise<TaskList> {
-    const body = await apiRequest<{ tasks: TaskSummaryWire[] }>("GET", "/tasks");
-    return { tasks: body.tasks.map(summary) };
+    const body = await apiRequest<{ tasks: TaskSummaryWire[]; capacity?: TaskCapacityWire | null }>(
+      "GET",
+      "/tasks",
+    );
+    const limits = capacity(body.capacity);
+    return limits
+      ? { tasks: body.tasks.map(summary), capacity: limits }
+      : { tasks: body.tasks.map(summary) };
   },
   async getTask(id: string): Promise<TaskDetail> {
     return taskDetail(await apiRequest<TaskDetailWire>("GET", taskPath(id)));
@@ -416,5 +474,15 @@ export const apiTaskSource: TaskSource = {
   },
   async decideApproval(id: string, decision: ApprovalDecision): Promise<void> {
     await apiRequest("POST", `/approvals/${encodeURIComponent(id)}/decision`, { decision });
+  },
+  async listTaskGrants(taskId: string): Promise<readonly TaskGrant[]> {
+    const body = await apiRequest<{ grants: TaskGrantWire[] }>(
+      "GET",
+      `${taskPath(taskId)}/approval-grants`,
+    );
+    return body.grants.map(taskGrant);
+  },
+  async revokeTaskGrant(id: string): Promise<void> {
+    await apiRequest("POST", `/approval-grants/${encodeURIComponent(id)}/revoke`);
   },
 };

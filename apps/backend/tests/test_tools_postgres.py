@@ -102,6 +102,12 @@ TRIGGERS = {
     "tool_approval_events_append_only": "tool_approval_events",
     "tool_approval_events_no_truncate": "tool_approval_events",
 }
+# The guards of the task-scoped grants (revision 0193), whose rows point at
+# approvals: emptying the approvals empties them too.
+GRANT_TRIGGERS = {
+    "tool_task_grants_no_truncate": "tool_task_grants",
+    "tool_task_grant_uses_no_truncate": "tool_task_grant_uses",
+}
 
 
 async def without_trigger(connection, name: str, statement: str, **parameters):
@@ -117,15 +123,22 @@ async def without_trigger(connection, name: str, statement: str, **parameters):
 
 
 async def empty_tool_tables(connection) -> None:
-    """Empty the two tables of a throw-away test database (the guards forbid
-    TRUNCATE for everybody else, so they are switched off around it)."""
-    for name, table in TRIGGERS.items():
+    """Empty the two tables (and the grants that point at them) of a throw-away
+    test database (the guards forbid TRUNCATE for everybody else, so they are
+    switched off around it)."""
+    triggers = {**TRIGGERS, **GRANT_TRIGGERS}
+    for name, table in triggers.items():
         if name.endswith("no_truncate"):
             await connection.execute(
                 text(f"ALTER TABLE {table} DISABLE TRIGGER {name}")
             )
-    await connection.execute(text("TRUNCATE tool_approvals, tool_approval_events"))
-    for name, table in TRIGGERS.items():
+    await connection.execute(
+        text(
+            "TRUNCATE tool_approvals, tool_approval_events, tool_task_grants,"
+            " tool_task_grant_uses"
+        )
+    )
+    for name, table in triggers.items():
         if name.endswith("no_truncate"):
             await connection.execute(
                 text(f"ALTER TABLE {table} ENABLE ALWAYS TRIGGER {name}")
@@ -485,9 +498,13 @@ class StateMachineTest(PostgresTestCase):
     async def refused(self, sql: str, **parameters):
         with self.assertRaises(DBAPIError) as caught:
             await self.execute(sql, **parameters)
-        if sql == "TRUNCATE tool_approvals":
+        if sql in (
+            "TRUNCATE tool_approvals",
+            "TRUNCATE tool_approvals, tool_approval_events",
+        ):
             # PostgreSQL refuses it on its own (a foreign key points at the
-            # table) before any trigger runs.
+            # table: the history's, and since revision 0193 the task-scoped
+            # grants') before any trigger runs.
             self.assertIsInstance(
                 caught.exception.orig, psycopg.errors.FeatureNotSupported
             )
@@ -2400,6 +2417,8 @@ def approval_row(approval_id, **overrides):
         "step_up_verified": False,
         "revoked_at": None,
         "revoked_by": None,
+        # revision 0193 (Decision 0085): never granted for the task
+        "grant_pattern": None,
     }
     values.update(overrides)
     return tuple(values.values())

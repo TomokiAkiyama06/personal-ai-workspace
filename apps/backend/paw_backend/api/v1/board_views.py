@@ -18,7 +18,11 @@ decided before any of these is read.
   (``requester_user_id``: only they may decide one, ``tools/approvals.py``), of
   projects they may read; what the approver is shown is the approval's stored
   ``summary`` (bounded and redacted when it was made, ``approval_types.py``) and
-  the names of the repositories it names that they may read.
+  the names of the repositories it names that they may read, and whether it may
+  be granted for the rest of its task (Decision 0085).
+* **Task-scoped grants** (「このタスクの間は許可」, Decision 0085): the active
+  grants a person made for a task's current run, with their summary and how
+  many calls each let run; only their own.
 """
 
 import uuid
@@ -36,8 +40,14 @@ from paw_backend.authz.models import AuditEventRecord
 from paw_backend.authz.policy import Policy
 from paw_backend.tasks.models import PullRequestChangesRow, TaskRow
 from paw_backend.tools.approval_types import ApprovalStatus
-from paw_backend.tools.models import ToolApprovalRow
+from paw_backend.tools.capabilities import ApprovalLevel
+from paw_backend.tools.models import (
+    ToolApprovalRow,
+    ToolTaskGrantRow,
+    ToolTaskGrantUseRow,
+)
 from paw_backend.tools.scope import TargetKind
+from paw_backend.tools.task_grants import MAX_MAX_ACTIVE_GRANTS, TaskGrantStatus
 
 MAX_AUDIT_ROWS = 100
 MAX_APPROVALS = 100
@@ -91,6 +101,19 @@ class ApprovalView:
     repositories: tuple[str, ...]
     created_at: datetime
     expires_at: datetime
+    # The broker stored how the call may be granted for the rest of its task
+    # (「このタスクの間は許可」, Decision 0085): the sheet offers the button.
+    task_grant_allowed: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class TaskGrantView:
+    id: uuid.UUID
+    approval_id: uuid.UUID
+    tool: str
+    summary: tuple[tuple[str, str, str], ...]
+    created_at: datetime
+    uses: int
 
 
 def _file(index: int, item: dict, patch: object) -> ChangedFileView:
@@ -254,6 +277,7 @@ async def pending_approvals(
                 approvals.targets,
                 approvals.created_at,
                 approvals.expires_at,
+                approvals.grant_pattern.is_not(None).label("grantable"),
                 TaskRow.title,
                 TaskRow.agent,
             )
@@ -299,6 +323,65 @@ async def pending_approvals(
                 ),
                 created_at=row.created_at,
                 expires_at=row.expires_at,
+                task_grant_allowed=bool(row.grantable)
+                and row.level == ApprovalLevel.APPROVAL.value,
             )
         )
     return items
+
+
+async def task_grants(
+    session: AsyncSession,
+    principal: Principal,
+    projects: Mapping[uuid.UUID, views.ProjectInfo],
+    task_id: uuid.UUID,
+) -> list[TaskGrantView]:
+    """The active task-scoped grants (Decision 0085) ``principal`` made for
+    ``task_id``'s current run, oldest first, with how many calls each let run;
+    nothing for a task of a project they may not read. Bounded by the cap of
+    active grants per (task, user) (``task_grants.MAX_MAX_ACTIVE_GRANTS``)."""
+    if not projects:
+        return []
+    grants = ToolTaskGrantRow
+    uses = (
+        select(func.count())
+        .select_from(ToolTaskGrantUseRow)
+        .where(ToolTaskGrantUseRow.grant_id == grants.id)
+        .scalar_subquery()
+    )
+    rows = (
+        await session.execute(
+            select(
+                grants.id,
+                grants.approval_id,
+                grants.tool,
+                grants.summary,
+                grants.created_at,
+                uses.label("uses"),
+            )
+            .join(TaskRow, TaskRow.id == grants.task_id)
+            .where(
+                grants.task_id == task_id,
+                grants.requester_user_id == principal.user_id,
+                grants.status == TaskGrantStatus.ACTIVE.value,
+                grants.project_id.in_(list(projects)),
+                grants.task_attempt == TaskRow.attempt,
+                grants.task_retry_count == TaskRow.retry_count,
+            )
+            .order_by(grants.created_at, grants.id)
+            .limit(MAX_MAX_ACTIVE_GRANTS)
+        )
+    ).all()
+    return [
+        TaskGrantView(
+            id=row.id,
+            approval_id=row.approval_id,
+            tool=row.tool,
+            summary=tuple(
+                (item["name"], item["kind"], item["value"]) for item in row.summary
+            ),
+            created_at=row.created_at,
+            uses=int(row.uses),
+        )
+        for row in rows
+    ]

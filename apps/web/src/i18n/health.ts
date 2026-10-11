@@ -27,11 +27,13 @@ export const healthJa = {
   "health.group.database": "PostgreSQL",
   "health.group.recovery": "Recovery Repository",
   "health.group.external": "外部エージェント",
+  "health.group.other": "その他",
   "health.groupKind.gpu": "GPU・モデル",
   "health.groupKind.queue": "Task · Memory Worker",
   "health.groupKind.database": "データベース",
   "health.groupKind.recovery": "Backup · Projection",
   "health.groupKind.external": "Codex · Claude",
+  "health.groupKind.other": "新しい監視項目",
   "health.groups": "監視の対象",
 
   "health.chipValue.vram": "VRAM {percent}",
@@ -79,6 +81,8 @@ export const healthJa = {
   "health.figure.models": "常駐モデル",
 
   "health.detail.components": "監視項目",
+  "health.detail.unknown":
+    "この画面が知らない監視項目です（新しい Backend の項目）。名前・理由・数値を Backend の Code のまま表示します。",
   "health.detail.models": "モデル",
   "health.detail.reasons": "{component} の詳細",
   "health.detail.noModels": "Scheduler のモデルはありません",
@@ -198,11 +202,13 @@ export const healthEn: Record<keyof typeof healthJa, string> = {
   "health.group.database": "PostgreSQL",
   "health.group.recovery": "Recovery Repository",
   "health.group.external": "External agents",
+  "health.group.other": "Other",
   "health.groupKind.gpu": "GPU and models",
   "health.groupKind.queue": "Task · Memory Worker",
   "health.groupKind.database": "Database",
   "health.groupKind.recovery": "Backup · Projection",
   "health.groupKind.external": "Codex · Claude",
+  "health.groupKind.other": "New components",
   "health.groups": "What is watched",
 
   "health.chipValue.vram": "VRAM {percent}",
@@ -250,6 +256,8 @@ export const healthEn: Record<keyof typeof healthJa, string> = {
   "health.figure.models": "Resident models",
 
   "health.detail.components": "Watched items",
+  "health.detail.unknown":
+    "This screen does not know these components (a newer Backend's). Their names, reasons and numbers are shown as the Backend's codes.",
   "health.detail.models": "Models",
   "health.detail.reasons": "Details of {component}",
   "health.detail.noModels": "The scheduler has no models",

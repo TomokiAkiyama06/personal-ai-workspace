@@ -1,0 +1,14 @@
+# Runs paw-release-prune.service once a day (Issue #54, Decision 0079 5).
+
+[Unit]
+Description=Daily deletion of expired restore points of the Personal AI Workspace
+
+[Timer]
+OnCalendar=daily
+# Run at the next boot when the server was off at the scheduled time.
+Persistent=true
+RandomizedDelaySec=15min
+Unit=paw-release-prune.service
+
+[Install]
+WantedBy=timers.target

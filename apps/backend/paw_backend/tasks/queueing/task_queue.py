@@ -81,6 +81,10 @@ its task is Active (Decision 0020, C: see "Project state gate" above). An entry 
 is skipped for its project keeps its place: it is not moved, cancelled or changed,
 and is taken in its original order once the project is Active again. A reclaimed
 entry keeps its ``priority`` and ``enqueued_at``, so it sorts where it always did.
+While an update's maintenance lasts (the row of ``deploy_maintenance``, Issue #54,
+Decision 0079) no entry is claimable at all: ``claim_next`` returns ``None`` and
+every entry keeps its place, as for a project that is not Active (a statement of
+its own before the claim's, which needs ``SELECT`` on that table, granted).
 
 Cost of the filter. The claim reads the queue in the order of the partial index
 ``ix_queue_entries_claim_order`` and stops at the first entry that passes, as it
@@ -152,6 +156,7 @@ from sqlalchemy import (
     DateTime,
     and_,
     bindparam,
+    exists,
     func,
     insert,
     literal,
@@ -180,7 +185,7 @@ from paw_backend.tasks.queueing.errors import (
     LeaseLostError,
     TaskAlreadyQueuedError,
 )
-from paw_backend.tasks.queueing.models import QueueEntryRow
+from paw_backend.tasks.queueing.models import DeployMaintenanceRow, QueueEntryRow
 from paw_backend.tasks.queueing.sql import (
     FOREIGN_KEY_VIOLATION,
     UNIQUE_VIOLATION,
@@ -484,6 +489,14 @@ class TaskQueue:
             .with_for_update(skip_locked=True)
         )
         async with self._database.session() as session, session.begin():
+            # No task starts while an update's maintenance lasts (Decision 0079).
+            # A statement of its own, so the claim keeps its plan; a maintenance
+            # that begins right after this read is caught by its drain, which
+            # holds the task this claim starts.
+            if (
+                await session.execute(select(exists(DeployMaintenanceRow.id)))
+            ).scalar():
+                return None
             entry_id = (await session.execute(best_first)).scalar_one_or_none()
             if entry_id is None:
                 return None

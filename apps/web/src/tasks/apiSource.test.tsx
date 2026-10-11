@@ -129,6 +129,55 @@ describe("apiTaskSource", () => {
     expect(list.capacity).toBeUndefined();
   });
 
+  it("reads the scheduler's parallel limit and, when it comes, the VRAM in GB", async () => {
+    mockApi({
+      "GET /tasks": reply(200, {
+        tasks: [],
+        capacity: {
+          parallel_limit: 2,
+          running: 1,
+          vram_used_bytes: 19_541_778_432, // 18.2 GiB
+          vram_total_bytes: 51_539_607_552, // 48 GiB
+        },
+      }),
+    });
+    expect((await apiTaskSource.listTasks()).capacity).toEqual({
+      parallelLimit: 2,
+      vramUsedGb: 18.2,
+      vramTotalGb: 48,
+    });
+  });
+
+  it("shows the parallel limit alone without the VRAM, and nothing without a scheduler", async () => {
+    mockApi({
+      "GET /tasks": reply(200, {
+        tasks: [],
+        capacity: { parallel_limit: 0, running: 0, vram_used_bytes: null, vram_total_bytes: null },
+      }),
+    });
+    expect((await apiTaskSource.listTasks()).capacity).toEqual({ parallelLimit: 0 });
+    mockApi({ "GET /tasks": reply(200, { tasks: [], capacity: null }) });
+    expect((await apiTaskSource.listTasks()).capacity).toBeUndefined();
+  });
+
+  it("puts the limit and the VRAM in the task list's header", async () => {
+    mockApi({
+      "GET /auth/session": reply(200, session()),
+      "GET /tasks": reply(200, {
+        tasks: [wire()],
+        capacity: {
+          parallel_limit: 2,
+          running: 1,
+          vram_used_bytes: 19_541_778_432,
+          vram_total_bytes: 51_539_607_552,
+        },
+      }),
+      [`GET /tasks/${TASK}`]: reply(200, wire()),
+    });
+    renderApp("/agents");
+    expect(await screen.findByText("並列上限 2 · VRAM 18.2 / 48 GB")).toBeInTheDocument();
+  });
+
   it("maps the detail: step tool calls, budget, repositories and DAG", async () => {
     mockApi({ [`GET /tasks/${TASK}`]: reply(200, wire()) });
     const task = await apiTaskSource.getTask(TASK);
@@ -342,6 +391,7 @@ describe("apiTaskSource", () => {
             repositories: ["web-app"],
             created_at: "2026-10-01T09:00:00Z",
             expires_at: "2026-10-01T10:00:00Z",
+            task_grant_allowed: true,
           },
         ],
       }),
@@ -358,10 +408,17 @@ describe("apiTaskSource", () => {
         repositories: [],
         created_at: "2026-10-01T09:00:00Z",
         expires_at: "2026-10-01T10:00:00Z",
+        task_grant_allowed: false,
       }),
     });
     const [item] = await apiTaskSource.listApprovals(TASK);
-    expect(item).toMatchObject({ id: "a-1", taskId: TASK, level: "approval", tool: "package.add" });
+    expect(item).toMatchObject({
+      id: "a-1",
+      taskId: TASK,
+      level: "approval",
+      tool: "package.add",
+      taskGrantAllowed: true,
+    });
     expect(String(fetchMock.mock.calls[0]?.[0])).toContain(`/approvals?task_id=${TASK}`);
     await apiTaskSource.decideApproval("a-1", "approve");
     expect(await apiTaskSource.getApproval("a-1")).toMatchObject({ level: "strong_approval" });
@@ -370,6 +427,45 @@ describe("apiTaskSource", () => {
       path: "/approvals/a-1/decision",
       body: { decision: "approve" },
     });
+  });
+
+  it("lists the grants of a task and revokes one", async () => {
+    const { calls } = mockApi({
+      "GET /tasks/t-1/approval-grants": reply(200, {
+        grants: [
+          {
+            id: "g-1",
+            approval_id: "a-1",
+            tool: "package.add",
+            summary: [{ name: "command", kind: "text", value: "uv add x" }],
+            created_at: "2026-10-01T09:00:00Z",
+            uses: 3,
+          },
+        ],
+      }),
+      "POST /approval-grants/g-1/revoke": reply(200, { id: "g-1", outcome: "revoked" }),
+      "POST /approvals/a-2/decision": reply(200, {
+        id: "a-2",
+        outcome: "approved_for_task",
+        grant_id: "g-2",
+      }),
+    });
+    expect(await apiTaskSource.listTaskGrants("t-1")).toEqual([
+      {
+        id: "g-1",
+        approvalId: "a-1",
+        tool: "package.add",
+        summary: [{ name: "command", kind: "text", value: "uv add x" }],
+        createdAt: "2026-10-01T09:00:00Z",
+        uses: 3,
+      },
+    ]);
+    await apiTaskSource.revokeTaskGrant("g-1");
+    await apiTaskSource.decideApproval("a-2", "approve_for_task");
+    expect(calls.slice(1)).toMatchObject([
+      { method: "POST", path: "/approval-grants/g-1/revoke" },
+      { method: "POST", path: "/approvals/a-2/decision", body: { decision: "approve_for_task" } },
+    ]);
   });
 
   it("computes what is left of the budget", () => {

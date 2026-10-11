@@ -1,5 +1,4 @@
-"""The changed files of a delivered pull request (issue #185 item 6, Decision 0078
-Proposed).
+"""The changed files of a delivered pull request (issue #185 item 6, Decision 0078).
 
 The PR screen shows which files a pull request changes, with the lines added and
 deleted, and each file's diff (the Design's PullRequest and MobileDiff boards).

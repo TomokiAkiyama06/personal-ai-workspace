@@ -46,6 +46,9 @@ from paw_backend.tools.approval_types import (
 )
 
 TABLE_NAMES = ("tool_approvals", "tool_approval_events")
+# The task-scoped grants (revision 0193, Decision 0085).
+GRANT_TABLE_NAMES = ("tool_task_grants", "tool_task_grant_uses")
+GRANT_STATUS_VALUES = ("active", "revoked")
 LEVEL_VALUES = ("approval", "strong_approval")
 
 
@@ -93,6 +96,9 @@ class ToolApprovalRow(Base):
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # NULL with ``revoked_at`` set: revoked by the system (the task ended).
     revoked_by: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    # How the call may be granted for the rest of its task (revision 0193,
+    # Decision 0085; ``grant_pattern.GrantPattern.to_json``). NULL: never.
+    grant_pattern: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
 
     __table_args__ = (
         _in("status", ApprovalStatus, "status_valid"),
@@ -136,6 +142,11 @@ class ToolApprovalRow(Base):
             "jsonb_typeof(summary) = 'array'"
             " AND jsonb_array_length(summary) BETWEEN 1 AND 16",
             name="summary_shape",
+        ),
+        CheckConstraint(
+            "grant_pattern IS NULL"
+            " OR (level = 'approval' AND jsonb_typeof(grant_pattern) = 'object')",
+            name="grant_pattern_only_approval",
         ),
         # At most one open approval per exact call: a repeated request finds it.
         Index(
@@ -189,4 +200,73 @@ class ToolApprovalEventRow(Base):
             name="agent_matches_kind",
         ),
         Index("ix_tool_approval_events_approval_id", "approval_id", "seq"),
+    )
+
+
+class ToolTaskGrantRow(Base):
+    """A task-scoped grant ("このタスクの間は許可", revision 0193, Decision
+    0085): made from one approval, bound to its task's run, agent, user and tool;
+    ``active`` until revoked (by the person, an Admin / Owner, or the system when
+    the task ended). Triggers keep what it covers immutable and refuse DELETE."""
+
+    __tablename__ = "tool_task_grants"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    approval_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tool_approvals.id"), unique=True
+    )
+    task_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    task_attempt: Mapped[int] = mapped_column(Integer)
+    task_retry_count: Mapped[int] = mapped_column(Integer)
+    project_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    agent_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    requester_user_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    tool: Mapped[str] = mapped_column(String(64))
+    pattern: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    # The approval's summary: what the person was shown when they granted it.
+    summary: Mapped[list[dict[str, Any]]] = mapped_column(JSONB)
+    status: Mapped[str] = mapped_column(String(16))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_by: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+
+    __table_args__ = (
+        _in("status", GRANT_STATUS_VALUES, "status_valid"),
+        CheckConstraint("agent_id <> requester_user_id", name="agent_is_not_user"),
+        CheckConstraint("task_attempt >= 1", name="task_attempt_positive"),
+        CheckConstraint("task_retry_count >= 0", name="task_retry_count_not_negative"),
+        CheckConstraint(
+            "(status = 'revoked') = (revoked_at IS NOT NULL)"
+            " AND (revoked_by IS NULL OR revoked_at IS NOT NULL)",
+            name="revoked_matches_status",
+        ),
+        CheckConstraint("jsonb_typeof(pattern) = 'object'", name="pattern_shape"),
+        CheckConstraint(
+            "jsonb_typeof(summary) = 'array'"
+            " AND jsonb_array_length(summary) BETWEEN 1 AND 16",
+            name="summary_shape",
+        ),
+        Index(
+            "ix_tool_task_grants_task_id", "task_id", "requester_user_id", "created_at"
+        ),
+    )
+
+
+class ToolTaskGrantUseRow(Base):
+    """One call a grant let run (append-only, revision 0193)."""
+
+    __tablename__ = "tool_task_grant_uses"
+
+    seq: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    grant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tool_task_grants.id"))
+    call_hash: Mapped[str] = mapped_column(String(64))
+    # The broker's decision (its audit rows carry the same correlation id).
+    correlation_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    task_attempt: Mapped[int] = mapped_column(Integer)
+    task_retry_count: Mapped[int] = mapped_column(Integer)
+    used_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint("call_hash ~ '^[0-9a-f]{64}$'", name="call_hash_sha256"),
+        Index("ix_tool_task_grant_uses_grant_id", "grant_id", "seq"),
     )

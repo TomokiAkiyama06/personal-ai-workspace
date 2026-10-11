@@ -354,6 +354,8 @@ class _Finished:
     error_class: str = "Error"
     message: str = ""
     retryable: bool = True
+    # The runtime asked for the next rung at once (``NodeOutcome.escalate``).
+    escalate: bool = False
 
     @classmethod
     def failure(
@@ -1903,6 +1905,7 @@ class Orchestrator:
                 error_class=runtime_error_class(outcome.error_class),
                 message=outcome.message,
                 retryable=outcome.retryable,
+                escalate=outcome.escalate,
             )
         return await self._settle_failure(run, dag, node, number, finished)
 
@@ -1937,7 +1940,12 @@ class Orchestrator:
           ``WAIT_FOR_USER`` keeps the node and stops the run, ``FAIL`` gives the
           node up and stops the run;
         * a failure that says it is not retryable, a rung out of attempts and an
-          approach beyond the loop detector's range give the node up.
+          approach beyond the loop detector's range give the node up;
+        * a failure that asks for the next rung (``escalate``, Decision 0083,
+          section 4) escalates at once when the ladder has another agent and the
+          approach counter allows it, whatever the loop verdict (it skips
+          ``TRY_ALTERNATIVE``); the budget still comes first. Without another
+          agent it goes the ordinary way.
         """
         error_class = format_error_class(finished.error_class)
         message = format_failure_text(finished.message)
@@ -2030,6 +2038,17 @@ class Orchestrator:
         if not finished.retryable:
             return NextStep.GIVE_UP, {}
         next_approach = node.approach + 1
+        # Decision 0083, section 4: a failure that says only a higher rung can
+        # solve it escalates without waiting for the loop detector (which may
+        # never fire: it needs the same signature three times in the task's last
+        # ten failures) and without an alternative on this rung first.
+        if (
+            finished.escalate
+            and can_escalate
+            and next_approach <= MAX_APPROACH
+            and action in (NextAction.CONTINUE, NextAction.TRY_ALTERNATIVE)
+        ):
+            action = NextAction.ESCALATE_AGENT
         if action is NextAction.ESCALATE_AGENT:
             if can_escalate and next_approach <= MAX_APPROACH:
                 return NextStep.ESCALATE, {

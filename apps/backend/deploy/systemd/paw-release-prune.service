@@ -1,0 +1,23 @@
+# Deletes the database restore points older than restore_point_keep_days
+# (Issue #54, Decision 0079 5): a dump holds the personal data of users deleted
+# since, so it must not outlive its retention when no update follows. Started
+# once a day by paw-release-prune.timer; paw-release also prunes after every
+# update and rollback.
+#
+# Install (as root), with paw-release installed as /usr/local/sbin/paw-release
+# and its configuration in /etc/paw/release.toml:
+#   cp paw-release-prune.service paw-release-prune.timer /etc/systemd/system/
+#   systemctl daemon-reload
+#   systemctl enable --now paw-release-prune.timer
+#
+# It runs as root like paw-release itself (it takes the same lock: a prune
+# never runs during an update) and needs no database credential.
+
+[Unit]
+Description=Delete expired restore points of the Personal AI Workspace
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/paw-release prune-restore-points
+NoNewPrivileges=true
+PrivateTmp=true
