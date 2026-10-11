@@ -32,6 +32,13 @@ from paw_backend.repositories.validation import validate_branch
 from paw_backend.tools.scope import TargetError, normalise_path
 
 WORKTREE_DIRECTORY = ".paw-worktrees"
+#: Where a Worker branch's starting point is recorded (Decision 0083, 10):
+#: ``refs/paw/base/<branch>``, written once when the branch is prepared and
+#: never moved, in the ``paw/`` namespace like the branch.
+BASE_REF_PREFIX = "refs/paw/base/"
+#: The trailer a Worker node's commits carry (``PAW-Node: <task>/<node>``):
+#: what tells them apart from the merges of the branches it builds on.
+NODE_TRAILER = "PAW-Node"
 BRANCH_NAMESPACE = "paw"
 INTEGRATION_KEY = "_integration"
 _KEY = re.compile(KEY_PATTERN)
@@ -86,3 +93,17 @@ def worktree_path(
     if len(path) > MAX_PATH_CHARS or len(path.encode()) > MAX_PATH_BYTES:
         raise WorktreeUnavailableError(WorktreeProblem.TOO_LONG)
     return path
+
+
+def base_ref(branch: str) -> str:
+    """``refs/paw/base/<branch>`` of a Worker branch (``paw/...``)."""
+    if not in_namespace(branch) or branch == BRANCH_NAMESPACE:
+        raise ValueError("not a branch of the workspace")
+    return BASE_REF_PREFIX + validate_branch(branch)
+
+
+def node_marker(task_id: uuid.UUID, key: str) -> str:
+    """The value of a node's ``PAW-Node`` trailer: ``<task>/<node>``."""
+    if not isinstance(task_id, uuid.UUID):
+        raise TypeError("task_id must be a UUID")
+    return f"{task_id}/{_key(key)}"

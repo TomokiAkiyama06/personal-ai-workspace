@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 import httpx
 
 from paw_backend.agents.chat import ChatCompletionsClient
+from paw_backend.agents.local import LocalAgentLimits, LocalAgentRuntime
 from paw_backend.agents.preferences import ModelPreferenceInterpreter
 from paw_backend.agents.reasoning import (
     MAIN_REASONING_POLICY,
@@ -25,18 +26,24 @@ from paw_backend.agents.reasoning import (
 from paw_backend.compute.domain import ResourceClass
 from paw_backend.compute.runtimes import ScheduledInterpreter
 from paw_backend.compute.scheduler import ComputeScheduler
+from paw_backend.compute.wiring import LocalRuntime
 
 # The main model's deployment in the scheduler and its served name
 # (``paw-llm-main.service``: ``--served-model-name main``).
 DEFAULT_MAIN_DEPLOYMENT = "main"
 DEFAULT_SERVED_MODEL = "main"
+# The main model's id, recorded as the placement's model (Decision 0083, 12;
+# Decision 0074: Qwen3.8-27B-FP8 is the main model).
+DEFAULT_MAIN_MODEL_ID = "Qwen3.8-27B-FP8"
+# The ladder label the local agent plays (``OrchestratorConfig``'s ladders).
+DEFAULT_AGENT_LABEL = "local"
 
 
 @dataclass(frozen=True, slots=True)
 class LocalModelSetup:
     """Where the main model's OpenAI-compatible API is.
 
-    ``base_url``: the API's root with its version (``http://127.0.0.1:8000/v1``).
+    ``base_url``: the API's root with its version (``http://127.0.0.1:18080/v1``).
     ``deployment``: the model's name in the scheduler's ``ComputeConfig``.
     ``served_model``: the server's ``--served-model-name``.
     ``reasoning_history``: what of the model's reasoning the local agent gives
@@ -49,9 +56,17 @@ class LocalModelSetup:
     served_model: str = DEFAULT_SERVED_MODEL
     reasoning_history: ReasoningHistoryPolicy = MAIN_REASONING_POLICY
     transport: httpx.AsyncBaseTransport | None = field(default=None, repr=False)
+    # The local agent runtime (Decision 0083, 11's stage 3): the model id its
+    # placement records, its ladder label and its limits (``node_seconds``: the
+    # orchestrator's node timeout).
+    model_id: str = DEFAULT_MAIN_MODEL_ID
+    agent_label: str = DEFAULT_AGENT_LABEL
+    limits: LocalAgentLimits = field(default_factory=LocalAgentLimits)
 
     def __post_init__(self) -> None:
         check_reasoning_policy(self.reasoning_history)
+        if not isinstance(self.limits, LocalAgentLimits):
+            raise TypeError("limits must be LocalAgentLimits")
 
     def client(self) -> ChatCompletionsClient:
         return ChatCompletionsClient(
@@ -82,9 +97,31 @@ def build_preference_interpreter(
     return scheduled, client
 
 
+def build_local_agent(
+    setup: LocalModelSetup, client: ChatCompletionsClient
+) -> LocalRuntime:
+    """The local agent runtime on the main model, for ``local_runtimes``: the
+    composition wraps it in ``HybridRuntime`` (the lease, its resizing through
+    ``compute.current_lease``, GPU time, placement and ``local_usage``)."""
+    if not isinstance(setup, LocalModelSetup):
+        raise TypeError("local_model must be a LocalModelSetup")
+    runtime = LocalAgentRuntime(
+        client, reasoning_history=setup.reasoning_history, limits=setup.limits
+    )
+    return LocalRuntime(
+        runtime=runtime,
+        deployment=setup.deployment,
+        local_model=setup.model_id,
+        resource_class=ResourceClass.CODING,
+    )
+
+
 __all__ = [
+    "DEFAULT_AGENT_LABEL",
     "DEFAULT_MAIN_DEPLOYMENT",
+    "DEFAULT_MAIN_MODEL_ID",
     "DEFAULT_SERVED_MODEL",
     "LocalModelSetup",
+    "build_local_agent",
     "build_preference_interpreter",
 ]

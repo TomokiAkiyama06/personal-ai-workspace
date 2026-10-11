@@ -84,6 +84,8 @@ from paw_backend.repositories import (
 )
 from paw_backend.repositories.accounts import AccountDirectory
 from paw_backend.repositories.git import GitRunner
+from paw_backend.sandbox import REPO_TOOL_SPECS, SandboxPool, ToolExecutors
+from paw_backend.sandbox.wiring import SandboxSetup, repository_tools
 from paw_backend.tasks import ProjectGate, TaskService
 from paw_backend.tasks.queueing import BudgetTracker, LoopDetector, TaskQueue
 from paw_backend.tools import (
@@ -116,6 +118,8 @@ class TaskExecution:
     tools: ToolRunner
     orchestrator: Orchestrator | None
     worktrees: GitWorktreeCoordinator | None = None
+    # The sandboxes of the repository tools (``None``: no ``SandboxSetup``).
+    sandboxes: SandboxPool | None = None
 
 
 def build_repository_scopes(
@@ -133,6 +137,10 @@ def build_repository_scopes(
     )
 
 
+#: How long one tool call may run (Decision 0083, 8: the benchmark's 300 s).
+REPOSITORY_TOOL_SECONDS = 300.0
+
+
 def build_tool_broker(
     database: Database,
     authorizer: Authorizer,
@@ -143,13 +151,16 @@ def build_tool_broker(
     approvals: PostgresApprovalStore,
     registrations: RepositoryScopes,
     grants: PostgresTaskGrantStore | None = None,
+    repository_tools: bool = False,
 ) -> ToolBroker:
     """The Tool Broker of the application (module docstring). Every call is
     fenced on the worker's lease, read from ``queue`` (issue #126, Decision 0046;
     Decision 0047, 7): without a verifier the Broker refuses every call
-    (``lease_unavailable``)."""
+    (``lease_unavailable``). ``repository_tools``: the file, shell and git
+    tools of Decision 0083 (``paw_backend.sandbox``) are registered too."""
+    specs = (*WORKING_SET_TOOL_SPECS, *(REPO_TOOL_SPECS if repository_tools else ()))
     return ToolBroker(
-        ToolRegistry(WORKING_SET_TOOL_SPECS),
+        ToolRegistry(specs),
         authorizer,
         approvals,
         PostgresAuditSink(database),
@@ -224,6 +235,7 @@ def build_task_execution(
     accounts: AccountDirectory | None = None,
     scheduler: ComputeScheduler | None = None,
     local_runtimes: Mapping[str, LocalRuntime] | None = None,
+    sandbox: SandboxSetup | None = None,
 ) -> TaskExecution:
     """Build the task execution of the application (module docstring).
 
@@ -236,7 +248,10 @@ def build_task_execution(
     ``git_runner`` is the deployment's ``GitRunner`` for the worktrees (default
     ``SubprocessGitRunner()``), ``accounts`` their account directory (default
     ``LoginNameAccountDirectory``; a test passes its own). Both are checked
-    whether or not an orchestrator is built (``TypeError``)."""
+    whether or not an orchestrator is built (``TypeError``). ``sandbox``
+    (Decision 0083, 2 and 6) adds the repository tools to the Tool Broker, run in
+    sandboxes as the task creator's account (the same account directory), with
+    the tool runner's limit at 300 seconds (Decision 0083, 8)."""
     if not isinstance(database, Database):
         raise TypeError("database must be a Database")
     if not isinstance(authorizer, Authorizer):
@@ -283,8 +298,31 @@ def build_task_execution(
         approvals=approval_store,
         registrations=repositories,
         grants=grant_store,
+        repository_tools=sandbox is not None,
     )
-    tools = ToolRunner(broker, WorkingSetExecutor(tasks))
+    sandboxes = None
+    if sandbox is None:
+        tools = ToolRunner(broker, WorkingSetExecutor(tasks))
+    else:
+        if accounts is None:
+            accounts = LoginNameAccountDirectory(
+                database, policy=RepositoryPolicy.from_settings(settings)
+            )
+        executor, sandboxes = repository_tools(
+            sandbox, git_runner=git_runner, accounts=accounts
+        )
+        working_set = WorkingSetExecutor(tasks)
+        tools = ToolRunner(
+            broker,
+            ToolExecutors(
+                {
+                    **{spec.name: working_set for spec in WORKING_SET_TOOL_SPECS},
+                    **{spec.name: executor for spec in REPO_TOOL_SPECS},
+                }
+            ),
+            execution_timeout=REPOSITORY_TOOL_SECONDS,
+        )
+        executor.bind_git_caller(tools.run)
     orchestrator = None
     worktrees = None
     if local_runtimes is not None and scheduler is not None:
@@ -320,4 +358,5 @@ def build_task_execution(
         tools=tools,
         orchestrator=orchestrator,
         worktrees=worktrees,
+        sandboxes=sandboxes,
     )

@@ -73,6 +73,7 @@ from paw_backend.compute.runtimes import (
     ScheduledInterpreter,
     ScheduledMemoryWorker,
     TrackerLateGpuCharge,
+    current_lease,
     estimate_context_tokens,
 )
 from paw_backend.compute.scheduler import (
@@ -144,5 +145,6 @@ __all__ = [
     "VramDeferral",
     "VramView",
     "VramWarningSink",
+    "current_lease",
     "estimate_context_tokens",
 ]

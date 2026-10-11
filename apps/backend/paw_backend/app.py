@@ -9,7 +9,11 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from paw_backend import __version__
-from paw_backend.agents.wiring import LocalModelSetup, build_preference_interpreter
+from paw_backend.agents.wiring import (
+    LocalModelSetup,
+    build_local_agent,
+    build_preference_interpreter,
+)
 from paw_backend.api.v1 import router as api_v1
 from paw_backend.auth.body_limit import AuthBodyLimitMiddleware
 from paw_backend.auth.csrf import OriginCheckMiddleware
@@ -54,6 +58,7 @@ from paw_backend.repositories import (
 from paw_backend.repositories.git import GitRunner
 from paw_backend.repositories.github_connection import GhRunner
 from paw_backend.research.scratch import ScratchJanitor, ScratchStore
+from paw_backend.sandbox.wiring import SandboxSetup, reap_idle_sandboxes
 from paw_backend.web import WebAppMiddleware
 
 logger = logging.getLogger(__name__)
@@ -72,6 +77,7 @@ def create_app(
     local_runtimes: Mapping[str, LocalRuntime] | None = None,
     gh_runner: GhRunner | None = None,
     local_model: LocalModelSetup | None = None,
+    sandbox: SandboxSetup | None = None,
 ) -> FastAPI:
     """Build the FastAPI application.
 
@@ -126,6 +132,8 @@ def create_app(
         raise TypeError("local_runtimes need compute")
     if local_model is not None and compute is None:
         raise TypeError("local_model needs compute")
+    if sandbox is not None and not isinstance(sandbox, SandboxSetup):
+        raise TypeError("sandbox must be a SandboxSetup")
     compute_services: ComputeServices | None = None
     if compute is not None:
         scheduler, vram_warnings = build_compute(compute)
@@ -136,6 +144,16 @@ def create_app(
         preference_interpreter, local_model_client = build_preference_interpreter(
             local_model, compute_services.scheduler
         )
+        if sandbox is not None and orchestrator_config is not None:
+            # The local agent runtime (Decision 0083, 11's stage 3): its tools are
+            # the repository tools, so only with a sandbox; it plays the ladder
+            # label ``local_model.agent_label``.
+            local_runtimes = {
+                **dict(local_runtimes or {}),
+                local_model.agent_label: build_local_agent(
+                    local_model, local_model_client
+                ),
+            }
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -161,6 +179,14 @@ def create_app(
         health = app.state.system_health
         compute_stop = asyncio.Event()
         try:
+            # The sandboxes of the repository tools (Decision 0083, 6): idle ones
+            # are stopped, and every one at shutdown.
+            if task_execution is not None and task_execution.sandboxes is not None:
+                background.add(
+                    asyncio.create_task(
+                        reap_idle_sandboxes(task_execution.sandboxes, compute_stop)
+                    )
+                )
             # The Compute Resource Scheduler, when the deployment configured one
             # (issue #165): its refresh loop, and Kaggle / Full GPU Mode next to
             # it (holding tasks needs the task lifecycle, so a database).
@@ -330,6 +356,7 @@ def create_app(
             git_runner=git_runner,
             scheduler=None if compute_services is None else compute_services.scheduler,
             local_runtimes=local_runtimes,
+            sandbox=sandbox,
         )
     elif local_runtimes is not None:
         raise TypeError("local_runtimes need a database")

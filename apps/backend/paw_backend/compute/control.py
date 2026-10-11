@@ -120,7 +120,7 @@ def _argv(parameter: str, value: object) -> tuple[str, ...] | None:
 class DeploymentCommands:
     """The argv of each action for one deployment (``None``: not available),
     and where its runtime's Prometheus metrics are (``metrics_url``, e.g.
-    ``http://127.0.0.1:8000/metrics`` for vLLM; ``None``: its KV usage is not
+    ``http://127.0.0.1:18080/metrics`` for vLLM; ``None``: its KV usage is not
     known)."""
 
     gpu: tuple[str, ...] | None = None  # start the GPU runtime

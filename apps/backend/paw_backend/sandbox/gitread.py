@@ -124,14 +124,23 @@ class GitReader:
 
     async def _run(
         self,
-        args: Sequence[str],
+        args: list[str],
         account: LinuxAccount,
         repository: RepositoryGit | str,
     ) -> GitResult:
         if isinstance(repository, RepositoryGit) and repository.pinned is not None:
             pinned = repository.pinned
             cwd = pinned.path
-            args = [f"--git-dir={pinned.git_dir}", f"--work-tree={pinned.path}", *args]
+            config: list[str] = []
+            while args[:1] == ["-c"]:
+                config.extend(args[:2])
+                args = args[2:]
+            args = [
+                *config,
+                f"--git-dir={pinned.git_dir}",
+                f"--work-tree={pinned.path}",
+                *args,
+            ]
         else:
             cwd = (
                 repository.root if isinstance(repository, RepositoryGit) else repository
@@ -295,6 +304,112 @@ class GitReader:
         if result.returncode == _NO:
             return False
         raise GitCommandError("merge-base", GitFailure.NONZERO_EXIT)
+
+
+# -- the base diff and the commit of a Worker node (Decision 0083, 10) -------------
+
+#: Who commits a Worker node's work, and how its message reads (fixed: the
+#: model never chooses them; the SSH wrapper accepts nothing else).
+COMMIT_NAME = "Personal AI Workspace Agent"
+COMMIT_EMAIL = "agent@paw.invalid"
+COMMIT_CONFIG = (
+    ("user.name", COMMIT_NAME),
+    ("user.email", COMMIT_EMAIL),
+    ("commit.gpgSign", "false"),
+)
+_MAX_LISTED = 10_000
+
+
+def commit_message(marker: str) -> str:
+    """The fixed message of a node's commit, with its ``PAW-Node`` trailer."""
+    return f"paw: node work\n\nPAW-Node: {marker}\n"
+
+
+@dataclass(frozen=True, slots=True)
+class BranchChanges:
+    """What a Worker node changed since its base: ``changed`` (committed since
+    the base, uncommitted and untracked; repository-relative paths) and
+    ``uncommitted`` (the part not committed yet)."""
+
+    base: str
+    head: str
+    changed: tuple[str, ...]
+    uncommitted: tuple[str, ...]
+
+
+def _paths(output: str) -> set[str]:
+    listed = {p for p in output.split("\0") if p}
+    if len(listed) > _MAX_LISTED:
+        raise GitCommandError("diff", GitFailure.OUTPUT_TOO_LARGE)
+    return listed
+
+
+async def branch_changes(
+    reader: "GitReader",
+    repository: RepositoryGit,
+    *,
+    account: LinuxAccount,
+    pathspecs: Sequence[str],
+) -> BranchChanges:
+    """The changes of ``repository`` (a worktree with its base) since its base,
+    outside the hidden paths (``pathspecs``: ``.`` and the excludes)."""
+    if not repository.has_history:
+        raise GitReadRefused(GitRefusal.HISTORY)
+    assert repository.base is not None
+    head = await reader._commit(repository, "HEAD", account)
+    fixed = ["--no-color", "--no-ext-diff", "--no-textconv", "--name-only"]
+
+    async def listed(args: list[str]) -> set[str]:
+        result = await reader._run([*args, "--", *pathspecs], account, repository)
+        if result.returncode != 0:
+            raise GitCommandError(args[0], GitFailure.NONZERO_EXIT)
+        return _paths(result.stdout)
+
+    since_base = await listed(["diff", *fixed, "--no-renames", "-z", repository.base])
+    since_head = await listed(["diff", *fixed, "--no-renames", "-z", head])
+    untracked = await listed(["ls-files", "--others", "--exclude-standard", "-z"])
+    return BranchChanges(
+        repository.base,
+        head,
+        tuple(sorted(since_base | untracked)),
+        tuple(sorted(since_head | untracked)),
+    )
+
+
+async def commit_paths(
+    reader: "GitReader",
+    repository: RepositoryGit,
+    paths: Sequence[str],
+    *,
+    account: LinuxAccount,
+    marker: str,
+) -> str:
+    """Commit exactly ``paths`` (repository-relative, already checked) of the
+    worktree, as the fixed author with the node's trailer; the new ``HEAD``."""
+    if repository.pinned is None or not paths:
+        raise GitReadRefused(GitRefusal.UNAVAILABLE)
+    specs = [f":(literal){p}" for p in paths]
+    added = await reader._run(["add", "-A", "--", *specs], account, repository)
+    if added.returncode != 0:
+        raise GitCommandError("add", GitFailure.NONZERO_EXIT)
+    identity = [w for key, value in COMMIT_CONFIG for w in ("-c", f"{key}={value}")]
+    committed = await reader._run(
+        [
+            *identity,
+            "commit",
+            "--quiet",
+            "--no-verify",
+            "-m",
+            commit_message(marker),
+            "--",
+            *specs,
+        ],
+        account,
+        repository,
+    )
+    if committed.returncode != 0:
+        raise GitCommandError("commit", GitFailure.NONZERO_EXIT)
+    return await reader._commit(repository, "HEAD", account)
 
 
 def _current_state_only(args: GitReadArgs) -> None:

@@ -17,8 +17,9 @@ runs through the Tool Broker, and where they run.
 * ``gitargs.py`` / ``gitread.py`` / ``shim.py``: the sandbox's ``git``, a shim
   that asks the backend, which runs a read-only, pinned git on the host.
 
-Nothing here is wired into the application yet: the runtime that calls these
-tools (``LocalAgentRuntime``) and its wiring come in stage 3.
+Stage 3 adds ``repo.git.changes`` / ``repo.git.commit`` (a Worker node's base
+diff and commit, Decision 0083, 10) and the wiring (``wiring.py``:
+``create_app(sandbox=SandboxSetup(...))``).
 """
 
 from paw_backend.sandbox.gitargs import (
@@ -48,6 +49,8 @@ from paw_backend.sandbox.spec import (
 from paw_backend.sandbox.tools import (
     REPO_FILE_STR_REPLACE,
     REPO_FILE_WRITE,
+    REPO_GIT_CHANGES,
+    REPO_GIT_COMMIT,
     REPO_GIT_READ,
     REPO_SHELL_READ,
     REPO_SHELL_RUN,
@@ -60,6 +63,8 @@ from paw_backend.sandbox.tools import (
 __all__ = [
     "REPO_FILE_STR_REPLACE",
     "REPO_FILE_WRITE",
+    "REPO_GIT_CHANGES",
+    "REPO_GIT_COMMIT",
     "REPO_GIT_READ",
     "REPO_SHELL_READ",
     "REPO_SHELL_RUN",

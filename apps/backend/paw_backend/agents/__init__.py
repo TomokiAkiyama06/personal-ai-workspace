@@ -18,7 +18,10 @@ stages (section 11). This package has the first stage, the shared parts:
   on the local main model, behind ``compute.ScheduledInterpreter`` (an
   ``INTERACTIVE`` lease; without one the rule interpreter answers).
 
-No tool, sandbox or CLI runs here yet (later stages).
+Stage 3 adds ``local.py``: :class:`LocalAgentRuntime`, the local main model's
+tool loop (the benchmark harness's prompt and tools; every tool through the Tool
+Broker's repository tools of ``paw_backend.sandbox``), wired through
+``wiring.build_local_agent`` into ``local_runtimes``. The CLI runtimes come later.
 """
 
 from paw_backend.agents.chat import (
@@ -34,6 +37,7 @@ from paw_backend.agents.failures import (
     FailureRow,
     RuntimeFailure,
 )
+from paw_backend.agents.local import LocalAgentLimits, LocalAgentRuntime
 from paw_backend.agents.preferences import ModelPreferenceInterpreter
 from paw_backend.agents.reasoning import (
     MAIN_REASONING_POLICY,
@@ -44,7 +48,11 @@ from paw_backend.agents.reasoning import (
     estimate_prompt_tokens,
     reasoning_chars,
 )
-from paw_backend.agents.wiring import LocalModelSetup, build_preference_interpreter
+from paw_backend.agents.wiring import (
+    LocalModelSetup,
+    build_local_agent,
+    build_preference_interpreter,
+)
 
 __all__ = [
     "FAILURE_TABLE",
@@ -56,12 +64,15 @@ __all__ = [
     "Failure",
     "FailureRow",
     "KeepAllReasoning",
+    "LocalAgentLimits",
+    "LocalAgentRuntime",
     "LocalModelSetup",
     "ModelPreferenceInterpreter",
     "ReasoningHistoryPolicy",
     "RuntimeFailure",
     "ToolCall",
     "Usage",
+    "build_local_agent",
     "build_preference_interpreter",
     "check_reasoning_policy",
     "estimate_prompt_tokens",

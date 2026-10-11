@@ -107,6 +107,11 @@ class NodeWorktree:
     path: str
     branch: str
     protected: tuple[str, ...] = ()
+    # The branch's starting point (Decision 0083, 10): the commit after the
+    # upstream Worker branches were first merged in, recorded once as
+    # ``refs/paw/base/<branch>`` and read back by every later attempt. The node
+    # reads and commits only from here on (``None``: not known).
+    base_commit: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

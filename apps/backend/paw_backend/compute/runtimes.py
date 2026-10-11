@@ -46,6 +46,7 @@
 
 import asyncio
 import contextlib
+import contextvars
 import dataclasses
 import json
 import logging
@@ -114,6 +115,20 @@ _REVOKED = object()
 _UNPLACED = object()
 
 logger = logging.getLogger(__name__)
+
+# The lease a local runtime runs under, while ``HybridRuntime`` runs it: the
+# runtime grows or shrinks its reservation with it before every request
+# (``ComputeLease.resize``, Decision 0076, 3). Set in the task that runs the
+# local runtime only (a context variable: no other node sees it).
+_LOCAL_LEASE: contextvars.ContextVar[ComputeLease | None] = contextvars.ContextVar(
+    "paw_local_lease", default=None
+)
+
+
+def current_lease() -> ComputeLease | None:
+    """The compute lease of the local runtime running in this task (``None``:
+    it does not run under ``HybridRuntime``, as in a test)."""
+    return _LOCAL_LEASE.get()
 
 
 async def _cancel_and_wait(work: asyncio.Future, lease: ComputeLease) -> None:
@@ -583,7 +598,9 @@ class HybridRuntime:
         without bound. A call that does not stop when it is cancelled keeps its
         lease until it ends (its GPU capacity is not given away) and is put in
         ``held`` (its time is metered and charged until it ends)."""
-        work = asyncio.ensure_future(self._local.run_node(assignment))
+        context = contextvars.copy_context()
+        context.run(_LOCAL_LEASE.set, lease)
+        work = asyncio.create_task(self._local.run_node(assignment), context=context)
         try:
             while True:
                 helpers = [asyncio.ensure_future(lease.revoked.wait())]

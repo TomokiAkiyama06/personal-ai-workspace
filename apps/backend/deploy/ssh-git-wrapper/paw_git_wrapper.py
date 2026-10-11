@@ -799,7 +799,7 @@ READ_OPTIONS: Mapping[str, frozenset[str]] = {
             "--untracked-files=no",
         }
     ),
-    "diff": _READ_DIFF_OUTPUT | {"--cached", "-R", "--exit-code", "--quiet"},
+    "diff": _READ_DIFF_OUTPUT | {"--cached", "-R", "--exit-code", "--quiet", "-z"},
     "log": _READ_DIFF_OUTPUT
     | {
         "--no-patch",
@@ -971,6 +971,84 @@ def _check_read_form(args: list[str], places: Places, config: Config) -> None:
     in :func:`plan`, which knows whether the call is pinned."""
 
 
+#: The fixed author of a Worker node's commit (Decision 0083 §10;
+#: ``paw_backend.sandbox.gitread.COMMIT_CONFIG``). Accepted from the client only
+#: in front of ``commit``, and applied by this file itself for ``commit``.
+COMMIT_CONFIG = (
+    ("user.name", "Personal AI Workspace Agent"),
+    ("user.email", "agent@paw.invalid"),
+    ("commit.gpgSign", "false"),
+)
+_COMMIT_MESSAGE = re.compile(
+    r"paw: node work\n\nPAW-Node: [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}"
+    r"-[0-9a-f]{12}/[a-z][a-z0-9_-]{0,63}\n"
+)
+#: How the worktree's preparation finds a lost base again (Decision 0083 §10):
+#: the first-parent history of a ``paw/`` branch with its node trailers.
+BASE_LOG_FORMAT = "--format=%H %(trailers:key=PAW-Node,valueonly,separator=%x2C)"
+
+
+def is_base_history(args: Sequence[str]) -> bool:
+    """``log --first-parent --max-count=<n> <BASE_LOG_FORMAT> refs/heads/paw/<b>``."""
+    return (
+        len(args) == 4
+        and args[0] == "--first-parent"
+        and re.fullmatch(r"--max-count=[1-9][0-9]{0,4}", args[1]) is not None
+        and args[2] == BASE_LOG_FORMAT
+        and _paw_ref(args[3])
+    )
+
+
+def _literal_paths(words: Sequence[str]) -> bool:
+    return bool(words) and all(
+        _read_pathspec(word) == "positive" and word.startswith(":(literal)")
+        for word in words
+    )
+
+
+def _check_update_ref(args: list[str], places: Places, config: Config) -> None:
+    """Create a Worker branch's base ref once (Decision 0083 §10): ``update-ref
+    refs/paw/base/paw/<b> <id> <zero id>`` (the zero id: only if absent)."""
+    if (
+        len(args) == 3
+        and args[0].startswith("refs/paw/base/")
+        and _paw_branch(args[0].removeprefix("refs/paw/base/"))
+        and _OBJECT_ID.fullmatch(args[1])
+        and args[2] == "0" * len(args[1])
+    ):
+        return
+    raise Rejected("bad_arguments")
+
+
+def _check_ls_files(args: list[str], places: Places, config: Config) -> None:
+    """The untracked files of a worktree (Decision 0083 §10)."""
+    head = ["--others", "--exclude-standard", "-z", "--"]
+    specs = args[len(head) :]
+    if args[: len(head)] != head or not specs:
+        raise Rejected("bad_arguments")
+    kinds = [_read_pathspec(word) for word in specs]
+    if None in kinds or "positive" not in kinds:
+        raise Rejected("bad_arguments")
+
+
+def _check_add(args: list[str], places: Places, config: Config) -> None:
+    """``add -A -- :(literal)<path>...``: the paths a node commits."""
+    if args[:2] != ["-A", "--"] or not _literal_paths(args[2:]):
+        raise Rejected("bad_arguments")
+
+
+def _check_commit(args: list[str], places: Places, config: Config) -> None:
+    """``commit --quiet --no-verify -m <fixed message> -- :(literal)<path>...``."""
+    if (
+        len(args) < 6
+        or args[:3] != ["--quiet", "--no-verify", "-m"]
+        or _COMMIT_MESSAGE.fullmatch(args[3]) is None
+        or args[4] != "--"
+        or not _literal_paths(args[5:])
+    ):
+        raise Rejected("bad_arguments")
+
+
 Checker = Callable[[list[str], Places, Config], None]
 
 #: The allowlist: Decision 0029 §3 (``rev-parse``, ``symbolic-ref``, ``config``,
@@ -1006,6 +1084,11 @@ SUBCOMMANDS: Mapping[str, tuple[Checker, bool]] = {
     "log": (_check_read_form, True),
     "show": (_check_read_form, True),
     "cat-file": (_check_cat_file, True),
+    # Decision 0083 §10: a Worker node's base ref, its changes and its commit.
+    "update-ref": (_check_update_ref, False),
+    "ls-files": (_check_ls_files, True),
+    "add": (_check_add, True),
+    "commit": (_check_commit, True),
 }
 
 
@@ -1111,6 +1194,8 @@ def plan(original: str | None, config: Config) -> Invocation:
     allowed = {f"{key}={value}" for key, value in hardening(config)}
     if subcommand == "merge":
         allowed |= {f"{key}={value}" for key, value in MERGE_CONFIG}
+    if subcommand == "commit":
+        allowed |= {f"{key}={value}" for key, value in COMMIT_CONFIG}
     helper = gh_credential_helper(config)
     if subcommand == "push" and helper is not None:
         # Decision 0052: the push empties the repository's credential helpers
@@ -1143,7 +1228,12 @@ def plan(original: str | None, config: Config) -> Invocation:
         # pinned to the worktree's git directory in the checkout (Decision 0036).
         raise Rejected("unpinned_worktree")
     checker(args, places, config)
-    if subcommand in READ_FIXED and not (
+    if subcommand in ("add", "commit") and not pinned:
+        raise Rejected("bad_arguments")  # only in a worktree, pinned
+    if subcommand == "log" and is_base_history(args):
+        if pinned:
+            raise Rejected("bad_arguments")
+    elif subcommand in READ_FIXED and not (
         subcommand == "status"
         and _exactly(
             args,
@@ -1183,6 +1273,9 @@ def plan(original: str | None, config: Config) -> Invocation:
         argv.extend(("-c", helper))
     if subcommand == "merge":
         for key, value in MERGE_CONFIG:
+            argv.extend(("-c", f"{key}={value}"))
+    if subcommand == "commit":
+        for key, value in COMMIT_CONFIG:
             argv.extend(("-c", f"{key}={value}"))
     argv.extend(pinned)
     argv.append(subcommand)
