@@ -7,7 +7,9 @@
 #   /usr/local/bin/git                  the git shim (no git runs in the sandbox)
 #   /usr/local/lib/paw/paw-file-tool    the helper of the file tools
 #
-# Any real git of the base image is removed: the shim is the only `git`.
+# Any real git of the base image is removed: the shim is the only `git`. The
+# image's USER does not matter: the wrapper runs the container and every
+# command as the workspace account's own uid / gid (`--user`, `--userns keep-id`).
 # Build (as the account that runs the sandboxes, or load the image into each
 # account's rootless storage), then pin it by digest on the wrapper's
 # `command=` line (`--sandbox-image=<name>@sha256:<digest>`; a tag is refused):

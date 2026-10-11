@@ -1629,6 +1629,11 @@ def _container_target(path: str, source: str, target: str) -> str:
     return target + path[len(source) :]
 
 
+def _own_user() -> str:
+    """``<uid>:<gid>`` of this process (the account the sandbox runs as)."""
+    return f"{os.geteuid()}:{os.getegid()}"
+
+
 def sandbox_environment(config: Config) -> dict[str, str]:
     """Podman's whole environment: a fixed allowlist (rootless Podman needs the
     user's runtime directory), nothing inherited from ``sshd``."""
@@ -1781,6 +1786,11 @@ def sandbox_plan(original: str, config: Config) -> SandboxCall:
             "none",
             "--userns",
             "keep-id",
+            # The account's own uid / gid, whatever the image's USER says: a
+            # container root would be another (unprivileged) uid here and could
+            # not write the account's worktree.
+            "--user",
+            _own_user(),
             "--cap-drop",
             "all",
             "--security-opt",
@@ -1839,7 +1849,7 @@ def sandbox_plan(original: str, config: Config) -> SandboxCall:
                 helper,
                 _sandbox_path(words[6]),
             ]
-        argv.extend(("--workdir", workdir, name, *entry))
+        argv.extend(("--user", _own_user(), "--workdir", workdir, name, *entry))
         inspect = [
             podman,
             "container",

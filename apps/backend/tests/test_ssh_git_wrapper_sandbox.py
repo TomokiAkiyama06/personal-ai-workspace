@@ -84,6 +84,8 @@ elif args[0] == "exec":
     if rest[0] == "--interactive":
         rest = rest[1:]
         stdin = sys.stdin.buffer.read()
+    assert rest[0] == "--user"
+    rest = rest[2:]
     workdir, name, entry = rest[1], rest[2], rest[3:]
     with open(state(name)) as handle:
         mounts = json.load(handle)
@@ -171,6 +173,7 @@ class SandboxPlanTest(unittest.TestCase):
             ("--memory", "8g"),
             ("--pids-limit", "1024"),
             ("--timeout", "7200"),
+            ("--user", f"{os.geteuid()}:{os.getegid()}"),
         ):
             index = argv.index(pair[0])
             self.assertEqual(argv[index + 1], pair[1], pair)
@@ -330,6 +333,8 @@ class SandboxPlanTest(unittest.TestCase):
             [
                 "/usr/bin/podman",
                 "exec",
+                "--user",
+                f"{os.geteuid()}:{os.getegid()}",
                 "--workdir",
                 "/workspace/src",
                 NAME,
@@ -350,6 +355,8 @@ class SandboxPlanTest(unittest.TestCase):
             call.argv[2:],
             [
                 "--interactive",
+                "--user",
+                f"{os.geteuid()}:{os.getegid()}",
                 "--workdir",
                 "/workspace",
                 NAME,

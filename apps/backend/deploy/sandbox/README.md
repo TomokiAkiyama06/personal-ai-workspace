@@ -89,7 +89,7 @@ Sandbox の中に本物の git はない（Image から消す）。`/usr/local/b
 Agent は他の Linux User・Podman を使えないため、次は Human がサーバーで行う（段階 3 の配線の前）。`paw_ssh` は [`../ssh-git-wrapper/README.md`](../ssh-git-wrapper/README.md) の確認と同じ関数。`ID=$(python3 -c 'import uuid; print(uuid.uuid4())')`。
 
 - [ ] 1. `podman --version` が 4 以上。`alice` で `podman run --rm --network none <image@digest> true` が通る。
-- [ ] 2. Start: `LocalWrapperSandboxRunner` / `SshSandboxRunner` で 1 つの worktree の Spec を `start` し、`podman ps --filter label=paw.sandbox=v1`（`alice` として）に出る。`podman inspect` で `NetworkMode=none`、`CapDrop` が全部、`--userns=keep-id`、Mount が Spec のとおり。
+- [ ] 2. Start: `LocalWrapperSandboxRunner` / `SshSandboxRunner` で 1 つの worktree の Spec を `start` し、`podman ps --filter label=paw.sandbox=v1`（`alice` として）に出る。`podman inspect` で `NetworkMode=none`、`CapDrop` が全部、`--userns=keep-id`・`--user` が `alice` の uid:gid、Mount が Spec のとおり。Container の中の `id -u` が `alice` の uid。
 - [ ] 3. Mask: Container の中で、Mask した Directory が空で書けない（`touch` が失敗）、Mask した File が空、worktree の `.git` が読めるが書けない、`/workspace` の外に Host の File が見えない。
 - [ ] 4. Network: Container の中で `python3 -c 'import socket; socket.create_connection(("1.1.1.1", 53), 2)'` が失敗する。
 - [ ] 5. 書き込みの拒否: Checkout を `writable: true` で `start` すると Wrapper が `path_outside_worktrees` で拒否する（Podman は動かない）。

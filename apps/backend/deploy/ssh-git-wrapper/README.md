@@ -94,7 +94,7 @@ paw-sandbox/v1 exec  <sandbox id> <nonce> <workdir> shell|file-write|file-str-re
 paw-sandbox/v1 stop  <sandbox id>
 ```
 
-- `--sandbox-image=`（Digest）がなければすべて `sandbox_not_configured` で拒否する。Image・Podman の Option（`--network none`・`--userns keep-id`・`--cap-drop all`・`--security-opt no-new-privileges`・CPU / Memory / PID の上限・寿命）・実行する Program（`timeout -k 5 <秒> bash -lc` か File の Helper）は Wrapper が決め、Client は選べない。
+- `--sandbox-image=`（Digest）がなければすべて `sandbox_not_configured` で拒否する。Image・Podman の Option（`--network none`・`--userns keep-id`・`--user <その Account の uid>:<gid>`・`--cap-drop all`・`--security-opt no-new-privileges`・CPU / Memory / PID の上限・寿命）・実行する Program（`timeout -k 5 <秒> bash -lc` か File の Helper）は Wrapper が決め、Client は選べない。
 - `start` は Mount の Path を全部確かめる（Root の中・Link なし・書き込みは `.paw-worktrees` の worktree だけ・Mask の種類）。`exec` は Container が動いていなければ `missing` の状態行を返す。`stop` は `podman rm --force --time 5 --ignore`。
 - `exec` の出力の最後の行は Wrapper の状態行（`paw-sandbox-status <nonce> exit=<n> truncated=<0|1>`）。Nonce は Backend が呼び出しごとに決め、Container の中には渡らないので、Command は偽れない。
 - Podman の環境は固定（`PATH`・`HOME`・`LC_ALL`・`LANG`・`XDG_RUNTIME_DIR`）。Log は操作の名前と User だけ。
