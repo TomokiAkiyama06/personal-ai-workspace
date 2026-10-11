@@ -278,7 +278,7 @@ class ApprovalService:
                 ("grant_from_approval", 1),
                 ("get", 1),
                 ("revoke", 1),
-                ("revoke_task", 1),
+                ("active_of_task", 1),
             ):
                 require_async_method(grants, name, count)
         self._grants = grants
@@ -535,27 +535,7 @@ class ApprovalService:
                     await self._report_task_end(approval_id, now)
                     reported += 1
                 if self._grants is not None:
-                    # Unusable already (the store checks the task's run at every
-                    # use); revoked so that the record says so (Decision 0085).
-                    try:
-                        grants = await self._grants.revoke_task(task_id, now=now)
-                    except Exception as error:
-                        logger.error(
-                            "Task grant revoke failed (%s)", type(error).__name__
-                        )
-                        raise ApprovalRevocationError(
-                            "the grants of a task could not be revoked"
-                        ) from None
-                    for grant_id in grants:
-                        await self._grant_audit_row(
-                            "tool.approval.grant.revoke",
-                            True,
-                            "task_ended",
-                            grant_id,
-                            None,
-                            None,
-                            now,
-                        )
+                    await self._revoke_task_grants(task_id, now)
         except TimeoutError:
             if revoked is None:
                 logger.error("Task approval revoke failed (%s)", "TimeoutError")
@@ -576,6 +556,53 @@ class ApprovalService:
                 "were reported within the deadline"
             ) from None
         return len(revoked)
+
+    async def _revoke_task_grants(self, task_id: uuid.UUID, now: datetime) -> None:
+        """Revoke the active grants of an ended task, each **after** its audit row.
+
+        Unusable already (the store checks the task's run at every use); revoked
+        so that the record says so (Decision 0085). A grant whose
+        ``tool.approval.grant.revoke`` row could not be written stays active: it
+        is still residue (``TaskEndResidue`` finds ended tasks with an active
+        grant), so the next run of this method writes the row and revokes it.
+        Revoking first lost the row for good: the revoked grant was no longer
+        found (Codex review of #216). A revocation that fails after its row was
+        written leaves the grant active, and the next run writes the row again
+        (a row more, never a row less). Runs inside the deadline of
+        :meth:`revoke_task`; raises :class:`ApprovalRevocationError` when a grant
+        was left active.
+        """
+        assert self._grants is not None
+        try:
+            grants = await self._grants.active_of_task(task_id)
+        except Exception as error:
+            logger.error("Task grant revoke failed (%s)", type(error).__name__)
+            raise ApprovalRevocationError(
+                "the grants of a task could not be revoked"
+            ) from None
+        left = 0
+        for grant in grants:
+            if not await self._grant_audit_row(
+                "tool.approval.grant.revoke",
+                True,
+                "task_ended",
+                grant.grant_id,
+                grant.project_id,
+                None,
+                now,
+            ):
+                left += 1
+                continue
+            try:
+                await self._grants.revoke(grant.grant_id, actor_id=None, now=now)
+            except Exception as error:
+                logger.error("Task grant revoke failed (%s)", type(error).__name__)
+                left += 1
+        if left:
+            raise ApprovalRevocationError(
+                f"{left} of {len(grants)} grants of a task were not revoked and "
+                "audited; the next cleanup repeats them"
+            )
 
     async def _report_task_end(self, approval_id: uuid.UUID, now: datetime) -> None:
         """Event and audit row of one approval that was revoked with its task.
@@ -671,8 +698,8 @@ class ApprovalService:
         project_id: uuid.UUID | None,
         actor: Principal | None,
         now: datetime,
-    ) -> None:
-        await record_event(
+    ) -> bool:
+        return await record_event(
             self._audit,
             build_tool_event(
                 action=action,

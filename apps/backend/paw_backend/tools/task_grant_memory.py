@@ -192,18 +192,9 @@ class InMemoryTaskGrantStore:
             )
             return RevokeOutcome.REVOKED
 
-    async def revoke_task(
-        self, task_id: uuid.UUID, *, now: datetime
-    ) -> list[uuid.UUID]:
-        async with self._lock:
-            revoked = []
-            for grant in list(self._grants.values()):
-                if grant.task_id == task_id and grant.status is TaskGrantStatus.ACTIVE:
-                    self._grants[grant.grant_id] = replace(
-                        grant,
-                        status=TaskGrantStatus.REVOKED,
-                        revoked_at=now,
-                        revoked_by=None,
-                    )
-                    revoked.append(grant.grant_id)
-            return revoked
+    async def active_of_task(self, task_id: uuid.UUID) -> list[TaskGrantRecord]:
+        return [
+            self._with_uses(grant)
+            for grant in self._grants.values()
+            if grant.task_id == task_id and grant.status is TaskGrantStatus.ACTIVE
+        ]
