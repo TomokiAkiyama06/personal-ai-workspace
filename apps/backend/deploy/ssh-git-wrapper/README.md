@@ -68,6 +68,11 @@ Wrapper は Client（Backend）を信用しない。`$SSH_ORIGINAL_COMMAND` を 
 | `status` | `--porcelain=v1 -z --untracked-files=all`／`--porcelain=v1 -z --untracked-files=normal --ignored=traditional --ignore-submodules=none`（Decision 0051（PR #130）による。`--git-dir=` / `--work-tree=` で pin したときだけ。下の 10）／下の「Sandbox の git の Shim の読み取り」の形 |
 | `diff`・`log`・`show` | 下の「Sandbox の git の Shim の読み取り」の形だけ（Decision 0083 の 2） |
 | `cat-file` | `-t <object id>` だけ（Decision 0083 の 2。Shim が受けた ID が Commit かを確かめる） |
+| `update-ref` | `refs/paw/base/paw/<b> <commit id> <0 の id>` だけ（Decision 0083 の 10。Worker の Branch の起点を一度だけ作る。pin しない） |
+| `log`（起点の履歴） | `--first-parent --max-count=<n> --format=%H %(trailers:key=PAW-Node,valueonly,separator=%x2C) refs/heads/paw/<b>`（Decision 0083 の 10。失われた起点を探す。pin しない） |
+| `ls-files` | `--others --exclude-standard -z -- <Pathspec>...`（Decision 0083 の 10。未追跡の File） |
+| `add` | `-A -- :(literal)<path>...` だけ（pin したときだけ） |
+| `commit` | `--quiet --no-verify -m "paw: node work\n\nPAW-Node: <task>/<node>\n" -- :(literal)<path>...` だけ（pin したときだけ。`-c` は `user.name=Personal AI Workspace Agent`・`user.email=agent@paw.invalid`・`commit.gpgSign=false` だけ受け付け、Wrapper 自身が付ける） |
 
 ### Sandbox の git の Shim の読み取り（Decision 0083 の 2）
 

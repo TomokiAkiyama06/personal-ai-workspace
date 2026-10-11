@@ -4186,11 +4186,29 @@ Test: `test_orchestrator_authority.py`（本番の `TaskAuthority`。最後の T
 | `failures.py` | 閉じた失敗の対応表（`ErrorClassifier`、Decision 0083 の 4）。`Failure`（理由ごとの固定の文）→ `error_class`（すべて `RUNTIME_ERROR_CLASSES` の名前）と `escalate`。`retryable=False` の行はありません。Cloud の振り替えの経路（`fallback=True`）の Gate の拒否だけは `HybridRuntime` の `ComputeUnavailable`。`from_error` は `NodeStopped`・Cancel・`MemoryError` を握りつぶさずに上げ、他の例外の文は読みません |
 | `reasoning.py` | Reasoning の履歴の方針の差し込み口 `ReasoningHistoryPolicy.prepare(messages, prompt_tokens=...) -> messages`（Decision 0083 の 3）。Runtime は返った Message を送り、以後はそれを履歴として持ちます（外した Reasoning は元に戻りません）。方針は 2 つ: **Main（Qwen3.8-27B-FP8）の既定の `DropOlderReasoning(keep_last=2, min_prompt_tokens=32_768)`**（`MAIN_REASONING_POLICY`。[Decision 0076](../../docs/decisions/0076-main-kv-context-under-coexistence.md) の 1、Approved。2 の GPU の Run は 2026-10-11 に合格）は、この Request の Prompt の見積もり（`estimate_prompt_tokens`: 直前の `usage.prompt_tokens` + 直前の `completion_tokens` + その後の Tool の結果の UTF-8 の Byte ÷ 3。直前の答えがなければ `None` で何も外さない）が 32,768 を超えたら、直近 2 つより前の Assistant の Message の `reasoning_content` と `reasoning` を外します（本文・Tool 呼び出し・Tool の結果は外しません）。Benchmark と同じ `KeepAllReasoning`（入力を変えない写し）は `LocalModelSetup(reasoning_history=KeepAllReasoning())` で選べます。Reasoning は DB・Log・Audit・`NodeResult` に書かず、外した Reasoning は保存も Log もしません（Log には `reasoning_chars` の文字数だけ） |
 | `chat.py` | `ChatCompletionsClient`: OpenAI 互換の `/chat/completions` への非 Stream の 1 回の呼び出し（httpx。環境の Proxy を使わず、Redirect を追わない）。答えの文・Reasoning（`reasoning_content` / `reasoning`）・Tool 呼び出し・`usage`（無ければ `None`。0 にしない）。失敗は表の `RuntimeFailure` だけ（繋がらない・503 → `SERVER_UNAVAILABLE`、CUDA OOM → `OUT_OF_MEMORY`、`maximum context length` → `CONTEXT_LIMIT`、全体の Timeout → `TIMEOUT`、壊れた・大きすぎる答え → `MALFORMED_RESPONSE`、その他 → `OTHER`）。Server の Error の本文は印を探すだけで、Log・例外・保存に出しません。Compute の Lease の内側でだけ使います |
+| `local.py` | `LocalAgentRuntime`（Decision 0083 の段階 3。下の「[Local の Agent の Runtime](#local-の-agent-の-runtimeissue-208decision-0083-の段階-3)」） |
 | `preferences.py`・`wiring.py` | #38 の Model の Interpreter（`ModelPreferenceInterpreter`。本人の文と候補を JSON の Data として渡し、`enable_thinking: false`）と、`LocalModelSetup` / `build_preference_interpreter`（`create_app(local_model=...)`。[Inferred Preference の確認 Flow](#inferred-preference-の確認-flowissue-38paw-044decision-0081)） |
 
 `NodeOutcome.failed(..., escalate=True)` と `_retry_step` の扱いは [Node ごとの Retry / Escalate](#node-ごとの-retry--escalate) の表のとおりです（Decision 0007 / 0021 の一部 Supersede）。
 
 Test は `tests/test_agents_failures.py`（表の各行と不変条件）、`test_agents_reasoning.py`、`test_agents_chat.py`（Fake の Server: `httpx.MockTransport`）、`test_agents_preferences.py`（Fake の Server と `compute_support` の Fake の GPU。実 PostgreSQL の Service の Test は `PAW_TEST_DATABASE_URL` がないと Skip）、`test_orchestrator_escalate.py`（実 PostgreSQL）です。GPU・Network・本物の CLI は使いません。
+
+## Local の Agent の Runtime（Issue #208、Decision 0083 の段階 3）
+
+`agents/local.py` の `LocalAgentRuntime` は、Local の Main Model（Qwen3.8-27B-FP8、vLLM の OpenAI 互換 API）で Node の 1 回の試行を Tool loop として動かす Orchestrator の `AgentRuntime` です（Decision 0083 の 2・5・7・8・10、Approved）。
+
+- **Model から見える形は Benchmark の Harness と同じ**: System Prompt（Workspace の場所だけを差し込む）、`bash`・`str_replace`・`write_file`・`submit` の 4 つの Tool と引数（`submit` に `changed_files` を足すことだけが違う）、`tool_choice: auto`、Tool の出力の 12,000 文字の切り詰め（前後を残す）、Tool を呼ばない応答への催促（3 回目で終わり）、60 Step、`max_tokens` 16,384、Prompt 120,000 token、Sampling は Model の既定。Worktree のない Node（Planner・Researcher・Reviewer・読むだけの Worker）は編集の Tool がなく、`bash` は読み取り専用（`repo.shell.read`）。Planner は `submit_plan`。Repository が 2 つ以上なら `/workspace/<repository id>/`（`bash` は `repository` を指定する）。
+- **実行はすべて Tool Broker を通る**（`NodeTools.call` → `paw_backend.sandbox` の Tool）。Path は Model の `/workspace/...` を Node の Worktree（`NodeAssignment.worktrees`）または読む Root（`NodeAssignment.roots`、新しい欄）の Host の Path に直してから渡し、`/workspace` の外と `.git` は Broker の前に拒否します。
+- **`submit`**（Worker）: `repo.git.changes`（起点からの差分: Commit 済み・未 Commit・未追跡）と `changed_files` を突き合わせ、違えば差を Model に返して直させ（3 回まで。超えたら `InvalidNodeResultError`）、合えば未 Commit の申告 Path だけを `repo.git.commit`（決まった作者 `Personal AI Workspace Agent <agent@paw.invalid>`、Trailer `PAW-Node: <Task>/<Node>`）で Commit します。`NodeResult.commit` は Branch の `HEAD`（起点のままなら空）、Repository が 2 つ以上なら `artifacts` の `commit:<repo id>:<sha>`。`test_result` は Model の申告を使いません。
+- **起点**（`refs/paw/base/<branch>`）: `GitWorktreeCoordinator.prepare_node` が Branch を作って上流の Merge を終えた直後に一度だけ作り（`update-ref` の Create-only）、以後は読むだけです（`NodeWorktree.base_commit`）。Ref が失われた既存の Branch は、First-parent の履歴で Node 自身の `PAW-Node` Trailer のない最新の Commit から作り直し、決められなければ `WorktreeUnavailable`（`base_unknown`）です。
+- **Reasoning と KV**（Decision 0076 の 1・3）: Request の前に履歴を `ReasoningHistoryPolicy.prepare(messages, prompt_tokens=estimate_prompt_tokens(...))` に通し、返った Message を以後の履歴にします（既定は Main の `DropOlderReasoning(keep_last=2, min_prompt_tokens=32_768)`）。同じく Request の前に `compute.current_lease()`（`HybridRuntime` が Local の Runtime の Task にだけ置く Lease）を「Prompt の見積もり + `max_tokens`」に `resize` し、`CONTEXT_TOO_LONG` は Context の上限（`RuntimeError`、`escalate=True`）で終えます。
+- **Token**（Decision 0083 の 5）: 応答ごとに `prompt_tokens + completion_tokens` をその場で `NodeBudget.charge(TOKENS)`、`usage` のない応答は見積もり（Request の Byte / 3 + `max_tokens`）。GPU 時間は `HybridRuntime`。
+- **承認**（Decision 0083 の 7）: 待たずに「承認が要るので実行していない」と返し、同じ呼び出しは承認の ID 付きで呼び直し、残った承認は `unresolved_questions` に Tool 名と承認の ID だけで載せます。
+- **時間**（Decision 0083 の 8）: 1 回の HTTP は Node の残り時間（`LocalAgentLimits.node_seconds`、Orchestrator の Node の Timeout）と 15 分の小さい方。取り消しと `NodeStopped` は上げます。失敗は `failures.py` の表のとおり。
+- **組み立て**: `create_app(compute=..., local_model=LocalModelSetup(base_url="http://127.0.0.1:18080/v1"), sandbox=SandboxSetup(SshSandboxRunner(...), shim_base="/run/paw-sandbox", shim_group=<gid>), orchestrator_config=...)` のとき、Tool Broker に Repository の Tool を足し（`ToolRunner(execution_timeout=300)`）、`local_runtimes` に `LocalModelSetup.agent_label`（既定 `local`）として `LocalRuntime(LocalAgentRuntime, deployment="main", local_model="Qwen3.8-27B-FP8")` を足します（`HybridRuntime` が包む）。Lifespan が使われない Sandbox を止め、終了時にすべて止めます。Queue を Claim する Worker（`Orchestrator.serve`）はまだ起動しません（Decision 0047 の 5）。
+- **Model の Server**（Decision 0083 の 12）: `deploy/systemd/paw-llm-main.service` に `--reasoning-parser qwen3 --enable-auto-tool-choice --tool-call-parser qwen3_coder` を足しました（Deploy への反映は Human）。KV の使用率は `DeploymentCommands(metrics_url="http://127.0.0.1:18080/metrics")`（Unit の Port）。
+
+Test は `tests/test_agents_local.py`（Fake の Server と Fake の `NodeTools`: Request の形、Tool の経路、上限、Token、Reasoning の方針、Lease の `resize`、承認、`submit`）、`test_agents_local_wiring.py`（組み立て）、`test_sandbox_commit.py`（本物の git と Tool Broker: 起点の Ref、差分、Commit）、`test_ssh_git_wrapper_sandbox.py`（Wrapper の `update-ref`・起点の履歴・`ls-files`・`add`・`commit` の形と、Wrapper を通る差分と Commit）、`test_compute_runtimes.py`（`current_lease`）。GPU は使いません。
 
 ## Tool Broker のファイル・Shell・Git の Tool と Sandbox（Issue #208、Decision 0083 の段階 2）
 
@@ -4289,7 +4307,7 @@ Local の Agent は Model ごとに 1 つの Runtime を共有します。`acqui
 
 **会話の伸び（Issue #200、[Decision 0076](../../docs/decisions/0076-main-kv-context-under-coexistence.md) の 3、Approved）**: 走っている Request は `ComputeLease.resize(context_tokens)` で予約を変えられます（Local の Agent の Runtime が毎回の Request の前に「Prompt の見積もり + `max_tokens`」で呼ぶ。Runtime は #208 の PR 3）。予約の増加は**待たせず、Class の取り分と `kv_safety` を超えても認めます**（待たせると、互いの終わりを待つ Agent が止まりうるため）。超えている間は新しい Request が上限で待ち（上の待ち行列のまま）、予約が減ると入れる待ちを通します。Model の `max_context_tokens` を超える `resize` は `ComputeUnavailableError(CONTEXT_TOO_LONG)` で断り、予約は変えません。CPU の Lease は予約を持たず（上限だけ確かめる）、`CLOUD` の Lease は変わりません。下の Class の伸びで上の Class を締め出さないよう、Class C の新しい Request は、C と上の Class の予約はそのまま、C より下の Class の予約はそれぞれの取り分まで・その合計を下の Class の中で最も高い取り分までとして数えます（`concurrency.counted_tokens`。Interactive は少なくとも安全な Pool の 5%、Coding は 10% が残る）。伸びのない予約はどの Class も取り分の内側なので、数え方は前と同じです。
 
-**KV の使用率の観測**: `DeploymentCommands(metrics_url="http://127.0.0.1:8000/metrics")` を与えた Deployment は、`CommandModelControl.kv_usage` が vLLM の `/metrics` の `vllm:kv_cache_usage_perc`（0〜1。Engine が複数なら最大）を読みます（`compute/metrics.py`）。読めないとき（応答なし・200 以外・Redirect・4 MiB 超・Sample なし・0〜1 の外）は `None`（観測なし）で、応答の中身は Log にも例外にも出しません。環境の Proxy は使いません。読み取りの Timeout は既定 2 秒（`metrics_timeout`、5 秒まで）です。
+**KV の使用率の観測**: `DeploymentCommands(metrics_url="http://127.0.0.1:18080/metrics")` を与えた Deployment は、`CommandModelControl.kv_usage` が vLLM の `/metrics` の `vllm:kv_cache_usage_perc`（0〜1。Engine が複数なら最大）を読みます（`compute/metrics.py`）。読めないとき（応答なし・200 以外・Redirect・4 MiB 超・Sample なし・0〜1 の外）は `None`（観測なし）で、応答の中身は Log にも例外にも出しません。環境の Proxy は使いません。読み取りの Timeout は既定 2 秒（`metrics_timeout`、5 秒まで）です。
 
 ### VRAM の勘定と Safety Headroom
 
@@ -4369,8 +4387,9 @@ control = CommandModelControl(
                 "/usr/bin/cat",
                 "/sys/fs/cgroup/system.slice/paw-llm-main.service/cgroup.procs",
             ),
-            # vLLM の KV の使用率（Decision 0076 の 3）。
-            metrics_url="http://127.0.0.1:8000/metrics",
+            # vLLM の KV の使用率（Decision 0076 の 3）。paw-llm-main.service の
+            # --port 18080 と同じ Port。
+            metrics_url="http://127.0.0.1:18080/metrics",
         ),
     }
 )
@@ -4381,7 +4400,7 @@ runtime = HybridRuntime(
     scheduler,
     local_runtime,
     deployment="main",
-    local_model="Qwen/Qwen3-Coder-30B-A3B-Instruct",
+    local_model="Qwen3.8-27B-FP8",
     cloud=codex_runtime,
     cloud_policy=policy,
     cloud_agent="codex",

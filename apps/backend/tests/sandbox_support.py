@@ -76,11 +76,14 @@ class World:
             self.worktree = node.path
             self.branch = node.branch
             self.base_commit = git("rev-parse", "HEAD", cwd=node.path)
-            if base:
+            # The preparation records the base (Decision 0083, 10).
+            assert node.base_commit == self.base_commit
+            if not base:
+                # A worktree whose base is not known (made before it was kept).
                 git(
                     "update-ref",
+                    "-d",
                     f"refs/paw/base/{node.branch}",
-                    self.base_commit,
                     cwd=self.checkout,
                 )
             scope = derive_child_scope(

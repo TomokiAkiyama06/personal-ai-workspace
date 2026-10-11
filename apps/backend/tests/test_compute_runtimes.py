@@ -202,6 +202,28 @@ class HybridRuntimeTest(unittest.IsolatedAsyncioTestCase):
     async def test_it_is_a_runtime_the_orchestrator_accepts(self):
         validate_runtime(self.runtime(), "local")
 
+    async def test_the_local_runtime_sees_its_lease(self):
+        # Decision 0076, 3: the local runtime resizes its own lease
+        # (``current_lease``); no other task sees it.
+        from paw_backend.compute import current_lease
+        from paw_backend.orchestrator.result import NodeResult
+        from paw_backend.orchestrator.runtime import NodeOutcome
+
+        seen = []
+
+        class Local:
+            async def run_node(self, assignment):
+                seen.append(current_lease())
+                return NodeOutcome.succeeded(NodeResult(summary="done"))
+
+        runtime = self.runtime(local_model="m")
+        runtime._local = Local()
+        outcome = await runtime.run_node(assignment())
+        self.assertEqual(outcome.result.summary, "done")
+        self.assertIsNotNone(seen[0])
+        self.assertEqual(seen[0].deployment, "main")
+        self.assertIsNone(current_lease())
+
     async def test_local_first_and_the_gpu_time_is_charged(self):
         work = assignment()
         task = asyncio.create_task(self.runtime().run_node(work))

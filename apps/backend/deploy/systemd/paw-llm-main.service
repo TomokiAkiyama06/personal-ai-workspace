@@ -62,7 +62,12 @@ Environment=FLASHINFER_WORKSPACE_BASE=/srv/paw-llm/cache
 # Environment=FLASHINFER_EXTRA_CUDAFLAGS=-DCCCL_DISABLE_CTK_COMPATIBILITY_CHECK
 # 40 GiB = 41943040 kB; "$$" is a literal "$" for systemd.
 ExecStartPre=/usr/bin/awk '/^MemAvailable:/ { found = 1; exit !($$2 >= 41943040) } END { if (!found) exit 1 }' /proc/meminfo
-ExecStart=/opt/paw/runtime-venv/bin/vllm serve /srv/models/main --served-model-name main --host 127.0.0.1 --port 18080
+# The parsers the local agent needs (Decision 0083, 12; issue #208): tool calls
+# and reasoning come back as structured fields, the way the benchmark measured
+# the main model (Qwen3.8-27B-FP8, Decision 0074). --max-model-len and
+# --gpu-memory-utilization are the coexistence values of Decision 0073 / 0075 /
+# 0076 and are set at deployment.
+ExecStart=/opt/paw/runtime-venv/bin/vllm serve /srv/models/main --served-model-name main --host 127.0.0.1 --port 18080 --reasoning-parser qwen3 --enable-auto-tool-choice --tool-call-parser qwen3_coder
 # "systemctl start" returns when the server answers (the scheduler's load is
 # done then). 900 s: the longest measured first load from the HDD was 412 s
 # (Decision 0039 2), the same as the scheduler's load timeout.

@@ -126,6 +126,11 @@ class NodeAssignment:
     # repository id (empty for a read-only role, or without worktrees). The node's
     # scope already points at these (the user's checkout is out of its scope).
     worktrees: Mapping[uuid.UUID, NodeWorktree] = field(default_factory=dict)
+    # Every repository of the node's scope that has a root, by id: its own
+    # worktree for a repository it has one of, else the checkout it may read
+    # (Decision 0083, 6: the sandbox of a call mounts one of these). Paths only:
+    # what the node may do there is the Tool Broker's, call by call.
+    roots: Mapping[uuid.UUID, str] = field(default_factory=dict)
     # Where the attempt runs, recorded once (``None``: nothing can be recorded,
     # such as a planner call: a runtime must then keep the node off the cloud).
     placement: NodePlacement | None = field(default=None, repr=False)

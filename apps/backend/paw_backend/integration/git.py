@@ -371,6 +371,48 @@ class WorktreeGit:
 
     # -- writing ------------------------------------------------------------------
 
+    async def create_ref(
+        self, path: str, ref: str, commit: str, account: LinuxAccount
+    ) -> bool:
+        """Create ``ref`` (``refs/paw/base/paw/...``) at ``commit`` only when it
+        does not exist (``update-ref`` with the zero id as the old value):
+        ``False`` when it exists already (never moved)."""
+        if _OBJECT_ID.fullmatch(commit) is None:
+            raise ValueError("commit must be a commit id")
+        if not ref.startswith("refs/paw/base/paw/"):
+            raise ValueError("not a base ref")
+        result = await self._run(
+            ["update-ref", ref, commit, "0" * len(commit)], account, path
+        )
+        return result.returncode == 0
+
+    async def first_parent_trailers(
+        self, path: str, branch: str, account: LinuxAccount, *, limit: int = 1000
+    ) -> list[tuple[str, tuple[str, ...]]]:
+        """The first-parent history of ``branch`` (newest first, at most
+        ``limit`` commits): each commit and its ``PAW-Node`` trailer values."""
+        result = await self._run(
+            [
+                "log",
+                "--first-parent",
+                f"--max-count={limit}",
+                "--format=%H %(trailers:key=PAW-Node,valueonly,separator=%x2C)",
+                _ref(branch),
+            ],
+            account,
+            path,
+        )
+        if result.returncode != 0:
+            raise GitCommandError("log", GitFailure.NONZERO_EXIT)
+        history = []
+        for line in result.stdout.splitlines():
+            commit, _, trailers = line.partition(" ")
+            if _OBJECT_ID.fullmatch(commit) is None:
+                raise GitCommandError("log", GitFailure.UNSAFE_OUTPUT)
+            values = tuple(v.strip() for v in trailers.split(",") if v.strip())
+            history.append((commit, values))
+        return history
+
     async def add_worktree(
         self,
         checkout: str,

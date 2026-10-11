@@ -34,6 +34,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from types import MappingProxyType
 
 from paw_backend.authz import Capability
+from paw_backend.integration.layout import node_marker
 from paw_backend.repositories.accounts import AccountDirectory
 from paw_backend.repositories.errors import (
     GitCommandError,
@@ -47,7 +48,13 @@ from paw_backend.sandbox.gitargs import (
     GitRefusal,
     parse_git_read,
 )
-from paw_backend.sandbox.gitread import GitReader, RepositoryGit, pathspecs
+from paw_backend.sandbox.gitread import (
+    GitReader,
+    RepositoryGit,
+    branch_changes,
+    commit_paths,
+    pathspecs,
+)
 from paw_backend.sandbox.plan import SandboxPlan, plan_sandbox, repository_of
 from paw_backend.sandbox.pool import SandboxKey, SandboxPool
 from paw_backend.sandbox.spec import (
@@ -83,6 +90,8 @@ REPO_FILE_STR_REPLACE = "repo.file.str_replace"
 REPO_SHELL_RUN = "repo.shell.run"
 REPO_SHELL_READ = "repo.shell.read"
 REPO_GIT_READ = "repo.git.read"
+REPO_GIT_CHANGES = "repo.git.changes"
+REPO_GIT_COMMIT = "repo.git.commit"
 #: The longest ``git`` argument list the shim sends (JSON).
 MAX_GIT_ARGUMENTS_CHARS = 16_384
 
@@ -123,6 +132,28 @@ REPO_TOOL_SPECS: tuple[ToolSpec, ...] = (
             "arguments": ArgumentSpec(
                 ArgumentKind.TEXT, max_length=MAX_GIT_ARGUMENTS_CHARS
             ),
+        },
+    ),
+)
+REPO_TOOL_SPECS += (
+    # A Worker node's changes since its base (Decision 0083, 10): what its
+    # ``submit`` is checked against. The runtime calls it, never a model.
+    ToolSpec(
+        REPO_GIT_CHANGES,
+        frozenset({ToolCapability.READ}),
+        Capability.PROJECT_READ,
+        {"workdir": _PATH},
+    ),
+    # Commit the declared, uncommitted paths of the node's own worktree, as the
+    # fixed author with the node's ``PAW-Node`` trailer (Decision 0083, 10;
+    # Decision 0036, 7: the node commits, never the backend on its own).
+    ToolSpec(
+        REPO_GIT_COMMIT,
+        frozenset({ToolCapability.WRITE}),
+        Capability.PROJECT_REPO_WRITE,
+        {
+            "workdir": _PATH,
+            "paths": ArgumentSpec(ArgumentKind.TEXT, max_length=MAX_TEXT_LENGTH),
         },
     ),
 )
@@ -190,6 +221,12 @@ class RepoToolExecutor:
         if tool == REPO_GIT_READ:
             return await self._git_read(
                 invocation.context, str(arguments["workdir"]), arguments["arguments"]
+            )
+        if tool in (REPO_GIT_CHANGES, REPO_GIT_COMMIT):
+            return await self._branch(
+                invocation.context,
+                str(arguments["workdir"]),
+                None if tool == REPO_GIT_CHANGES else arguments["paths"],
             )
         if tool in (REPO_SHELL_RUN, REPO_SHELL_READ):
             workdir = str(arguments["workdir"])
@@ -319,6 +356,79 @@ class RepoToolExecutor:
             return {"error": "failed", "message": "git failed"}
 
         return answer
+
+    async def _branch(
+        self, context: TaskContext, workdir: str, paths: object
+    ) -> dict[str, object]:
+        """``repo.git.changes`` (``paths`` is ``None``) and ``repo.git.commit``
+        on the node's own worktree with its base (Decision 0083, 10)."""
+        try:
+            repository = await self._repository(context, workdir)
+            assert repository.root is not None
+            if workdir != repository.root:
+                raise GitReadRefused(GitRefusal.PATH)
+            account = await self._account(context)
+            git = await self._git.locate(
+                repository.root,
+                account=account,
+                checkouts=context.scope.excluded_paths,
+            )
+            if not git.has_history:
+                raise GitReadRefused(GitRefusal.HISTORY)
+            plan = plan_sandbox(
+                context.scope, repository, git, writable=True, shim=False
+            )
+            everything = await pathspecs(
+                (),
+                workdir=repository.root,
+                root=repository.root,
+                scope=context.scope,
+                resolver=self._resolver,
+                hidden=plan.hidden,
+            )
+            changes = await branch_changes(
+                self._git, git, account=account, pathspecs=everything
+            )
+            if paths is None:
+                return {
+                    "base": changes.base,
+                    "head": changes.head,
+                    "changed": list(changes.changed),
+                    "uncommitted": list(changes.uncommitted),
+                }
+            wanted = json.loads(str(paths))
+            if (
+                not isinstance(wanted, list)
+                or not wanted
+                or not all(isinstance(p, str) for p in wanted)
+                or len(set(wanted)) != len(wanted)
+                or not set(wanted) <= set(changes.uncommitted)
+            ):
+                raise GitReadRefused(GitRefusal.PATH)
+            # Each path passes the broker's scope check (and the hidden paths).
+            await pathspecs(
+                wanted,
+                workdir=repository.root,
+                root=repository.root,
+                scope=context.scope,
+                resolver=self._resolver,
+                hidden=plan.hidden,
+            )
+            assert git.branch is not None
+            marker = node_marker(context.task_id, git.branch.rsplit("/", 1)[-1])
+            head = await commit_paths(
+                self._git, git, sorted(wanted), account=account, marker=marker
+            )
+        except GitReadRefused as refused:
+            return _refusal(refused.code)
+        except (ValueError, SandboxUnavailableError):
+            return _refusal(GitRefusal.UNAVAILABLE)
+        except GitCommandError as error:
+            code, message = _GIT_FAILURES.get(
+                error.failure, ("git_failed", "git failed")
+            )
+            return {"error": code, "message": message}
+        return {"commit": head}
 
     async def _git_read(
         self, context: TaskContext, workdir: str, arguments: object
