@@ -65,6 +65,8 @@ from paw_backend.tools.interfaces import require_async_method
 logger = logging.getLogger(__name__)
 
 ACTION_ABANDON = "connection.usage.abandon"
+ACTION_COLLECT = "connection.credential.collect"
+_RESOURCE_CREDENTIAL = "connection_credential"
 REASON_ABANDONED = "abandoned_call"
 _RESOURCE_USAGE = "connection_usage"
 _SYSTEM_ROLE = "system"
@@ -162,6 +164,29 @@ class AbandonedCallReaper:
             return
         if deleted:
             logger.warning("Deleted %d unreferenced stored credential(s)", deleted)
+            await self._audit_collection(deleted)
+
+    async def _audit_collection(self, deleted: int) -> None:
+        """The cleanup in the system's audit (Decision 0087, 1): the count only."""
+        try:
+            event = AuditEvent(
+                event_id=uuid.uuid4(),
+                correlation_id=uuid.uuid4(),
+                occurred_at=datetime.now(UTC),
+                actor_id=None,
+                actor_role=_SYSTEM_ROLE,
+                action=ACTION_COLLECT,
+                resource_kind=_RESOURCE_CREDENTIAL,
+                decision="allow",
+                reason=f"deleted:{deleted}",
+            )
+            async with asyncio.timeout(AUDIT_TIMEOUT_SECONDS):
+                await self._sink.record(event)
+        except Exception as error:
+            logger.error(
+                "Auditing the secret store's cleanup failed (%s)",
+                error_class_of(error),
+            )
 
     def _record_success(self, reaped: int) -> None:
         now = datetime.now(UTC)

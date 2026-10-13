@@ -8,6 +8,7 @@ call: no adapter is registered and its secret resolver refuses every handle
 own service with the deployment's adapters and secret store.
 """
 
+import tomllib
 from pathlib import Path
 
 from paw_backend.authz import AuditSink, Authorizer
@@ -28,6 +29,24 @@ class NoSecretStore:
 
 #: The release directory (Decision 0079): the secret store is never inside it.
 RELEASE_ROOT = Path("/opt/paw")
+#: The release tool's configuration and its documented restore point directory
+#: (Decision 0079, 4): the secret store never overlaps the restore points.
+RELEASE_CONFIG = Path("/etc/paw/release.toml")
+DEFAULT_RESTORE_POINT_DIR = Path("/var/lib/paw/restore-points")
+
+
+def restore_point_dirs(config: Path = RELEASE_CONFIG) -> list[Path]:
+    """The documented restore point directory and the one the release tool is
+    configured with (when its file can be read)."""
+    found = [DEFAULT_RESTORE_POINT_DIR]
+    try:
+        with config.open("rb") as handle:
+            value = tomllib.load(handle).get("restore_point_dir")
+    except (OSError, tomllib.TOMLDecodeError):
+        return found
+    if isinstance(value, str) and value.startswith("/"):
+        found.append(Path(value))
+    return found
 
 
 def build_secret_store(settings: Settings) -> FileSecretStore | None:
@@ -44,6 +63,7 @@ def build_secret_store(settings: Settings) -> FileSecretStore | None:
             settings.recovery_repository_dir,
             settings.memory_projection_dir,
             settings.web_dist_dir,
+            *restore_point_dirs(),
         )
         if path is not None
     ]

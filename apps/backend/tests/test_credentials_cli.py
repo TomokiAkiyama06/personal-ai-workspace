@@ -100,7 +100,7 @@ class AuditTest(PutTest):
     def setUpClass(cls) -> None:
         migrate()
 
-    def test_the_store_is_audited_without_the_value_or_the_handle(self):
+    def test_the_store_is_audited_with_the_handle_but_not_the_value(self):
         engine = create_engine(sync_database_url())
         self.addCleanup(engine.dispose)
         code, out, _ = self.run_cli(
@@ -111,17 +111,21 @@ class AuditTest(PutTest):
             database_url=TEST_DATABASE_URL,
         )
         self.assertEqual(code, credentials.EXIT_OK)
+        handle = out.strip()
         with engine.connect() as connection:
             rows = connection.execute(
                 text(
-                    "SELECT actor_role, reason, resource_id FROM audit_events"
-                    " WHERE action = 'connection.credential.store'"
+                    "SELECT actor_role, reason FROM audit_events"
+                    " WHERE action = 'connection.credential_store'"
                     " ORDER BY occurred_at DESC LIMIT 1"
                 )
             ).all()
         self.assertEqual(len(rows), 1)
-        self.assertEqual((rows[0].actor_role, rows[0].reason), ("system", "codex"))
-        self.assertNotIn(out.strip(), repr(rows))
+        # Decision 0087, 2: the kind, the version and the handle; never the value.
+        self.assertEqual(
+            (rows[0].actor_role, rows[0].reason), ("system", f"codex:v1:{handle}")
+        )
+        self.assertNotIn(VALUE, repr(rows))
 
 
 if __name__ == "__main__":

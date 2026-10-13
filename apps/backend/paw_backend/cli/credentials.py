@@ -12,8 +12,9 @@ The master key is the systemd credential ``paw-secret-key``: the command runs
 in a one-shot unit that loads it, through the deployment's wrapper
 (``deploy/secret-store/paw-connection-credential-put``, run as root), with the
 backend's environment file. ``PAW_SECRET_STORE_DIR`` names the store. When a
-database is configured the store is audited (``connection.credential.store``,
-the ``system`` role, the kind as the reason; never the handle or the value).
+database is configured the store is audited (``connection.credential_store``,
+the ``system`` role; the reason holds the kind, the version and the handle,
+``codex:v1:cred_...``; never the value).
 
 Standard input is read whole (at most ``MAX_SECRET_CHARS`` characters); one
 trailing line break is dropped (``printf`` / ``echo`` / a file all work).
@@ -46,7 +47,7 @@ EXIT_ENVIRONMENT = 2
 
 PUT_COMMAND = "connection-credential"
 COMMANDS = frozenset({PUT_COMMAND})
-ACTION_STORE = "connection.credential.store"
+ACTION_STORE = "connection.credential_store"
 
 
 class _Parser(argparse.ArgumentParser):
@@ -88,7 +89,10 @@ def _read_value(stream: TextIO) -> str | None:
     return data
 
 
-async def _audit(database: Database, kind: ConnectionKind) -> None:
+async def _audit(database: Database, kind: ConnectionKind, handle: str) -> None:
+    """Decision 0087, 2: the handle, the kind and the version (a put is
+    version 1), never the value; the system's role (the operator ran a
+    server-local command)."""
     event = AuditEvent(
         event_id=uuid.uuid4(),
         correlation_id=uuid.uuid4(),
@@ -98,7 +102,7 @@ async def _audit(database: Database, kind: ConnectionKind) -> None:
         action=ACTION_STORE,
         resource_kind="connection_credential",
         decision="allow",
-        reason=kind.value,
+        reason=f"{kind.value}:v1:{handle}",
     )
     await PostgresAuditSink(database).record(event)
 
@@ -111,7 +115,7 @@ async def _put(kind: ConnectionKind, value: str, settings: Settings) -> str:
     database = Database(settings)
     if database.configured:
         try:
-            await _audit(database, kind)
+            await _audit(database, kind, handle)
         finally:
             await database.dispose()
     return handle

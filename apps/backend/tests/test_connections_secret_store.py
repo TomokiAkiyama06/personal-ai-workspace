@@ -197,6 +197,21 @@ class CollectTest(StoreCase):
         self.assertEqual((await self.store.read(handle)).version, 3)
 
 
+class HealthTest(StoreCase):
+    async def test_the_check_reads_every_handle_and_the_directory(self):
+        handle = await self.store.put(CODEX, VALUE)
+        self.assertIsNone(await self.store.check())
+        (self.root / handle / "v1.bin").write_bytes(b"PAWS1damaged")
+        self.assertEqual(await self.store.check(), "secret_store_unavailable")
+        os.unlink(self.root / handle / "v1.bin")
+        self.assertIsNone(await self.store.check())
+        os.chmod(self.root, 0o755)
+        try:
+            self.assertEqual(await self.store.check(), "secret_store_unavailable")
+        finally:
+            os.chmod(self.root, 0o700)
+
+
 class OpeningTest(unittest.TestCase):
     def setUp(self) -> None:
         self.root = Path(tempfile.mkdtemp())
@@ -218,6 +233,22 @@ class OpeningTest(unittest.TestCase):
                 with self.assertRaises(SecretStoreError):
                     check_root(self.root, [forbidden])
         check_root(self.root, [self.root.parent / "elsewhere-entirely"])
+
+    def test_the_restore_points_are_forbidden_too(self):
+        from paw_backend.connections.wiring import (
+            DEFAULT_RESTORE_POINT_DIR,
+            restore_point_dirs,
+        )
+
+        config = self.root / "release.toml"
+        self.assertEqual(restore_point_dirs(config), [DEFAULT_RESTORE_POINT_DIR])
+        config.write_text('restore_point_dir = "/srv/paw/restore"\n')
+        self.assertEqual(
+            restore_point_dirs(config),
+            [DEFAULT_RESTORE_POINT_DIR, Path("/srv/paw/restore")],
+        )
+        config.write_text("not toml [")
+        self.assertEqual(restore_point_dirs(config), [DEFAULT_RESTORE_POINT_DIR])
 
     def test_the_key_is_checked(self):
         with self.assertRaises(SecretStoreError):

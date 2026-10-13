@@ -278,6 +278,25 @@ class FileSecretStore:
         finally:
             os.close(fd)
 
+    # --- health -------------------------------------------------------------
+
+    async def check(self) -> str | None:
+        """System Health's look at the store (Decision 0087, 1: an abnormal
+        store is ``CRITICAL``): ``None`` while the directory is as it must be
+        and every handle's current version decrypts, else the fixed code
+        ``secret_store_unavailable``. Never a path, a handle or a value."""
+        try:
+            await asyncio.to_thread(self._check_all)
+        except Exception:
+            return "secret_store_unavailable"
+        return None
+
+    def _check_all(self) -> None:
+        check_root(self._root)
+        for handle in self._handles():
+            if self._versions(handle):
+                self._read_current(handle)
+
     # --- cleanup ------------------------------------------------------------
 
     async def collect(self, referenced: Callable[[str], Awaitable[bool]]) -> int:

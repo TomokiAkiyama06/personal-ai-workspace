@@ -16,7 +16,8 @@ The thresholds are ``limits.py`` (Decision 0059, Approved).
 * :class:`MemoryWorkerSource`: the Memory consolidation queue (pending, deferred
   for an unreachable worker, expired leases, dead letters).
 * :class:`ConnectionSource`: the shared Codex / Claude connections (status,
-  enabled, last check, calls in flight). Never the credential or its handle.
+  enabled, last check, calls in flight) and their secret store (``CRITICAL``
+  when it cannot be read). Never the credential or its handle.
 * :class:`ReaperSource`: the reaper of abandoned connection calls (its cycles).
 * :class:`ScheduledJobSource`: a job run by a timer that records each run in
   ``audit_events`` (the Recovery backup, the Memory Projection, the audit
@@ -599,8 +600,11 @@ class ConnectionSource:
     component = Component.CONNECTIONS
     max_age_seconds = limits.REPORT_MAX_AGE_SECONDS
 
-    def __init__(self, database: Database) -> None:
+    def __init__(self, database: Database, secret_store=None) -> None:
         self._database = database
+        # The secret store of the connections (Decision 0087, 1), when the
+        # deployment has one: a store that cannot be read is ``CRITICAL``.
+        self._secret_store = secret_store
 
     async def check(self) -> ComponentHealth:
         rows = await self._database.fetch_abortable(
@@ -646,6 +650,12 @@ class ConnectionSource:
             elif row[1] == ConnectionStatus.UNAVAILABLE.value:
                 severities.append(Severity.WARNING)
                 reasons.append(f"unavailable:{kind.value}")
+        if self._secret_store is not None:
+            problem = await self._secret_store.check()
+            metrics["secret_store_ok"] = 1 if problem is None else 0
+            if problem is not None:
+                severities.append(Severity.CRITICAL)
+                reasons.append(problem)
         severity = worst(severities)
         return _health(
             self.component,

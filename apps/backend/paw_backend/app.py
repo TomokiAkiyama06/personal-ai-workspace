@@ -466,6 +466,7 @@ def create_app(
         compute=None if compute_services is None else compute_services.scheduler,
         probe=probe,
         event_bus=event_bus,
+        secret_store=secret_store,
     )
     # A person's Notification Center (issue #188): ``/api/v1/notifications``
     # answers 503 without a database.

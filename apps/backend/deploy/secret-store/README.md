@@ -14,7 +14,7 @@
 | 主鍵（32 Byte）を暗号化した systemd の Credential | `/etc/paw/credentials/paw-secret-key.cred` | root、0600 |
 | 平文を入れる Wrapper | `/usr/local/sbin/paw-connection-credential-put`（この Directory の同名の File） | root、0755 |
 
-Store の Directory は Release の Directory（`/opt/paw`）・Recovery Repository・Memory の Projection・Web の配布物の中にも上にも置けない（起動時に拒否する）。
+Store の Directory は Release の Directory（`/opt/paw`）・Recovery Repository・Memory の Projection・Web の配布物・Restore Point の Directory（`/var/lib/paw/restore-points` と `/etc/paw/release.toml` の `restore_point_dir`）の中にも上にも置けない（起動時に拒否する）。
 Backup にも Recovery にも入れない。Restore の後と、主鍵を失くしたときは、Credential を入れ直す（要件の「Credential 類のみ再登録」）。
 
 ## 初めの準備（root）

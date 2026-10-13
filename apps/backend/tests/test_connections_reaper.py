@@ -249,15 +249,30 @@ class CredentialCleanupTest(unittest.IsolatedAsyncioTestCase):
                     raise OSError("the disk")
                 return 2
 
+        class Sink:
+            def __init__(self):
+                self.events = []
+
+            async def record(self, event):
+                self.events.append(event)
+
         secrets = SecretStore()
+        sink = Sink()
         reaper = AbandonedCallReaper(
-            store, FailingSink(), clock=ManualClock(), secret_store=secrets
+            store, sink, clock=ManualClock(), secret_store=secrets
         )
         await reaper.run_cycle()  # the cleanup's failure does not fail the cycle
+        self.assertEqual(sink.events, [])
         await reaper.run_cycle()
         self.assertEqual(secrets.calls, 2)
         self.assertEqual(secrets.referenced, store.handle_referenced)
         self.assertEqual(reaper.stats.consecutive_failures, 0)
+        # The count of deleted handles is in the system's audit (Decision 0087).
+        (event,) = sink.events
+        self.assertEqual(
+            (event.action, event.actor_role, event.reason),
+            ("connection.credential.collect", "system", "deleted:2"),
+        )
 
     def test_a_store_without_cleanup_is_refused(self):
         with self.assertRaises(TypeError):
