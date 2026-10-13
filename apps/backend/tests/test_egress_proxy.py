@@ -282,7 +282,25 @@ class NftablesTest(unittest.TestCase):
         networks = [
             ipaddress.ip_network(item) for item in re.findall(r"[0-9a-f:]+/\d+", block)
         ]
-        for address in ("2001:2::1", "2001::1", "2001:10::1", "2002::1", "2001:db8::1"):
+        # Every special-purpose block inside 2000::/3 that Python's ``ipaddress``
+        # knows (the IANA registry it follows), and a few addresses in them.
+        special = [
+            network
+            for network in ipaddress._IPv6Constants._private_networks
+            if network.subnet_of(ipaddress.ip_network("2000::/3"))
+        ]
+        self.assertTrue(special)
+        for block in special:
+            with self.subTest(block=str(block)):
+                self.assertTrue(any(block.subnet_of(n) for n in networks))
+        for address in (
+            "2001:2::1",
+            "2001::1",
+            "2001:10::1",
+            "2002::1",
+            "2001:db8::1",
+            "3fff::1",
+        ):
             with self.subTest(address=address):
                 self.assertFalse(egress.is_public(address))
                 ip = ipaddress.ip_address(address)

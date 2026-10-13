@@ -18,7 +18,8 @@ table inet paw_egress {
         type ipv6_addr
         flags interval
         elements = { ::/128, ::1/128, ::ffff:0:0/96, 64:ff9b::/96, 100::/64,
-                     2001::/23, 2001:db8::/32, 2002::/16, fc00::/7, fe80::/10, fec0::/10,
+                     2001::/23, 2001:db8::/32, 2002::/16, 3fff::/20, fc00::/7, fe80::/10,
+                     fec0::/10,
                      ff00::/8 }
     }
 
@@ -32,8 +33,8 @@ table inet paw_egress {
         # TCP 443 to global addresses.
         ip daddr @not_global4 counter drop
         # IPv6: the global unicast block 2000::/3 only, less the special-purpose
-        # ranges inside it (not_global6: 2001::/23, the documentation and 6to4
-        # blocks; the proxy refuses them too).
+        # ranges inside it (not_global6: 2001::/23, the documentation blocks
+        # 2001:db8::/32 and 3fff::/20, 6to4; the proxy refuses them too).
         ip6 daddr != 2000::/3 counter drop
         ip6 daddr @not_global6 counter drop
         tcp dport 443 accept
