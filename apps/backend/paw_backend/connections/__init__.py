@@ -37,6 +37,7 @@ from paw_backend.connections.errors import (
     ConnectionPermissionDeniedError,
     ConnectionsError,
     ConnectionUnavailableError,
+    CredentialNotStoredError,
     DuplicateAdapterError,
     InputProblem,
     InvalidConnectionInputError,
@@ -56,6 +57,11 @@ from paw_backend.connections.records import (
     UsageRecord,
 )
 from paw_backend.connections.secret import Secret, SecretResolver
+from paw_backend.connections.secret_store import (
+    FileSecretStore,
+    SecretStoreError,
+    StaleCredentialVersionError,
+)
 from paw_backend.connections.service import ConnectionService
 from paw_backend.connections.session import (
     SESSION_MIN_TOKENS,
@@ -91,6 +97,10 @@ __all__ = [
     "ConnectionBusyError",
     "ConnectionCallError",
     "ConnectionExistsError",
+    "CredentialNotStoredError",
+    "FileSecretStore",
+    "SecretStoreError",
+    "StaleCredentialVersionError",
     "ConnectionInfo",
     "ConnectionKind",
     "ConnectionNotFoundError",

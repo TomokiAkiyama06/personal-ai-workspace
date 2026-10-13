@@ -232,6 +232,38 @@ class StatsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stats.last_success_at, stats.last_cycle_at)
 
 
+class CredentialCleanupTest(unittest.IsolatedAsyncioTestCase):
+    """The secret store's cleanup runs with every cycle (Decision 0087, 1)."""
+
+    async def test_each_cycle_cleans_up_the_store_and_survives_its_failure(self):
+        store = ScriptedStore((), ())
+
+        class SecretStore:
+            def __init__(self):
+                self.calls = 0
+
+            async def collect(self, referenced):
+                self.calls += 1
+                self.referenced = referenced
+                if self.calls == 1:
+                    raise OSError("the disk")
+                return 2
+
+        secrets = SecretStore()
+        reaper = AbandonedCallReaper(
+            store, FailingSink(), clock=ManualClock(), secret_store=secrets
+        )
+        await reaper.run_cycle()  # the cleanup's failure does not fail the cycle
+        await reaper.run_cycle()
+        self.assertEqual(secrets.calls, 2)
+        self.assertEqual(secrets.referenced, store.handle_referenced)
+        self.assertEqual(reaper.stats.consecutive_failures, 0)
+
+    def test_a_store_without_cleanup_is_refused(self):
+        with self.assertRaises(TypeError):
+            AbandonedCallReaper(ScriptedStore(), FailingSink(), secret_store=object())
+
+
 class ArgumentTest(unittest.TestCase):
     def test_the_reaper_refuses_what_it_cannot_use(self):
         store = ConnectionStore(Database(make_settings()))
