@@ -1,0 +1,31 @@
+# One CLI session's container (Decision 0083, 6; Decision 0087, 4;
+# deploy/cli-session/README.md). The backend starts and stops exactly these
+# units (polkit: 50-paw-cli-session.rules); the instance is the session's UUID.
+#
+# Rootless Podman under these restrictions is what the deployment verifies
+# first (Decision 0083's approval, condition (1)); if it does not run, use the
+# single-uid mapping of README.md (no newuidmap) and keep the hardening.
+
+[Unit]
+Description=Personal AI Workspace CLI session %i
+After=paw-egress.service
+
+[Service]
+Type=exec
+User=paw-agent-cli
+Group=paw-cli-bridge
+Environment=HOME=/var/lib/paw-agent-cli
+ExecStart=/usr/bin/python3 -I /usr/local/lib/paw/paw_cli_session_run.py %i
+ExecStopPost=-/usr/bin/podman rm --force --ignore paw-cli-%i
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=5s
+Restart=no
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+CapabilityBoundingSet=
+RestrictSUIDSGID=yes
+ReadWritePaths=/var/lib/paw-agent-cli /run/paw-cli /run/user
+UMask=0077

@@ -22,10 +22,10 @@ import asyncio
 import contextlib
 import json
 import os
+import re
 import secrets
 import shutil
 import signal
-import tempfile
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -80,7 +80,9 @@ def create_session(
     (0640), the MCP configuration (the PAW relay as the only server) and the
     CLI's settings, and return its spec."""
     session_id = uuid.uuid4()
-    directory = Path(tempfile.mkdtemp(prefix=f"paw-cli-{session_id}-", dir=base))
+    # ``<base>/<uuid>``: the template unit's program finds it by the id alone.
+    directory = Path(base) / str(session_id)
+    directory.mkdir(mode=0o750)
     os.chmod(directory, 0o750)
     spec = CliSessionSpec(
         session_id, directory, secrets.token_urlsafe(32), tuple(relay_command)
@@ -109,6 +111,15 @@ def create_session(
 def remove_session(spec: CliSessionSpec) -> None:
     """Delete the session's directory (also after a cancellation)."""
     shutil.rmtree(spec.directory, ignore_errors=True)
+
+
+_ENV_NAME = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
+
+
+def _write_bytes(path: Path, data: bytes, mode: int) -> None:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, mode)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(data)
 
 
 def _write(path: Path, text: str, mode: int) -> None:
@@ -166,6 +177,121 @@ class _Subprocess:
             await process.wait()
 
 
+class _UnitProcess:
+    """A session's unit, as the adapter sees a process."""
+
+    def __init__(self, launcher: "SystemdLauncher", unit: str, stdout) -> None:
+        self._launcher = launcher
+        self._unit = unit
+        self.stdout = stdout
+
+    async def wait(self) -> int:
+        """The unit's exit status once it is no longer active."""
+        launcher = self._launcher
+        for _ in range(int(launcher.settle_seconds / 0.2) + 1):
+            state = await launcher.show(self._unit, "ActiveState")
+            if state in ("inactive", "failed"):
+                break
+            await asyncio.sleep(0.2)
+        status = await launcher.show(self._unit, "ExecMainStatus")
+        try:
+            return int(status)
+        except ValueError:
+            return -1
+
+    async def stop(self) -> None:
+        """``systemctl stop``: the unit sends SIGTERM, waits five seconds
+        (``TimeoutStopSec``), then SIGKILL, and removes the container."""
+        await self._launcher.systemctl("stop", self._unit)
+
+
+class SystemdLauncher:
+    """Production's launcher (Decision 0083, 6): the session's files, then
+    ``systemctl start paw-cli-session@<uuid>.service`` (polkit lets the
+    backend's user start and stop exactly these units), whose program
+    (``deploy/cli-session/paw_cli_session_run.py``, as ``paw-agent-cli``)
+    runs the CLI's container and connects its stdout to the session's
+    ``stream.sock``.
+
+    The credential is the one line ``NAME=value`` of ``credential.env``
+    (mode 0640, group ``paw-cli-bridge`` through the session directory's
+    setgid parent): only the backend's and the CLI's accounts read it, and it
+    goes with the session's directory."""
+
+    def __init__(
+        self,
+        *,
+        systemctl: Sequence[str] = ("systemctl",),
+        unit_prefix: str = "paw-cli-session@",
+        connect_seconds: float = 120.0,
+        settle_seconds: float = 30.0,
+    ) -> None:
+        self._systemctl = tuple(systemctl)
+        self._prefix = unit_prefix
+        self._connect = connect_seconds
+        self.settle_seconds = settle_seconds
+
+    async def systemctl(self, *arguments: str) -> tuple[int, str]:
+        process = await asyncio.create_subprocess_exec(
+            *self._systemctl,
+            *arguments,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await process.communicate()
+        return process.returncode or 0, out.decode("ascii", "replace").strip()
+
+    async def show(self, unit: str, prop: str) -> str:
+        _, out = await self.systemctl("show", "--property", prop, "--value", unit)
+        return out
+
+    async def start(self, launch: CliLaunch) -> CliProcess:
+        spec = launch.spec
+        value = launch.secret.reveal()
+        if not _ENV_NAME.fullmatch(launch.secret_env) or any(
+            c in value for c in "\n\r\x00"
+        ):
+            raise ValueError("the credential cannot be written as one line")
+        _write(
+            spec.directory / "launch.json",
+            json.dumps({"argv": list(launch.argv), "env": dict(launch.env)}),
+            0o640,
+        )
+        _write(
+            spec.directory / "credential.env", f"{launch.secret_env}={value}\n", 0o640
+        )
+        _write_bytes(spec.directory / "prompt", launch.stdin, 0o640)
+        connected: asyncio.Future = asyncio.get_running_loop().create_future()
+
+        async def accept(reader, writer) -> None:
+            if connected.done():
+                writer.close()
+                return
+            connected.set_result(reader)
+            await writer.wait_closed()
+
+        server = await asyncio.start_unix_server(
+            accept, path=str(spec.directory / "stream.sock"), limit=16 * 1024 * 1024
+        )
+        os.chmod(spec.directory / "stream.sock", 0o660)
+        unit = f"{self._prefix}{spec.session_id}.service"
+        try:
+            code, _ = await self.systemctl("start", "--no-block", unit)
+            if code != 0:
+                raise OSError("the session's unit did not start")
+            process = _UnitProcess(self, unit, None)
+            try:
+                reader = await asyncio.wait_for(connected, self._connect)
+            except BaseException:
+                await asyncio.shield(process.stop())
+                raise
+        finally:
+            server.close()  # one connection only; it stays open
+        process.stdout = reader
+        return process
+
+
 class SubprocessLauncher:
     """Starts the CLI as a child process (development, the tests). Only
     ``PATH``, the launch's ``env`` and the credential's variable are in its
@@ -207,6 +333,7 @@ class SubprocessLauncher:
 
 __all__ = [
     "STOP_GRACE_SECONDS",
+    "SystemdLauncher",
     "CliLaunch",
     "CliLauncher",
     "CliProcess",
