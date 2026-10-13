@@ -21,11 +21,13 @@
 import asyncio
 import contextlib
 import json
+import logging
 import os
 import re
 import secrets
 import shutil
 import signal
+import stat
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -33,6 +35,8 @@ from pathlib import Path
 from typing import Protocol
 
 from paw_backend.connections import Secret
+
+logger = logging.getLogger(__name__)
 
 #: SIGTERM, then this long, then SIGKILL (Decision 0083, 8).
 STOP_GRACE_SECONDS = 5.0
@@ -83,7 +87,10 @@ def create_session(
     # ``<base>/<uuid>``: the template unit's program finds it by the id alone.
     directory = Path(base) / str(session_id)
     directory.mkdir(mode=0o750)
-    os.chmod(directory, 0o750)
+    # Keep the parent's setgid (production: /run/paw-cli, group
+    # paw-cli-bridge): the files below then belong to the CLI's group.
+    setgid = Path(base).stat().st_mode & stat.S_ISGID
+    os.chmod(directory, 0o750 | setgid)
     spec = CliSessionSpec(
         session_id, directory, secrets.token_urlsafe(32), tuple(relay_command)
     )
@@ -201,8 +208,10 @@ class _UnitProcess:
 
     async def stop(self) -> None:
         """``systemctl stop``: the unit sends SIGTERM, waits five seconds
-        (``TimeoutStopSec``), then SIGKILL, and removes the container."""
-        await self._launcher.systemctl("stop", self._unit)
+        (``TimeoutStopSec``), then SIGKILL, and removes the container. A stop
+        that systemd refuses is tried again, then raised (``OSError``): the
+        caller must not believe a unit with the credential has ended."""
+        await self._launcher.stop_unit(self._unit)
 
 
 class SystemdLauncher:
@@ -242,6 +251,16 @@ class SystemdLauncher:
         out, _ = await process.communicate()
         return process.returncode or 0, out.decode("ascii", "replace").strip()
 
+    async def stop_unit(self, unit: str, attempts: int = 3) -> None:
+        for attempt in range(attempts):
+            code, _ = await self.systemctl("stop", unit)
+            if code == 0:
+                return
+            if attempt + 1 < attempts:
+                await asyncio.sleep(1.0)
+        logger.error("A CLI session's unit could not be stopped")
+        raise OSError("the session's unit could not be stopped")
+
     async def show(self, unit: str, prop: str) -> str:
         _, out = await self.systemctl("show", "--property", prop, "--value", unit)
         return out
@@ -276,16 +295,19 @@ class SystemdLauncher:
         )
         os.chmod(spec.directory / "stream.sock", 0o660)
         unit = f"{self._prefix}{spec.session_id}.service"
+        process = _UnitProcess(self, unit, None)
         try:
             code, _ = await self.systemctl("start", "--no-block", unit)
             if code != 0:
                 raise OSError("the session's unit did not start")
-            process = _UnitProcess(self, unit, None)
-            try:
-                reader = await asyncio.wait_for(connected, self._connect)
-            except BaseException:
+            reader = await asyncio.wait_for(connected, self._connect)
+        except BaseException:
+            # Whatever ended the start (a refusal, the wait, a cancellation
+            # that came while systemctl ran): the unit may be queued or
+            # running with the credential; stop it before passing on.
+            with contextlib.suppress(Exception):
                 await asyncio.shield(process.stop())
-                raise
+            raise
         finally:
             server.close()  # one connection only; it stays open
         process.stdout = reader

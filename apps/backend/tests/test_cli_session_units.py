@@ -13,6 +13,7 @@ fake ``systemctl`` on ``PATH``; no container, no systemd, no other account.
   ``paw-cli-session@<uuid>.service``, and reads the CLI's stream.
 """
 
+import asyncio
 import json
 import shutil
 import socket
@@ -212,6 +213,10 @@ class LauncherTest(unittest.IsolatedAsyncioTestCase):
             session = unit.split("@", 1)[1].rsplit(".", 1)[0]
             state = os.path.join(root, session + ".state")
             if args[0] == "start":
+                import time
+                delay = os.path.join(root, "start_delay")
+                if os.path.exists(delay):
+                    time.sleep(float(open(delay).read()))
                 program = (
                     "import socket, sys, time, os;"
                     "s = socket.socket(socket.AF_UNIX);"
@@ -238,6 +243,8 @@ class LauncherTest(unittest.IsolatedAsyncioTestCase):
                 else:
                     print(text[1] if text[0] == "inactive" else "")
             elif args[0] == "stop":
+                if os.path.exists(os.path.join(root, "stop_fails")):
+                    sys.exit(1)
                 text = open(state).read().split()
                 if text[0] == "active":
                     import signal
@@ -292,6 +299,42 @@ class LauncherTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn(
             f"stop paw-cli-session@{spec.session_id}.service", self.calls.read_text()
         )
+
+    async def test_a_refused_stop_is_raised(self):
+        (self.sessions / "hold").write_text("30")
+        spec, process = await self.launch()
+        await process.stdout.readline()
+        (self.sessions / "stop_fails").write_text("")
+        with self.assertRaises(OSError):
+            await process.stop()
+        (self.sessions / "stop_fails").unlink()
+        await process.stop()
+
+    async def test_a_start_cancelled_during_systemctl_stops_the_unit(self):
+        (self.sessions / "start_delay").write_text("1")
+        spec = create_session(self.sessions, ("python3", "relay.py"))
+        launch = CliLaunch(
+            ("x",), {}, Secret(TOKEN), "CLAUDE_CODE_OAUTH_TOKEN", b"", spec
+        )
+        starting = asyncio.create_task(self.launcher().start(launch))
+        await asyncio.sleep(0.3)  # systemctl start is running
+        starting.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await starting
+        self.assertIn(
+            f"stop paw-cli-session@{spec.session_id}.service", self.calls.read_text()
+        )
+
+    def test_the_session_directory_keeps_the_parents_setgid(self):
+        shared = self.base / "shared"
+        shared.mkdir()
+        shared.chmod(0o2750)
+        spec = create_session(shared, ("python3", "relay.py"))
+        mode = spec.directory.stat().st_mode
+        self.assertTrue(mode & stat.S_ISGID)
+        self.assertEqual(stat.S_IMODE(mode) & 0o777, 0o750)
+        plain = create_session(self.sessions, ("python3", "relay.py"))
+        self.assertFalse(plain.directory.stat().st_mode & stat.S_ISGID)
 
     async def test_a_credential_that_is_not_one_line_is_refused(self):
         spec = create_session(self.sessions, ("python3", "relay.py"))
