@@ -382,9 +382,15 @@ class DeployFilesTest(unittest.TestCase):
             "ProtectHome=yes",
             "RestrictSUIDSGID=yes",
             "TimeoutStopSec=5s",
+            "RuntimeDirectory=paw-cli-session/%i",
+            "Environment=XDG_RUNTIME_DIR=/run/paw-cli-session/%i",
         ):
             with self.subTest(line=line):
                 self.assertIn(f"\n{line}\n", unit)
+        # ProtectHome=yes hides /run/user: Podman's runtime directory is the
+        # unit's own, and nothing under /run/user is asked for.
+        settings = [line for line in unit.splitlines() if not line.startswith("#")]
+        self.assertFalse([line for line in settings if "/run/user" in line])
         rule = (DEPLOY / "50-paw-cli-session.rules").read_text()
         self.assertIn('subject.user !== "paw"', rule)
         self.assertIn('verb === "start" || verb === "stop"', rule)

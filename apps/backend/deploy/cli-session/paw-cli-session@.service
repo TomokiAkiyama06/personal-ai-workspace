@@ -15,6 +15,11 @@ Type=exec
 User=paw-agent-cli
 Group=paw-cli-bridge
 Environment=HOME=/var/lib/paw-agent-cli
+# Rootless Podman's runtime directory (its runroot and tmpdir): the unit's own,
+# because ProtectHome=yes hides /run/user.
+RuntimeDirectory=paw-cli-session/%i
+RuntimeDirectoryMode=0700
+Environment=XDG_RUNTIME_DIR=/run/paw-cli-session/%i
 ExecStart=/usr/bin/python3 -I /usr/local/lib/paw/paw_cli_session_run.py %i
 ExecStopPost=-/usr/bin/podman rm --force --ignore paw-cli-%i
 KillMode=mixed
@@ -27,5 +32,5 @@ ProtectHome=yes
 PrivateTmp=yes
 CapabilityBoundingSet=
 RestrictSUIDSGID=yes
-ReadWritePaths=/var/lib/paw-agent-cli /run/paw-cli /run/user
+ReadWritePaths=/var/lib/paw-agent-cli /run/paw-cli
 UMask=0077
