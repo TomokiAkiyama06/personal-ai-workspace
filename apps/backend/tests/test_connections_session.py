@@ -53,8 +53,9 @@ class FakeSession:
 
     kind = CODEX
 
-    def __init__(self, turns=(), result=None, *, error=None, gate=None):
+    def __init__(self, turns=(), result=None, *, error=None, gate=None, before=None):
         self.turns = list(turns)
+        self.before = before  # awaited once the session was launched
         self.result = result or AgentSessionResult(submission={"summary": "done"})
         self.error = error
         self.gate = gate
@@ -63,6 +64,8 @@ class FakeSession:
 
     async def run_session(self, secret, request):
         self.calls += 1
+        if self.before is not None:
+            await self.before()
         for input_tokens, output_tokens in self.turns:
             go_on = await request.on_usage(input_tokens, output_tokens)
             self.answers.append(go_on)
@@ -243,12 +246,11 @@ class StopTest(SessionCase):
         self.assertEqual(self.row()["status"], "cancelled")
 
     async def test_a_lost_lease_writes_nothing_and_stops(self):
-        adapter = FakeSession([(100, 10)])
-
-        async def expire():  # the lease runs out after the admission
+        async def expire():  # the lease runs out during the session
             self.expire_entry()
 
-        result = await self.start(adapter, gate=expire)
+        adapter = FakeSession([(100, 10)], before=expire)
+        result = await self.start(adapter)
         self.assertEqual(adapter.answers, [False])
         self.assertIs(result.stopped, SessionStop.LEASE_LOST)
 
@@ -267,16 +269,15 @@ class RunFenceTest(SessionCase):
     async def test_a_run_replaced_during_the_session_writes_nothing(self):
         # The turn is charged through ``BudgetTracker.record_in`` itself (its
         # run fence included), in the transaction of the row's increment.
-        adapter = FakeSession([(100, 10)])
-
-        async def replace_run():  # a Retry after the admission
+        async def replace_run():  # a Retry during the session
             with self.engine.begin() as connection:
                 connection.execute(
                     text("UPDATE tasks SET retry_count = 1 WHERE id = :task"),
                     {"task": self.task},
                 )
 
-        result = await self.start(adapter, gate=replace_run)
+        adapter = FakeSession([(100, 10)], before=replace_run)
+        result = await self.start(adapter)
         self.assertEqual(adapter.answers, [False])
         self.assertIs(result.stopped, SessionStop.RUN_REPLACED)
 
@@ -331,30 +332,31 @@ class LockOrderTest(SessionCase):
 
     async def test_a_zero_token_turn_is_fenced_on_the_run_too(self):
         # A (0, 0) turn charges nothing but still passes the run fence.
-        adapter = FakeSession([(0, 0)])
-
-        async def replace_run():  # a Retry after the admission
+        async def replace_run():  # a Retry during the session
             with self.engine.begin() as connection:
                 connection.execute(
                     text("UPDATE tasks SET retry_count = 1 WHERE id = :task"),
                     {"task": self.task},
                 )
 
-        result = await self.start(adapter, gate=replace_run)
+        adapter = FakeSession([(0, 0)], before=replace_run)
+        result = await self.start(adapter)
         self.assertEqual(adapter.answers, [False])
         self.assertIs(result.stopped, SessionStop.RUN_REPLACED)
 
     async def test_a_turn_refused_by_the_lease_charges_nothing(self):
         # The charge comes first now: a lease that does not hold rolls it back.
         before = await self.consumed()
-        adapter = FakeSession(
-            [(100, 10)], AgentSessionResult(input_tokens=100, output_tokens=10)
-        )
 
-        async def expire():
+        async def expire():  # during the session
             self.expire_entry()
 
-        result = await self.start(adapter, gate=expire)
+        adapter = FakeSession(
+            [(100, 10)],
+            AgentSessionResult(input_tokens=100, output_tokens=10),
+            before=expire,
+        )
+        result = await self.start(adapter)
         self.assertIs(result.stopped, SessionStop.LEASE_LOST)
         # The settlement charges the whole 110 once: the refused turn did not.
         self.assertEqual(await self.consumed() - before, 110)
@@ -505,6 +507,67 @@ class CancelTest(SessionCase):
         self.assertEqual(await self.consumed() - before, 200_000)
 
 
+class LaunchAndSettlementTest(SessionCase):
+    async def test_a_run_replaced_before_the_launch_sends_nothing(self):
+        adapter = FakeSession([(100, 10)])
+
+        async def replace_run():  # after the admission, before the launch
+            with self.engine.begin() as connection:
+                connection.execute(
+                    text("UPDATE tasks SET retry_count = 1 WHERE id = :task"),
+                    {"task": self.task},
+                )
+
+        result = await self.start(adapter, gate=replace_run)
+        self.assertEqual(adapter.calls, 0)
+        self.assertIs(result.stopped, SessionStop.RUN_REPLACED)
+        self.assertEqual(self.row()["status"], "cancelled")
+
+    async def test_an_attempt_abandoned_before_the_launch_sends_nothing(self):
+        adapter = FakeSession([(100, 10)])
+        result = await self.session_service(adapter).execute_session(
+            self.principal(self.user),
+            self.session_context(),
+            CODEX,
+            SessionRequest("gpt-5-codex", UsagePurpose.CODING, "the task", 600),
+            alive=lambda: False,
+        )
+        self.assertEqual(adapter.calls, 0)
+        self.assertIs(result.stopped, SessionStop.ABANDONED)
+
+    async def test_known_totals_count_even_when_the_submission_is_refused(self):
+        await self.budget.set_preset(self.task, BudgetPreset.UNLIMITED)
+        adapter = FakeSession(
+            result=AgentSessionResult(
+                submission={"bad": object()}, input_tokens=1_000_000
+            )
+        )
+        result = await self.start(adapter)
+        self.assertIs(result.failure, FailureCode.INVALID_RESPONSE)
+        self.assertEqual(await self.consumed(), 1_000_000)
+
+    async def test_the_row_is_not_closed_without_its_charge(self):
+        # The remainder's charge fails: the settlement rolls back and the
+        # row stays in flight (the reaper's), never closed uncharged.
+        adapter = FakeSession()  # unknown totals: the estimate is the remainder
+        record, record_in = self.budget.record, self.budget.record_in
+
+        async def failing_record(task_id, kind, amount, *args, **kwargs):
+            if amount == 200_000:
+                raise RuntimeError("the charge failed")
+            return await record(task_id, kind, amount, *args, **kwargs)
+
+        async def failing_record_in(session, task_id, kind, amount, **kwargs):
+            if amount == 200_000:
+                raise RuntimeError("the charge failed")
+            return await record_in(session, task_id, kind, amount, **kwargs)
+
+        self.budget.record = failing_record
+        self.budget.record_in = failing_record_in
+        await self.start(adapter)
+        self.assertEqual(self.row()["status"], "in_flight")
+
+
 class FloorAtomicityTest(SessionCase):
     async def test_the_floor_is_judged_again_inside_the_admission(self):
         # Another node charges the task between the early check and the
@@ -590,7 +653,11 @@ class SubmissionTest(SessionCase):
     async def test_an_abandoned_attempt_gets_no_further_turn(self):
         # The turn that was spent is counted; the next one is refused.
         open_ = [True]
-        adapter = FakeSession([(100, 10), (5, 0)])
+
+        async def abandon():  # the orchestrator closes the attempt's fence
+            open_[0] = False
+
+        adapter = FakeSession([(100, 10), (5, 0)], before=abandon)
 
         async def run():
             return await self.session_service(adapter).execute_session(
@@ -601,7 +668,6 @@ class SubmissionTest(SessionCase):
                 alive=lambda: open_[0],
             )
 
-        open_[0] = False  # the orchestrator closed the attempt's fence
         result = await run()
         self.assertEqual(adapter.answers, [False])
         self.assertIs(result.stopped, SessionStop.ABANDONED)

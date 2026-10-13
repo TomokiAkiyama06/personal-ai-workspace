@@ -1130,6 +1130,13 @@ class ConnectionService:
         try:
             async with asyncio.timeout(request.timeout_seconds):
                 secret = await self._resolve(admission.secret_handle)
+                # The last fences before the first turn is sent: the attempt,
+                # and (a turn of 0 tokens) the run and the queue lease, after
+                # everything this side waited for.
+                if not await on_usage(0, 0):
+                    state.status = UsageStatus.CANCELLED
+                    state.known_totals = (0, 0)  # nothing was sent
+                    return
                 raw = await adapter.run_session(
                     secret,
                     AgentSessionRequest(
@@ -1162,6 +1169,10 @@ class ConnectionService:
         if type(raw) is not AgentSessionResult:
             state.fail(FailureCode.INVALID_RESPONSE)
             return
+        # Each part of the totals as far as it is known (a known input is kept
+        # even when the output is not, and the other way round), read before
+        # anything below can refuse the result: what was spent is charged.
+        state.known_totals = (raw.input_tokens, raw.output_tokens)
         if raw.submission is not None:
             # The credential must not come back in the submission either (an
             # adapter's bug, an echo of the CLI): every text is cleaned as the
@@ -1177,9 +1188,6 @@ class ConnectionService:
                 state.fail(FailureCode.INVALID_RESPONSE)
                 return
             state.submission = submission
-        # Each part as far as it is known (a known input is kept even when
-        # the output is not, and the other way round).
-        state.known_totals = (raw.input_tokens, raw.output_tokens)
         if raw.failure is not None:
             state.fail(raw.failure)
         elif state.stopped is None:
@@ -1201,15 +1209,19 @@ class ConnectionService:
         here must not charge that turn twice."""
         counted = state.counted_input + state.counted_output
         settled = None
+        failed = False
         try:
             settled = await self._store.settle_session(
                 admission.usage_id,
+                context.task_id,
                 state.status,
                 state.failure,
                 state.known_totals,
                 UNKNOWN_SESSION_TOKENS,
+                self._budget,
             )
         except Exception as error:
+            failed = True
             logger.error(
                 "connection session could not be settled: usage_id=%s"
                 " exception_type=%s",
@@ -1217,30 +1229,37 @@ class ConnectionService:
                 log_type_name(error),
             )
         if settled is not None:
-            record, counted = settled
-            final_input = record.input_tokens or 0
-            final_output = record.output_tokens or 0
+            # Settled and charged in one transaction.
+            record, _ = settled
+            state.final_input = record.input_tokens or 0
+            state.final_output = record.output_tokens or 0
         else:
-            # Not settled here (an error, or someone else closed the row): the
-            # budget still gets what this side knows to be the remainder, by
-            # the same rule as ``settle_session``.
+            # Not settled here: the row is no longer in flight (the reaper
+            # closed it, keeping what the turns counted) or the settlement
+            # failed and rolled back (the row stays in flight for the reaper,
+            # which keeps only what was counted). Either way the budget still
+            # gets what this side knows to be the remainder, by the same rule.
             final_input, final_output = _session_finals(
                 state.counted_input,
                 state.counted_output,
                 state.known_totals,
                 UNKNOWN_SESSION_TOKENS,
             )
-        state.final_input, state.final_output = final_input, final_output
-        remainder = final_input + final_output - counted
-        if self._budget is not None and remainder > 0:
-            try:
-                await self._budget.record(context.task_id, BudgetKind.TOKENS, remainder)
-            except Exception as error:
-                logger.error(
-                    "task budget could not be charged: usage_id=%s exception_type=%s",
-                    admission.usage_id,
-                    log_type_name(error),
-                )
+            state.final_input, state.final_output = final_input, final_output
+            remainder = final_input + final_output - counted
+            if self._budget is not None and remainder > 0:
+                try:
+                    await self._budget.record(
+                        context.task_id, BudgetKind.TOKENS, remainder
+                    )
+                except Exception as error:
+                    logger.error(
+                        "task budget could not be charged: usage_id=%s"
+                        " exception_type=%s failed_settlement=%s",
+                        admission.usage_id,
+                        log_type_name(error),
+                        failed,
+                    )
         if state.failure is FailureCode.EXPIRED:
             try:
                 await self._store_health(
