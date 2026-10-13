@@ -313,6 +313,67 @@ class UnstoppedTest(ClaudeCase):
         self.assertEqual(outcome.error_class, "AdapterError")
 
 
+class ReportTest(ClaudeCase):
+    async def test_totals_without_any_turn_are_refused(self):
+        result = {
+            "subtype": "success",
+            "is_error": False,
+            "modelUsage": {"m": {"inputTokens": 7, "outputTokens": 3}},
+        }
+        await self.run_node([{"result": result}])
+        self.assertEqual(self.connections.raw.failure.value, "invalid_response")
+
+
+class GroupStopTest(unittest.IsolatedAsyncioTestCase):
+    async def test_a_child_that_ignores_sigterm_is_killed_too(self):
+        import os
+        import signal as signals
+
+        from paw_backend.agents.cli_session import CliLaunch, CliSessionSpec
+
+        directory = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
+        marker = directory / "child"
+        child = (
+            "import signal, time, os, pathlib;"
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN);"
+            f"pathlib.Path({str(marker)!r}).write_text(str(os.getpid()));"
+            "time.sleep(60)"
+        )
+        leader = (
+            "import subprocess, sys, time;"
+            f"subprocess.Popen([sys.executable, '-c', {child!r}],"
+            " stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,"
+            " stderr=subprocess.DEVNULL);"
+            "time.sleep(60)"
+        )
+        spec = CliSessionSpec(uuid.uuid4(), directory, "t" * 40, ("relay",))
+        launch = CliLaunch(
+            (sys.executable, "-c", leader),
+            {},
+            Secret(TOKEN),
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            b"",
+            spec,
+        )
+        process = await SubprocessLauncher().start(launch)
+        for _ in range(100):
+            if marker.exists() and marker.read_text():
+                break
+            await asyncio.sleep(0.05)
+        await process.stop()
+        pid = int(marker.read_text())
+        for _ in range(50):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+            await asyncio.sleep(0.05)
+        else:
+            os.kill(pid, signals.SIGKILL)
+            self.fail("the child that ignored SIGTERM outlived the stop")
+
+
 class StreamTest(unittest.TestCase):
     def init(self, tools, servers=None, errors=None):
         message = {
