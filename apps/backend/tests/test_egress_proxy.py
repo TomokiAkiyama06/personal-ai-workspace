@@ -268,6 +268,31 @@ class AllowlistTest(unittest.TestCase):
             egress.Config.load(str(path))
 
 
+class NftablesTest(unittest.TestCase):
+    """The nftables example (the second line) refuses at least what the
+    proxy refuses inside the global unicast block 2000::/3."""
+
+    def test_the_special_ranges_inside_2000_3_are_dropped(self):
+        import ipaddress
+        import re
+
+        text = (PATH.parent / "paw-egress.nft").read_text()
+        block = text[text.index("set not_global6") :]
+        block = block[: block.index("}", block.index("elements"))]
+        networks = [
+            ipaddress.ip_network(item) for item in re.findall(r"[0-9a-f:]+/\d+", block)
+        ]
+        for address in ("2001:2::1", "2001::1", "2001:10::1", "2002::1", "2001:db8::1"):
+            with self.subTest(address=address):
+                self.assertFalse(egress.is_public(address))
+                ip = ipaddress.ip_address(address)
+                self.assertTrue(any(ip in network for network in networks))
+        self.assertTrue(egress.is_public("2606:4700::1"))
+        self.assertFalse(
+            any(ipaddress.ip_address("2606:4700::1") in n for n in networks)
+        )
+
+
 class ForwardTest(ProxyCase):
     async def test_the_forwarder_passes_tcp_to_the_socket(self):
         await self.start()
