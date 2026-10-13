@@ -248,7 +248,15 @@ class SystemdLauncher:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
         )
-        out, _ = await process.communicate()
+        talking = asyncio.ensure_future(process.communicate())
+        try:
+            out, _ = await asyncio.shield(talking)
+        except asyncio.CancelledError:
+            # A systemctl already running is let finish (a "start" it was
+            # about to send must not come after the caller's "stop").
+            with contextlib.suppress(Exception):
+                await talking
+            raise
         return process.returncode or 0, out.decode("ascii", "replace").strip()
 
     async def stop_unit(self, unit: str, attempts: int = 3) -> None:

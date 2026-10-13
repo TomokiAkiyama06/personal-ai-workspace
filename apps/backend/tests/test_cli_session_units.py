@@ -217,6 +217,7 @@ class LauncherTest(unittest.IsolatedAsyncioTestCase):
                 delay = os.path.join(root, "start_delay")
                 if os.path.exists(delay):
                     time.sleep(float(open(delay).read()))
+                open(calls, "a").write("queued " + unit + "\\n")
                 program = (
                     "import socket, sys, time, os;"
                     "s = socket.socket(socket.AF_UNIX);"
@@ -321,9 +322,11 @@ class LauncherTest(unittest.IsolatedAsyncioTestCase):
         starting.cancel()
         with self.assertRaises(asyncio.CancelledError):
             await starting
-        self.assertIn(
-            f"stop paw-cli-session@{spec.session_id}.service", self.calls.read_text()
-        )
+        calls = self.calls.read_text()
+        unit = f"paw-cli-session@{spec.session_id}.service"
+        self.assertIn(f"stop {unit}", calls)
+        # The start that was running finished first: the stop came after it.
+        self.assertLess(calls.index(f"queued {unit}"), calls.index(f"stop {unit}"))
 
     def test_the_session_directory_keeps_the_parents_setgid(self):
         shared = self.base / "shared"
