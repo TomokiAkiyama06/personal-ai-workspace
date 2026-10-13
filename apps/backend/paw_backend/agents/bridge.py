@@ -103,11 +103,16 @@ class McpBridge:
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
         try:
-            if self._connected or not await self._handshake(reader):
+            if self._connected:
                 logger.warning("MCP bridge: a connection was refused")
                 return
+            # The slot is taken before anything is awaited: two handshakes
+            # that arrive together cannot both get in.
             self._connected = True
             try:
+                if not await self._handshake(reader):
+                    logger.warning("MCP bridge: a connection was refused")
+                    return
                 await self._serve(reader, writer)
             finally:
                 self._connected = False

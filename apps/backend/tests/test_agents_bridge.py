@@ -125,6 +125,25 @@ class HandshakeTest(BridgeCase):
         await self.assert_closed(other_reader)
         await self.call(reader, writer, "ping")  # the first still works
 
+    async def test_two_handshakes_at_once_get_one_connection(self):
+        first_reader, first_writer = await asyncio.open_unix_connection(self.path)
+        second_reader, second_writer = await asyncio.open_unix_connection(self.path)
+        self.addCleanup(first_writer.close)
+        self.addCleanup(second_writer.close)
+        hello = json.dumps({"paw_bridge": 1, "token": TOKEN}).encode() + b"\n"
+        ping = b'{"jsonrpc": "2.0", "id": 1, "method": "ping"}\n'
+        for writer in (first_writer, second_writer):
+            writer.write(hello + ping)
+        await asyncio.gather(first_writer.drain(), second_writer.drain())
+        answers = []
+        for reader in (first_reader, second_reader):
+            try:
+                line = await asyncio.wait_for(reader.readline(), 5)
+            except ConnectionResetError:
+                line = b""
+            answers.append(line)
+        self.assertEqual(sum(1 for line in answers if line), 1)
+
     def test_a_short_token_is_refused(self):
         with self.assertRaises(ValueError):
             McpBridge(FakeToolkit(), token="short")
