@@ -27,7 +27,7 @@ Host
 ## 配備（root）
 
 `paw-egress.service` の先頭の注釈の手順で、Account（`paw-egress`）と Group（`paw-cli-bridge`。メンバーは `paw-agent-cli` だけ）を作り、
-`paw_egress.py` と `egress.toml` を置いて Service を有効にする。nftables は `paw-egress.nft` を既存の規則と一緒に読み込む（Resolver の Address は `/etc/resolv.conf` に合わせる）。
+`paw_egress.py` と `egress.toml` を置いて Service を有効にする。nftables は `paw-egress.nft` を既存の規則と一緒に読み込む（Resolver の Address は `/etc/resolv.conf` に合わせる）。この例は IPv6 の 2001::/23 を丸ごと落とす（その中のわずかな Global な範囲も。どれも Provider のものではなく、第 2 の守りは狭い側に倒す）。
 
 `allowed_hosts` の初めの値は Claude Code の Subscription（`setup-token`）の `api.anthropic.com` だけ。
 CLI の Smoke で拒否の Log（`outcome=host`）を見て、CLI が要る Host だけを足す（Decision 0087 の 4）。

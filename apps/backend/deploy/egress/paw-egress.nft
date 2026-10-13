@@ -35,6 +35,9 @@ table inet paw_egress {
         # IPv6: the global unicast block 2000::/3 only, less the special-purpose
         # ranges inside it (not_global6: 2001::/23, the documentation blocks
         # 2001:db8::/32 and 3fff::/20, 6to4; the proxy refuses them too).
+        # 2001::/23 is dropped whole on purpose: the few globally reachable
+        # blocks inside it (2001:3::/32, 2001:4:112::/48, 2001:20::/28, ...)
+        # are no provider's, and this second line errs on the side of less.
         ip6 daddr != 2000::/3 counter drop
         ip6 daddr @not_global6 counter drop
         tcp dport 443 accept

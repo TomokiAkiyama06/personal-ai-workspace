@@ -305,6 +305,13 @@ class NftablesTest(unittest.TestCase):
                 self.assertFalse(egress.is_public(address))
                 ip = ipaddress.ip_address(address)
                 self.assertTrue(any(ip in network for network in networks))
+        # On purpose: the globally reachable exceptions inside 2001::/23 are
+        # dropped here too (the example's comment says so); the proxy alone
+        # would let them through.
+        for block in ipaddress._IPv6Constants._private_networks_exceptions:
+            with self.subTest(exception=str(block)):
+                self.assertTrue(any(block.subnet_of(n) for n in networks))
+        self.assertIn("2001::/23 is dropped whole on purpose", text)
         self.assertTrue(egress.is_public("2606:4700::1"))
         self.assertFalse(
             any(ipaddress.ip_address("2606:4700::1") in n for n in networks)
