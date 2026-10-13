@@ -223,9 +223,11 @@ class SystemdLauncher:
     ``stream.sock``.
 
     The credential is the one line ``NAME=value`` of ``credential.env``
-    (mode 0640, group ``paw-cli-bridge`` through the session directory's
-    setgid parent): only the backend's and the CLI's accounts read it, and it
-    goes with the session's directory."""
+    (mode 0640, owner the backend, group ``paw-cli-bridge`` through the
+    session directory's setgid parent: Decision 0088, which approved this in
+    place of Decision 0087's 0400 owned by ``paw-agent-cli``; the backend
+    cannot hand a file to another account): only the backend's and the
+    CLI's accounts read it, and it goes with the session's directory."""
 
     def __init__(
         self,

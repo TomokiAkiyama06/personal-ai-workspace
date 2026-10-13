@@ -138,6 +138,10 @@ def podman_command(
         f"{config['egress_socket']}:{EGRESS_IN_CONTAINER}",
         "--env-file",
         str(credential),
+        # The session's id for the egress forwarder's X-PAW-Session (set by
+        # this program, not by the backend's launch.json nor the CLI).
+        "--env",
+        f"PAW_SESSION_ID={session_id}",
     ]
     for name in sorted(env):
         command += ["--env", f"{name}={env[name]}"]

@@ -147,6 +147,7 @@ class RunnerTest(unittest.TestCase):
             ["--userns", "keep-id"],
             ["--env-file", str(self.directory / "credential.env")],
             ["--env", "HTTPS_PROXY=http://127.0.0.1:3128"],
+            ["--env", f"PAW_SESSION_ID={self.session}"],
             ["--volume", f"{self.directory}:{self.directory}:rw"],
             ["--volume", "/run/paw-egress/egress.sock:/run/paw-egress.sock"],
         ):

@@ -22,6 +22,8 @@ Backend（User paw）
                    └─ claude -p ...（MCP の Server = paw_mcp_relay.py → bridge.sock）
 ```
 
+`credential.env` は 0640・所有者 Backend・Group `paw-cli-bridge`（Decision 0088 で承認。Decision 0087 の「0400・所有者 `paw-agent-cli`」の代わり。Backend は別の Account に File を渡せないため）。
+
 止めるのは `systemctl stop`（Unit の `TimeoutStopSec=5s`: SIGTERM → 5 秒 → SIGKILL、`ExecStopPost` で Container を消す）。Session の Directory は終わりに Backend が消す（Token の File も一緒に消える）。
 
 ## 配備（root）

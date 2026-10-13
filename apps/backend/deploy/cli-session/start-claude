@@ -3,5 +3,6 @@
 # background (127.0.0.1:3128 -> the mounted proxy socket), then Claude Code
 # with the arguments the backend chose (Decision 0087, 3 and 4).
 set -eu
-python3 -I /opt/paw/paw_egress.py forward --listen-port 3128 --socket /run/paw-egress.sock &
+python3 -I /opt/paw/paw_egress.py forward --listen-port 3128 \
+    --socket /run/paw-egress.sock --session "$PAW_SESSION_ID" &
 exec claude "$@"
