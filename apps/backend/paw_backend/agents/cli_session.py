@@ -309,12 +309,16 @@ class SystemdLauncher:
             if code != 0:
                 raise OSError("the session's unit did not start")
             reader = await asyncio.wait_for(connected, self._connect)
-        except BaseException:
+        except BaseException as error:
             # Whatever ended the start (a refusal, the wait, a cancellation
             # that came while systemctl ran): the unit may be queued or
-            # running with the credential; stop it before passing on.
-            with contextlib.suppress(Exception):
+            # running with the credential; stop it before passing on. A stop
+            # that fails is raised instead (chained): nobody may take the
+            # unit for stopped and delete its directory under it.
+            try:
                 await asyncio.shield(process.stop())
+            except OSError as failed:
+                raise failed from error
             raise
         finally:
             server.close()  # one connection only; it stays open

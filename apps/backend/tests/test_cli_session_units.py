@@ -328,6 +328,22 @@ class LauncherTest(unittest.IsolatedAsyncioTestCase):
         # The start that was running finished first: the stop came after it.
         self.assertLess(calls.index(f"queued {unit}"), calls.index(f"stop {unit}"))
 
+    async def test_a_failed_stop_after_a_failed_start_is_raised(self):
+        (self.sessions / "start_delay").write_text("1")
+        (self.sessions / "stop_fails").write_text("")
+        spec = create_session(self.sessions, ("python3", "relay.py"))
+        launch = CliLaunch(
+            ("x",), {}, Secret(TOKEN), "CLAUDE_CODE_OAUTH_TOKEN", b"", spec
+        )
+        starting = asyncio.create_task(self.launcher().start(launch))
+        await asyncio.sleep(0.3)
+        starting.cancel()
+        with self.assertRaises(OSError) as caught:
+            await starting
+        self.assertIsInstance(caught.exception.__cause__, asyncio.CancelledError)
+        (self.sessions / "stop_fails").unlink()
+        await self.launcher().stop_unit(f"paw-cli-session@{spec.session_id}.service")
+
     def test_the_session_directory_keeps_the_parents_setgid(self):
         shared = self.base / "shared"
         shared.mkdir()
