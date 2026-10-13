@@ -152,18 +152,23 @@ class _Subprocess:
         return await self._process.wait()
 
     async def stop(self) -> None:
-        """SIGTERM to the process group, then SIGKILL after the grace."""
+        """SIGTERM to the process group, then SIGKILL after the grace; and
+        SIGKILL to the group in every case at the end, so no child that
+        ignored SIGTERM (it has the credential in its environment) outlives
+        the leader."""
         process = self._process
-        if process.returncode is not None:
-            return
-        with contextlib.suppress(ProcessLookupError):
-            os.killpg(process.pid, signal.SIGTERM)
-        try:
-            await asyncio.wait_for(asyncio.shield(process.wait()), STOP_GRACE_SECONDS)
-        except TimeoutError:
+        if process.returncode is None:
             with contextlib.suppress(ProcessLookupError):
-                os.killpg(process.pid, signal.SIGKILL)
-            await process.wait()
+                os.killpg(process.pid, signal.SIGTERM)
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(process.wait()), STOP_GRACE_SECONDS
+                )
+            except TimeoutError:
+                pass
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+        await process.wait()
 
 
 class SubprocessLauncher:

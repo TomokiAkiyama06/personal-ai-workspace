@@ -206,6 +206,7 @@ class ClaudeSessionAdapter:
         # The CLI was stopped on purpose (the service said no more turns):
         # its exit status is the stop's, not a failure.
         stopped = False
+        turns = 0
         ended = asyncio.create_task(attachment.bridge.ended.wait())
         try:
             while True:
@@ -231,6 +232,7 @@ class ClaudeSessionAdapter:
                     if not stream.initialized:
                         failure = FailureCode.INVALID_RESPONSE
                         break
+                    turns += 1
                     if not await request.on_usage(
                         item.input_tokens, item.output_tokens
                     ):
@@ -248,6 +250,15 @@ class ClaudeSessionAdapter:
             await process.stop()
         code = await process.wait()
         if failure is None and not stream.initialized:
+            failure = FailureCode.INVALID_RESPONSE
+        if (
+            failure is None
+            and totals is not None
+            and (totals.input_tokens or totals.output_tokens)
+            and turns == 0
+        ):
+            # Tokens were used but no call was reported on the way: a CLI
+            # that does not report its turns is not run (Decision 0083, 5).
             failure = FailureCode.INVALID_RESPONSE
         if failure is None and totals is not None and totals.is_error:
             failure = (
