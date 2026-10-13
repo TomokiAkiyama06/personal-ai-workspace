@@ -4225,6 +4225,16 @@ Codex / Claude Code の CLI の Runtime（段階 4b。Decision 0016 の前提の
 
 Test は `tests/test_connections_session.py`（実 PostgreSQL: 最低の枠、Turn ごとの計上、Lease・Run・Budget による停止と何も書かないこと、残りだけの精算、見積もり、Gate、取り消し、Schema、Reaper、Lease の SQL と `TaskQueue.holds_lease` の一致）、`test_agents_cloud.py`（`CloudGate` の順序と拒否、`NodeConnectionGateway`）、`test_compute_runtimes.py`（`run_as_fallback`）。
 
+## CLI の Session の PAW の Tool（MCP の Bridge。Issue #208、Decision 0083 の 6、段階 4b の 3a）
+
+CLI（Claude Code・Codex）は組み込みの Tool を止めて動かし（Decision 0087 の 4）、使える Tool は PAW の Tool だけです。**CLI の Runtime はまだありません**（後の PR）。
+
+- **`agents/toolkit.py` の `NodeToolkit`**: Local の Model の Loop（`local.py`）にあった Node の試行の Tool（`bash`・`str_replace`・`write_file`・`submit`、Planner の `submit_plan`）と、その承認の扱い・`submit` の直させ方・Commit を、そのまま取り出したもの。`LocalAgentRuntime` はこれを使い、振る舞いは変わりません（`tests/test_agents_local.py` はそのまま通る）。
+- **`agents/bridge.py` の `McpBridge`**: その Toolkit を MCP の Server（stdio の枠組み = 1 行 1 つの JSON-RPC 2.0）として Session の Directory の Unix Socket（0660）で出す。最初の 1 行の Handshake の Token（定数時間の比較）が合うまで何も答えず、同時に 1 接続だけ。`initialize`・`ping`・`tools/list`・`tools/call` だけを答え、呼び出しは 1 つずつ Toolkit（Tool Broker）を通す。`submit` の成功（`outcome`）と試行の失敗（`failure`。`RuntimeFailure`・`NodeStopped` など）で終わり（`ended`）、その後の呼び出しは拒否する。呼び出しの引数・結果は Log に書かない。
+- **`deploy/cli-session/paw_mcp_relay.py`**（標準ライブラリだけ）: CLI の Container の中で CLI が起動する MCP の Server の Command。Mount された Socket につなぎ、Token を File から読んで Handshake を送り、あとは CLI の stdin / stdout を行ごとに中継する。
+
+Test は `tests/test_agents_bridge.py`（一時 Directory の Unix Socket、Fake の Toolkit と本物の `NodeToolkit`、本物の Relay の Program）。
+
 ## Tool Broker のファイル・Shell・Git の Tool と Sandbox（Issue #208、Decision 0083 の段階 2）
 
 `paw_backend/sandbox/` は、Local の Model の Tool loop（段階 3 の `LocalAgentRuntime`）が Benchmark の `bash`・`str_replace`・`write_file` を Tool Broker を通して動かすための Tool と、その実行先の Sandbox です（Decision 0083 の 2・6・8、Approved）。**まだ本番の組み立てには配線していません**（Runtime と一緒に段階 3 で `ToolRunner(execution_timeout=300)` に `ToolExecutors({...WorkingSetExecutor..., ...RepoToolExecutor...})` を渡します）。配備と Server の確認は [`deploy/sandbox/README.md`](deploy/sandbox/README.md)。
