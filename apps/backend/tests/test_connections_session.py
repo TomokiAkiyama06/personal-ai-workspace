@@ -568,6 +568,51 @@ class LaunchAndSettlementTest(SessionCase):
         self.assertEqual(self.row()["status"], "in_flight")
 
 
+class SettlementRetryTest(SessionCase):
+    async def test_an_uncertain_commit_is_not_charged_twice(self):
+        # The settlement committed but its answer was lost: it is retried
+        # through the same atomic operation (which then finds the row closed),
+        # never charged again by a separate transaction.
+        before = await self.consumed()
+        service = self.session_service(FakeSession())
+        original = service._store.settle_session
+        lost = [True]
+
+        async def committed_then_lost(*args, **kwargs):
+            result = await original(*args, **kwargs)
+            if lost[0]:
+                lost[0] = False
+                raise ConnectionError("the answer to COMMIT was lost")
+            return result
+
+        service._store.settle_session = committed_then_lost
+        await self.start(None, service=service)
+        self.assertEqual(self.row()["status"], "succeeded")
+        self.assertEqual(await self.consumed() - before, 200_000)
+
+    async def test_a_turn_beyond_the_stored_range_is_refused_whole(self):
+        adapter = FakeSession([(10, 0)])
+
+        async def near_the_cap():
+            with self.engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "UPDATE connection_usage SET input_tokens = 999999995"
+                        " WHERE status = 'in_flight'"
+                    )
+                )
+
+        adapter.before = near_the_cap
+        before = await self.consumed()
+        result = await self.start(adapter)
+        self.assertEqual(adapter.answers, [False])
+        self.assertIs(result.stopped, SessionStop.BUDGET_EXCEEDED)
+        # The refused turn charged nothing (the settlement adds its own part).
+        (row,) = self.rows("SELECT input_tokens FROM connection_usage")
+        self.assertLessEqual(row["input_tokens"], 1_000_000_000)
+        self.assertLess(await self.consumed() - before, 10 + 200_000)
+
+
 class FloorAtomicityTest(SessionCase):
     async def test_the_floor_is_judged_again_inside_the_admission(self):
         # Another node charges the task between the early check and the

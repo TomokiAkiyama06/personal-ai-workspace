@@ -289,6 +289,11 @@ def _token_count(value: object) -> tuple[int | None, bool]:
         return None, False
 
 
+#: How often a session's settlement (the row and its charge, one transaction)
+#: is tried before it is left to the reaper.
+_SETTLE_ATTEMPTS = 3
+
+
 def _session_finals(
     counted_input: int,
     counted_output: int,
@@ -1207,59 +1212,45 @@ class ConnectionService:
         What the turns counted is read from the row (under its lock), not from
         ``state``: a cancellation between a turn's commit and its bookkeeping
         here must not charge that turn twice."""
-        counted = state.counted_input + state.counted_output
         settled = None
-        failed = False
-        try:
-            settled = await self._store.settle_session(
-                admission.usage_id,
-                context.task_id,
-                state.status,
-                state.failure,
-                state.known_totals,
-                UNKNOWN_SESSION_TOKENS,
-                self._budget,
-            )
-        except Exception as error:
-            failed = True
-            logger.error(
-                "connection session could not be settled: usage_id=%s"
-                " exception_type=%s",
-                admission.usage_id,
-                log_type_name(error),
-            )
+        for attempt in range(_SETTLE_ATTEMPTS):
+            try:
+                settled = await self._store.settle_session(
+                    admission.usage_id,
+                    context.task_id,
+                    state.status,
+                    state.failure,
+                    state.known_totals,
+                    UNKNOWN_SESSION_TOKENS,
+                    self._budget,
+                )
+                break
+            except Exception as error:
+                # The row and its charge are one transaction: retried as one
+                # (an uncertain COMMIT that did go through finds the row
+                # closed and writes nothing), never charged separately.
+                logger.error(
+                    "connection session could not be settled: usage_id=%s"
+                    " attempt=%s exception_type=%s",
+                    admission.usage_id,
+                    attempt + 1,
+                    log_type_name(error),
+                )
         if settled is not None:
-            # Settled and charged in one transaction.
             record, _ = settled
             state.final_input = record.input_tokens or 0
             state.final_output = record.output_tokens or 0
         else:
-            # Not settled here: the row is no longer in flight (the reaper
-            # closed it, keeping what the turns counted) or the settlement
-            # failed and rolled back (the row stays in flight for the reaper,
-            # which keeps only what was counted). Either way the budget still
-            # gets what this side knows to be the remainder, by the same rule.
-            final_input, final_output = _session_finals(
+            # Closed by somebody else (the reaper keeps what the turns
+            # counted) or not settled at all (left in flight for the reaper):
+            # report what this side knows; nothing is charged outside the
+            # settlement's own transaction.
+            state.final_input, state.final_output = _session_finals(
                 state.counted_input,
                 state.counted_output,
                 state.known_totals,
                 UNKNOWN_SESSION_TOKENS,
             )
-            state.final_input, state.final_output = final_input, final_output
-            remainder = final_input + final_output - counted
-            if self._budget is not None and remainder > 0:
-                try:
-                    await self._budget.record(
-                        context.task_id, BudgetKind.TOKENS, remainder
-                    )
-                except Exception as error:
-                    logger.error(
-                        "task budget could not be charged: usage_id=%s"
-                        " exception_type=%s failed_settlement=%s",
-                        admission.usage_id,
-                        log_type_name(error),
-                        failed,
-                    )
         if state.failure is FailureCode.EXPIRED:
             try:
                 await self._store_health(

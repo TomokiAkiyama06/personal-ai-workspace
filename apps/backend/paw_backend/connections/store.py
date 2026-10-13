@@ -225,9 +225,13 @@ SESSION_LEASE_SQL = (
 #: One turn of a session added to its row (``in_flight`` sessions only).
 SESSION_ADD_SQL = (
     "UPDATE connection_usage SET"
-    " input_tokens = LEAST(COALESCE(input_tokens, 0) + :input, 1000000000),"
-    " output_tokens = LEAST(COALESCE(output_tokens, 0) + :output, 1000000000)"
-    " WHERE id = :id AND status = 'in_flight' AND session RETURNING id"
+    " input_tokens = COALESCE(input_tokens, 0) + :input,"
+    " output_tokens = COALESCE(output_tokens, 0) + :output"
+    " WHERE id = :id AND status = 'in_flight' AND session"
+    # Never saturate: a turn that would take a part past the stored range is
+    # refused whole (its budget charge rolls back with it).
+    " AND COALESCE(input_tokens, 0) + :input <= 1000000000"
+    " AND COALESCE(output_tokens, 0) + :output <= 1000000000 RETURNING id"
 )
 
 
