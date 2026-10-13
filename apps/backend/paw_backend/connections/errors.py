@@ -90,6 +90,16 @@ class ConnectionNotFoundError(ConnectionsError):
         super().__init__("Connection not found")
 
 
+class CredentialNotStoredError(ConnectionsError):
+    """The handle is not one the secret store holds for this kind (unknown,
+    deleted, or stored for the other kind). Nothing was changed."""
+
+    code = "credential_not_stored"
+
+    def __init__(self) -> None:
+        super().__init__("The secret store holds no such credential for this kind")
+
+
 class ConnectionExistsError(ConnectionsError):
     """A connection of this kind is already configured: replace its credential."""
 
