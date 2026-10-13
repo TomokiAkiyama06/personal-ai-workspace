@@ -276,6 +276,43 @@ class LauncherTest(unittest.IsolatedAsyncioTestCase):
             os.kill(pid, 0)
 
 
+class UnstoppedTest(ClaudeCase):
+    async def test_a_cli_that_cannot_be_stopped_keeps_its_directory(self):
+        class StuckLauncher(SubprocessLauncher):
+            async def start(self, launch):
+                process = await super().start(launch)
+                real_stop = process.stop
+
+                async def stop():
+                    await real_stop()  # (the test's process does end)
+                    raise OSError("the session's unit could not be stopped")
+
+                process.stop = stop
+                return process
+
+        def adapter():
+            return ClaudeSessionAdapter(
+                StuckLauncher(),
+                executable=(
+                    sys.executable,
+                    "-I",
+                    str(FAKE),
+                    "--scenario",
+                    str(self.scenario),
+                    "--report",
+                    str(self.report),
+                ),
+            )
+
+        self.adapter = adapter
+        outcome = await self.run_node(
+            [{"call": "submit", "arguments": {"summary": "s"}}, {"sleep": 30}]
+        )
+        self.assertEqual(len(list(self.sessions.iterdir())), 1)  # kept
+        self.assertIsNone(outcome.result)
+        self.assertEqual(outcome.error_class, "AdapterError")
+
+
 class StreamTest(unittest.TestCase):
     def init(self, tools, servers=None, errors=None):
         message = {

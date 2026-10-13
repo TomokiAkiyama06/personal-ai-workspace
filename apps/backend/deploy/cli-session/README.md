@@ -34,6 +34,8 @@ Backend（User paw）
 ## 確かめること（有効にする前）
 
 - **Rootless の Podman が、この硬くした Unit（`NoNewPrivileges`・空の `CapabilityBoundingSet`・`ProtectSystem=strict`・`ProtectHome`・`RestrictSUIDSGID`）の下で動くこと**（Decision 0083 の承認の条件 (1)）。`newuidmap` は Setuid なので動かないことがある。そのときは Subuid の Mapping を使わない形（`/etc/subuid` に `paw-agent-cli` の行を置かず、`storage.conf` の `ignore_chown_errors = "true"`）で、硬さはそのまま保つ。
+- Unit の `Delegate=yes` の下で、Podman の `--memory`・`--cpus`・`--pids-limit` が効くこと（cgroup v2 の Controller の委任）。
+- CLI の Unit が止められなかった（`systemctl stop` が 3 回とも失敗した）ときは、Runtime は Session の Directory を消さずに残す（Unit が Mount しているため）。Log の `A CLI session could not be stopped` を見たら、Unit を止めてから `/run/paw-cli/<uuid>` を消す。
 - `paw-egress` が動いていて、Container の中から `127.0.0.1:3128` 経由で `api.anthropic.com` に届き、他の Host は拒否されること（Proxy の Log）。
 - `claude` の `system/init` に PAW の Tool と `EndConversation` だけが出ること（違えば Runtime が止める）。
 - Provider の規約の確認（Human）。

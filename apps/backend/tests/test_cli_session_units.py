@@ -383,6 +383,7 @@ class DeployFilesTest(unittest.TestCase):
             "RestrictSUIDSGID=yes",
             "TimeoutStopSec=5s",
             "RuntimeDirectory=paw-cli-session/%i",
+            "Delegate=yes",
             "Environment=XDG_RUNTIME_DIR=/run/paw-cli-session/%i",
         ):
             with self.subTest(line=line):

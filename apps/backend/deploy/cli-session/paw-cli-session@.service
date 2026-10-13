@@ -22,6 +22,9 @@ RuntimeDirectoryMode=0700
 Environment=XDG_RUNTIME_DIR=/run/paw-cli-session/%i
 ExecStart=/usr/bin/python3 -I /usr/local/lib/paw/paw_cli_session_run.py %i
 ExecStopPost=-/usr/bin/podman rm --force --ignore paw-cli-%i
+# Rootless Podman creates the container's cgroup below the unit's (memory,
+# CPU and PID limits): the unit's cgroup is delegated to it.
+Delegate=yes
 KillMode=mixed
 KillSignal=SIGTERM
 TimeoutStopSec=5s
