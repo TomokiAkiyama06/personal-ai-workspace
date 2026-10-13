@@ -80,6 +80,7 @@ def build_system_health(
     full_gpu: FullGpuStatusProvider | None = None,
     probe: GpuProbe | None = None,
     event_bus: EventBus | None = None,
+    secret_store=None,
 ) -> SystemHealth:
     compute_source = ComputeSource(compute, full_gpu, probe=probe)
     reaper_source = ReaperSource()
@@ -88,7 +89,7 @@ def build_system_health(
         sources += [
             TaskQueueSource(database),
             MemoryWorkerSource(database),
-            ConnectionSource(database),
+            ConnectionSource(database, secret_store),
         ]
     sources.append(reaper_source)
     if database.configured:

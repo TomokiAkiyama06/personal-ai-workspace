@@ -395,6 +395,24 @@ class ConnectionSourceTest(unittest.IsolatedAsyncioTestCase):
         self.assertIs(health.severity, Severity.WARNING)
         self.assertEqual(health.reasons, ("unavailable:codex",))
 
+    async def test_an_unreadable_secret_store_is_critical(self):
+        class Store:
+            def __init__(self, problem):
+                self.problem = problem
+
+            async def check(self):
+                return self.problem
+
+        healthy = await ConnectionSource(RowsDatabase([], []), Store(None)).check()
+        self.assertIs(healthy.severity, Severity.INFO)
+        self.assertEqual(healthy.metrics["secret_store_ok"], 1)
+        broken = await ConnectionSource(
+            RowsDatabase([], []), Store("secret_store_unavailable")
+        ).check()
+        self.assertIs(broken.severity, Severity.CRITICAL)
+        self.assertEqual(broken.reasons, ("secret_store_unavailable",))
+        self.assertEqual(broken.metrics["secret_store_ok"], 0)
+
     async def test_no_handle_is_read(self):
         database = RowsDatabase([], [])
         await ConnectionSource(database).check()

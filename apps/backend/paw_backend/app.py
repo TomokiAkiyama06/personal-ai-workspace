@@ -33,7 +33,10 @@ from paw_backend.compute.wiring import (
     build_compute,
 )
 from paw_backend.config import Settings
-from paw_backend.connections.wiring import build_connection_service
+from paw_backend.connections.wiring import (
+    build_connection_service,
+    build_secret_store,
+)
 from paw_backend.db import Database
 from paw_backend.errors import ERROR_RESPONSES, register_error_handlers
 from paw_backend.events import EventBus, publish_heartbeats
@@ -146,6 +149,9 @@ def create_app(
     shutdown.
     """
     settings = settings or Settings()
+    # The secret store of the shared connections (Decision 0087, 1), when one is
+    # configured: a configured store that cannot be opened stops the start here.
+    secret_store = build_secret_store(settings)
     database = database or Database(settings)
     event_bus = event_bus or EventBus(
         settings.event_queue_size, settings.event_max_subscribers
@@ -284,6 +290,7 @@ def create_app(
                 reaper = build_connection_reaper(
                     database,
                     interval_seconds=settings.connection_reap_interval_seconds,
+                    secret_store=secret_store,
                 )
                 background.add(asyncio.create_task(reaper.run()))
                 health.reaper.attach(reaper)
@@ -439,7 +446,11 @@ def create_app(
     # The quota / usage routes' connection service (issue #187): with a database.
     app.state.connections = (
         build_connection_service(
-            settings, database, app.state.authorizer, auth.audit_sink
+            settings,
+            database,
+            app.state.authorizer,
+            auth.audit_sink,
+            secret_store=secret_store,
         )
         if database.configured
         else None
@@ -455,6 +466,7 @@ def create_app(
         compute=None if compute_services is None else compute_services.scheduler,
         probe=probe,
         event_bus=event_bus,
+        secret_store=secret_store,
     )
     # A person's Notification Center (issue #188): ``/api/v1/notifications``
     # answers 503 without a database.
