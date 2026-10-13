@@ -156,6 +156,7 @@ class RefusalTest(ProxyCase):
             [(socket.AF_INET6, "::1")],
             [(socket.AF_INET6, "::ffff:192.168.1.1")],
             [(socket.AF_INET6, "fd00::1")],
+            [(socket.AF_INET6, "fec0::1")],
             [PUBLIC, (socket.AF_INET, "192.168.0.10")],
             [],
         ):
@@ -164,6 +165,28 @@ class RefusalTest(ProxyCase):
                 await self.refused(
                     f"CONNECT {HOST}:443 HTTP/1.1\r\n\r\n".encode(), b"403"
                 )
+
+
+class RefusalLogTest(ProxyCase):
+    async def test_a_refusal_names_the_host_and_the_session(self):
+        # What the operator reads to decide on the allowlist (README).
+        await self.start()
+        with self.assertLogs("paw_egress", "INFO") as logs:
+            _, _, writer = await self.request(
+                b"CONNECT statsig.anthropic.com:443 HTTP/1.1\r\n"
+                + f"X-PAW-Session: {SESSION}\r\n\r\n".encode()
+            )
+            writer.close()
+            _, _, writer = await self.request(
+                b"CONNECT bad host\x7f:443 HTTP/1.1\r\n\r\n"
+            )
+            writer.close()
+            await asyncio.sleep(0.05)
+        first, second = logs.output
+        self.assertIn("host=statsig.anthropic.com", first)
+        self.assertIn(f"session={SESSION}", first)
+        self.assertIn("outcome=host", first)
+        self.assertIn("host=-", second)  # not a DNS name: not repeated
 
 
 class LimitTest(ProxyCase):

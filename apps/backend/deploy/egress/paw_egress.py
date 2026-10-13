@@ -74,10 +74,15 @@ class Refused(Exception):
     """A request the proxy does not serve. ``status`` is the HTTP answer,
     ``reason`` the fixed word of the log line."""
 
-    def __init__(self, status: int, reason: str) -> None:
+    def __init__(
+        self, status: int, reason: str, host: str = "-", session: str = "-"
+    ) -> None:
         super().__init__(reason)
         self.status = status
         self.reason = reason
+        # What the log line names (a host only when it is a DNS name).
+        self.host = host
+        self.session = session
 
 
 _STATUS_TEXT = {
@@ -124,8 +129,11 @@ def is_public(address: str) -> bool:
     """Whether ``address`` is a global unicast address (not private,
     loopback, link-local, CGNAT, multicast, reserved or unspecified)."""
     ip = ipaddress.ip_address(address)
-    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
-        ip = ip.ipv4_mapped
+    if isinstance(ip, ipaddress.IPv6Address):
+        if ip.ipv4_mapped is not None:
+            ip = ip.ipv4_mapped
+        elif ip.is_site_local:  # fec0::/10: deprecated, still routed in places
+            return False
     return ip.is_global and not ip.is_multicast
 
 
@@ -185,10 +193,10 @@ class EgressProxy:
         async with self._slots:
             try:
                 host, session = await self._read_request(reader)
-                upstream_reader, upstream_writer = await self._open(host)
+                upstream_reader, upstream_writer = await self._open(host, session)
             except Refused as refused:
                 await _answer(writer, refused.status)
-                _log(session, host, refused.reason, 0, 0)
+                _log(refused.session, refused.host, refused.reason, 0, 0)
                 await _close(writer)
                 return
             try:
@@ -225,43 +233,46 @@ class EgressProxy:
         if len(parts) != 3 or not parts[2].startswith("HTTP/1."):
             raise Refused(400, "malformed")
         method, target, _ = parts
-        if method != "CONNECT":
-            raise Refused(405, "not_connect")
-        host, separator, port = target.rpartition(":")
-        if not separator or port != str(PORT):
-            raise Refused(403, "port")
-        if host not in self._hosts:
-            raise Refused(403, "host")
         session = "-"
         for line in lines[1:]:
             name, colon, value = line.partition(":")
             if colon and name.strip().lower() == _SESSION_HEADER:
                 with contextlib.suppress(ValueError):
                     session = str(uuid.UUID(value.strip()))
+        host, separator, port = target.rpartition(":")
+        # The refusal's log line names the host the CLI asked for (what the
+        # allowlist may need), but only when it is a plain DNS name.
+        shown = host if _HOST.fullmatch(host) else "-"
+        if method != "CONNECT":
+            raise Refused(405, "not_connect", session=session)
+        if not separator or port != str(PORT):
+            raise Refused(403, "port", shown, session)
+        if host not in self._hosts:
+            raise Refused(403, "host", shown, session)
         return host, session
 
     async def _open(
-        self, host: str
+        self, host: str, session: str = "-"
     ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         try:
             async with asyncio.timeout(CONNECT_TIMEOUT_SECONDS):
                 addresses = await self._resolver(host)
         except TimeoutError:
-            raise Refused(504, "dns_timeout") from None
+            raise Refused(504, "dns_timeout", host, session) from None
         except OSError:
-            raise Refused(502, "dns") from None
+            raise Refused(502, "dns", host, session) from None
         public = [address for address in addresses if is_public(address[1])]
         if not public or len(public) != len(addresses):
             # One non-global answer refuses the host: a name that also points
             # into the LAN is not a provider's.
-            raise Refused(403, "address")
+            raise Refused(403, "address", host, session)
         for address in public:
             try:
                 async with asyncio.timeout(CONNECT_TIMEOUT_SECONDS):
                     return await self._connector(address)
             except (OSError, TimeoutError):
                 continue
-        raise Refused(502, "connect")
+        raise Refused(502, "connect", host, session)
 
     async def _splice(
         self,
