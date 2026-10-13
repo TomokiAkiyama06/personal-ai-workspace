@@ -213,7 +213,15 @@ from paw_backend.tasks.queueing.budget import BudgetTracker
 from paw_backend.tasks.queueing.domain import BudgetKind
 from paw_backend.tasks.queueing.errors import BudgetNotConfiguredError
 from paw_backend.tools.calls import TaskContext
-from paw_backend.tools.credentials import MAX_TEXT_CHARS, redact_text, redact_value
+from paw_backend.tools.credentials import (
+    MAX_RESULT_CHARS as MAX_SUBMISSION_CHARS,
+)
+from paw_backend.tools.credentials import (
+    MAX_RESULT_NODES,
+    MAX_TEXT_CHARS,
+    redact_text,
+    redact_value,
+)
 from paw_backend.tools.interfaces import require_async_method
 from paw_backend.tools.lease import FailClosedLeaseVerifier, LeaseStatus, LeaseVerifier
 
@@ -298,14 +306,22 @@ def _clean_submission(secret: Secret, submission: Mapping[str, Any]) -> dict | N
     text still shows the value or the shape is not JSON-like (str keys; str,
     int, float, bool, None, lists and mappings, at most 32 levels deep)."""
 
+    # The read limits of a tool result (``redact_value``), enforced while
+    # this pass copies: a huge submission is refused, not walked.
+    left = {"nodes": MAX_RESULT_NODES, "chars": MAX_SUBMISSION_CHARS}
+
     def text(value: str) -> str | None:
+        left["chars"] -= len(value)
+        if left["chars"] < 0:
+            return None
         cleaned = secret.scrub(value)
         cleaned, _ = redact_text(cleaned)
         cleaned = secret.scrub(cleaned)
         return None if secret.visible_in(cleaned) else cleaned
 
     def clean(value: Any, depth: int) -> tuple[bool, Any]:
-        if depth > _SUBMISSION_MAX_DEPTH:
+        left["nodes"] -= 1
+        if depth > _SUBMISSION_MAX_DEPTH or left["nodes"] < 0:
             return False, None
         if isinstance(value, str):
             cleaned = text(value)
@@ -341,6 +357,7 @@ def _clean_submission(secret: Secret, submission: Mapping[str, Any]) -> dict | N
     # whatever it holds. Its normalisation can compose text again, so the
     # value is looked for once more afterwards.
     redacted, _ = redact_value(cleaned)
+    left["nodes"], left["chars"] = MAX_RESULT_NODES, MAX_SUBMISSION_CHARS
     ok, cleaned = clean(redacted, 0)
     return cleaned if ok else None
 
@@ -991,6 +1008,7 @@ class ConnectionService:
                 request.model,
                 request.purpose,
                 session=True,
+                min_tokens=SESSION_MIN_TOKENS,
             )
         )
         if isinstance(admission, Refused):
@@ -1070,23 +1088,19 @@ class ConnectionService:
                 output_tokens,
                 self._budget,
             )
-            if turn is SessionTurn.RECORDED:
+            if turn in (SessionTurn.RECORDED, SessionTurn.USED_UP):
                 state.counted_input += input_tokens
                 state.counted_output += output_tokens
+                if turn is SessionTurn.USED_UP:
+                    state.stopped = SessionStop.BUDGET_EXCEEDED
             elif turn is SessionTurn.LEASE_LOST:
                 state.stopped = SessionStop.LEASE_LOST
             elif turn is SessionTurn.RUN_REPLACED:
                 state.stopped = SessionStop.RUN_REPLACED
             else:
                 state.stopped = SessionStop.BUDGET_EXCEEDED
-            if state.stopped is None and self._budget is not None:
-                # "May the task do one more?" (as at the start): a turn that
-                # used the budget up exactly stops the session too.
-                verdict = await self._budget.check(
-                    context.task_id, planned={BudgetKind.TOKENS: 1}
-                )
-                if BudgetKind.TOKENS in verdict.exceeded:
-                    state.stopped = SessionStop.BUDGET_EXCEEDED
+            # (Whether the budget allows another turn was decided in the
+            # turn's transaction, with its run and lease fences: ``USED_UP``.)
             # The turn was spent (and counted above) either way; an abandoned
             # attempt must not get another one.
             if state.stopped is None and alive is not None and alive() is not True:

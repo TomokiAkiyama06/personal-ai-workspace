@@ -133,6 +133,11 @@ TASK_LOCK_SQL = (
     "SELECT state, attempt, retry_count, created_by, project_id FROM tasks"
     " WHERE id = %(task)s FOR SHARE"
 )
+#: The task's token budget row, locked for the admission (a session's floor).
+BUDGET_FLOOR_LOCK_SQL = (
+    "SELECT consumed, limit_value FROM budget_usages"
+    " WHERE task_id = %(task)s AND kind = 'tokens' FOR UPDATE"
+)
 CONNECTION_LOCK_SQL = (
     "SELECT id, secret_handle, status, enabled FROM shared_connections"
     " WHERE kind = %(kind)s FOR SHARE"
@@ -230,6 +235,9 @@ class SessionTurn(StrEnum):
     """What counting one turn of a session came to."""
 
     RECORDED = "recorded"
+    # Recorded, and the task has no token left for another turn: judged in
+    # the same transaction as the run and lease fences.
+    USED_UP = "used_up"
     LEASE_LOST = "lease_lost"  # nothing written
     RUN_REPLACED = "run_replaced"  # nothing written
     NO_BUDGET = "no_budget"  # nothing written
@@ -872,10 +880,15 @@ class ConnectionStore:
         purpose: UsagePurpose,
         *,
         session: bool = False,
+        min_tokens: int | None = None,
     ) -> Admitted | Refused:
         """Decide whether the call may start and, if so, record that it did.
         ``session``: the row is a CLI session's (Decision 0083, 5 (b): it may
-        carry tokens while ``in_flight``).
+        carry tokens while ``in_flight``). ``min_tokens``: the task must have at
+        least this many tokens of its budget left (a session's floor, Decision
+        0083, 5 (a)); judged here, on the budget row locked until the admission
+        commits, so a concurrent charge cannot slip in between (lock order: the
+        task, then its budget, as every charge takes them).
 
         See the module docstring for the steps and their order. A call for a
         task that has used this connection before is a CONTINUING task: it is
@@ -900,6 +913,22 @@ class ConnectionStore:
                     TaskActivity.SUPERSEDED: RefusalReason.TASK_SUPERSEDED,
                 }.get(activity, RefusalReason.TASK_NOT_FOUND)
                 return Refused(reason, project_id=project_id)
+
+            if min_tokens is not None:
+                cursor = await connection.execute(
+                    BUDGET_FLOOR_LOCK_SQL, {"task": task_id}
+                )
+                tokens = await cursor.fetchone()
+                if tokens is None:
+                    return Refused(
+                        RefusalReason.TASK_BUDGET_NOT_CONFIGURED,
+                        project_id=project_id,
+                    )
+                consumed, limit = tokens
+                if limit is not None and consumed + min_tokens > limit:
+                    return Refused(
+                        RefusalReason.TASK_TOKEN_FLOOR, project_id=project_id
+                    )
 
             cursor = await connection.execute(CONNECTION_LOCK_SQL, {"kind": kind.value})
             found = await cursor.fetchone()
@@ -996,8 +1025,9 @@ class ConnectionStore:
                 # entry. A failed check below rolls the charge back.
                 # A zero-token turn too: ``record_in`` of 0 charges nothing
                 # but still locks and checks the task's run.
+                usage = None
                 if budget is not None:
-                    await budget.record_in(
+                    usage = await budget.record_in(
                         session, task_id, BudgetKind.TOKENS, amount, run=run
                     )
                 held = await session.execute(
@@ -1017,13 +1047,21 @@ class ConnectionStore:
                 )
                 if added.first() is None:
                     raise _TurnRefused(SessionTurn.CLOSED)
+                # "May the task do one more?" (consumed + 1 > limit), read
+                # from the budget row this transaction holds: the answer for
+                # the next turn is fenced like the turn itself.
+                used_up = (
+                    usage is not None
+                    and usage.limit is not None
+                    and usage.consumed + 1 > usage.limit
+                )
         except _TurnRefused as refused:
             return refused.turn  # rolled back: nothing was written
         except StaleRunError:
             return SessionTurn.RUN_REPLACED  # rolled back: nothing was written
         except BudgetNotConfiguredError:
             return SessionTurn.NO_BUDGET
-        return SessionTurn.RECORDED
+        return SessionTurn.USED_UP if used_up else SessionTurn.RECORDED
 
     async def settle_session(
         self,

@@ -366,6 +366,38 @@ class ReaperTest(SessionCase):
         self.assertEqual(self.row()["status"], "failed")
 
 
+class FencedAuthorizationTest(SessionCase):
+    async def test_the_next_turn_is_decided_inside_the_fenced_transaction(self):
+        # Whether the budget allows another turn is read in the turn's own
+        # transaction (with its run and lease fences), never by a separate
+        # read afterwards that a lost lease or a new run could overtake.
+        service = self.session_service(FakeSession([(100, 10), (5, 0)]))
+        unfenced = []
+        original = self.budget.check
+
+        async def check(*args, **kwargs):
+            if service_running[0]:
+                unfenced.append(args)
+            return await original(*args, **kwargs)
+
+        service_running = [False]
+        self.budget.check = check
+        adapter = service._session_adapters[CODEX]
+        run_session = adapter.run_session
+
+        async def running(secret, request):
+            service_running[0] = True
+            try:
+                return await run_session(secret, request)
+            finally:
+                service_running[0] = False
+
+        adapter.run_session = running
+        result = await self.start(None, service=service)
+        self.assertIsNone(result.stopped)
+        self.assertEqual(unfenced, [])
+
+
 class AdmissionTest(SessionCase):
     async def test_the_floor_refuses_before_anything_is_written(self):
         with self.engine.begin() as connection:
@@ -456,6 +488,34 @@ class CancelTest(SessionCase):
         self.assertEqual(await self.consumed() - before, 200_000)
 
 
+class FloorAtomicityTest(SessionCase):
+    async def test_the_floor_is_judged_again_inside_the_admission(self):
+        # Another node charges the task between the early check and the
+        # admission: the admission itself refuses below the floor.
+        with self.engine.begin() as connection:
+            connection.execute(
+                text(
+                    "UPDATE budget_usages SET limit_value = 60000"
+                    " WHERE task_id = :task AND kind = 'tokens'"
+                ),
+                {"task": self.task},
+            )
+        adapter = FakeSession([(10, 1)])
+        service = self.session_service(adapter)
+        original = service._store.admit
+
+        async def charged_meanwhile(*args, **kwargs):
+            await self.budget.record(self.task, BudgetKind.TOKENS, 20_000)
+            return await original(*args, **kwargs)
+
+        service._store.admit = charged_meanwhile
+        with self.assertRaises(TaskBudgetError) as caught:
+            await self.start(None, service=service)
+        self.assertIs(caught.exception.reason, RefusalReason.TASK_TOKEN_FLOOR)
+        self.assertEqual(adapter.calls, 0)
+        self.assertEqual(self.rows("SELECT id FROM connection_usage"), [])
+
+
 class SubmissionTest(SessionCase):
     async def test_the_credential_is_scrubbed_from_the_submission(self):
         token = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"  # split: a shape only
@@ -483,6 +543,18 @@ class SubmissionTest(SessionCase):
         self.assertIsNone(result.failure)
         self.assertNotIn(opaque, repr(result.submission))
         self.assertEqual(result.submission["summary"], "s")
+
+    async def test_a_submission_beyond_the_read_limits_is_refused(self):
+        from paw_backend.tools.credentials import MAX_RESULT_NODES
+
+        adapter = FakeSession(
+            result=AgentSessionResult(
+                submission={"items": [0] * (MAX_RESULT_NODES + 1)}
+            )
+        )
+        result = await self.start(adapter)
+        self.assertIs(result.failure, FailureCode.INVALID_RESPONSE)
+        self.assertIsNone(result.submission)
 
     async def test_a_malformed_submission_is_refused(self):
         adapter = FakeSession(
