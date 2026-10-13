@@ -91,6 +91,7 @@
 | [0085](0085-task-scoped-tool-approval-grant.md) | Tool の承認の「このタスクの間は許可」（同じ Task・同じ Run・同じ Tool・`APPROVAL` で、Scope と引数が同じか狭い呼び出しを Task の終わりまで人に聞かずに通す Grant、`STRONG_APPROVAL`・削除・Credential・外部送信・Working Set / ACL / Role / Permission の変更は対象外、作るのは本人だけで `project.task.run` と `ApprovalService`、Grant の ID つきの Audit と使用の行、Task の画面で取り消し。Migration 0193。Decision 0006 の一部と 0078 の 8 を置き換える） | Approved |
 | [0086](0086-orchestrator-worker-start.md) | Orchestrator の Worker（`Orchestrator.serve`）を Application の起動で動かす（Orchestrator が組み立てられたときだけ、`PAW_ORCHESTRATOR_WORKERS` 既定 1・0 で止める、Worker の ID は `<host>:<pid>:<n>`、終了時は最初に取り消す。Decision 0047 の 5 の一部を置き換える） | Approved |
 | [0087](0087-cli-secret-store-and-egress.md) | CLI の Runtime の前提（Issue #208 の PR 4b）: Secret Store は Backend の暗号化した File の Store（AES-256-GCM、主鍵は systemd の `LoadCredentialEncrypted=`、版ごとの File と Compare-and-swap の Rotation、Backup に入れない）、平文は Server の上の管理 Command で入れて Handle を登録、Egress は Repository の中の `CONNECT` だけの Proxy（Unix Socket、Host 名の Allowlist、Private の範囲を拒否）と nftables（DNS と Private を除く 443）、CLI と Credential の種類ごとの認証の渡し方（Subscription の OAuth は Proxy で付けない）、組み込みの Tool の止め方と検出、Turn ごとの Token の読み方。2026-10-12 の公式の Document を出典に。Decision 0083 の 6 の一部を置き換える | Approved |
+| [0088](0088-cli-token-file-mode.md) | CLI の Session の Subscription の Token の File は Mode 0640・所有者 Backend・Group `paw-cli-bridge`（Backend は別の Account へ `chown` できないため。Decision 0087 の 4 の表の 0400・所有者 `paw-agent-cli` を置き換える） | Approved |
 
 運用は [AGENTS.md](../../AGENTS.md) の「仕様変更」に従います。
 
