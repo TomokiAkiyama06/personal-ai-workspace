@@ -203,6 +203,9 @@ class ClaudeSessionAdapter:
         totals: Totals | None = None
         failure: FailureCode | None = None
         retry: str | None = None
+        # The CLI was stopped on purpose (the service said no more turns):
+        # its exit status is the stop's, not a failure.
+        stopped = False
         ended = asyncio.create_task(attachment.bridge.ended.wait())
         try:
             while True:
@@ -231,6 +234,7 @@ class ClaudeSessionAdapter:
                     if not await request.on_usage(
                         item.input_tokens, item.output_tokens
                     ):
+                        stopped = True
                         break
                 elif isinstance(item, Retry):
                     retry = item.error
@@ -255,6 +259,7 @@ class ClaudeSessionAdapter:
             failure is None
             and totals is None
             and code != 0
+            and not stopped
             and not attachment.bridge.ended.is_set()
         ):
             failure = FailureCode.INTERNAL_ERROR

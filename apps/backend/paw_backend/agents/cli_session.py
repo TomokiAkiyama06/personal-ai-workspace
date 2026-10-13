@@ -188,13 +188,21 @@ class SubprocessLauncher:
             limit=16 * 1024 * 1024,
         )
         assert process.stdin is not None
+        handle = _Subprocess(process)
         try:
-            process.stdin.write(launch.stdin)
-            await process.stdin.drain()
-        except (BrokenPipeError, ConnectionResetError):
-            pass
-        process.stdin.close()
-        return _Subprocess(process)
+            try:
+                process.stdin.write(launch.stdin)
+                await process.stdin.drain()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            process.stdin.close()
+        except BaseException:
+            # Cancelled (or failed) before the caller got the handle: the
+            # process must not outlive the attempt with the token in its
+            # environment.
+            await asyncio.shield(handle.stop())
+            raise
+        return handle
 
 
 __all__ = [

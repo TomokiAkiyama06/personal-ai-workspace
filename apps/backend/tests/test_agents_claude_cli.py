@@ -205,6 +205,9 @@ class StopTest(ClaudeCase):
             [{"turn": [600, 10]}, {"turn": [1, 1]}, {"sleep": 30}], budget=500
         )
         self.assertEqual(self.connections.turns, [(600, 10)])
+        # A stop the service asked for is not a failure of the session (the
+        # service records it as cancelled).
+        self.assertIsNone(self.connections.raw.failure)
 
     async def test_a_builtin_tool_left_on_stops_the_cli(self):
         outcome = await self.run_node(
@@ -234,6 +237,43 @@ class StopTest(ClaudeCase):
         self.assertEqual(outcome.error_class, "ConnectionError")
         self.assertTrue(outcome.escalate)
         self.assertEqual(self.connections.raw.failure.value, "expired")
+
+
+class LauncherTest(unittest.IsolatedAsyncioTestCase):
+    async def test_a_cancelled_start_leaves_no_process(self):
+        import os
+
+        directory = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
+        marker = directory / "pid"
+        # A "CLI" that never reads its stdin: the prompt's write blocks.
+        script = (
+            "import os, time, pathlib;"
+            f"pathlib.Path({str(marker)!r}).write_text(str(os.getpid()));"
+            "time.sleep(60)"
+        )
+        from paw_backend.agents.cli_session import CliLaunch, CliSessionSpec
+
+        spec = CliSessionSpec(uuid.uuid4(), directory, "t" * 40, ("relay",))
+        launch = CliLaunch(
+            (sys.executable, "-c", script),
+            {},
+            Secret(TOKEN),
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            b"x" * (8 * 1024 * 1024),
+            spec,
+        )
+        starting = asyncio.create_task(SubprocessLauncher().start(launch))
+        for _ in range(100):
+            if marker.exists() and marker.read_text():
+                break
+            await asyncio.sleep(0.05)
+        starting.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await starting
+        pid = int(marker.read_text())
+        with self.assertRaises(ProcessLookupError):
+            os.kill(pid, 0)
 
 
 class StreamTest(unittest.TestCase):
