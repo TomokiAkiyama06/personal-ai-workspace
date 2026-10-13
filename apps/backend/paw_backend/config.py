@@ -187,6 +187,13 @@ class Settings(BaseSettings):
     # every home directory and the projection, the top of a git work tree with
     # the recovery marker. ``recovery_git_timeout_seconds`` bounds one git command.
     recovery_repository_dir: Path | None = None
+    # The secret store of the shared Codex / Claude connections (Decision 0087,
+    # 1): the directory of the encrypted credential files (for example
+    # ``/var/lib/paw/secrets``, the backend's own, mode 0700). Its master key is
+    # the systemd credential ``paw-secret-key`` (``LoadCredentialEncrypted=``),
+    # never a setting. Unset: no store (a connection's handle cannot be
+    # resolved, and the HTTP layer takes handles as given).
+    secret_store_dir: Path | None = None
     recovery_git_timeout_seconds: float = Field(default=300.0, gt=0, le=3_600)
 
     # Repository registration (PAW-027, Decision 0017). Where a user's checkouts
@@ -294,6 +301,7 @@ class Settings(BaseSettings):
         "passkey_rp_id",
         "memory_projection_dir",
         "recovery_repository_dir",
+        "secret_store_dir",
         mode="before",
     )
     @classmethod
