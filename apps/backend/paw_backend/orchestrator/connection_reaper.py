@@ -65,6 +65,8 @@ from paw_backend.tools.interfaces import require_async_method
 logger = logging.getLogger(__name__)
 
 ACTION_ABANDON = "connection.usage.abandon"
+ACTION_COLLECT = "connection.credential.collect"
+_RESOURCE_CREDENTIAL = "connection_credential"
 REASON_ABANDONED = "abandoned_call"
 _RESOURCE_USAGE = "connection_usage"
 _SYSTEM_ROLE = "system"
@@ -100,7 +102,10 @@ class AbandonedCallReaper:
         *,
         interval_seconds: float = DEFAULT_REAP_INTERVAL_SECONDS,
         clock: Clock | None = None,
+        secret_store: object | None = None,
     ) -> None:
+        if secret_store is not None:
+            require_async_method(secret_store, "collect", 1)
         if not isinstance(store, ConnectionStore):
             raise TypeError("store must be a ConnectionStore")
         require_async_method(audit_sink, "record", 1)
@@ -113,6 +118,7 @@ class AbandonedCallReaper:
         clock = clock or SystemClock()
         require_async_method(clock, "sleep", 1)
         self._store = store
+        self._secret_store = secret_store
         self._sink = audit_sink
         self._clock = clock
         self._stopping = asyncio.Event()
@@ -140,7 +146,47 @@ class AbandonedCallReaper:
             await self._audit(correlation_id, usage.id, usage.project_id)
         if reaped:
             logger.warning("Settled %d abandoned connection call(s)", len(reaped))
+        await self._collect_credentials()
         return len(reaped)
+
+    async def _collect_credentials(self) -> None:
+        """The secret store's cleanup (Decision 0087, 1): the stored credentials
+        nothing refers to any more, and replaced versions after a day. Best
+        effort: a failure is logged by type and tried again next cycle."""
+        if self._secret_store is None:
+            return
+        try:
+            deleted = await self._secret_store.collect(self._store.handle_referenced)
+        except Exception as error:
+            logger.error(
+                "Cleaning up the secret store failed (%s)", error_class_of(error)
+            )
+            return
+        if deleted:
+            logger.warning("Deleted %d unreferenced stored credential(s)", deleted)
+            await self._audit_collection(deleted)
+
+    async def _audit_collection(self, deleted: int) -> None:
+        """The cleanup in the system's audit (Decision 0087, 1): the count only."""
+        try:
+            event = AuditEvent(
+                event_id=uuid.uuid4(),
+                correlation_id=uuid.uuid4(),
+                occurred_at=datetime.now(UTC),
+                actor_id=None,
+                actor_role=_SYSTEM_ROLE,
+                action=ACTION_COLLECT,
+                resource_kind=_RESOURCE_CREDENTIAL,
+                decision="allow",
+                reason=f"deleted:{deleted}",
+            )
+            async with asyncio.timeout(AUDIT_TIMEOUT_SECONDS):
+                await self._sink.record(event)
+        except Exception as error:
+            logger.error(
+                "Auditing the secret store's cleanup failed (%s)",
+                error_class_of(error),
+            )
 
     def _record_success(self, reaped: int) -> None:
         now = datetime.now(UTC)
@@ -228,11 +274,14 @@ def build_connection_reaper(
     *,
     interval_seconds: float = DEFAULT_REAP_INTERVAL_SECONDS,
     clock: Clock | None = None,
+    secret_store: object | None = None,
 ) -> AbandonedCallReaper:
-    """The reaper the application runs, wired the way production wires it."""
+    """The reaper the application runs, wired the way production wires it
+    (with the deployment's secret store, its cleanup too)."""
     return AbandonedCallReaper(
         ConnectionStore(database),
         PostgresAuditSink(database),
         interval_seconds=interval_seconds,
         clock=clock,
+        secret_store=secret_store,
     )

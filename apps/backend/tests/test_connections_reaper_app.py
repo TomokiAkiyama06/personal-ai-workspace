@@ -79,7 +79,10 @@ class LifespanTest(unittest.IsolatedAsyncioTestCase):
             (reaper,) = RecordingReaper.instances
             self.assertTrue(await wait_until(reaper.started.is_set))
             self.assertIs(reaper.database, database)
-            self.assertEqual(reaper.options, {"interval_seconds": 600})
+            # No secret store configured: the reaper has no store to clean up.
+            self.assertEqual(
+                reaper.options, {"interval_seconds": 600, "secret_store": None}
+            )
 
         self.assertTrue(reaper.stopped)
         self.assertTrue(reaper.cancelled)

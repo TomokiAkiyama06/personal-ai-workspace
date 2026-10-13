@@ -111,6 +111,7 @@ Limits (stated, not hidden)
 """
 
 import asyncio
+import contextlib
 import logging
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
@@ -152,6 +153,7 @@ from paw_backend.connections.errors import (
     ConnectionNotFoundError,
     ConnectionPermissionDeniedError,
     ConnectionUnavailableError,
+    CredentialNotStoredError,
     InputProblem,
     InvalidConnectionInputError,
     QuotaExceededError,
@@ -178,6 +180,7 @@ from paw_backend.connections.records import (
 )
 from paw_backend.connections.report import UsageRange, UsageReport
 from paw_backend.connections.secret import Secret, SecretResolver
+from paw_backend.connections.secret_store import CredentialStore
 from paw_backend.connections.session import (
     SESSION_MIN_TOKENS,
     UNKNOWN_SESSION_TOKENS,
@@ -233,6 +236,7 @@ ACTION_REPLACE = "connection.replace"
 ACTION_ENABLE = "connection.enable"
 ACTION_DISABLE = "connection.disable"
 ACTION_DISCONNECT = "connection.disconnect"
+ACTION_ROTATE = "connection.rotate"
 ACTION_STATUS = "connection.status"
 ACTION_USE = "connection.use"
 ACTION_QUOTA_SET = "connection.quota.set"
@@ -459,6 +463,7 @@ class ConnectionService:
         budget: BudgetTracker | None = None,
         lease: LeaseVerifier | None = None,
         session_adapters: Mapping[ConnectionKind, AgentSessionAdapter] | None = None,
+        credential_store: CredentialStore | None = None,
         period_timezone: str = DEFAULT_PERIOD_TIMEZONE,
         database_timeout_seconds: float = DEFAULT_DATABASE_TIMEOUT_SECONDS,
         health_timeout_seconds: float = DEFAULT_HEALTH_TIMEOUT_SECONDS,
@@ -475,6 +480,13 @@ class ConnectionService:
         queue, as the Tool Broker's. Without one no lease is known and every call
         is refused (``FailClosedLeaseVerifier``, as in the Broker).
 
+        ``credential_store`` (Decision 0087, 1): the secret store whose files
+        the handles name (``FileSecretStore``). With it, a handle is registered
+        only while the store holds it for that kind (under the handle's lock),
+        a credential nothing refers to any more is deleted after a replacement
+        or a disconnection, and ``rotate_credential`` is possible. Without it
+        (the HTTP layer's quota service, the tests), handles are taken as given.
+
         ``period_timezone`` is the IANA zone of the calendar windows (``day``, ``week``,
         ``month``); the default is ``Asia/Tokyo`` (Decision 0016, section 4, approved;
         it needs the system's time zone database). ``clock`` /
@@ -488,6 +500,11 @@ class ConnectionService:
             require_async_method(secrets, "resolve", 1)
             if lease is not None:
                 require_async_method(lease, "check", 2)
+            if credential_store is not None:
+                for method, arity in (("verify", 2), ("delete", 1), ("rotate", 4)):
+                    require_async_method(credential_store, method, arity)
+                if not callable(getattr(credential_store, "lock", None)):
+                    raise TypeError("lock")
         except TypeError:
             raise fail("collaborator", InputProblem.WRONG_TYPE) from None
         if budget is not None:
@@ -506,6 +523,7 @@ class ConnectionService:
         self._sink = audit_sink
         self._adapters = adapters
         self._secrets = secrets
+        self._credentials = credential_store
         self._budget = budget
         self._session_adapters = _session_adapters(session_adapters)
         if self._session_adapters and budget is None:
@@ -544,7 +562,9 @@ class ConnectionService:
             _connection_resource(),
             correlation_id,
         )
-        info = await self._call_store(self._store.insert_connection(kind, handle))
+        async with self._credential_lock(handle):
+            await self._require_stored(handle, kind)
+            info = await self._call_store(self._store.insert_connection(kind, handle))
         if info is None:
             raise ConnectionExistsError()
         await self._audit(
@@ -569,9 +589,14 @@ class ConnectionService:
             _connection_resource(),
             correlation_id,
         )
-        info = await self._call_store(self._store.replace_handle(kind, handle))
+        previous = await self._call_store(self._store.read_handle(kind))
+        async with self._credential_lock(handle):
+            await self._require_stored(handle, kind)
+            info = await self._call_store(self._store.replace_handle(kind, handle))
         if info is None:
             raise ConnectionNotFoundError()
+        if previous is not None and previous != handle:
+            await self._discard_credential(previous)
         await self._audit(
             ACTION_REPLACE, OUTCOME_SUCCEEDED, True, principal, correlation_id,
             _RESOURCE_CONNECTION, info.id,
@@ -619,12 +644,83 @@ class ConnectionService:
         kind = validate_enum("kind", kind, ConnectionKind)
         correlation_id = uuid.uuid4()
         existing = await self._authorize_existing(principal, kind, correlation_id)
+        previous = await self._call_store(self._store.read_handle(kind))
         if not await self._call_store(self._store.delete_connection(kind)):
             raise ConnectionNotFoundError()
+        if previous is not None:
+            await self._discard_credential(previous)
         await self._audit(
             ACTION_DISCONNECT, OUTCOME_SUCCEEDED, True, principal, correlation_id,
             _RESOURCE_CONNECTION, existing,
         )  # fmt: skip
+
+    async def rotate_credential(
+        self,
+        kind: ConnectionKind,
+        handle: str,
+        expected_version: int,
+        value: str,
+    ) -> int:
+        """Write back a refreshed credential (Decision 0083, 6: a CLI that
+        refreshed its OAuth token during a session). Backend-internal, no
+        actor, like ``check_health``: the same connection's same handle only,
+        and only while ``expected_version`` is still its current version
+        (``StaleCredentialVersionError`` otherwise: somebody else wrote first).
+        Never a different credential (that is ``replace_credential``, an
+        Owner's / Admin's change). Audited as the system's ``connection.rotate``.
+        Returns the new version."""
+        kind = validate_enum("kind", kind, ConnectionKind)
+        handle = validate_handle("secret_handle", handle)
+        if self._credentials is None:
+            raise ConnectionUnavailableError()
+        current = await self._call_store(self._store.get_connection(kind))
+        if (
+            current is None
+            or (await self._call_store(self._store.read_handle(kind))) != handle
+        ):
+            raise ConnectionNotFoundError()
+        version = await self._credentials.rotate(handle, kind, expected_version, value)
+        await self._audit(
+            ACTION_ROTATE, OUTCOME_SUCCEEDED, True, None, uuid.uuid4(),
+            _RESOURCE_CONNECTION, current.id,
+        )  # fmt: skip
+        return version
+
+    async def collect_credentials(self) -> int:
+        """Delete the stored credentials nothing refers to any more (the secret
+        store's cleanup, Decision 0087, 1); 0 without a store."""
+        if self._credentials is None or not hasattr(self._credentials, "collect"):
+            return 0
+        return await self._credentials.collect(self._store.handle_referenced)
+
+    def _credential_lock(self, handle: str):
+        """The secret store's lock of ``handle`` (none without a store)."""
+        if self._credentials is None:
+            return contextlib.nullcontext()
+        return self._credentials.lock(handle)
+
+    async def _require_stored(self, handle: str, kind: ConnectionKind) -> None:
+        if self._credentials is not None and not await self._credentials.verify(
+            handle, kind
+        ):
+            raise CredentialNotStoredError()
+
+    async def _discard_credential(self, handle: str) -> None:
+        """Delete the stored credential ``handle`` if nothing refers to it any
+        more (checked under its lock, so a registration of the same handle in
+        the meantime keeps it). Best effort: a failure is logged by type and
+        the store's cleanup deletes it later."""
+        if self._credentials is None:
+            return
+        try:
+            async with self._credentials.lock(handle):
+                if not await self._call_store(self._store.handle_referenced(handle)):
+                    await self._credentials.delete(handle)
+        except Exception as error:
+            logger.error(
+                "a replaced credential could not be deleted: exception_type=%s",
+                log_type_name(error),
+            )
 
     async def get_connection(
         self, principal: Principal, kind: ConnectionKind
