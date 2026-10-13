@@ -318,6 +318,37 @@ class NftablesTest(unittest.TestCase):
         )
 
 
+class ForwardSessionTest(ProxyCase):
+    async def test_the_forwarder_sets_the_session_the_cli_cannot(self):
+        await self.start()
+        server = await egress.forward(0, self.socket_path, SESSION)
+        self.addAsyncCleanup(self._close_server, server)
+        port = server.sockets[0].getsockname()[1]
+        with self.assertLogs("paw_egress", "INFO") as logs:
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+            forged = "00000000-0000-4000-8000-000000000000"
+            request = f"CONNECT {HOST}:443 HTTP/1.1\r\nX-PAW-Session: {forged}"
+            writer.write(f"{request}\r\n\r\n".encode())
+            await writer.drain()
+            status = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 5)
+            self.assertTrue(status.startswith(b"HTTP/1.1 200"))
+            writer.close()
+            await asyncio.sleep(0.2)
+        self.assertIn(f"session={SESSION}", logs.output[-1])
+        self.assertNotIn(forged, logs.output[-1])
+
+
+class NftablesRulesTest(unittest.TestCase):
+    def test_no_shortcut_for_established_flows(self):
+        text = (PATH.parent / "paw-egress.nft").read_text()
+        rules = [line for line in text.splitlines() if not line.strip().startswith("#")]
+        self.assertFalse([line for line in rules if "ct state" in line])
+
+    def test_the_install_steps_add_the_cli_account_to_the_group(self):
+        unit = (PATH.parent / "paw-egress.service").read_text()
+        self.assertIn("usermod -aG paw-cli-bridge paw-agent-cli", unit)
+
+
 class ForwardTest(ProxyCase):
     async def test_the_forwarder_passes_tcp_to_the_socket(self):
         await self.start()

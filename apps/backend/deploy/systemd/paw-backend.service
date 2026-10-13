@@ -41,6 +41,11 @@ PrivateTmp=true
 # and the paths of its settings (PAW_MEMORY_PROJECTION_DIR, ...), so /home and
 # /srv stay writable (ProtectHome is not set for the same reason).
 ProtectSystem=full
+# The secret store of the shared connections (Decision 0087, 1;
+# deploy/secret-store/README.md): its master key, encrypted with the host key
+# (and the TPM2), handed to this unit only (and to the one-shot unit of
+# paw-connection-credential-put). Enable it together with PAW_SECRET_STORE_DIR.
+#LoadCredentialEncrypted=paw-secret-key:/etc/paw/credentials/paw-secret-key.cred
 
 [Install]
 WantedBy=multi-user.target

@@ -26,6 +26,7 @@ from paw_backend.connections import (
     ConnectionRequest,
     ConnectionService,
     ConnectionStatus,
+    ConnectionUnavailableError,
     InputProblem,
     InvalidConnectionInputError,
     QuotaMetric,
@@ -319,7 +320,30 @@ class EveryArgumentIsCheckedTest(unittest.IsolatedAsyncioTestCase):
             for name in dir(ConnectionService)
             if not name.startswith("_") and callable(getattr(ConnectionService, name))
         }
-        self.assertEqual(public, set(CASES) | {"check_health"})
+        # The backend-internal methods without an actor (the health check, the
+        # secret store's rotation and cleanup) are checked below on their own.
+        self.assertEqual(
+            public,
+            set(CASES) | {"check_health", "rotate_credential", "collect_credentials"},
+        )
+
+    async def test_the_rotation_checks_its_arguments_and_needs_a_store(self):
+        value = "paw-store-canary-" + "41d7"
+        for kind, handle_ in (
+            ("gemini", "cred_" + "0" * 32),
+            (ConnectionKind.CODEX, "not-a-handle"),
+            (ConnectionKind.CODEX, 42),
+        ):
+            with self.subTest(kind=kind, handle=handle_):
+                with self.assertRaises(InvalidConnectionInputError):
+                    await self.service.rotate_credential(kind, handle_, 1, value)
+        # This service has no secret store: nothing can be rotated, nothing
+        # is cleaned up, and the database is not even asked.
+        with self.assertRaises(ConnectionUnavailableError):
+            await self.service.rotate_credential(
+                ConnectionKind.CODEX, "cred_" + "0" * 32, 1, value
+            )
+        self.assertEqual(await self.service.collect_credentials(), 0)
 
     async def test_a_valid_call_gets_as_far_as_the_database(self):
         for method in CASES:

@@ -11,7 +11,7 @@ Test は [`tests/test_egress_proxy.py`](../../tests/test_egress_proxy.py)（一�
 ```text
 CLI の Container（--network none、User paw-agent-cli）
   └─ CLI（HTTPS_PROXY=http://127.0.0.1:<Port>）
-       └─ paw_egress.py forward（127.0.0.1:<Port> → Mount した /run/paw-egress/egress.sock）
+       └─ paw_egress.py forward --session <uuid>（127.0.0.1:<Port> → Mount した /run/paw-egress/egress.sock。CONNECT に Session の Header を付ける）
 Host
   └─ paw-egress.service（User paw-egress、Group paw-cli-bridge）
        └─ CONNECT <許可した Host 名>:443 だけ → 自分で名前を引き、Global な Address だけに接続 → TLS をそのまま中継
@@ -21,7 +21,7 @@ Host
 - 受けるのは `CONNECT host:443` だけ（Host 名は `egress.toml` の `allowed_hosts` と完全一致。Wildcard・別の Port・平文の HTTP の Request は拒否）。
 - 名前は Proxy が引き、答えに 1 つでも Global でない Address（Private・Loopback・Link-local・CGNAT・Multicast・予約）があれば拒否する。
 - TLS は開かない（中身を読まない・変えない・Credential を足さない）。
-- 1 つの接続ごとに 1 行の Log: Session（CONNECT の任意の `X-PAW-Session: <UUID>`）・Host・結果・Byte 数。中身・他の Header は書かない。
+- 1 つの接続ごとに 1 行の Log: Session・Host・結果・Byte 数。中身・他の Header は書かない。Session は Container の中の転送が `--session <UUID>`（Backend が Container の Command に入れる）から `X-PAW-Session` に入れる。CLI が送った同じ名前の Header は転送が落とす。
 - 上限: CONNECT の Request は 8 KiB・10 秒、同時 64 接続、両方向とも 15 分 Idle なら閉じる。
 
 ## 配備（root）

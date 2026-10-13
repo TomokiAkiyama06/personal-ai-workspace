@@ -539,6 +539,16 @@ class ConnectionStore:
             by_kind[kind.value] for kind in ConnectionKind if kind.value in by_kind
         )
 
+    async def handle_referenced(self, handle: str) -> bool:
+        """Does any connection point at the credential ``handle``? (Read under
+        the secret store's lock of the handle before its file is deleted.)"""
+        rows = await self._fetch(
+            "SELECT EXISTS (SELECT 1 FROM shared_connections"
+            " WHERE secret_handle = %(handle)s)",
+            {"handle": handle},
+        )
+        return bool(rows[0][0])
+
     async def read_handle(self, kind: ConnectionKind) -> str | None:
         """The credential handle of ``kind`` (for the health check), or ``None``."""
         rows = await self._fetch(

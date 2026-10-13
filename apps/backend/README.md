@@ -173,6 +173,7 @@ Database には pgvector が必要です（CI は `pgvector/pgvector:pg18` を�
 | `PAW_PASSKEY_RP_NAME` / `PAW_PASSKEY_CHALLENGE_TTL_SECONDS` | `Personal AI Workspace` / `300` | Authenticator に見せる名前と、Challenge に答えられる秒（30〜900） |
 | `PAW_SCRATCH_PURGE_INTERVAL_SECONDS` | `3600` | 期限切れの Research Scratch Item を消す Janitor の間隔（秒）。`0` で Janitor を止める（期限切れの行が DB に残り続ける）。それ以外は 60〜86400。DB が未設定のときも起動しない。[Janitor](#janitor期限切れの削除) |
 | `PAW_MEMORY_PROJECTION_DIR` | なし | Memory Markdown Projection の出力先（絶対 Path。例 `/srv/personal-ai/memory`）。未設定なら `memory-projection-run` は動かない。git の Work Tree の中・Home の中や上・Projection の Marker のない空でない Directory は拒否する。[Memory Markdown Projection](#memory-markdown-projection)（Decision 0038、Approved） |
+| `PAW_SECRET_STORE_DIR` | なし | 共有の Codex / Claude の Connection の Secret Store の Directory（絶対 Path、Backend の User の 0700。例 `/var/lib/paw/secrets`）。主鍵は systemd の Credential `paw-secret-key`（`LoadCredentialEncrypted=`）。未設定なら Store なし。[Secret Store](#secret-storeissue-208decision-0087-の-12段階-4b-の-1)（Decision 0087、Approved） |
 | `PAW_RECOVERY_REPOSITORY_DIR` / `PAW_RECOVERY_GIT_TIMEOUT_SECONDS` | なし / `300` | Recovery Repository（専用の Private Repository）の Clone の場所（絶対 Path。例 `/srv/personal-ai/recovery`）と、git の 1 Command の Timeout。未設定なら `recovery-backup-run` と `recovery-restore` は動かない。Home・Projection と重なる場所、Work Tree の最上位でない場所、Marker がなく空でない Checkout は拒否する。[Recovery Repository](#recovery-repositorybackup--restore)（Decision 0054、Approved） |
 | `PAW_REPOSITORY_WORKSPACE_SUBDIR` | `workspaces` | Backend が作る Checkout の置き場所（`<home>/<この名前>/<project>/<repo>`）。1 つの安全な名前（[Repository 登録](#repository-registration--per-user-checkout)） |
 | `PAW_REPOSITORY_EXISTING_ROOTS` | `{home}` | 既存 Repository を登録してよい Root（Comma 区切り、8 つまで）。各 Root は絶対 Path で `{home}`（先頭だけ）か `{user}` を含む（全員で共有する Directory は拒否） |
@@ -4225,6 +4226,18 @@ Codex / Claude Code の CLI の Runtime（段階 4b。Decision 0016 の前提の
 
 Test は `tests/test_connections_session.py`（実 PostgreSQL: 最低の枠、Turn ごとの計上、Lease・Run・Budget による停止と何も書かないこと、残りだけの精算、見積もり、Gate、取り消し、Schema、Reaper、Lease の SQL と `TaskQueue.holds_lease` の一致）、`test_agents_cloud.py`（`CloudGate` の順序と拒否、`NodeConnectionGateway`）、`test_compute_runtimes.py`（`run_as_fallback`）。
 
+## Secret Store（Issue #208、Decision 0087 の 1・2、段階 4b の 1）
+
+共有の Codex / Claude の Connection の Credential を置く、Backend の暗号化した File の Store です（`connections/secret_store.py` の `FileSecretStore`）。配備は [`deploy/secret-store/README.md`](deploy/secret-store/README.md)。**CLI の Runtime はまだありません**（段階 4b の後の PR）。
+
+- `PAW_SECRET_STORE_DIR` の下に Handle（`cred_` + 32 桁の 16 進）ごとの Directory（0700）、版ごとの File（`v<N>.bin`、0600）。中身は AES-256-GCM で、追加の認証データに Handle・版・種類（`codex` / `claude`）を入れるので、別の Handle・版に移した File や種類の違う登録は復号できない。主鍵（32 Byte）は systemd の `LoadCredentialEncrypted=paw-secret-key:...` で `paw-backend.service` と管理 Command の一時の Unit にだけ渡し、`$CREDENTIALS_DIRECTORY` から読む（環境変数の File には置かない）。
+- 書き込みは一時名 → `fsync` → `rename` → Directory の `fsync` の後にだけ Handle・新しい版を返す。`rotate`（Backend 内部の `ConnectionService.rotate_credential`。同じ Connection の同じ Handle、Audit は System の `connection.rotate`）は「今の版が渡した版のときだけ次の版を書く」Compare-and-swap。
+- 平文を入れる口は Server の上の `python -m paw_backend.cli connection-credential put --kind codex|claude`（標準入力だけ。出力は Handle だけ。Audit は System の `connection.credential_store` で、理由に種類・版・Handle（`codex:v1:cred_...`）、値は残さない）だけ。Wrapper の `paw-connection-credential-put` が `systemd-run` で鍵を読み込んだ一時の Unit で動かす。
+- `ConnectionService(credential_store=...)` のとき、`connect` / `replace_credential` は Handle の Lock（`flock`。Process をまたぐ）の中で「Store がその種類の Credential として持つ」ことを確かめてから DB に書く（違えば `CredentialNotStoredError`）。置き換え・切断で外した Handle は、その Lock の中で DB の参照がもうないことを確かめてから消す。登録されなかった Handle（24 時間後）と置き換えから 24 時間たった古い版は、`connection_reaper.py` の周期の掃除（`FileSecretStore.collect`、Handle ごとの Lock の中で参照を DB に問う）で消え、消した数を System の `connection.credential.collect` の Audit に残す。
+- Store が読めない（Directory の Mode・所有者が変わった、版が復号できない）ときは、System Health の `connections` が `CRITICAL`（理由 `secret_store_unavailable`）になる。Store の Directory は Restore Point の Directory（既定の `/var/lib/paw/restore-points` と `/etc/paw/release.toml` の `restore_point_dir`）とも重ねられない。
+- `PAW_SECRET_STORE_DIR` を設定したのに鍵が渡されていない・Directory が Backend の User の 0700 でない・Release / Recovery / Projection / Web の配布物と重なるときは、Backend は起動しない。Backup と Recovery には入れない（Restore の後は入れ直す）。
+
+Test は `tests/test_connections_secret_store.py`（File だけ: 暗号化・認証データ・Compare-and-swap・Lock・掃除・Directory と鍵の確認）、`test_connections_credential_store.py`（実 PostgreSQL: 登録の確認・置き換えと切断での削除・`rotate_credential`・掃除の参照）、`test_credentials_cli.py`（管理 Command と Audit）、`test_connections_reaper.py`（周期の掃除）。
 ## Egress の Proxy（Issue #208、Decision 0087 の 3、段階 4b の 2）
 
 CLI の Session の Container（`--network none`）から Provider へ出る唯一の道の `paw-egress` です（[`deploy/egress/paw_egress.py`](deploy/egress/paw_egress.py)、標準ライブラリだけ）。配備は [`deploy/egress/README.md`](deploy/egress/README.md)。Unix Socket だけで受け、`CONNECT <許可した Host 名>:443` だけを、Proxy 自身が引いた Global な Address にだけつなぎ、TLS はそのまま中継します（Credential を足さない）。Container の中の転送（`paw_egress.py forward`）が `127.0.0.1:<Port>` を Socket につなぎ、CLI には `HTTPS_PROXY` を渡します。nftables の例（`paw-egress.nft`）は、その Account の外への通信を DNS と Global な Address の TCP 443 に絞ります。**CLI の Runtime はまだ使いません**（後の PR）。Test は `tests/test_egress_proxy.py`。

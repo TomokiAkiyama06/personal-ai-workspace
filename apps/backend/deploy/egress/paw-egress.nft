@@ -26,7 +26,9 @@ table inet paw_egress {
     chain output {
         type filter hook output priority filter; policy accept;
         meta skuid != "paw-egress" accept
-        ct state established,related accept
+        # No shortcut for established flows: every packet of the account's
+        # meets the rules below (a reply to an inbound connection would
+        # otherwise reach any peer and port).
         # DNS to the host's resolver only.
         ip daddr 127.0.0.53 udp dport 53 accept
         ip daddr 127.0.0.53 tcp dport 53 accept

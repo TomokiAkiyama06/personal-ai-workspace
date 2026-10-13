@@ -4,7 +4,10 @@
 #
 # Install (as root):
 #   useradd --system --no-create-home --shell /usr/sbin/nologin paw-egress
-#   groupadd --system paw-cli-bridge   # paw-agent-cli is its only member
+#   groupadd --system paw-cli-bridge
+#   useradd --system --home-dir /var/lib/paw-agent-cli --create-home \
+#       --shell /usr/sbin/nologin paw-agent-cli
+#   usermod -aG paw-cli-bridge paw-agent-cli   # its only member
 #   install -m 0755 paw_egress.py /usr/local/lib/paw/paw_egress.py
 #   install -m 0644 egress.example.toml /etc/paw/egress.toml   # then edit
 #   cp paw-egress.service /etc/systemd/system/

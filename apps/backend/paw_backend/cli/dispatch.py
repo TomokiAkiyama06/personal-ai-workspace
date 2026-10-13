@@ -1,7 +1,8 @@
 """Which module handles a ``python -m paw_backend.cli`` command line.
 
 ``owner`` (PAW-021), ``retention`` (Issue #117), ``erasure`` (Issue #127),
-``memory_projection`` (PAW-045), ``recovery`` (PAW-047) and ``deploy`` (PAW-068)
+``memory_projection`` (PAW-045), ``recovery`` (PAW-047), ``deploy`` (PAW-068) and
+``credentials`` (Decision 0087: ``connection-credential put``)
 keep their own parsers, exit codes and database URLs
 (``PAW_OPERATOR_DATABASE_URL`` vs. ``PAW_MIGRATION_DATABASE_URL`` vs.
 ``PAW_DATABASE_URL``); ``compute`` (PAW-036) reads the GPU and uses no
@@ -14,6 +15,7 @@ from types import ModuleType
 
 from paw_backend.cli import (
     compute,
+    credentials,
     deploy,
     erasure,
     memory_projection,
@@ -39,6 +41,8 @@ def command_module(argv: Sequence[str]) -> ModuleType:
         return recovery
     if argv and argv[0] in deploy.COMMANDS:
         return deploy
+    if argv and argv[0] in credentials.COMMANDS:
+        return credentials
     return owner
 
 

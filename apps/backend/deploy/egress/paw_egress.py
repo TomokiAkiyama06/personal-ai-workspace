@@ -32,7 +32,8 @@ addresses only); the hostname decision is this file's.
 Standard library only (it does not run in the backend's virtual environment).
 
     paw_egress.py serve --config /etc/paw/egress.toml
-    paw_egress.py forward --listen-port 3128 --socket /run/paw-egress/egress.sock
+    paw_egress.py forward --listen-port 3128 --socket /run/paw-egress/egress.sock \\
+        --session <uuid>
 """
 
 import argparse
@@ -356,9 +357,16 @@ def _log(session: str, host: str, outcome: str, sent: int, received: int) -> Non
     )
 
 
-async def forward(listen_port: int, socket_path: str) -> asyncio.AbstractServer:
+async def forward(
+    listen_port: int, socket_path: str, session: str | None = None
+) -> asyncio.AbstractServer:
     """Inside the container: ``127.0.0.1:<listen_port>`` to the proxy's
-    mounted Unix socket, byte for byte."""
+    mounted Unix socket. With ``session`` (the session's UUID, given by the
+    backend through the container's command, not by the CLI), the CONNECT
+    request's ``X-PAW-Session`` header is set to it: any such header the CLI
+    sent is dropped. Everything after the request passes byte for byte."""
+    if session is not None:
+        session = str(uuid.UUID(session))
 
     async def pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         try:
@@ -368,6 +376,28 @@ async def forward(listen_port: int, socket_path: str) -> asyncio.AbstractServer:
         except OSError:
             await _close(writer)
             return
+        if session is not None:
+            try:
+                async with asyncio.timeout(REQUEST_TIMEOUT_SECONDS):
+                    head = await reader.readuntil(b"\r\n\r\n")
+            except (
+                TimeoutError,
+                asyncio.LimitOverrunError,
+                asyncio.IncompleteReadError,
+            ):
+                await _close(upstream_writer)
+                await _close(writer)
+                return
+            lines = head[:-4].split(b"\r\n")
+            kept = [
+                line
+                for line in lines[1:]
+                if line.split(b":", 1)[0].strip().lower() != _SESSION_HEADER.encode()
+            ]
+            upstream_writer.write(
+                b"\r\n".join([lines[0], *kept, f"X-PAW-Session: {session}".encode()])
+                + b"\r\n\r\n"
+            )
 
         async def copy(source, sink):
             with contextlib.suppress(Exception):
@@ -391,6 +421,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     relay = commands.add_parser("forward")
     relay.add_argument("--listen-port", type=int, required=True)
     relay.add_argument("--socket", required=True)
+    relay.add_argument("--session")
     arguments = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
 
@@ -401,7 +432,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 config.socket_path
             )
         else:
-            server = await forward(arguments.listen_port, arguments.socket)
+            server = await forward(
+                arguments.listen_port, arguments.socket, arguments.session
+            )
         async with server:
             await server.serve_forever()
 
