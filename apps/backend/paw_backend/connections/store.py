@@ -1068,47 +1068,55 @@ class ConnectionStore:
         usage_id: uuid.UUID,
         status: UsageStatus,
         failure: FailureCode | None,
-        totals: tuple[int, int] | None,
+        totals: tuple[int | None, int | None],
         estimate: int,
     ) -> tuple[UsageRecord, int] | None:
         """End a session's ``in_flight`` row and say how many tokens its turns
         had counted (read from the row itself, under its lock: what the turns
         committed, whatever the caller saw of them).
 
-        ``totals``: the session's whole input and output tokens when the CLI
-        reported them; the row keeps the larger of each and what was counted
-        (never pulled back). ``None`` (not known): the row ends with the
-        ``estimate`` in all when the turns counted less (Decision 0083, 5 (d)).
+        ``totals``: the session's whole input and output tokens as far as the
+        CLI reported them (each ``None`` when not known). The row keeps, per
+        part, the larger of the known total and what was counted (never pulled
+        back). When a part is not known, the row ends with at least the
+        ``estimate`` in all, the difference going to the unknown part (Decision
+        0083, 5 (d)); a known part is never replaced by the estimate.
         Conditional on ``in_flight``, as :meth:`settle`; ``None`` when the row
         was no longer in flight."""
         clock, params = self._clock_cte()
-        known = totals is not None
+        known_input, known_output = totals
         rows = await self._fetch(
             f"WITH {clock}, counted AS (SELECT id AS counted_id,"
             " COALESCE(input_tokens, 0) AS counted_input,"
             " COALESCE(output_tokens, 0) AS counted_output FROM connection_usage"
-            " WHERE id = %(id)s AND status = 'in_flight' AND session FOR UPDATE)"
+            " WHERE id = %(id)s AND status = 'in_flight' AND session FOR UPDATE),"
+            " parts AS (SELECT counted_id, counted_input, counted_output,"
+            " GREATEST(counted_input, COALESCE(%(input)s::bigint, 0)) AS fi,"
+            " GREATEST(counted_output, COALESCE(%(output)s::bigint, 0)) AS fo"
+            " FROM counted),"
+            " final AS (SELECT counted_id, counted_input, counted_output,"
+            " fi + CASE WHEN %(input)s::bigint IS NULL"
+            " THEN GREATEST(0, %(estimate)s - fi - fo) ELSE 0 END AS fi,"
+            " fo + CASE WHEN %(input)s::bigint IS NOT NULL"
+            " AND %(output)s::bigint IS NULL"
+            " THEN GREATEST(0, %(estimate)s - fi - fo) ELSE 0 END AS fo"
+            " FROM parts)"
             " UPDATE connection_usage SET status = %(status)s,"
             " failure_code = %(failure)s,"
-            " input_tokens = CASE WHEN %(known)s"
-            " THEN GREATEST(counted_input, %(input)s)"
-            " ELSE counted_input + GREATEST(0,"
-            " %(estimate)s - counted_input - counted_output) END,"
-            " output_tokens = CASE WHEN %(known)s"
-            " THEN GREATEST(counted_output, %(output)s) ELSE counted_output END,"
+            " input_tokens = final.fi, output_tokens = final.fo,"
             " finished_at = GREATEST((SELECT ts FROM clock), started_at),"
             " duration_ms = GREATEST(0, floor(extract(epoch FROM"
             " ((SELECT ts FROM clock) - started_at)) * 1000))::bigint"
-            " FROM counted WHERE id = counted_id"
-            f" RETURNING {_USAGE_COLUMNS}, counted_input + counted_output",
+            " FROM final WHERE id = final.counted_id"
+            f" RETURNING {_USAGE_COLUMNS},"
+            " final.counted_input + final.counted_output",
             {
                 **params,
                 "id": usage_id,
                 "status": status.value,
                 "failure": None if failure is None else failure.value,
-                "known": known,
-                "input": totals[0] if known else 0,
-                "output": totals[1] if known else 0,
+                "input": known_input,
+                "output": known_output,
                 "estimate": estimate,
             },
         )

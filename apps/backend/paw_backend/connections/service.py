@@ -289,6 +289,26 @@ def _token_count(value: object) -> tuple[int | None, bool]:
         return None, False
 
 
+def _session_finals(
+    counted_input: int,
+    counted_output: int,
+    totals: tuple[int | None, int | None],
+    estimate: int,
+) -> tuple[int, int]:
+    """The final input and output tokens of a session (``settle_session``'s
+    rule): per part the larger of the known total and what was counted; when
+    a part is unknown, the whole is topped up to ``estimate`` on that part."""
+    known_input, known_output = totals
+    final_input = max(counted_input, known_input or 0)
+    final_output = max(counted_output, known_output or 0)
+    gap = max(0, estimate - final_input - final_output)
+    if known_input is None:
+        final_input += gap
+    elif known_output is None:
+        final_output += gap
+    return final_input, final_output
+
+
 def _is_node_stop(error: BaseException) -> bool:
     """Is ``error`` the orchestrator's ``NodeStopped`` (imported here, late:
     the connections package does not depend on the orchestrator otherwise)?"""
@@ -383,7 +403,7 @@ class _Session:
     failure: FailureCode | None = FailureCode.INTERNAL_ERROR
     counted_input: int = 0
     counted_output: int = 0
-    known_totals: tuple[int, int] | None = None
+    known_totals: tuple[int | None, int | None] = (None, None)
     submission: Any = None
     stopped: SessionStop | None = None
     final_input: int = 0
@@ -1157,8 +1177,9 @@ class ConnectionService:
                 state.fail(FailureCode.INVALID_RESPONSE)
                 return
             state.submission = submission
-        if raw.input_tokens is not None and raw.output_tokens is not None:
-            state.known_totals = (raw.input_tokens, raw.output_tokens)
+        # Each part as far as it is known (a known input is kept even when
+        # the output is not, and the other way round).
+        state.known_totals = (raw.input_tokens, raw.output_tokens)
         if raw.failure is not None:
             state.fail(raw.failure)
         elif state.stopped is None:
@@ -1199,14 +1220,16 @@ class ConnectionService:
             record, counted = settled
             final_input = record.input_tokens or 0
             final_output = record.output_tokens or 0
-        elif state.known_totals is not None:
-            # Not settled here (an error, or someone else closed the row): the
-            # budget still gets what this side knows to be the remainder.
-            final_input = max(state.counted_input, state.known_totals[0])
-            final_output = max(state.counted_output, state.known_totals[1])
         else:
-            final_input = state.counted_input + max(0, UNKNOWN_SESSION_TOKENS - counted)
-            final_output = state.counted_output
+            # Not settled here (an error, or someone else closed the row): the
+            # budget still gets what this side knows to be the remainder, by
+            # the same rule as ``settle_session``.
+            final_input, final_output = _session_finals(
+                state.counted_input,
+                state.counted_output,
+                state.known_totals,
+                UNKNOWN_SESSION_TOKENS,
+            )
         state.final_input, state.final_output = final_input, final_output
         remainder = final_input + final_output - counted
         if self._budget is not None and remainder > 0:

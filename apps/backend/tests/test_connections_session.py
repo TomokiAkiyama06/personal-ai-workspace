@@ -177,6 +177,23 @@ class TurnTest(SessionCase):
         self.assertEqual(result.input_tokens + result.output_tokens, 200_000)
         self.assertEqual(await self.consumed(), 200_000)
 
+    async def test_a_known_part_of_the_totals_is_kept(self):
+        # A known input total with an unknown output: the input is not lost
+        # to the estimate; only the unknown part is estimated.
+        await self.budget.set_preset(self.task, BudgetPreset.UNLIMITED)
+        adapter = FakeSession([(1000, 500)], AgentSessionResult(input_tokens=1_000_000))
+        result = await self.start(adapter)
+        self.assertEqual(result.input_tokens, 1_000_000)
+        self.assertEqual(result.output_tokens, 500)
+        self.assertEqual(await self.consumed(), 1_000_500)
+
+    async def test_a_small_known_part_is_topped_up_to_the_estimate(self):
+        adapter = FakeSession([(1000, 500)], AgentSessionResult(output_tokens=700))
+        result = await self.start(adapter)
+        self.assertEqual(result.output_tokens, 700)
+        self.assertEqual(result.input_tokens + result.output_tokens, 200_000)
+        self.assertEqual(await self.consumed(), 200_000)
+
     async def test_a_row_in_flight_carries_what_was_counted(self):
         gate = asyncio.Event()
         adapter = FakeSession([(70, 7)], gate=gate)
@@ -659,6 +676,25 @@ class SchemaTest(SessionCase):
                 {"entry": self.entry, "task": self.task, "worker": "w1", "claims": 1},
             ).first()
         self.assertIsNone(held)
+
+
+class SessionFinalsTest(unittest.TestCase):
+    """The fallback of the settlement uses the same rule as the store."""
+
+    def test_the_rule(self):
+        from paw_backend.connections.service import _session_finals
+
+        cases = [
+            ((10, 5, (100, 50), 200), (100, 50)),
+            ((10, 5, (None, None), 200), (195, 5)),
+            ((10, 5, (1_000, None), 200), (1_000, 5)),
+            ((10, 5, (100, None), 200), (100, 100)),
+            ((10, 5, (None, 70), 200), (130, 70)),
+            ((300, 5, (100, 50), 200), (300, 50)),
+        ]
+        for args, expected in cases:
+            with self.subTest(args=args):
+                self.assertEqual(_session_finals(*args), expected)
 
 
 if __name__ == "__main__":
