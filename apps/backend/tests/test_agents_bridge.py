@@ -144,6 +144,13 @@ class HandshakeTest(BridgeCase):
             answers.append(line)
         self.assertEqual(sum(1 for line in answers if line), 1)
 
+    async def test_a_connection_without_the_token_holds_no_slot(self):
+        silent_reader, silent_writer = await asyncio.open_unix_connection(self.path)
+        self.addCleanup(silent_writer.close)
+        await asyncio.sleep(0.05)  # it says nothing, and keeps the line open
+        reader, writer = await self.connect()
+        await self.call(reader, writer, "ping")  # the relay still gets in
+
     def test_a_short_token_is_refused(self):
         with self.assertRaises(ValueError):
             McpBridge(FakeToolkit(), token="short")
