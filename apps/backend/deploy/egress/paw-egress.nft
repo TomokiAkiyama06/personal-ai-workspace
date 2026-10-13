@@ -30,8 +30,10 @@ table inet paw_egress {
         # meets the rules below (a reply to an inbound connection would
         # otherwise reach any peer and port).
         # DNS to the host's resolver only.
-        ip daddr 127.0.0.53 udp dport 53 accept
-        ip daddr 127.0.0.53 tcp dport 53 accept
+        # Only flows the account started (ct direction original): a reply to
+        # an inbound connection never matches an accept below.
+        ip daddr 127.0.0.53 udp dport 53 ct direction original accept
+        ip daddr 127.0.0.53 tcp dport 53 ct direction original accept
         # TCP 443 to global addresses.
         ip daddr @not_global4 counter drop
         # IPv6: the global unicast block 2000::/3 only, less the special-purpose
@@ -42,7 +44,7 @@ table inet paw_egress {
         # are no provider's, and this second line errs on the side of less.
         ip6 daddr != 2000::/3 counter drop
         ip6 daddr @not_global6 counter drop
-        tcp dport 443 accept
+        tcp dport 443 ct direction original accept
         counter drop
     }
 }

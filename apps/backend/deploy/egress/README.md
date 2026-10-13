@@ -21,7 +21,7 @@ Host
 - 受けるのは `CONNECT host:443` だけ（Host 名は `egress.toml` の `allowed_hosts` と完全一致。Wildcard・別の Port・平文の HTTP の Request は拒否）。
 - 名前は Proxy が引き、答えに 1 つでも Global でない Address（Private・Loopback・Link-local・CGNAT・Multicast・予約）があれば拒否する。
 - TLS は開かない（中身を読まない・変えない・Credential を足さない）。
-- 1 つの接続ごとに 1 行の Log: Session・Host・結果・Byte 数。中身・他の Header は書かない。Session は Container の中の転送が `--session <UUID>`（Backend が Container の Command に入れる）から `X-PAW-Session` に入れる。CLI が送った同じ名前の Header は転送が落とす。
+- 1 つの接続ごとに 1 行の Log: Session・Host・結果・Byte 数。中身・他の Header は書かない。Session は Container の中の転送が `--session <UUID>`（Backend が Container の Command に入れる）から `X-PAW-Session` に入れる。CLI が送った同じ名前の Header は転送が落とす。ただし Container の中の Process は Mount された Socket に直接つなぐこともできるので、Log の Session は目安（Session ごとの Socket で結び付けるのは後続）。宛先の制限（Allowlist・Global な Address・443）はどの経路でも同じに効く。
 - 上限: CONNECT の Request は 8 KiB・10 秒、同時 64 接続、両方向とも 15 分 Idle なら閉じる。
 
 ## 配備（root）

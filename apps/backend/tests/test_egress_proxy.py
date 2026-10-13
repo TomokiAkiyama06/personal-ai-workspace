@@ -343,6 +343,17 @@ class NftablesRulesTest(unittest.TestCase):
         text = (PATH.parent / "paw-egress.nft").read_text()
         rules = [line for line in text.splitlines() if not line.strip().startswith("#")]
         self.assertFalse([line for line in rules if "ct state" in line])
+        # Every accept (but the first, for the other accounts) is for flows
+        # the account started: replies to inbound connections never pass.
+        accepts = [
+            line.strip()
+            for line in rules
+            if line.strip().endswith("accept") and "skuid" not in line
+        ]
+        self.assertTrue(accepts)
+        for line in accepts:
+            with self.subTest(line=line):
+                self.assertIn("ct direction original", line)
 
     def test_the_install_steps_add_the_cli_account_to_the_group(self):
         unit = (PATH.parent / "paw-egress.service").read_text()
