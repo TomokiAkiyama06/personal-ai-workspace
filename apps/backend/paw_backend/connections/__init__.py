@@ -57,9 +57,27 @@ from paw_backend.connections.records import (
 )
 from paw_backend.connections.secret import Secret, SecretResolver
 from paw_backend.connections.service import ConnectionService
+from paw_backend.connections.session import (
+    SESSION_MIN_TOKENS,
+    UNKNOWN_SESSION_TOKENS,
+    AgentSessionAdapter,
+    AgentSessionRequest,
+    AgentSessionResult,
+    SessionRequest,
+    SessionResult,
+    SessionStop,
+)
 from paw_backend.connections.store import ConnectionStore
 
 __all__ = [
+    "SESSION_MIN_TOKENS",
+    "UNKNOWN_SESSION_TOKENS",
+    "AgentSessionAdapter",
+    "AgentSessionRequest",
+    "AgentSessionResult",
+    "SessionRequest",
+    "SessionResult",
+    "SessionStop",
     "DEFAULT_PERIOD_TIMEZONE",
     "UNLIMITED",
     "AdapterFailure",

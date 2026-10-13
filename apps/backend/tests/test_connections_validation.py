@@ -30,6 +30,7 @@ from paw_backend.connections import (
     InvalidConnectionInputError,
     QuotaMetric,
     QuotaPeriod,
+    SessionRequest,
     UsagePurpose,
 )
 from paw_backend.connections.report import UsageRange
@@ -46,6 +47,7 @@ from paw_backend.connections.validation import (
     validate_uuid,
 )
 from paw_backend.db import Database, DatabaseNotConfiguredError
+from paw_backend.tasks.queueing import BudgetTracker
 
 from .connections_support import (
     CANARY,
@@ -140,6 +142,14 @@ NOT_A_LIMIT_OF_PAGE = [0, 201, -1, True, "10", None, 1.5, 10**9]
 NOT_AN_OFFSET = [-1, 100_001, True, "0", None, 1.5]
 
 
+class _SessionAdapter:
+    def __init__(self, kind):
+        self.kind = kind
+
+    async def run_session(self, secret, request):
+        raise AssertionError("never run here")
+
+
 def make_service() -> ConnectionService:
     database = Database(make_settings())  # no URL: every statement fails
     sink = InMemoryAuditSink()
@@ -153,6 +163,8 @@ def make_service() -> ConnectionService:
         adapters,
         FakeResolver(),
         lease=FakeLeaseVerifier(),
+        budget=BudgetTracker(database),
+        session_adapters={kind: _SessionAdapter(kind) for kind in ConnectionKind},
     )
     service.audit_events = sink.events  # type: ignore[attr-defined]
     return service
@@ -269,6 +281,20 @@ CASES: dict[str, tuple[dict[str, Any], dict[str, list[Any]]]] = {
             ],
         },
     ),
+    "execute_session": (
+        {"context": None, "kind": ConnectionKind.CODEX, "request": None},
+        {
+            "context": [None, object(), "context"],
+            "kind": not_a_member("codex"),
+            "request": [
+                None,
+                "prompt",
+                object(),
+                ConnectionRequest("m", UsagePurpose.CODING, "p"),
+            ],
+            "gate": ["not callable", 1],
+        },
+    ),
 }
 
 
@@ -277,6 +303,9 @@ def valid_arguments(method: str) -> dict[str, Any]:
     if method == "execute":
         arguments["context"] = context()
         arguments["request"] = request()
+    if method == "execute_session":
+        arguments["context"] = context()
+        arguments["request"] = SessionRequest("model-1", UsagePurpose.CODING, "p", 60)
     return arguments
 
 
@@ -456,6 +485,13 @@ class ConstructionTest(unittest.TestCase):
             # ``check(task_id, lease)``, or nothing (the fail-closed default).
             {"lease": object()},
             {"lease": SimpleNamespace(check=lambda task_id, lease: None)},
+            # A session is counted into the task's budget turn by turn (with
+            # its run fence): session adapters need a budget.
+            {
+                "session_adapters": {
+                    ConnectionKind.CODEX: _SessionAdapter(ConnectionKind.CODEX)
+                }
+            },
         ]
         for options in bad:
             with self.subTest(options=str(options)):

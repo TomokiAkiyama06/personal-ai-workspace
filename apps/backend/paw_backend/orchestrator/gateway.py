@@ -34,6 +34,7 @@ import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from typing import NoReturn, Protocol
 
+from paw_backend.authz.principals import PrincipalDirectory
 from paw_backend.orchestrator.errors import NodeStopped, StopReason, error_class_of
 from paw_backend.tasks import StaleRunError, TaskRun
 from paw_backend.tasks.queueing import (
@@ -216,6 +217,120 @@ class NodeToolGateway:
             self._guard.stop(StopReason.LEASE_LOST)
             raise NodeStopped(StopReason.LEASE_LOST)
         return outcome
+
+
+class SessionService(Protocol):
+    """``connections.ConnectionService.execute_session`` (Decision 0083, 1)."""
+
+    async def execute_session(
+        self, principal, context, kind, request, *, gate=None
+    ): ...
+
+
+class NodeConnectionGateway:
+    """The ``connections`` of a ``NodeAssignment`` (Decision 0083, 1).
+
+    Each session is run with a context built NOW (the run, the worker's queue
+    lease: the service fences every turn on them, Decision 0046 / 0057) and as
+    the task's creator (``principals``: the current principal, as the Tool
+    Broker's authorizer reads it). The runtime never sees the service, the
+    context, the principal or the lease. A session the service stopped is a
+    ``NodeStopped`` (the budget, the lease, the run), as a tool call's."""
+
+    def __init__(
+        self,
+        guard: RunGuard,
+        service: SessionService,
+        principals: PrincipalDirectory,
+        creator_id: uuid.UUID,
+        context_factory: Callable[[], Awaitable[TaskContext]],
+        fence: AttemptFence | None = None,
+    ) -> None:
+        self._guard = guard
+        self._service = service
+        self._principals = principals
+        self._creator_id = creator_id
+        self._context_factory = context_factory
+        self._fence = fence or AttemptFence()
+
+    async def execute_session(self, kind, request, *, gate=None):
+        self._fence.ensure_open()
+        context = await self._context_factory()
+        await self._guard.ensure_active()
+        self._fence.ensure_open()
+        principal = await self._principals.get_principal_by_id(self._creator_id)
+        if principal is None:
+            # The creator is gone or inactive: the task cannot act for them.
+            self._guard.stop(StopReason.TASK_ENDED)
+            raise NodeStopped(StopReason.TASK_ENDED)
+        # The attempt may have been abandoned during the lookup: nothing may
+        # be sent for it then.
+        await self._guard.ensure_active()
+        self._fence.ensure_open()
+        try:
+            result = await self._service.execute_session(
+                principal,
+                context,
+                kind,
+                request,
+                gate=gate,
+                alive=lambda: not self._fence.closed,
+            )
+        except Exception as error:
+            # The admission's own fence (the task ended, the run was replaced,
+            # the lease was lost after the checks above): the attempt stops,
+            # as a tool call's would. Anything else is the runtime's to
+            # classify (``CloudGate``).
+            reason = _ADMISSION_STOPS.get(_refusal_of(error))
+            if reason is None:
+                raise
+            self._guard.stop(reason)
+            raise NodeStopped(reason) from None
+        stopped = getattr(result, "stopped", None)
+        if stopped is not None:
+            reason = _SESSION_STOPS.get(stopped.value, StopReason.ABANDONED)
+            # The budget stops the node only (the orchestrator decides the
+            # rest), an abandoned attempt is closed by its fence already.
+            if reason not in (StopReason.BUDGET_EXCEEDED, StopReason.ABANDONED):
+                self._guard.stop(reason)
+            raise NodeStopped(reason)
+        return result
+
+
+# ``connections.TaskNotUsableError`` reasons that stop the attempt (read by
+# value, as below). ``lease_unavailable`` (the lease could not be read) refuses
+# the call only, as for a tool call: the heartbeats decide about the lease.
+_ADMISSION_STOPS = {
+    "task_not_found": StopReason.TASK_ENDED,
+    "task_ended": StopReason.TASK_ENDED,
+    "task_superseded": StopReason.SUPERSEDED,
+    "lease_lost": StopReason.LEASE_LOST,
+}
+
+
+def _refusal_of(error: Exception) -> str | None:
+    """The reason of a ``connections.TaskNotUsableError`` (``None`` for any
+    other error)."""
+    if getattr(error, "code", None) != "task_not_usable":
+        return None
+    reason = getattr(error, "reason", None)
+    return getattr(reason, "value", None)
+
+
+# ``connections.SessionStop`` values (read by value: the orchestrator does not
+# import the connections package).
+_SESSION_STOPS = {
+    "budget_exceeded": StopReason.BUDGET_EXCEEDED,
+    "lease_lost": StopReason.LEASE_LOST,
+    "run_replaced": StopReason.SUPERSEDED,
+    "abandoned": StopReason.ABANDONED,
+}
+
+
+class SessionService(Protocol):
+    async def execute_session(
+        self, principal, context, kind, request, *, gate=None, alive=None
+    ): ...
 
 
 # What a node may report through ``NodeBudgetHandle.charge``.

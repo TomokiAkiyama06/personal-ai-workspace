@@ -54,9 +54,11 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, tzinfo
+from enum import StrEnum
 from typing import Any
 
 import psycopg
+from sqlalchemy import text
 
 from paw_backend.connections.domain import (
     DEFAULT_PERIOD_TIMEZONE,
@@ -106,6 +108,10 @@ from paw_backend.connections.validation import (
 )
 from paw_backend.db import Database
 from paw_backend.tasks.domain import TaskRun
+from paw_backend.tasks.errors import StaleRunError
+from paw_backend.tasks.queueing import BudgetKind, BudgetTracker
+from paw_backend.tasks.queueing.domain import QueueLease
+from paw_backend.tasks.queueing.errors import BudgetNotConfiguredError
 from paw_backend.tools.task_state import TaskActivity, activity_of
 
 _CONNECTION_COLUMNS = "id, kind, status, enabled, checked_at, created_at, updated_at"
@@ -126,6 +132,11 @@ _PERIODS = tuple(QuotaPeriod)
 TASK_LOCK_SQL = (
     "SELECT state, attempt, retry_count, created_by, project_id FROM tasks"
     " WHERE id = %(task)s FOR SHARE"
+)
+#: The task's token budget row, locked for the admission (a session's floor).
+BUDGET_FLOOR_LOCK_SQL = (
+    "SELECT consumed, limit_value FROM budget_usages"
+    " WHERE task_id = %(task)s AND kind = 'tokens' FOR UPDATE"
 )
 CONNECTION_LOCK_SQL = (
     "SELECT id, secret_handle, status, enabled FROM shared_connections"
@@ -201,6 +212,48 @@ USERS_REPORT_SQL = (
     " ORDER BY CASE u.system_role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1"
     " ELSE 2 END, u.login_name"
 )
+
+
+#: The worker's queue lease, valid now (``TaskQueue.holds_lease``'s rule; the
+#: database's wall clock, ``clock_timestamp()``, not the transaction's start:
+#: a turn may wait on the task and budget locks first). A test compares the two.
+SESSION_LEASE_SQL = (
+    "SELECT 1 FROM queue_entries WHERE id = :entry AND task_id = :task"
+    " AND status = 'claimed' AND claimed_by = :worker AND claim_count = :claims"
+    " AND lease_expires_at > clock_timestamp() FOR SHARE"
+)
+#: One turn of a session added to its row (``in_flight`` sessions only).
+SESSION_ADD_SQL = (
+    "UPDATE connection_usage SET"
+    " input_tokens = COALESCE(input_tokens, 0) + :input,"
+    " output_tokens = COALESCE(output_tokens, 0) + :output"
+    " WHERE id = :id AND status = 'in_flight' AND session"
+    # Never saturate: a turn that would take a part past the stored range is
+    # refused whole (its budget charge rolls back with it).
+    " AND COALESCE(input_tokens, 0) + :input <= 1000000000"
+    " AND COALESCE(output_tokens, 0) + :output <= 1000000000 RETURNING id"
+)
+
+
+class SessionTurn(StrEnum):
+    """What counting one turn of a session came to."""
+
+    RECORDED = "recorded"
+    # Recorded, and the task has no token left for another turn: judged in
+    # the same transaction as the run and lease fences.
+    USED_UP = "used_up"
+    LEASE_LOST = "lease_lost"  # nothing written
+    RUN_REPLACED = "run_replaced"  # nothing written
+    NO_BUDGET = "no_budget"  # nothing written
+    CLOSED = "closed"  # the row is no longer in flight
+
+
+class _TurnRefused(Exception):
+    """Rolls a turn's transaction back (the lease or the row did not hold)."""
+
+    def __init__(self, turn: SessionTurn) -> None:
+        super().__init__(turn.value)
+        self.turn = turn
 
 
 @dataclass(frozen=True, slots=True)
@@ -829,8 +882,17 @@ class ConnectionStore:
         kind: ConnectionKind,
         model: str,
         purpose: UsagePurpose,
+        *,
+        session: bool = False,
+        min_tokens: int | None = None,
     ) -> Admitted | Refused:
         """Decide whether the call may start and, if so, record that it did.
+        ``session``: the row is a CLI session's (Decision 0083, 5 (b): it may
+        carry tokens while ``in_flight``). ``min_tokens``: the task must have at
+        least this many tokens of its budget left (a session's floor, Decision
+        0083, 5 (a)); judged here, on the budget row locked until the admission
+        commits, so a concurrent charge cannot slip in between (lock order: the
+        task, then its budget, as every charge takes them).
 
         See the module docstring for the steps and their order. A call for a
         task that has used this connection before is a CONTINUING task: it is
@@ -855,6 +917,22 @@ class ConnectionStore:
                     TaskActivity.SUPERSEDED: RefusalReason.TASK_SUPERSEDED,
                 }.get(activity, RefusalReason.TASK_NOT_FOUND)
                 return Refused(reason, project_id=project_id)
+
+            if min_tokens is not None:
+                cursor = await connection.execute(
+                    BUDGET_FLOOR_LOCK_SQL, {"task": task_id}
+                )
+                tokens = await cursor.fetchone()
+                if tokens is None:
+                    return Refused(
+                        RefusalReason.TASK_BUDGET_NOT_CONFIGURED,
+                        project_id=project_id,
+                    )
+                consumed, limit = tokens
+                if limit is not None and consumed + min_tokens > limit:
+                    return Refused(
+                        RefusalReason.TASK_TOKEN_FLOOR, project_id=project_id
+                    )
 
             cursor = await connection.execute(CONNECTION_LOCK_SQL, {"kind": kind.value})
             found = await cursor.fetchone()
@@ -906,9 +984,9 @@ class ConnectionStore:
             usage_id = uuid.uuid4()
             await connection.execute(
                 "INSERT INTO connection_usage (id, user_id, task_id, project_id, kind,"
-                " model, purpose, status, started_at) VALUES (%(id)s, %(user)s,"
-                " %(task)s, %(project)s, %(kind)s, %(model)s, %(purpose)s,"
-                " 'in_flight', %(now)s)",
+                " model, purpose, status, started_at, session) VALUES (%(id)s,"
+                " %(user)s, %(task)s, %(project)s, %(kind)s, %(model)s, %(purpose)s,"
+                " 'in_flight', %(now)s, %(session)s)",
                 {
                     "id": usage_id,
                     "user": user_id,
@@ -918,6 +996,7 @@ class ConnectionStore:
                     "model": model,
                     "purpose": purpose.value,
                     "now": now,
+                    "session": bool(session),
                 },
             )
             return Admitted(usage_id, connection_id, project_id, handle)
@@ -925,6 +1004,157 @@ class ConnectionStore:
         return await self._database.transact_abortable(
             work, timeout_seconds=self._timeout
         )
+
+    async def add_session_turn(
+        self,
+        usage_id: uuid.UUID,
+        task_id: uuid.UUID,
+        run: TaskRun,
+        lease: QueueLease,
+        input_tokens: int,
+        output_tokens: int,
+        budget: BudgetTracker | None,
+    ) -> SessionTurn:
+        """Count one turn of a session (Decision 0083, 5 (b)): in ONE transaction,
+        the worker's queue lease is checked (Decision 0057), the turn's tokens are
+        added to the session's ``in_flight`` row and charged to the task's budget
+        for ``run`` (``BudgetTracker.record_in``, its run fence included). Nothing
+        is written unless all three hold. The database's clock judges the lease
+        (as ``TaskQueue.holds_lease``)."""
+        amount = input_tokens + output_tokens
+        try:
+            async with self._database.session() as session, session.begin():
+                # Lock order as everywhere else: the task row and the budget
+                # row first (``record_in``: its run fence), then the queue
+                # entry. A failed check below rolls the charge back.
+                # A zero-token turn too: ``record_in`` of 0 charges nothing
+                # but still locks and checks the task's run.
+                usage = None
+                if budget is not None:
+                    usage = await budget.record_in(
+                        session, task_id, BudgetKind.TOKENS, amount, run=run
+                    )
+                held = await session.execute(
+                    text(SESSION_LEASE_SQL),
+                    {
+                        "entry": lease.entry_id,
+                        "task": task_id,
+                        "worker": lease.worker_id,
+                        "claims": lease.claim_count,
+                    },
+                )
+                if held.first() is None:
+                    raise _TurnRefused(SessionTurn.LEASE_LOST)
+                added = await session.execute(
+                    text(SESSION_ADD_SQL),
+                    {"id": usage_id, "input": input_tokens, "output": output_tokens},
+                )
+                if added.first() is None:
+                    raise _TurnRefused(SessionTurn.CLOSED)
+                # "May the task do one more?" (consumed + 1 > limit), read
+                # from the budget row this transaction holds: the answer for
+                # the next turn is fenced like the turn itself.
+                used_up = (
+                    usage is not None
+                    and usage.limit is not None
+                    and usage.consumed + 1 > usage.limit
+                )
+        except _TurnRefused as refused:
+            return refused.turn  # rolled back: nothing was written
+        except StaleRunError:
+            return SessionTurn.RUN_REPLACED  # rolled back: nothing was written
+        except BudgetNotConfiguredError:
+            return SessionTurn.NO_BUDGET
+        return SessionTurn.USED_UP if used_up else SessionTurn.RECORDED
+
+    async def settle_session(
+        self,
+        usage_id: uuid.UUID,
+        task_id: uuid.UUID,
+        status: UsageStatus,
+        failure: FailureCode | None,
+        totals: tuple[int | None, int | None],
+        estimate: int,
+        budget: BudgetTracker | None,
+    ) -> tuple[UsageRecord, int] | None:
+        """End a session's ``in_flight`` row and charge the task's budget the
+        remainder, in ONE transaction (the row is never closed without its
+        charge: a failure leaves it ``in_flight`` for the reaper). Returns the
+        record and how many tokens the turns had counted (read from the row
+        itself, under its lock: what the turns committed, whatever the caller
+        saw of them).
+
+        ``totals``: the session's whole input and output tokens as far as the
+        CLI reported them (each ``None`` when not known). The row keeps, per
+        part, the larger of the known total and what was counted (never pulled
+        back). When a part is not known, the row ends with at least the
+        ``estimate`` in all, the difference going to the unknown part (Decision
+        0083, 5 (d)); a known part is never replaced by the estimate. The
+        remainder (final less counted) is charged without a run fence: it was
+        spent whatever happened to the run since. Conditional on
+        ``in_flight``, as :meth:`settle`; ``None`` (nothing written) when the
+        row was no longer in flight."""
+        if self._clock is None:
+            clock, params = "clock AS MATERIALIZED (SELECT clock_timestamp() AS ts)", {}
+        else:
+            clock = "clock AS MATERIALIZED (SELECT CAST(:now AS timestamptz) AS ts)"
+            params = {"now": self._test_instant()}
+        known_input, known_output = totals
+        sql = (
+            f"WITH {clock}, counted AS (SELECT id AS counted_id,"
+            " COALESCE(input_tokens, 0) AS counted_input,"
+            " COALESCE(output_tokens, 0) AS counted_output FROM connection_usage"
+            " WHERE id = :id AND status = 'in_flight' AND session FOR UPDATE),"
+            " parts AS (SELECT counted_id, counted_input, counted_output,"
+            " GREATEST(counted_input, COALESCE(CAST(:input AS bigint), 0)) AS fi,"
+            " GREATEST(counted_output, COALESCE(CAST(:output AS bigint), 0)) AS fo"
+            " FROM counted),"
+            " final AS (SELECT counted_id, counted_input, counted_output,"
+            " fi + CASE WHEN CAST(:input AS bigint) IS NULL"
+            " THEN GREATEST(0, :estimate - fi - fo) ELSE 0 END AS fi,"
+            " fo + CASE WHEN CAST(:input AS bigint) IS NOT NULL"
+            " AND CAST(:output AS bigint) IS NULL"
+            " THEN GREATEST(0, :estimate - fi - fo) ELSE 0 END AS fo"
+            " FROM parts)"
+            " UPDATE connection_usage SET status = :status,"
+            " failure_code = :failure,"
+            " input_tokens = final.fi, output_tokens = final.fo,"
+            " finished_at = GREATEST((SELECT ts FROM clock), started_at),"
+            " duration_ms = GREATEST(0, floor(extract(epoch FROM"
+            " ((SELECT ts FROM clock) - started_at)) * 1000))::bigint"
+            " FROM final WHERE id = final.counted_id"
+            f" RETURNING {_USAGE_COLUMNS},"
+            " final.counted_input + final.counted_output"
+        )
+        async with self._database.session() as session, session.begin():
+            # Lock order as a turn's: the task and its budget first (a charge
+            # of 0 takes their locks), then the usage row.
+            if budget is not None:
+                await budget.record_in(session, task_id, BudgetKind.TOKENS, 0)
+            row = (
+                await session.execute(
+                    text(sql),
+                    {
+                        **params,
+                        "id": usage_id,
+                        "status": status.value,
+                        "failure": None if failure is None else failure.value,
+                        "input": known_input,
+                        "output": known_output,
+                        "estimate": estimate,
+                    },
+                )
+            ).first()
+            if row is None:
+                return None
+            *columns, counted = tuple(row)
+            record = usage_record(tuple(columns))
+            remainder = (
+                (record.input_tokens or 0) + (record.output_tokens or 0) - int(counted)
+            )
+            if budget is not None and remainder > 0:
+                await budget.record_in(session, task_id, BudgetKind.TOKENS, remainder)
+        return record, int(counted)
 
     async def reap_abandoned(
         self, *, limit: int = MAX_REAPED_PER_CYCLE

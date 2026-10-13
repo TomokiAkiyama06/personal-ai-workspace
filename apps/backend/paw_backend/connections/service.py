@@ -113,8 +113,10 @@ Limits (stated, not hidden)
 import asyncio
 import logging
 import uuid
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any
 
 from paw_backend.authz import (
     AuditEvent,
@@ -176,7 +178,22 @@ from paw_backend.connections.records import (
 )
 from paw_backend.connections.report import UsageRange, UsageReport
 from paw_backend.connections.secret import Secret, SecretResolver
-from paw_backend.connections.store import Admitted, ConnectionStore, Refused
+from paw_backend.connections.session import (
+    SESSION_MIN_TOKENS,
+    UNKNOWN_SESSION_TOKENS,
+    AgentSessionAdapter,
+    AgentSessionRequest,
+    AgentSessionResult,
+    SessionRequest,
+    SessionResult,
+    SessionStop,
+)
+from paw_backend.connections.store import (
+    Admitted,
+    ConnectionStore,
+    Refused,
+    SessionTurn,
+)
 from paw_backend.connections.validation import (
     fail,
     require_type,
@@ -196,7 +213,15 @@ from paw_backend.tasks.queueing.budget import BudgetTracker
 from paw_backend.tasks.queueing.domain import BudgetKind
 from paw_backend.tasks.queueing.errors import BudgetNotConfiguredError
 from paw_backend.tools.calls import TaskContext
-from paw_backend.tools.credentials import MAX_TEXT_CHARS, redact_text
+from paw_backend.tools.credentials import (
+    MAX_RESULT_CHARS as MAX_SUBMISSION_CHARS,
+)
+from paw_backend.tools.credentials import (
+    MAX_RESULT_NODES,
+    MAX_TEXT_CHARS,
+    redact_text,
+    redact_value,
+)
 from paw_backend.tools.interfaces import require_async_method
 from paw_backend.tools.lease import FailClosedLeaseVerifier, LeaseStatus, LeaseVerifier
 
@@ -264,6 +289,104 @@ def _token_count(value: object) -> tuple[int | None, bool]:
         return None, False
 
 
+#: How often a session's settlement (the row and its charge, one transaction)
+#: is tried before it is left to the reaper.
+_SETTLE_ATTEMPTS = 3
+
+
+def _session_finals(
+    counted_input: int,
+    counted_output: int,
+    totals: tuple[int | None, int | None],
+    estimate: int,
+) -> tuple[int, int]:
+    """The final input and output tokens of a session (``settle_session``'s
+    rule): per part the larger of the known total and what was counted; when
+    a part is unknown, the whole is topped up to ``estimate`` on that part."""
+    known_input, known_output = totals
+    final_input = max(counted_input, known_input or 0)
+    final_output = max(counted_output, known_output or 0)
+    gap = max(0, estimate - final_input - final_output)
+    if known_input is None:
+        final_input += gap
+    elif known_output is None:
+        final_output += gap
+    return final_input, final_output
+
+
+def _is_node_stop(error: BaseException) -> bool:
+    """Is ``error`` the orchestrator's ``NodeStopped`` (imported here, late:
+    the connections package does not depend on the orchestrator otherwise)?"""
+    from paw_backend.orchestrator.errors import NodeStopped
+
+    return isinstance(error, NodeStopped)
+
+
+_SUBMISSION_MAX_DEPTH = 32
+
+
+def _clean_submission(secret: Secret, submission: Mapping[str, Any]) -> dict | None:
+    """``submission`` with every text (keys too) cleaned as a one-call answer
+    is (scrub, redact the credential formats, scrub again), or ``None`` when a
+    text still shows the value or the shape is not JSON-like (str keys; str,
+    int, float, bool, None, lists and mappings, at most 32 levels deep)."""
+
+    # The read limits of a tool result (``redact_value``), enforced while
+    # this pass copies: a huge submission is refused, not walked.
+    left = {"nodes": MAX_RESULT_NODES, "chars": MAX_SUBMISSION_CHARS}
+
+    def text(value: str) -> str | None:
+        left["chars"] -= len(value)
+        if left["chars"] < 0:
+            return None
+        cleaned = secret.scrub(value)
+        cleaned, _ = redact_text(cleaned)
+        cleaned = secret.scrub(cleaned)
+        return None if secret.visible_in(cleaned) else cleaned
+
+    def clean(value: Any, depth: int) -> tuple[bool, Any]:
+        left["nodes"] -= 1
+        if depth > _SUBMISSION_MAX_DEPTH or left["nodes"] < 0:
+            return False, None
+        if isinstance(value, str):
+            cleaned = text(value)
+            return cleaned is not None, cleaned
+        if value is None or isinstance(value, (bool, int, float)):
+            return True, value
+        if isinstance(value, Mapping):
+            out = {}
+            for key, item in value.items():
+                if not isinstance(key, str):
+                    return False, None
+                cleaned_key = text(key)
+                ok, cleaned_item = clean(item, depth + 1)
+                if cleaned_key is None or not ok:
+                    return False, None
+                out[cleaned_key] = cleaned_item
+            return True, out
+        if isinstance(value, (list, tuple)):
+            items = []
+            for item in value:
+                ok, cleaned_item = clean(item, depth + 1)
+                if not ok:
+                    return False, None
+                items.append(cleaned_item)
+            return True, items
+        return False, None
+
+    ok, cleaned = clean(submission, 0)
+    if not ok:
+        return None
+    # Then the structured rules of a tool result (``redact_value``): the value
+    # under a sensitive-looking key (``api_key``, ``password``, ...) goes
+    # whatever it holds. Its normalisation can compose text again, so the
+    # value is looked for once more afterwards.
+    redacted, _ = redact_value(cleaned)
+    left["nodes"], left["chars"] = MAX_RESULT_NODES, MAX_SUBMISSION_CHARS
+    ok, cleaned = clean(redacted, 0)
+    return cleaned if ok else None
+
+
 def _failure_code_of(error: BaseException) -> FailureCode:
     """The closed code of an exception an adapter raised. By ``type()`` and the
     slot of ``AdapterFailure`` only: an adapter's property or ``__class__`` cannot
@@ -275,6 +398,51 @@ def _failure_code_of(error: BaseException) -> FailureCode:
     if issubclass(error_type, TimeoutError):
         return FailureCode.TIMEOUT
     return FailureCode.INTERNAL_ERROR
+
+
+@dataclass(slots=True)
+class _Session:
+    """What one session came to (in memory; set by ``execute_session``)."""
+
+    status: UsageStatus = UsageStatus.FAILED
+    failure: FailureCode | None = FailureCode.INTERNAL_ERROR
+    counted_input: int = 0
+    counted_output: int = 0
+    known_totals: tuple[int | None, int | None] = (None, None)
+    submission: Any = None
+    stopped: SessionStop | None = None
+    final_input: int = 0
+    final_output: int = 0
+
+    def fail(self, code: FailureCode) -> None:
+        self.status = UsageStatus.FAILED
+        self.failure = code
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if name == "status" and value is not UsageStatus.FAILED:
+            object.__setattr__(self, "failure", None)
+        object.__setattr__(self, name, value)
+
+
+def _session_adapters(
+    adapters: Mapping[ConnectionKind, AgentSessionAdapter] | None,
+) -> dict[ConnectionKind, AgentSessionAdapter]:
+    """The session adapters by kind, each checked (``kind`` matches, an async
+    ``run_session`` of two arguments): a wrong one fails when the service is
+    built."""
+    result: dict[ConnectionKind, AgentSessionAdapter] = {}
+    for kind, adapter in (adapters or {}).items():
+        if (
+            type(kind) is not ConnectionKind
+            or getattr(adapter, "kind", None) is not kind
+        ):
+            raise fail("session_adapters", InputProblem.WRONG_TYPE)
+        try:
+            require_async_method(adapter, "run_session", 2)
+        except TypeError:
+            raise fail("session_adapters", InputProblem.WRONG_TYPE) from None
+        result[kind] = adapter
+    return result
 
 
 class ConnectionService:
@@ -290,6 +458,7 @@ class ConnectionService:
         *,
         budget: BudgetTracker | None = None,
         lease: LeaseVerifier | None = None,
+        session_adapters: Mapping[ConnectionKind, AgentSessionAdapter] | None = None,
         period_timezone: str = DEFAULT_PERIOD_TIMEZONE,
         database_timeout_seconds: float = DEFAULT_DATABASE_TIMEOUT_SECONDS,
         health_timeout_seconds: float = DEFAULT_HEALTH_TIMEOUT_SECONDS,
@@ -338,6 +507,12 @@ class ConnectionService:
         self._adapters = adapters
         self._secrets = secrets
         self._budget = budget
+        self._session_adapters = _session_adapters(session_adapters)
+        if self._session_adapters and budget is None:
+            # A session is counted turn by turn into the task's budget, with
+            # the run fence of ``BudgetTracker.record_in`` (Decision 0083, 5):
+            # without a budget there is neither, so sessions are not offered.
+            raise fail("budget", InputProblem.WRONG_TYPE)
         self._lease: LeaseVerifier = (
             FailClosedLeaseVerifier() if lease is None else lease
         )
@@ -792,6 +967,316 @@ class ConnectionService:
             outcome.redactions,
         )
 
+    async def execute_session(
+        self,
+        principal: Principal,
+        context: TaskContext,
+        kind: ConnectionKind,
+        request: SessionRequest,
+        *,
+        gate: Callable[[], Awaitable[None]] | None = None,
+        alive: Callable[[], bool] | None = None,
+    ) -> SessionResult:
+        """One CLI session of a node attempt through the shared connection of
+        ``kind`` (Decision 0083, 1 and 5). The same checks as :meth:`execute`, in
+        the same order, plus the session's token floor (5 (a): at least
+        ``SESSION_MIN_TOKENS`` of the task's budget left, ``TaskBudgetError``
+        ``task_token_floor``); then the admission (a session row, ``connection.
+        use`` audited as for a call); then ``gate`` (the caller's placement
+        record, Decision 0083, 1: ``CloudPolicy`` -> admission -> placement ->
+        adapter), whose failure closes the row ``cancelled`` without sending
+        anything and propagates; then the adapter.
+
+        Turn by turn the adapter reports its tokens (``on_usage``): each turn is
+        counted into the row and charged to the task's budget in one transaction
+        with the lease check (:meth:`ConnectionStore.add_session_turn`); the
+        answer is ``False`` once the budget is used up, the lease is lost or the
+        run was replaced, and the adapter stops (``SessionResult.stopped``). At
+        the end only the remainder is settled (the totals less what was counted,
+        never less than counted); unknown totals (an abnormal end, a
+        cancellation) count ``UNKNOWN_SESSION_TOKENS`` less what was counted
+        (5 (c), (d)). A cancellation is settled (``cancelled``) before it passes.
+
+        ``alive`` (the caller's attempt fence, Decision 0046): asked after every
+        turn is counted; once it answers ``False`` (the orchestrator abandoned
+        the attempt) the session stops (``SessionStop.ABANDONED``).
+        """
+        self._actor(principal)
+        require_type("context", context, TaskContext)
+        kind = validate_enum("kind", kind, ConnectionKind)
+        require_type("request", request, SessionRequest)
+        if gate is not None and not callable(gate):
+            raise fail("gate", InputProblem.WRONG_TYPE)
+        if alive is not None and not callable(alive):
+            raise fail("alive", InputProblem.WRONG_TYPE)
+        correlation_id = uuid.uuid4()
+        await self._authorize(
+            principal,
+            Capability.AGENT_USE,
+            Resource.owned_by(context.delegator_id, _RESOURCE_CONNECTION),
+            correlation_id,
+        )
+        adapter = self._session_adapters.get(kind)
+        if adapter is None:
+            await self._refuse(
+                principal, RefusalReason.CONNECTION_UNAVAILABLE, None, correlation_id
+            )
+        await self._check_task_budget(principal, context, correlation_id)
+        await self._check_session_floor(principal, context, correlation_id)
+        await self._check_lease(principal, context, correlation_id)
+        admission = await self._call_store(
+            self._store.admit(
+                principal.user_id,
+                context.task_id,
+                context.run,
+                kind,
+                request.model,
+                request.purpose,
+                session=True,
+                min_tokens=SESSION_MIN_TOKENS,
+            )
+        )
+        if isinstance(admission, Refused):
+            await self._refuse(
+                principal,
+                admission.reason,
+                admission.project_id,
+                correlation_id,
+                admission,
+            )
+        assert isinstance(admission, Admitted)
+        state = _Session()
+        try:
+            if gate is not None:
+                try:
+                    await gate()
+                except BaseException:
+                    state.status = UsageStatus.CANCELLED
+                    state.known_totals = (0, 0)  # nothing was sent
+                    raise
+            try:
+                await self._run_session(
+                    adapter, admission, context, request, state, alive
+                )
+            except asyncio.CancelledError:
+                state.status = UsageStatus.CANCELLED
+                raise
+        finally:
+            await self._shielded(self._settle_session(kind, context, admission, state))
+        return SessionResult(
+            admission.usage_id,
+            state.submission,
+            state.final_input,
+            state.final_output,
+            state.failure,
+            state.stopped,
+        )
+
+    async def _check_session_floor(
+        self, principal: Principal, context: TaskContext, correlation_id: uuid.UUID
+    ) -> None:
+        if self._budget is None:
+            return
+        verdict = await self._budget.check(
+            context.task_id, planned={BudgetKind.TOKENS: SESSION_MIN_TOKENS}
+        )
+        if BudgetKind.TOKENS in verdict.exceeded:
+            await self._refuse(
+                principal, RefusalReason.TASK_TOKEN_FLOOR, None, correlation_id
+            )
+
+    async def _run_session(
+        self,
+        adapter: AgentSessionAdapter,
+        admission: Admitted,
+        context: TaskContext,
+        request: SessionRequest,
+        state: "_Session",
+        alive: Callable[[], bool] | None = None,
+    ) -> None:
+        async def on_usage(input_tokens: int, output_tokens: int) -> bool:
+            if state.stopped is not None:
+                return False
+            for value in (input_tokens, output_tokens):
+                if (
+                    isinstance(value, bool)
+                    or not isinstance(value, int)
+                    or not 0 <= value <= MAX_TOKENS_PER_CALL
+                ):
+                    raise fail("on_usage", InputProblem.OUT_OF_RANGE)
+            turn = await self._store.add_session_turn(
+                admission.usage_id,
+                context.task_id,
+                context.run,
+                context.lease,
+                input_tokens,
+                output_tokens,
+                self._budget,
+            )
+            if turn in (SessionTurn.RECORDED, SessionTurn.USED_UP):
+                state.counted_input += input_tokens
+                state.counted_output += output_tokens
+                if turn is SessionTurn.USED_UP:
+                    state.stopped = SessionStop.BUDGET_EXCEEDED
+            elif turn is SessionTurn.LEASE_LOST:
+                state.stopped = SessionStop.LEASE_LOST
+            elif turn is SessionTurn.RUN_REPLACED:
+                state.stopped = SessionStop.RUN_REPLACED
+            else:
+                state.stopped = SessionStop.BUDGET_EXCEEDED
+            # (Whether the budget allows another turn was decided in the
+            # turn's transaction, with its run and lease fences: ``USED_UP``.)
+            # The turn was spent (and counted above) either way; an abandoned
+            # attempt must not get another one.
+            if state.stopped is None and alive is not None and alive() is not True:
+                state.stopped = SessionStop.ABANDONED
+            return state.stopped is None
+
+        try:
+            async with asyncio.timeout(request.timeout_seconds):
+                secret = await self._resolve(admission.secret_handle)
+                # The last fences before the first turn is sent: the attempt,
+                # and (a turn of 0 tokens) the run and the queue lease, after
+                # everything this side waited for.
+                if not await on_usage(0, 0):
+                    state.status = UsageStatus.CANCELLED
+                    state.known_totals = (0, 0)  # nothing was sent
+                    return
+                raw = await adapter.run_session(
+                    secret,
+                    AgentSessionRequest(
+                        request.model,
+                        request.prompt,
+                        request.timeout_seconds,
+                        on_usage,
+                    ),
+                )
+        except TimeoutError:
+            state.fail(FailureCode.TIMEOUT)
+            return
+        except Exception as error:
+            if _is_node_stop(error) or isinstance(error, MemoryError):
+                # The attempt was stopped (its bridge's tool call was fenced
+                # out), or memory ran out (the orchestrator records it as
+                # such): either passes to the runtime unchanged, after the
+                # settlement (``execute_session``'s ``finally``).
+                state.status = UsageStatus.CANCELLED
+                raise
+            code = _failure_code_of(error)
+            logger.warning(
+                "connection session failed: usage_id=%s code=%s exception_type=%s",
+                admission.usage_id,
+                code.value,
+                log_type_name(error),
+            )
+            state.fail(code)
+            return
+        if type(raw) is not AgentSessionResult:
+            state.fail(FailureCode.INVALID_RESPONSE)
+            return
+        # Each part of the totals as far as it is known (a known input is kept
+        # even when the output is not, and the other way round), read before
+        # anything below can refuse the result: what was spent is charged.
+        state.known_totals = (raw.input_tokens, raw.output_tokens)
+        if raw.submission is not None:
+            # The credential must not come back in the submission either (an
+            # adapter's bug, an echo of the CLI): every text is cleaned as the
+            # one-call answer is, and a submission that still holds the value
+            # is refused whole.
+            submission = _clean_submission(secret, raw.submission)
+            if submission is None:
+                logger.warning(
+                    "connection session returned a submission that holds the"
+                    " credential or is malformed: usage_id=%s",
+                    admission.usage_id,
+                )
+                state.fail(FailureCode.INVALID_RESPONSE)
+                return
+            state.submission = submission
+        if raw.failure is not None:
+            state.fail(raw.failure)
+        elif state.stopped is None:
+            state.status = UsageStatus.SUCCEEDED
+        else:
+            state.status = UsageStatus.CANCELLED
+
+    async def _settle_session(
+        self,
+        kind: ConnectionKind,
+        context: TaskContext,
+        admission: Admitted,
+        state: "_Session",
+    ) -> None:
+        """Settle the session's row with the remainder (never raises).
+
+        What the turns counted is read from the row (under its lock), not from
+        ``state``: a cancellation between a turn's commit and its bookkeeping
+        here must not charge that turn twice."""
+        settled = None
+        for attempt in range(_SETTLE_ATTEMPTS):
+            try:
+                settled = await self._store.settle_session(
+                    admission.usage_id,
+                    context.task_id,
+                    state.status,
+                    state.failure,
+                    state.known_totals,
+                    UNKNOWN_SESSION_TOKENS,
+                    self._budget,
+                )
+                break
+            except Exception as error:
+                # The row and its charge are one transaction: retried as one
+                # (an uncertain COMMIT that did go through finds the row
+                # closed and writes nothing), never charged separately.
+                logger.error(
+                    "connection session could not be settled: usage_id=%s"
+                    " attempt=%s exception_type=%s",
+                    admission.usage_id,
+                    attempt + 1,
+                    log_type_name(error),
+                )
+        if settled is not None:
+            record, _ = settled
+            state.final_input = record.input_tokens or 0
+            state.final_output = record.output_tokens or 0
+        else:
+            # Closed by somebody else (the reaper keeps what the turns
+            # counted) or not settled at all (left in flight for the reaper):
+            # report what this side knows; nothing is charged outside the
+            # settlement's own transaction.
+            state.final_input, state.final_output = _session_finals(
+                state.counted_input,
+                state.counted_output,
+                state.known_totals,
+                UNKNOWN_SESSION_TOKENS,
+            )
+        if state.failure is FailureCode.EXPIRED:
+            try:
+                await self._store_health(
+                    kind, admission.secret_handle, ConnectionStatus.EXPIRED
+                )
+            except Exception as error:
+                logger.error(
+                    "connection expiry could not be recorded: exception_type=%s",
+                    log_type_name(error),
+                )
+
+    @staticmethod
+    async def _shielded(awaitable) -> None:
+        """Run ``awaitable`` to its end even while being cancelled; a
+        cancellation is raised once it ended (``_account``'s pattern)."""
+        work = asyncio.ensure_future(awaitable)
+        cancelled: asyncio.CancelledError | None = None
+        while not work.done():
+            try:
+                await asyncio.wait({work})
+            except asyncio.CancelledError as error:
+                cancelled = error
+        work.result()
+        if cancelled is not None:
+            raise cancelled
+
     async def _call(
         self,
         adapter,
@@ -1175,6 +1660,7 @@ class ConnectionService:
         if reason in (
             RefusalReason.TASK_BUDGET_EXCEEDED,
             RefusalReason.TASK_BUDGET_NOT_CONFIGURED,
+            RefusalReason.TASK_TOKEN_FLOOR,
         ):
             raise TaskBudgetError(reason)
         raise ConnectionUnavailableError()

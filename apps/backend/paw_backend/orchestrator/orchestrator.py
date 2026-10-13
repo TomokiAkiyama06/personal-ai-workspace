@@ -61,6 +61,7 @@ from enum import StrEnum
 from types import MappingProxyType
 
 from paw_backend.authz import AgentGrant, Capability, GrantEscalationError
+from paw_backend.authz.principals import PrincipalDirectory
 from paw_backend.orchestrator.config import Clock, OrchestratorConfig, SystemClock
 from paw_backend.orchestrator.domain import (
     DagState,
@@ -90,8 +91,10 @@ from paw_backend.orchestrator.errors import (
 from paw_backend.orchestrator.gateway import (
     AttemptFence,
     NodeBudgetHandle,
+    NodeConnectionGateway,
     NodeToolGateway,
     RunGuard,
+    SessionService,
     ToolCaller,
 )
 from paw_backend.orchestrator.limits import MAX_ERROR_CLASS_CHARS
@@ -425,6 +428,8 @@ class Orchestrator:
         config: OrchestratorConfig,
         clock: Clock | None = None,
         worktrees: NodeWorkspaces | None = None,
+        connections: SessionService | None = None,
+        principals: PrincipalDirectory | None = None,
     ) -> None:
         """Every collaborator is checked here, once, so that a wrong one fails
         loudly at construction (``TypeError``, or ``InvalidOrchestratorArgumentError``
@@ -451,6 +456,15 @@ class Orchestrator:
         if worktrees is not None:
             require_async_method(worktrees, "prepare_node", 1)
             require_async_method(worktrees, "integrate", 1)
+        # The shared connections of the attempts (Decision 0083, 1): with the
+        # directory of the principals the sessions act for, or not at all.
+        if (connections is None) != (principals is None):
+            raise TypeError("connections and principals come together")
+        if connections is not None:
+            require_async_method(connections, "execute_session", 4)
+            require_async_method(principals, "get_principal_by_id", 1)
+        self._connections = connections
+        self._principals = principals
         clock = clock or SystemClock()
         if not callable(getattr(clock, "monotonic", None)):
             raise TypeError("clock must have monotonic()")
@@ -1715,6 +1729,22 @@ class Orchestrator:
             lease=QueueLease.of(run.entry, run.worker_id),
         )
 
+    def _node_connections(self, run, spec, worktrees, fence):
+        """The ``connections`` of an attempt of a DAG node (``None`` without a
+        connection service, and for the planner's calls: Decision 0083, 1 keeps
+        the planner off the cloud)."""
+        if self._connections is None or spec.node is None:
+            return None
+        assert self._principals is not None
+        return NodeConnectionGateway(
+            run.guard,
+            self._connections,
+            self._principals,
+            run.task.created_by,
+            lambda: self._context(run, spec, worktrees),
+            fence,
+        )
+
     async def _attempt(self, run: _Run, spec: _Spec) -> _Finished:
         """Run one attempt through the agent runtime; only cancellation escapes."""
         fence = AttemptFence()
@@ -1758,6 +1788,7 @@ class Orchestrator:
                     }
                 ),
                 placement=self._placement(run, spec, fence),
+                connections=self._node_connections(run, spec, worktrees, fence),
             )
             outcome = await self._with_timeout(
                 self._runtimes[spec.agent].run_node(assignment)

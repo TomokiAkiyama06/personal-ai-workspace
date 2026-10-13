@@ -33,7 +33,7 @@ A runtime lets it pass.
 """
 
 import uuid
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -60,6 +60,24 @@ class NodeTools(Protocol):
         model's; everything else is the backend's. Raises ``NodeStopped`` when the
         task can no longer act (it ended, another run replaced it, the worker lost
         its lease, the budget is used up)."""
+        ...
+
+
+class NodeConnections(Protocol):
+    async def execute_session(
+        self,
+        kind: Any,
+        request: Any,
+        *,
+        gate: Callable[[], Awaitable[None]] | None = None,
+    ) -> Any:
+        """Run a CLI session through the shared connection ``kind`` for this
+        attempt (Decision 0083, 1: ``ConnectionService.execute_session`` with the
+        task's context, the run and the worker's queue lease at that moment, as
+        the task's creator). ``gate`` runs between the admission and the session
+        (the attempt's placement record: Decision 0083's ``CloudGate``). Raises
+        ``NodeStopped`` when the attempt can no longer act, and when the service
+        stopped the session (the budget, the lease, the run)."""
         ...
 
 
@@ -134,6 +152,9 @@ class NodeAssignment:
     # Where the attempt runs, recorded once (``None``: nothing can be recorded,
     # such as a planner call: a runtime must then keep the node off the cloud).
     placement: NodePlacement | None = field(default=None, repr=False)
+    # The shared connections of this attempt (Decision 0083, 1; ``None``: the
+    # orchestrator was given none, or the call is the planner's: no CLI session).
+    connections: NodeConnections | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True, slots=True)

@@ -788,6 +788,34 @@ class HybridPlacementTest(unittest.IsolatedAsyncioTestCase):
         values.update(options)
         return HybridRuntime(self.scheduler, self.local, **values)
 
+    async def test_a_cloud_runtime_with_its_own_gate_records_its_placement(self):
+        # Decision 0083, 1: the CLI runtime's CloudGate records the placement
+        # between its admission and the send; HybridRuntime only checks the
+        # CloudPolicy and calls its fallback entry.
+        calls = []
+
+        class Gated(Recorder):
+            async def run_as_fallback(self, assignment):
+                calls.append(assignment)
+                return NodeOutcome.succeeded(NodeResult(summary="by the gate"))
+
+        await fill_main(self.scheduler)
+        runtime = self.runtime(cloud=Gated("cloud"))
+        outcome = await runtime.run_node(
+            assignment(goal="x" * 90_000, placement=self.placement)
+        )
+        self.assertEqual(outcome.result.summary, "by the gate")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(self.placement.records, [])
+        self.policy.allows_value = False
+        task = asyncio.create_task(
+            runtime.run_node(assignment(goal="x" * 90_000, placement=self.placement))
+        )
+        await settle()
+        await self.clock.advance(120)
+        self.assertEqual((await task).error_class, "ComputeUnavailable")
+        self.assertEqual(len(calls), 1)
+
     async def test_the_compute_placements_are_the_orchestrators(self):
         self.assertEqual(
             [member.value for member in Placement],
