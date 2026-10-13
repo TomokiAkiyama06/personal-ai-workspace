@@ -185,9 +185,7 @@ describe("System Health words", () => {
   it("words reason codes, with their argument", () => {
     expect(reasonText(t, "vram_pressure")).toBe("VRAM が逼迫しています");
     expect(reasonText(t, "expired:claude")).toBe("Claude の認証が期限切れです");
-    expect(reasonText(t, "secret_store_unavailable")).toBe(
-      "認証情報の保管場所を読めません",
-    );
+    expect(reasonText(t, "secret_store_unavailable")).toBe("認証情報の保管場所を読めません");
     expect(reasonText(t, "model_failed:memory_worker")).toBe(
       "Memory Worker のモデルの操作が失敗しました",
     );
