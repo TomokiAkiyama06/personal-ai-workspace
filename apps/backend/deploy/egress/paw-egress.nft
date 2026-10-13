@@ -31,6 +31,8 @@ table inet paw_egress {
         ip daddr 127.0.0.53 tcp dport 53 accept
         # TCP 443 to global addresses.
         ip daddr @not_global4 counter drop
+        # IPv6: the global unicast block 2000::/3 only, less the ranges above.
+        ip6 daddr != 2000::/3 counter drop
         ip6 daddr @not_global6 counter drop
         tcp dport 443 accept
         counter drop

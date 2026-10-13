@@ -61,6 +61,7 @@ _CHUNK = 64 * 1024
 
 _HOST = re.compile(r"(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}")
 _SESSION_HEADER = "x-paw-session"
+_GLOBAL_UNICAST6 = ipaddress.ip_network("2000::/3")
 
 #: An address the proxy connects to: (family, address string).
 Address = tuple[int, str]
@@ -132,9 +133,11 @@ def is_public(address: str) -> bool:
     if isinstance(ip, ipaddress.IPv6Address):
         if ip.ipv4_mapped is not None:
             ip = ip.ipv4_mapped
-        elif ip.is_site_local:  # fec0::/10: deprecated, still routed in places
+        elif ip not in _GLOBAL_UNICAST6 or ip.is_site_local:
+            # Only the global unicast block 2000::/3 (``is_global`` also holds
+            # for reserved blocks such as 4000::/2, and for fec0::/10).
             return False
-    return ip.is_global and not ip.is_multicast
+    return ip.is_global and not ip.is_multicast and not ip.is_reserved
 
 
 async def system_resolver(host: str) -> Sequence[Address]:
@@ -202,9 +205,11 @@ class EgressProxy:
             try:
                 writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
                 await writer.drain()
-                sent, received = await self._splice(
+                sent, received, failed = await self._splice(
                     reader, writer, upstream_reader, upstream_writer
                 )
+                if failed:
+                    outcome = "error"
             except Exception:
                 outcome = "error"
             finally:
@@ -280,8 +285,11 @@ class EgressProxy:
         client_writer: asyncio.StreamWriter,
         upstream_reader: asyncio.StreamReader,
         upstream_writer: asyncio.StreamWriter,
-    ) -> tuple[int, int]:
+    ) -> tuple[int, int, bool]:
+        """Copy both ways until both ends are done, a side fails, or both are
+        idle. Returns the bytes sent and received, and whether a side failed."""
         counts = [0, 0]
+        failed = False
         activity = asyncio.Event()
 
         async def pump(
@@ -313,12 +321,13 @@ class EgressProxy:
                 if not done:
                     break  # idle in both directions
                 if any(t.done() and not t.cancelled() and t.exception() for t in tasks):
+                    failed = True
                     break
         finally:
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
-        return counts[0], counts[1]
+        return counts[0], counts[1], failed
 
 
 async def _answer(writer: asyncio.StreamWriter, status: int) -> None:

@@ -13,6 +13,7 @@ itself refuses every non-global address, the loopback included).
 """
 
 import asyncio
+import contextlib
 import importlib.util
 import shutil
 import socket
@@ -157,6 +158,8 @@ class RefusalTest(ProxyCase):
             [(socket.AF_INET6, "::ffff:192.168.1.1")],
             [(socket.AF_INET6, "fd00::1")],
             [(socket.AF_INET6, "fec0::1")],
+            [(socket.AF_INET6, "4000::1")],
+            [(socket.AF_INET, "240.0.0.1")],
             [PUBLIC, (socket.AF_INET, "192.168.0.10")],
             [],
         ):
@@ -187,6 +190,31 @@ class RefusalLogTest(ProxyCase):
         self.assertIn(f"session={SESSION}", first)
         self.assertIn("outcome=host", first)
         self.assertIn("host=-", second)  # not a DNS name: not repeated
+
+
+class FailureLogTest(ProxyCase):
+    async def test_a_failed_tunnel_is_logged_as_an_error(self):
+        async def resetting(reader, writer):
+            await reader.read(1)
+            writer.transport.abort()  # the provider resets the connection
+
+        self.upstream.close()
+        await self.upstream.wait_closed()
+        self.upstream = await asyncio.start_server(resetting, "127.0.0.1", 0)
+        self.upstream_port = self.upstream.sockets[0].getsockname()[1]
+        await self.start()
+        with self.assertLogs("paw_egress", "INFO") as logs:
+            _, reader, writer = await self.request(
+                f"CONNECT {HOST}:443 HTTP/1.1\r\n\r\n".encode()
+            )
+            with contextlib.suppress(ConnectionError):
+                for _ in range(20):
+                    writer.write(SECRET_BYTES)
+                    await writer.drain()
+                    await asyncio.sleep(0.01)
+            writer.close()
+            await asyncio.sleep(0.2)
+        self.assertIn("outcome=error", logs.output[-1])
 
 
 class LimitTest(ProxyCase):
