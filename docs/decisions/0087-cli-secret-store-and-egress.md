@@ -1,6 +1,7 @@
 # CLI の Runtime の前提: Secret Store（製品・保存方式・書き込みの口）と外への通信（Egress の Proxy・Allowlist・nftables）と CLI ごとの認証の形
 
-- Status: Proposed
+- Status: Approved
+- Approval: 2026-10-12、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで直接回答して承認（approved as recommended, all 7 points: 決めてほしいことの 1〜7 をすべて推奨どおり承認。Credential の種類は Subscription を選んだ。末尾の「承認時の決定」）
 - Date: 2026-10-12
 - Scope: Issue [#208](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/208) の PR 4b（[Decision 0083](0083-agent-runtime-adapters.md) の 11 の 4 のうち、`CodexCliRuntime` / `ClaudeCliRuntime`・Credential の Proxy・`rotate_credential`・PAW の Tool の MCP の Bridge）の前提。この Decision は設計だけで、コードは承認の後に PR 4b で書く。関係する既存の口: `apps/backend/paw_backend/connections/secret.py`（`Secret`・`SecretResolver`。Store はまだない）、`connections/service.py`（`register` / `replace_credential` は Handle だけを受ける）、`apps/backend/deploy/systemd/`。
 - Supersedes（一部）:
@@ -148,3 +149,10 @@
 - Claude Code: [CLI reference](https://code.claude.com/docs/en/cli-reference)、[Run Claude Code programmatically（headless）](https://code.claude.com/docs/en/headless)、[Environment variables](https://code.claude.com/docs/en/env-vars)、[Authentication](https://code.claude.com/docs/en/authentication)、[Enterprise network configuration](https://code.claude.com/docs/en/network-config)、[Other LLM gateways](https://code.claude.com/docs/en/llm-gateway)、[Track cost and usage（Agent SDK。`stream-json` と同じ Message の形）](https://code.claude.com/docs/en/agent-sdk/cost-tracking)
 - Codex CLI（`developers.openai.com/codex/...` は `learn.chatgpt.com/docs/...` へ転送される）: [Non-interactive mode](https://learn.chatgpt.com/docs/non-interactive-mode)、[Developer commands（CLI）](https://learn.chatgpt.com/docs/developer-commands?surface=cli)、[Configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference)、[Authentication](https://learn.chatgpt.com/docs/auth)
 - systemd: `systemd-creds(1)`、`systemd.exec(5)` の `LoadCredentialEncrypted=`（Host の systemd 259 の man page）
+
+## 承認時の決定（2026-10-12）
+
+Human は、作業 Session で判断が必要な点について推奨つきの説明を受け、直接回答して承認した（2026-10-12、Human (approved as recommended, all 7 points)。決めてほしいことの 1〜7 をすべて推奨どおり承認）。
+
+- 「Human に確かめてほしいこと」の Credential の種類は **Subscription** を選んだ。PR 4b は Claude の `setup-token` の Token（4 の表の Subscription の行）から作り、Codex の ChatGPT の Login は 7 のとおり Smoke の後の別の PR にする。API Key の経路は今は作らない。
+- Provider の規約の確認と Host の準備（`podman`）は、まだ Human の側に残っている。確かめるまで、組み立てで CLI の段を有効にしない。
