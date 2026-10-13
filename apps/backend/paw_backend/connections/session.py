@@ -61,6 +61,10 @@ class AgentSessionRequest:
     prompt: str = field(repr=False)
     timeout_seconds: float
     on_usage: UsageCallback = field(repr=False)
+    # The caller's per-session material for the adapter (a CLI session's
+    # directory, bridge socket and token file: ``agents.cli_session``), passed
+    # through as it is; never read by the service.
+    attachment: Any = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "model", validate_model("model", self.model))
@@ -119,6 +123,8 @@ class SessionRequest:
     purpose: UsagePurpose
     prompt: str = field(repr=False)
     timeout_seconds: float
+    # Handed to the adapter unchanged (``AgentSessionRequest.attachment``).
+    attachment: Any = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "model", validate_model("model", self.model))

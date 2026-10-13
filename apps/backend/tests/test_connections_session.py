@@ -64,6 +64,7 @@ class FakeSession:
 
     async def run_session(self, secret, request):
         self.calls += 1
+        self.attachment = request.attachment
         if self.before is not None:
             await self.before()
         for input_tokens, output_tokens in self.turns:
@@ -724,6 +725,25 @@ class SubmissionTest(SessionCase):
             await self.start(adapter)
         self.assertIs(caught.exception.reason, StopReason.LEASE_LOST)
         self.assertEqual(self.row()["status"], "cancelled")
+
+
+class AttachmentTest(SessionCase):
+    async def test_the_attachment_reaches_the_adapter_unchanged(self):
+        attachment = object()
+        adapter = FakeSession()
+        await self.session_service(adapter).execute_session(
+            self.principal(self.user),
+            self.session_context(),
+            CODEX,
+            SessionRequest(
+                "gpt-5-codex",
+                UsagePurpose.CODING,
+                "the task",
+                600,
+                attachment=attachment,
+            ),
+        )
+        self.assertIs(adapter.attachment, attachment)
 
 
 class SchemaTest(SessionCase):

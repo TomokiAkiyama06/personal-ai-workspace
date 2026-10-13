@@ -4235,6 +4235,18 @@ CLI（Claude Code・Codex）は組み込みの Tool を止めて動かし（Deci
 
 Test は `tests/test_agents_bridge.py`（一時 Directory の Unix Socket、Fake の Toolkit と本物の `NodeToolkit`、本物の Relay の Program）。
 
+## Claude Code の Runtime（Subscription の Token。Issue #208、Decision 0083 の 1・5・6・8 と Decision 0087 の 4、段階 4b の 3b）
+
+`agents/claude_cli.py` の `ClaudeCliRuntime`（Orchestrator の `AgentRuntime`）と `ClaudeSessionAdapter`（`ConnectionService` の Session の Adapter）、`agents/claude_stream.py`（`stream-json` の読み取り）、`agents/cli_session.py`（Session の Directory・起動の口）です。**CLI の段は組み立てで無効のまま**（`CloudPolicy` の Decision と Provider の規約の確認まで）。本番の起動の口（Container と systemd の Template Unit）は後の PR で、今あるのは子 Process として動かす `SubprocessLauncher`（開発と Test）だけです。
+
+- Runtime は試行ごとに Session の Directory（0750）を作り、`NodeToolkit` を `McpBridge` で出し、`CloudGate`（`CloudPolicy` → Admission → Placement → Adapter）で Session を送る。結果は Bridge のもの（`submit` の Outcome か、試行を終えた失敗）で、どちらもなければ `no_submission`。Planner には使わない（Decision 0083 の 1）。`run_as_fallback` で `HybridRuntime` の Cloud の経路にも使える（Gate の拒否は `ComputeUnavailable`）。
+- Adapter は CLI を Decision 0087 の 4 の Option（`-p`・`--output-format stream-json --verbose --include-partial-messages`・`--tools ""`・`--strict-mcp-config --mcp-config`・`--allowedTools "mcp__paw__*"`・`--permission-mode dontAsk`・`--no-session-persistence`・`--setting-sources user`（`CLAUDE_CONFIG_DIR` は Session の空の Directory）・`--settings`・`--restricted`）と、Subscription の Token を `CLAUDE_CODE_OAUTH_TOKEN`（起動の口に `Secret` で渡す。引数・Log に出さない）、Task を stdin で起動する。
+- `system/init` が PAW の Tool（と外せない `EndConversation`）と接続済みの `paw` の Server だけでなければ止める。Model の呼び出しごと（`message_start` の入力 + Cache、`message_delta` の本当の出力）に `on_usage` で報告し、`False` なら止める。`message_delta` の出力がない版は止める。Bridge が終わった（`submit`・失敗）ら止める。認証の失敗の `api_retry` は `expired`。終わりの合計は `result` の `modelUsage`（無い・0 は不明として Service の見積もり）。止め方は SIGTERM → 5 秒 → SIGKILL。
+- `SessionRequest.attachment` / `AgentSessionRequest.attachment`: 呼び出し側から Adapter への Session ごとの材料（Directory・Bridge・Token の File）。Service は読まずにそのまま渡す。
+- `local.py` の Prompt の選び方を `node_prompts` に取り出した（Local と CLI が同じ Prompt を使う）。
+
+Test は `tests/test_agents_claude_cli.py`（本物の Runtime・Adapter・Bridge・Relay・起動の口、Fake の `claude` = `tests/fake_claude_cli.py`、`execute_session` の代わりの Fake）。
+
 ## Tool Broker のファイル・Shell・Git の Tool と Sandbox（Issue #208、Decision 0083 の段階 2）
 
 `paw_backend/sandbox/` は、Local の Model の Tool loop（段階 3 の `LocalAgentRuntime`）が Benchmark の `bash`・`str_replace`・`write_file` を Tool Broker を通して動かすための Tool と、その実行先の Sandbox です（Decision 0083 の 2・6・8、Approved）。**まだ本番の組み立てには配線していません**（Runtime と一緒に段階 3 で `ToolRunner(execution_timeout=300)` に `ToolExecutors({...WorkingSetExecutor..., ...RepoToolExecutor...})` を渡します）。配備と Server の確認は [`deploy/sandbox/README.md`](deploy/sandbox/README.md)。

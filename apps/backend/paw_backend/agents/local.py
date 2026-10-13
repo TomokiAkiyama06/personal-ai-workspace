@@ -246,17 +246,10 @@ class LocalAgentRuntime:
                 command_seconds=limits.command_seconds,
             ),
         )
-        role = assignment.role
-        place = toolkit.workspace.describe()
-        if role is NodeRole.PLANNER:
-            prompt = PLANNER_PROMPT.format(workspace=place)
-        elif toolkit.writes:
-            prompt = WORKER_PROMPT.format(workspace=place)
-        else:
-            prompt = READER_PROMPT.format(workspace=place, role=role.value)
+        system, user = node_prompts(toolkit)
         messages = [
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": _task_text(assignment)},
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
         ]
         return _Attempt(assignment, toolkit, messages, toolkit.tools, self._clock())
 
@@ -404,6 +397,21 @@ def _tokens(size_bytes: int) -> int:
     return math.ceil(size_bytes / BYTES_PER_TOKEN_ESTIMATE)
 
 
+def node_prompts(toolkit: NodeToolkit) -> tuple[str, str]:
+    """The system prompt and the task of a node attempt (the benchmark
+    harness's; the CLI runtimes use the same, Decision 0083, 2)."""
+    assignment = toolkit.assignment
+    role = assignment.role
+    place = toolkit.workspace.describe()
+    if role is NodeRole.PLANNER:
+        system = PLANNER_PROMPT.format(workspace=place)
+    elif toolkit.writes:
+        system = WORKER_PROMPT.format(workspace=place)
+    else:
+        system = READER_PROMPT.format(workspace=place, role=role.value)
+    return system, _task_text(assignment)
+
+
 def _task_text(assignment: NodeAssignment) -> str:
     """The user message: the node's title, goal, input and the results of the
     nodes it depends on (JSON)."""
@@ -440,5 +448,6 @@ __all__ = [
     "WRITE_FILE_TOOL",
     "LocalAgentLimits",
     "LocalAgentRuntime",
+    "node_prompts",
     "truncate",
 ]
