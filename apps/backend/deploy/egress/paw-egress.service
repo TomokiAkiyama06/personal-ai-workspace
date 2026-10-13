@@ -1,0 +1,42 @@
+# The CONNECT-only egress proxy of the CLI sessions (Decision 0087, 3;
+# deploy/egress/README.md). It listens on a Unix socket only; nftables limits
+# its account's own outbound traffic (paw-egress.nft).
+#
+# Install (as root):
+#   useradd --system --no-create-home --shell /usr/sbin/nologin paw-egress
+#   groupadd --system paw-cli-bridge   # paw-agent-cli is its only member
+#   install -m 0755 paw_egress.py /usr/local/lib/paw/paw_egress.py
+#   install -m 0644 egress.example.toml /etc/paw/egress.toml   # then edit
+#   cp paw-egress.service /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now paw-egress.service
+
+[Unit]
+Description=Personal AI Workspace egress proxy for CLI sessions
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=exec
+User=paw-egress
+Group=paw-cli-bridge
+RuntimeDirectory=paw-egress
+RuntimeDirectoryMode=0750
+UMask=0007
+ExecStart=/usr/bin/python3 -I /usr/local/lib/paw/paw_egress.py serve --config /etc/paw/egress.toml
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateDevices=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=multi-user.target

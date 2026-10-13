@@ -4225,6 +4225,10 @@ Codex / Claude Code の CLI の Runtime（段階 4b。Decision 0016 の前提の
 
 Test は `tests/test_connections_session.py`（実 PostgreSQL: 最低の枠、Turn ごとの計上、Lease・Run・Budget による停止と何も書かないこと、残りだけの精算、見積もり、Gate、取り消し、Schema、Reaper、Lease の SQL と `TaskQueue.holds_lease` の一致）、`test_agents_cloud.py`（`CloudGate` の順序と拒否、`NodeConnectionGateway`）、`test_compute_runtimes.py`（`run_as_fallback`）。
 
+## Egress の Proxy（Issue #208、Decision 0087 の 3、段階 4b の 2）
+
+CLI の Session の Container（`--network none`）から Provider へ出る唯一の道の `paw-egress` です（[`deploy/egress/paw_egress.py`](deploy/egress/paw_egress.py)、標準ライブラリだけ）。配備は [`deploy/egress/README.md`](deploy/egress/README.md)。Unix Socket だけで受け、`CONNECT <許可した Host 名>:443` だけを、Proxy 自身が引いた Global な Address にだけつなぎ、TLS はそのまま中継します（Credential を足さない）。Container の中の転送（`paw_egress.py forward`）が `127.0.0.1:<Port>` を Socket につなぎ、CLI には `HTTPS_PROXY` を渡します。nftables の例（`paw-egress.nft`）は、その Account の外への通信を DNS と Global な Address の TCP 443 に絞ります。**CLI の Runtime はまだ使いません**（後の PR）。Test は `tests/test_egress_proxy.py`。
+
 ## Tool Broker のファイル・Shell・Git の Tool と Sandbox（Issue #208、Decision 0083 の段階 2）
 
 `paw_backend/sandbox/` は、Local の Model の Tool loop（段階 3 の `LocalAgentRuntime`）が Benchmark の `bash`・`str_replace`・`write_file` を Tool Broker を通して動かすための Tool と、その実行先の Sandbox です（Decision 0083 の 2・6・8、Approved）。**まだ本番の組み立てには配線していません**（Runtime と一緒に段階 3 で `ToolRunner(execution_timeout=300)` に `ToolExecutors({...WorkingSetExecutor..., ...RepoToolExecutor...})` を渡します）。配備と Server の確認は [`deploy/sandbox/README.md`](deploy/sandbox/README.md)。

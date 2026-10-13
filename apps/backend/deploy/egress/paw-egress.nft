@@ -1,0 +1,37 @@
+#!/usr/sbin/nft -f
+# The paw-egress account's own outbound traffic (Decision 0087, 3): DNS to the
+# host's resolver and TCP 443 to global addresses only. The host-name allowlist
+# is the proxy's; this rule set is the second line if the proxy were taken over.
+# Load it with your other rules (as root: nft -f paw-egress.nft) and adjust the
+# resolver address to /etc/resolv.conf's (systemd-resolved: 127.0.0.53).
+
+table inet paw_egress {
+    set not_global4 {
+        type ipv4_addr
+        flags interval
+        elements = { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8,
+                     169.254.0.0/16, 172.16.0.0/12, 192.0.0.0/24, 192.0.2.0/24,
+                     192.168.0.0/16, 198.18.0.0/15, 198.51.100.0/24,
+                     203.0.113.0/24, 224.0.0.0/3 }
+    }
+    set not_global6 {
+        type ipv6_addr
+        flags interval
+        elements = { ::/128, ::1/128, ::ffff:0:0/96, 64:ff9b::/96, 100::/64,
+                     2001:db8::/32, fc00::/7, fe80::/10, ff00::/8 }
+    }
+
+    chain output {
+        type filter hook output priority filter; policy accept;
+        meta skuid != "paw-egress" accept
+        ct state established,related accept
+        # DNS to the host's resolver only.
+        ip daddr 127.0.0.53 udp dport 53 accept
+        ip daddr 127.0.0.53 tcp dport 53 accept
+        # TCP 443 to global addresses.
+        ip daddr @not_global4 counter drop
+        ip6 daddr @not_global6 counter drop
+        tcp dport 443 accept
+        counter drop
+    }
+}

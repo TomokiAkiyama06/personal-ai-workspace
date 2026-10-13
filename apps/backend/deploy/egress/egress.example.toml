@@ -1,0 +1,9 @@
+# /etc/paw/egress.toml (root-owned, 0644): the paw-egress proxy (Decision 0087, 3).
+socket = "/run/paw-egress/egress.sock"
+
+# Exact host names, port 443 only. Claude Code with a subscription token
+# (setup-token) talks to the API host; add a host only after the smoke test's
+# refusal log shows the CLI needs it (Decision 0087, 4).
+allowed_hosts = [
+    "api.anthropic.com",
+]

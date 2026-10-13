@@ -1,0 +1,33 @@
+# Egress の Proxy（`paw-egress`）の配備
+
+更新日: 2026-10-13
+
+[Decision 0087](../../../../docs/decisions/0087-cli-secret-store-and-egress.md)（Approved）の 3。
+実装は [`paw_egress.py`](paw_egress.py)（標準ライブラリだけの Python 1 File。Backend の仮想環境に依存しない）、
+Test は [`tests/test_egress_proxy.py`](../../tests/test_egress_proxy.py)（一時 Directory の Unix Socket と Loopback だけ。DNS の答えと「Provider」への接続は Test の差し込み口）。
+
+## 何をするか
+
+```text
+CLI の Container（--network none、User paw-agent-cli）
+  └─ CLI（HTTPS_PROXY=http://127.0.0.1:<Port>）
+       └─ paw_egress.py forward（127.0.0.1:<Port> → Mount した /run/paw-egress/egress.sock）
+Host
+  └─ paw-egress.service（User paw-egress、Group paw-cli-bridge）
+       └─ CONNECT <許可した Host 名>:443 だけ → 自分で名前を引き、Global な Address だけに接続 → TLS をそのまま中継
+  └─ nftables（paw-egress.nft）: paw-egress の外への通信は DNS と Global な Address の TCP 443 だけ
+```
+
+- 受けるのは `CONNECT host:443` だけ（Host 名は `egress.toml` の `allowed_hosts` と完全一致。Wildcard・別の Port・平文の HTTP の Request は拒否）。
+- 名前は Proxy が引き、答えに 1 つでも Global でない Address（Private・Loopback・Link-local・CGNAT・Multicast・予約）があれば拒否する。
+- TLS は開かない（中身を読まない・変えない・Credential を足さない）。
+- 1 つの接続ごとに 1 行の Log: Session（CONNECT の任意の `X-PAW-Session: <UUID>`）・Host・結果・Byte 数。中身・他の Header は書かない。
+- 上限: CONNECT の Request は 8 KiB・10 秒、同時 64 接続、両方向とも 15 分 Idle なら閉じる。
+
+## 配備（root）
+
+`paw-egress.service` の先頭の注釈の手順で、Account（`paw-egress`）と Group（`paw-cli-bridge`。メンバーは `paw-agent-cli` だけ）を作り、
+`paw_egress.py` と `egress.toml` を置いて Service を有効にする。nftables は `paw-egress.nft` を既存の規則と一緒に読み込む（Resolver の Address は `/etc/resolv.conf` に合わせる）。
+
+`allowed_hosts` の初めの値は Claude Code の Subscription（`setup-token`）の `api.anthropic.com` だけ。
+CLI の Smoke で拒否の Log（`outcome=host`）を見て、CLI が要る Host だけを足す（Decision 0087 の 4）。
