@@ -1,30 +1,34 @@
 # The CONNECT-only egress proxy of the CLI sessions (Decision 0087, 3;
-# deploy/egress/README.md). It listens on a Unix socket only; nftables limits
-# its account's own outbound traffic (paw-egress.nft).
+# deploy/egress/README.md). It listens on a Unix socket only, which systemd
+# makes (paw-egress.socket: group paw-cli-bridge, 0660) and passes to it; the
+# process itself is not in paw-cli-bridge, which also reads the sessions'
+# credential files (Decision 0088). nftables limits its account's own
+# outbound traffic (paw-egress.nft).
 #
 # Install (as root):
-#   useradd --system --no-create-home --shell /usr/sbin/nologin paw-egress
+#   useradd --system --user-group --no-create-home \
+#       --shell /usr/sbin/nologin paw-egress
 #   groupadd --system paw-cli-bridge
 #   useradd --system --home-dir /var/lib/paw-agent-cli --create-home \
 #       --shell /usr/sbin/nologin paw-agent-cli
 #   usermod -aG paw-cli-bridge paw-agent-cli   # its only member
 #   install -m 0755 paw_egress.py /usr/local/lib/paw/paw_egress.py
 #   install -m 0644 egress.example.toml /etc/paw/egress.toml   # then edit
-#   cp paw-egress.service /etc/systemd/system/
-#   systemctl daemon-reload && systemctl enable --now paw-egress.service
+#   cp paw-egress.socket paw-egress.service /etc/systemd/system/
+#   systemctl daemon-reload
+#   systemctl enable --now paw-egress.socket paw-egress.service
 
 [Unit]
 Description=Personal AI Workspace egress proxy for CLI sessions
+Requires=paw-egress.socket
 Wants=network-online.target
-After=network-online.target
+After=network-online.target paw-egress.socket
 
 [Service]
 Type=exec
 User=paw-egress
-Group=paw-cli-bridge
-RuntimeDirectory=paw-egress
-RuntimeDirectoryMode=0750
-UMask=0007
+Group=paw-egress
+UMask=0077
 ExecStart=/usr/bin/python3 -I /usr/local/lib/paw/paw_egress.py serve --config /etc/paw/egress.toml
 Restart=on-failure
 RestartSec=5s

@@ -5,10 +5,12 @@ A CLI (Codex / Claude Code) runs in a container without a network
 (``--network none``, Decision 0083, 6). Its only path to its provider is this
 proxy, on the host, under its own account ``paw-egress``:
 
-* it listens on a Unix socket only (``listen``, group ``paw-cli-bridge``,
-  mode 0660); inside the container a small forwarder (:func:`forward`, the same
-  file) maps ``127.0.0.1:<port>`` to the mounted socket, and the CLI is given
-  ``HTTPS_PROXY=http://127.0.0.1:<port>``;
+* it listens on a Unix socket only (group ``paw-cli-bridge``, mode 0660),
+  which systemd makes and passes (``paw-egress.socket``): the proxy's own
+  process is not in that group, which also reads the sessions' credential
+  files (Decision 0088); inside the container a small forwarder
+  (:func:`forward`, the same file) maps ``127.0.0.1:<port>`` to the mounted
+  socket, and the CLI is given ``HTTPS_PROXY=http://127.0.0.1:<port>``;
 * it accepts HTTP ``CONNECT host:443`` only, for a host that is on the
   allowlist exactly (no wildcard, no other port, no plain HTTP request);
 * it resolves the host itself and refuses every address that is not a global
@@ -47,7 +49,7 @@ import socket
 import sys
 import tomllib
 import uuid
-from collections.abc import Awaitable, Callable, Iterable, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
 logger = logging.getLogger("paw_egress")
@@ -172,6 +174,13 @@ class EgressProxy:
         self._connector = connector
         self._slots = asyncio.Semaphore(max_connections)
         self._idle = idle_timeout
+
+    async def serve_socket(self, sock: socket.socket) -> asyncio.AbstractServer:
+        """Serve a listening Unix socket that systemd made and passed
+        (``paw-egress.socket``: group ``paw-cli-bridge``, mode 0660)."""
+        return await asyncio.start_unix_server(
+            self.handle, sock=sock, limit=MAX_REQUEST_BYTES
+        )
 
     async def serve_unix(self, path: str) -> asyncio.AbstractServer:
         with contextlib.suppress(FileNotFoundError):
@@ -413,6 +422,26 @@ async def forward(
     return await asyncio.start_server(pipe, host="127.0.0.1", port=listen_port)
 
 
+def inherited_socket(
+    environ: Mapping[str, str], *, fd: int = 3
+) -> socket.socket | None:
+    """The listening socket systemd passed to this process (socket
+    activation: ``LISTEN_PID`` is this process, ``LISTEN_FDS`` is 1, the
+    socket is ``fd`` 3), or ``None`` when none was passed. The process then
+    needs no access to the socket's group (``paw-cli-bridge``, which also
+    reads the sessions' credential files: Decision 0088)."""
+    if environ.get("LISTEN_PID") != str(os.getpid()):
+        return None
+    if environ.get("LISTEN_FDS") != "1":
+        raise ValueError("exactly one socket must be passed")
+    sock = socket.socket(fileno=fd)
+    if sock.family != socket.AF_UNIX or sock.type != socket.SOCK_STREAM:
+        sock.detach()
+        raise ValueError("the passed socket must be a Unix stream socket")
+    sock.setblocking(False)
+    return sock
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="paw_egress.py", allow_abbrev=False)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -428,9 +457,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     async def run() -> None:
         if arguments.command == "serve":
             config = Config.load(arguments.config)
-            server = await EgressProxy(config.allowed_hosts).serve_unix(
-                config.socket_path
-            )
+            proxy = EgressProxy(config.allowed_hosts)
+            inherited = inherited_socket(os.environ)
+            if inherited is not None:
+                server = await proxy.serve_socket(inherited)
+            else:  # (development: the proxy makes the socket itself)
+                server = await proxy.serve_unix(config.socket_path)
         else:
             server = await forward(
                 arguments.listen_port, arguments.socket, arguments.session

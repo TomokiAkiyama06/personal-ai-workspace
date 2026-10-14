@@ -1,4 +1,7 @@
 # /etc/paw/egress.toml (root-owned, 0644): the paw-egress proxy (Decision 0087, 3).
+# Under systemd the socket is paw-egress.socket's (the same path) and this
+# value is not used; without socket activation (development) the proxy makes
+# it here itself.
 socket = "/run/paw-egress/egress.sock"
 
 # Exact host names, port 443 only. Claude Code with a subscription token

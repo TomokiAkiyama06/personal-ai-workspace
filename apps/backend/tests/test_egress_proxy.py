@@ -15,6 +15,7 @@ itself refuses every non-global address, the loopback included).
 import asyncio
 import contextlib
 import importlib.util
+import os
 import shutil
 import socket
 import sys
@@ -358,6 +359,72 @@ class NftablesRulesTest(unittest.TestCase):
     def test_the_install_steps_add_the_cli_account_to_the_group(self):
         unit = (PATH.parent / "paw-egress.service").read_text()
         self.assertIn("usermod -aG paw-cli-bridge paw-agent-cli", unit)
+
+
+class UnitTest(unittest.TestCase):
+    """The proxy's process is not in ``paw-cli-bridge``: that group reads the
+    sessions' credential files (Decision 0088). systemd makes the socket
+    (group ``paw-cli-bridge``, 0660, Decision 0087, 3) and hands it over."""
+
+    def directives(self, name):
+        text = (PATH.parent / name).read_text()
+        return [
+            line.strip()
+            for line in text.splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+
+    def test_the_process_is_not_in_the_credential_group(self):
+        service = self.directives("paw-egress.service")
+        self.assertIn("Group=paw-egress", service)
+        self.assertFalse([d for d in service if "paw-cli-bridge" in d])
+        self.assertIn("Requires=paw-egress.socket", service)
+        # The socket's directory is the socket unit's: no RuntimeDirectory
+        # that would remove it when the service stops.
+        self.assertFalse([d for d in service if d.startswith("RuntimeDirectory")])
+
+    def test_systemd_makes_the_socket_for_the_cli_group(self):
+        socket_unit = self.directives("paw-egress.socket")
+        self.assertIn("ListenStream=/run/paw-egress/egress.sock", socket_unit)
+        self.assertIn("SocketGroup=paw-cli-bridge", socket_unit)
+        self.assertIn("SocketMode=0660", socket_unit)
+
+
+class InheritedSocketTest(ProxyCase):
+    def listening(self):
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.bind(self.socket_path)
+        sock.listen()
+        return sock
+
+    def test_only_a_socket_passed_to_this_process_is_taken(self):
+        sock = self.listening()
+        self.addCleanup(sock.close)
+        fd = sock.fileno()
+        self.assertIsNone(egress.inherited_socket({}, fd=fd))
+        other = {"LISTEN_PID": str(os.getpid() + 1), "LISTEN_FDS": "1"}
+        self.assertIsNone(egress.inherited_socket(other, fd=fd))
+        two = {"LISTEN_PID": str(os.getpid()), "LISTEN_FDS": "2"}
+        with self.assertRaises(ValueError):
+            egress.inherited_socket(two, fd=fd)
+
+    async def test_the_proxy_serves_the_inherited_socket(self):
+        sock = self.listening()
+        env = {"LISTEN_PID": str(os.getpid()), "LISTEN_FDS": "1"}
+        inherited = egress.inherited_socket(env, fd=os.dup(sock.fileno()))
+        sock.close()
+        proxy = egress.EgressProxy(
+            egress.allowed_hosts([HOST]),
+            resolver=self.resolver,
+            connector=self.connector,
+        )
+        server = await proxy.serve_socket(inherited)
+        self.addAsyncCleanup(self._close_server, server)
+        status, reader, writer = await self.request(
+            f"CONNECT {HOST}:443 HTTP/1.1\r\n\r\n".encode()
+        )
+        self.assertEqual(status, b"HTTP/1.1 200 Connection Established")
+        writer.close()
 
 
 class ForwardTest(ProxyCase):
