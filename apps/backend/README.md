@@ -4260,6 +4260,20 @@ Test は `tests/test_agents_bridge.py`（一時 Directory の Unix Socket、Fake
 
 Test は `tests/test_agents_claude_cli.py`（本物の Runtime・Adapter・Bridge・Relay・起動の口、Fake の `claude` = `tests/fake_claude_cli.py`、`execute_session` の代わりの Fake）。
 
+## Egress の Proxy（Issue #208、Decision 0087 の 3、段階 4b の 2）
+
+CLI の Session の Container（`--network none`）から Provider へ出る唯一の道の `paw-egress` です（[`deploy/egress/paw_egress.py`](deploy/egress/paw_egress.py)、標準ライブラリだけ）。配備は [`deploy/egress/README.md`](deploy/egress/README.md)。Unix Socket だけで受け、`CONNECT <許可した Host 名>:443` だけを、Proxy 自身が引いた Global な Address にだけつなぎ、TLS はそのまま中継します（Credential を足さない）。Container の中の転送（`paw_egress.py forward`）が `127.0.0.1:<Port>` を Socket につなぎ、CLI には `HTTPS_PROXY` を渡します。nftables の例（`paw-egress.nft`）は、その Account の外への通信を DNS と Global な Address の TCP 443 に絞ります。**CLI の Runtime はまだ使いません**（後の PR）。Test は `tests/test_egress_proxy.py`。
+
+## CLI の Session の PAW の Tool（MCP の Bridge。Issue #208、Decision 0083 の 6、段階 4b の 3a）
+
+CLI（Claude Code・Codex）は組み込みの Tool を止めて動かし（Decision 0087 の 4）、使える Tool は PAW の Tool だけです。**CLI の Runtime はまだありません**（後の PR）。
+
+- **`agents/toolkit.py` の `NodeToolkit`**: Local の Model の Loop（`local.py`）にあった Node の試行の Tool（`bash`・`str_replace`・`write_file`・`submit`、Planner の `submit_plan`）と、その承認の扱い・`submit` の直させ方・Commit を、そのまま取り出したもの。`LocalAgentRuntime` はこれを使い、振る舞いは変わりません（`tests/test_agents_local.py` はそのまま通る）。
+- **`agents/bridge.py` の `McpBridge`**: その Toolkit を MCP の Server（stdio の枠組み = 1 行 1 つの JSON-RPC 2.0）として Session の Directory の Unix Socket（0660）で出す。最初の 1 行の Handshake の Token（定数時間の比較）が合うまで何も答えず、同時に 1 接続だけ。`initialize`・`ping`・`tools/list`・`tools/call` だけを答え、呼び出しは 1 つずつ Toolkit（Tool Broker）を通す。`submit` の成功（`outcome`）と試行の失敗（`failure`。`RuntimeFailure`・`NodeStopped` など）で終わり（`ended`）、その後の呼び出しは拒否する。呼び出しの引数・結果は Log に書かない。
+- **`deploy/cli-session/paw_mcp_relay.py`**（標準ライブラリだけ）: CLI の Container の中で CLI が起動する MCP の Server の Command。Mount された Socket につなぎ、Token を File から読んで Handshake を送り、あとは CLI の stdin / stdout を行ごとに中継する。
+
+Test は `tests/test_agents_bridge.py`（一時 Directory の Unix Socket、Fake の Toolkit と本物の `NodeToolkit`、本物の Relay の Program）。
+
 ## Tool Broker のファイル・Shell・Git の Tool と Sandbox（Issue #208、Decision 0083 の段階 2）
 
 `paw_backend/sandbox/` は、Local の Model の Tool loop（段階 3 の `LocalAgentRuntime`）が Benchmark の `bash`・`str_replace`・`write_file` を Tool Broker を通して動かすための Tool と、その実行先の Sandbox です（Decision 0083 の 2・6・8、Approved）。**まだ本番の組み立てには配線していません**（Runtime と一緒に段階 3 で `ToolRunner(execution_timeout=300)` に `ToolExecutors({...WorkingSetExecutor..., ...RepoToolExecutor...})` を渡します）。配備と Server の確認は [`deploy/sandbox/README.md`](deploy/sandbox/README.md)。
