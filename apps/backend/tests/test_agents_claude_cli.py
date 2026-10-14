@@ -25,7 +25,7 @@ from pathlib import Path
 
 from paw_backend.agents.claude_cli import ClaudeCliRuntime, ClaudeSessionAdapter
 from paw_backend.agents.claude_stream import ClaudeStream, StreamRefused, paw_tool_names
-from paw_backend.agents.cli_session import SubprocessLauncher
+from paw_backend.agents.cli_session import SubprocessLauncher, UnitNotStoppedError
 from paw_backend.connections import (
     AgentSessionRequest,
     Secret,
@@ -289,6 +289,121 @@ class LauncherTest(unittest.IsolatedAsyncioTestCase):
         pid = int(marker.read_text())
         with self.assertRaises(ProcessLookupError):
             os.kill(pid, 0)
+
+
+class UnstoppedTest(ClaudeCase):
+    async def test_a_cli_that_cannot_be_stopped_keeps_its_directory(self):
+        class StuckLauncher(SubprocessLauncher):
+            async def start(self, launch):
+                process = await super().start(launch)
+                real_stop = process.stop
+
+                async def stop():
+                    await real_stop()  # (the test's process does end)
+                    raise OSError("the session's unit could not be stopped")
+
+                process.stop = stop
+                return process
+
+        def adapter():
+            return ClaudeSessionAdapter(
+                StuckLauncher(),
+                executable=(
+                    sys.executable,
+                    "-I",
+                    str(FAKE),
+                    "--scenario",
+                    str(self.scenario),
+                    "--report",
+                    str(self.report),
+                ),
+            )
+
+        self.adapter = adapter
+        outcome = await self.run_node(
+            [{"call": "submit", "arguments": {"summary": "s"}}, {"sleep": 30}]
+        )
+        self.assertEqual(len(list(self.sessions.iterdir())), 1)  # kept
+        self.assertIsNone(outcome.result)
+        self.assertEqual(outcome.error_class, "AdapterError")
+
+    async def test_a_stop_interrupted_by_cancellation_keeps_its_directory(self):
+        # The session's deadline cancels the attempt while the adapter is
+        # stopping the CLI (a slow systemctl stop): the stop is finished
+        # first, it fails, so the files stay; the cancellation goes on.
+        stopping = asyncio.Event()
+
+        class SlowStuckLauncher(SubprocessLauncher):
+            async def start(self, launch):
+                process = await super().start(launch)
+                real_stop = process.stop
+
+                async def stop():
+                    stopping.set()
+                    await asyncio.sleep(0.5)
+                    await real_stop()  # (the test's process does end)
+                    raise UnitNotStoppedError("the session's unit could not be stopped")
+
+                process.stop = stop
+                return process
+
+        def adapter():
+            return ClaudeSessionAdapter(
+                SlowStuckLauncher(),
+                executable=(
+                    sys.executable,
+                    "-I",
+                    str(FAKE),
+                    "--scenario",
+                    str(self.scenario),
+                    "--report",
+                    str(self.report),
+                ),
+            )
+
+        self.adapter = adapter
+        running = asyncio.create_task(
+            self.run_node(
+                [{"call": "submit", "arguments": {"summary": "s"}}, {"sleep": 30}]
+            )
+        )
+        await asyncio.wait_for(stopping.wait(), 20)
+        running.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await running
+        self.assertEqual(len(list(self.sessions.iterdir())), 1)  # kept
+
+    async def test_a_start_whose_cleanup_cannot_stop_keeps_its_directory(self):
+        # The start failed (a timeout, a cancellation) and the stops that
+        # cleaned it up failed too: the unit may still run with the session's
+        # files mounted, although no process was handed to the adapter.
+        class StartStuckLauncher(SubprocessLauncher):
+            async def start(self, launch):
+                process = await super().start(launch)
+                await process.stop()  # (the test's process does end)
+                raise UnitNotStoppedError(
+                    "the session's unit could not be stopped"
+                ) from TimeoutError()
+
+        def adapter():
+            return ClaudeSessionAdapter(
+                StartStuckLauncher(),
+                executable=(
+                    sys.executable,
+                    "-I",
+                    str(FAKE),
+                    "--scenario",
+                    str(self.scenario),
+                    "--report",
+                    str(self.report),
+                ),
+            )
+
+        self.adapter = adapter
+        outcome = await self.run_node([{"sleep": 30}])
+        self.assertEqual(len(list(self.sessions.iterdir())), 1)  # kept
+        self.assertIsNone(outcome.result)
+        self.assertEqual(outcome.error_class, "AdapterError")
 
 
 class ReportTest(ClaudeCase):

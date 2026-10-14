@@ -62,8 +62,10 @@ from paw_backend.agents.cli_session import (
     CliLaunch,
     CliLauncher,
     CliSessionSpec,
+    UnitNotStoppedError,
     create_session,
     remove_session,
+    stop_through_cancellation,
 )
 from paw_backend.agents.cloud import CloudGate
 from paw_backend.agents.failures import ErrorClassifier, Failure, RuntimeFailure
@@ -124,6 +126,10 @@ class ClaudeAttachment:
     tools: frozenset[str]
     system_prompt: str = field(repr=False)
     notes: SessionNotes = field(default_factory=SessionNotes, compare=False)
+    # Set by the adapter when the CLI could not be stopped: the runtime then
+    # keeps the session's directory (the unit still has it mounted) for the
+    # operator, instead of deleting it under a running session.
+    unstopped: list[bool] = field(default_factory=list, repr=False)
 
 
 class ClaudeSessionAdapter:
@@ -203,16 +209,22 @@ class ClaudeSessionAdapter:
         attachment = request.attachment
         if not isinstance(attachment, ClaudeAttachment):
             raise TypeError("a Claude session needs its attachment")
-        process = await self._launcher.start(
-            CliLaunch(
-                self.arguments(attachment, request.model),
-                self.environment(attachment),
-                secret,
-                TOKEN_ENV,
-                request.prompt.encode("utf-8"),
-                attachment.spec,
+        try:
+            process = await self._launcher.start(
+                CliLaunch(
+                    self.arguments(attachment, request.model),
+                    self.environment(attachment),
+                    secret,
+                    TOKEN_ENV,
+                    request.prompt.encode("utf-8"),
+                    attachment.spec,
+                )
             )
-        )
+        except UnitNotStoppedError:
+            # The start failed and its cleanup could not stop the unit: it
+            # may run with the session's files although no process came back.
+            attachment.unstopped.append(True)
+            raise
         stream = ClaudeStream(attachment.tools)
         totals: Totals | None = None
         failure: FailureCode | None = None
@@ -266,7 +278,16 @@ class ClaudeSessionAdapter:
                     totals = item
         finally:
             ended.cancel()
-            await process.stop()
+            # A cancellation (the session's deadline) that comes during the
+            # stop waits for it: a stop that did not end may leave the CLI
+            # running, and then its files must stay.
+            failed, cancelled = await stop_through_cancellation(process)
+            if failed is not None:
+                attachment.unstopped.append(True)
+            if cancelled:
+                raise asyncio.CancelledError
+            if failed is not None:
+                raise failed
         code = await process.wait()
         if failure is None and not stream.initialized:
             failure = FailureCode.INVALID_RESPONSE
@@ -360,6 +381,7 @@ class ClaudeCliRuntime:
         system, task = node_prompts(toolkit)
         spec = create_session(self._base, self._relay)
         bridge = McpBridge(toolkit, token=spec.token)
+        attachment = None
         try:
             server = await bridge.serve(str(spec.socket_path))
             try:
@@ -384,11 +406,22 @@ class ClaudeCliRuntime:
                     )
                 except RuntimeFailure as refused:
                     return ErrorClassifier.outcome(refused.failure, fallback=fallback)
+                except Exception:
+                    if not attachment.unstopped:
+                        raise
+                    result = None  # answered below: the CLI did not stop
             finally:
                 server.close()
                 await server.wait_closed()
         finally:
-            remove_session(spec)
+            if attachment is not None and attachment.unstopped:
+                # The CLI's unit did not stop: its directory stays (the unit
+                # has it mounted); the operator stops the unit and removes it.
+                logger.error("A CLI session could not be stopped; its files stay")
+            else:
+                remove_session(spec)
+        if attachment is not None and attachment.unstopped:
+            return ErrorClassifier.outcome(Failure.OTHER)
         if bridge.failure is not None:
             return _ended(bridge.failure)
         if bridge.outcome is not None:
