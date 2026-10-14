@@ -1,0 +1,573 @@
+"""Codex CLI as a node's runtime, through ``codex app-server`` (Decision 0083,
+1, 5, 6 and 8; Decision 0087, 4; Decision 0089; #208).
+
+:class:`CodexCliRuntime` is an orchestrator ``AgentRuntime``, as
+:class:`~paw_backend.agents.claude_cli.ClaudeCliRuntime`: for one node attempt
+it makes the session's directory, serves the node's tools on its MCP bridge and
+sends the session through :class:`~paw_backend.agents.cloud.CloudGate`. The
+answer is the bridge's (the ``submit``'s outcome, or the failure that ended the
+attempt); a session that ended without either is ``no_submission``.
+
+:class:`CodexSessionAdapter` is the connection's session adapter
+(``ConnectionService(session_adapters={CODEX: ...})``). It writes the session's
+``$CODEX_HOME/config.toml`` (Decision 0089, 2: every default-on tool feature
+off, web search off, the PAW relay as the only MCP server with its tools
+approved: the Tool Broker approves each call), starts ``codex app-server`` and
+talks to it (``codex_app_server.py``):
+
+* a version that is not in the verified list sends nothing (the list is empty
+  until the smoke test of Decision 0089, 2 passes for a version);
+* every growth of the thread's tokens is reported at once (``on_usage``); when
+  the service answers ``False`` the CLI is stopped;
+* an item that can execute (or that the table does not know), a request from
+  the server, a shrinking total: the CLI is stopped (``invalid_response``);
+* when the bridge ends (a ``submit``, a failure of the attempt) the CLI is
+  stopped; ``turn/completed`` ends the session;
+* ``unauthorized`` is an expired credential, the usage and rate limits a rate
+  limit.
+
+The credential (the ChatGPT login's ``auth.json``) is placed into the session's
+``CODEX_HOME`` and collected afterwards by a :class:`CodexCredentials` handler.
+None ships yet: the one-session-per-connection lease and the compare-and-swap
+write-back of a refreshed ``auth.json`` (Decision 0083, 6) come with the
+ChatGPT login after the smoke test (Decision 0087, 5's 4; Decision 0089, 4).
+Without a handler a session is refused before anything starts.
+
+The CLI rung stays disabled at assembly (Decision 0083, 11's 4: until the
+``CloudPolicy`` Decision; the provider's terms are still being confirmed by the
+human; and no version is verified). The launcher here,
+:class:`InteractiveSubprocessLauncher`, runs the CLI as a child process for
+development and the tests; production's launcher must also carry the CLI's
+stdin (``app-server`` is a conversation, not one prompt).
+"""
+
+import asyncio
+import contextlib
+import json
+import logging
+import os
+import re
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Final, Protocol
+
+from paw_backend.agents.bridge import McpBridge
+from paw_backend.agents.claude_cli import NODE_MARGIN_SECONDS, _ended
+from paw_backend.agents.cli_session import (
+    CliSessionSpec,
+    _Subprocess,
+    create_session,
+    remove_session,
+)
+from paw_backend.agents.cloud import CloudGate
+from paw_backend.agents.codex_app_server import (
+    CREDENTIAL_ERRORS,
+    MAX_LINE_BYTES,
+    RATE_ERRORS,
+    VERIFIED_VERSIONS,
+    CodexStream,
+    Ended,
+    Initialized,
+    Ready,
+    StreamRefused,
+    Turn,
+    initialize,
+    notification,
+    thread_start,
+    turn_start,
+)
+from paw_backend.agents.failures import ErrorClassifier, Failure, RuntimeFailure
+from paw_backend.agents.local import node_prompts
+from paw_backend.agents.toolkit import NodeToolkit, ToolkitLimits
+from paw_backend.connections import (
+    AgentSessionRequest,
+    AgentSessionResult,
+    ConnectionKind,
+    FailureCode,
+    Secret,
+    SessionRequest,
+    UsagePurpose,
+)
+from paw_backend.orchestrator.domain import NodeRole
+from paw_backend.orchestrator.runtime import NodeAssignment, NodeOutcome
+from paw_backend.tools.interfaces import require_async_method
+
+logger = logging.getLogger(__name__)
+
+AGENT = "codex"
+CONFIG_NAME = "config.toml"
+CLIENT_VERSION = "1"
+#: The default-on features of ``rust-v0.162.1`` that offer the model a tool or
+#: reach out (``features/src/lib.rs``), all off (Decision 0089, 2). A version
+#: is verified only after its own list was compared and the smoke test saw
+#: exactly the PAW tools in the request.
+DISABLED_FEATURES: Final = (
+    "shell_tool",
+    "unified_exec",
+    "view_image",
+    "sleep_tool",
+    "multi_agent",
+    "apps",
+    "plugins",
+    "remote_plugin",
+    "tool_suggest",
+    "image_generation",
+    "browser_use",
+    "browser_use_external",
+    "browser_use_full_cdp_access",
+    "computer_use",
+    "in_app_browser",
+    "skill_search",
+    "skill_mcp_dependency_install",
+    "hooks",
+    "goals",
+    "guardian_approval",
+    "tool_call_mcp_elicitation",
+    "auth_elicitation",
+    "code_mode_host",
+    "realtime_conversation",
+)
+#: A PAW tool call runs at most 300 seconds (Decision 0083, 8); the CLI waits
+#: a little longer for its answer.
+TOOL_TIMEOUT_SECONDS: Final = 360
+STARTUP_TIMEOUT_SECONDS: Final = 30
+#: ``codex --version`` answers within this time.
+VERSION_SECONDS: Final = 30.0
+_VERSION_LINE = re.compile(r"\b([0-9]+\.[0-9]+\.[0-9]+[0-9A-Za-z.+-]*)")
+
+_PURPOSES = {
+    NodeRole.WORKER: UsagePurpose.CODING,
+    NodeRole.PLANNER: UsagePurpose.CODING,
+    NodeRole.REVIEWER: UsagePurpose.REVIEW,
+    NodeRole.RESEARCHER: UsagePurpose.RESEARCH,
+}
+_FAILURES = {
+    FailureCode.EXPIRED: Failure.CREDENTIAL_EXPIRED,
+    FailureCode.RATE_LIMITED: Failure.RATE_LIMITED,
+    FailureCode.TIMEOUT: Failure.TIMEOUT,
+    FailureCode.INVALID_RESPONSE: Failure.MALFORMED_RESPONSE,
+    FailureCode.UNAVAILABLE: Failure.CONNECTION_UNAVAILABLE,
+}
+
+
+class CodexCredentials(Protocol):
+    """Places the connection's credential in a session's ``CODEX_HOME`` and
+    takes it back afterwards (the ChatGPT login's later change: the lease and
+    the write-back of a refreshed ``auth.json``, Decision 0083, 6)."""
+
+    async def place(self, secret: Secret, codex_home: Path) -> None: ...
+
+    async def collect(self, codex_home: Path) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class CodexLaunch:
+    """One ``codex app-server`` to start. ``env`` holds no secret."""
+
+    argv: tuple[str, ...]
+    env: Mapping[str, str]
+    spec: CliSessionSpec
+
+
+class CodexProcess(Protocol):
+    stdin: asyncio.StreamWriter
+    stdout: asyncio.StreamReader
+
+    async def wait(self) -> int: ...
+
+    async def stop(self) -> None: ...
+
+
+class CodexLauncher(Protocol):
+    async def start(self, launch: CodexLaunch) -> CodexProcess: ...
+
+
+class _Interactive(_Subprocess):
+    def __init__(self, process: asyncio.subprocess.Process) -> None:
+        super().__init__(process)
+        assert process.stdin is not None
+        self.stdin = process.stdin
+
+
+class InteractiveSubprocessLauncher:
+    """Starts the CLI as a child process with its stdin kept open
+    (development, the tests). Only ``PATH`` and the launch's ``env`` are in its
+    environment; its stderr is not read. Stopping is the process group's
+    SIGTERM, five seconds, SIGKILL (``cli_session``)."""
+
+    def __init__(self, *, path: str = "/usr/bin:/bin") -> None:
+        self._path = path
+
+    async def start(self, launch: CodexLaunch) -> CodexProcess:
+        process = await asyncio.create_subprocess_exec(
+            *launch.argv,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+            env={"PATH": self._path, **launch.env},
+            cwd=launch.spec.directory,
+            start_new_session=True,
+            limit=MAX_LINE_BYTES,
+        )
+        return _Interactive(process)
+
+
+@dataclass(frozen=True, slots=True)
+class CodexAttachment:
+    """What the runtime hands its adapter through the service
+    (``SessionRequest.attachment``)."""
+
+    spec: CliSessionSpec
+    bridge: McpBridge = field(repr=False)
+    tools: frozenset[str]
+    system_prompt: str = field(repr=False)
+
+
+def session_config(spec: CliSessionSpec, tools: Iterable[str]) -> str:
+    """The session's ``config.toml`` (Decision 0089, 2; the auth settings of
+    Decision 0087, 4)."""
+    relay = spec.relay_command
+    paw = {
+        "command": relay[0],
+        "args": [
+            *relay[1:],
+            "--socket",
+            str(spec.socket_path),
+            "--token-file",
+            str(spec.token_path),
+        ],
+        "required": True,
+        "enabled_tools": sorted(tools),
+        "default_tools_approval_mode": "approve",
+        "startup_timeout_sec": STARTUP_TIMEOUT_SECONDS,
+        "tool_timeout_sec": TOOL_TIMEOUT_SECONDS,
+    }
+    tables: list[tuple[str, Mapping[str, object]]] = [
+        ("analytics", {"enabled": False}),
+        (
+            "otel",
+            {"exporter": "none", "trace_exporter": "none", "metrics_exporter": "none"},
+        ),
+        ("history", {"persistence": "none"}),
+        ("tools.update_plan", {"enabled": False}),
+        ("tools.experimental_request_user_input", {"enabled": False}),
+        ("features", {name: False for name in DISABLED_FEATURES}),
+        ("mcp_servers.paw", paw),
+    ]
+    lines = [
+        _toml_pair("cli_auth_credentials_store", "file"),
+        _toml_pair("forced_login_method", "chatgpt"),
+        _toml_pair("web_search", "disabled"),
+        _toml_pair("check_for_update_on_startup", False),
+    ]
+    for name, values in tables:
+        lines.append(f"\n[{name}]")
+        lines.extend(_toml_pair(key, value) for key, value in values.items())
+    return "\n".join(lines) + "\n"
+
+
+def _toml_pair(key: str, value: object) -> str:
+    return f"{key} = {_toml_value(value)}"
+
+
+def _toml_value(value: object) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, str):
+        # A JSON string is a TOML basic string (its escapes are TOML's).
+        return json.dumps(value)
+    if isinstance(value, Sequence):
+        return "[" + ", ".join(_toml_value(v) for v in value) + "]"
+    raise TypeError("not a TOML value")
+
+
+class CodexSessionAdapter:
+    """See the module. ``verified_versions``: the CLI versions that may run
+    (:data:`~.codex_app_server.VERIFIED_VERSIONS`, empty, unless a test or a
+    later verified release says otherwise)."""
+
+    kind = ConnectionKind.CODEX
+
+    def __init__(
+        self,
+        launcher: CodexLauncher,
+        *,
+        credentials: CodexCredentials | None = None,
+        executable: tuple[str, ...] = ("codex",),
+        proxy_url: str | None = None,
+        verified_versions: frozenset[str] = VERIFIED_VERSIONS,
+    ) -> None:
+        require_async_method(launcher, "start", 1)
+        if credentials is not None:
+            require_async_method(credentials, "place", 2)
+            require_async_method(credentials, "collect", 1)
+        if not executable or not all(isinstance(p, str) and p for p in executable):
+            raise ValueError("executable")
+        self._launcher = launcher
+        self._credentials = credentials
+        self._executable = executable
+        self._proxy_url = proxy_url
+        self._verified = frozenset(verified_versions)
+
+    def __repr__(self) -> str:
+        return "CodexSessionAdapter()"
+
+    def arguments(self) -> tuple[str, ...]:
+        return (*self._executable, "app-server", "--listen", "stdio://")
+
+    def environment(self, attachment: CodexAttachment) -> dict[str, str]:
+        env = {
+            "HOME": str(attachment.spec.directory),
+            "CODEX_HOME": str(attachment.spec.config_dir),
+        }
+        if self._proxy_url is not None:
+            env["HTTPS_PROXY"] = self._proxy_url
+        return env
+
+    async def run_session(
+        self, secret: Secret, request: AgentSessionRequest
+    ) -> AgentSessionResult:
+        attachment = request.attachment
+        if not isinstance(attachment, CodexAttachment):
+            raise TypeError("a Codex session needs its attachment")
+        if self._credentials is None:
+            # No way to hand the login over yet (Decision 0089, 4).
+            return AgentSessionResult(failure=FailureCode.UNAVAILABLE)
+        # The version first, without any credential: ``app-server`` may reach
+        # the provider as it starts with a login (Decision 0089, 2: an
+        # unverified version sends nothing).
+        version = await self._version(attachment)
+        if version is None or version not in self._verified:
+            logger.warning("Codex session refused: version")
+            return AgentSessionResult(failure=FailureCode.INVALID_RESPONSE)
+        codex_home = attachment.spec.config_dir
+        _write(
+            codex_home / CONFIG_NAME, session_config(attachment.spec, attachment.tools)
+        )
+        try:
+            await self._credentials.place(secret, codex_home)
+            return await self._converse(request, attachment)
+        finally:
+            await asyncio.shield(self._collect(codex_home))
+
+    async def _version(self, attachment: CodexAttachment) -> str | None:
+        """``codex --version``'s version (``codex-cli 0.162.1``), or ``None``."""
+        process = await self._launcher.start(
+            CodexLaunch(
+                (*self._executable, "--version"),
+                self.environment(attachment),
+                attachment.spec,
+            )
+        )
+        try:
+            async with asyncio.timeout(VERSION_SECONDS):
+                line = await process.stdout.readline()
+        except (TimeoutError, ValueError):
+            line = b""
+        finally:
+            await process.stop()
+        match = _VERSION_LINE.search(line.decode("ascii", "replace"))
+        return match.group(1) if match else None
+
+    async def _collect(self, codex_home: Path) -> None:
+        assert self._credentials is not None
+        try:
+            await self._credentials.collect(codex_home)
+        except Exception as error:
+            logger.error(
+                "Codex credential could not be collected: exception_type=%s",
+                type(error).__name__,
+            )
+
+    async def _converse(
+        self, request: AgentSessionRequest, attachment: CodexAttachment
+    ) -> AgentSessionResult:
+        process = await self._launcher.start(
+            CodexLaunch(self.arguments(), self.environment(attachment), attachment.spec)
+        )
+        stream = CodexStream(attachment.tools, self._verified)
+        ended: Ended | None = None
+        failure: FailureCode | None = None
+        stopped = False
+        bridge_ended = asyncio.create_task(attachment.bridge.ended.wait())
+        try:
+            await _send(process, initialize(CLIENT_VERSION))
+            while True:
+                reading = asyncio.create_task(process.stdout.readline())
+                done, _ = await asyncio.wait(
+                    {reading, bridge_ended}, return_when=asyncio.FIRST_COMPLETED
+                )
+                if reading not in done:
+                    reading.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await reading
+                    break  # the bridge ended: a submit, or the attempt failed
+                line = reading.result()
+                if not line:
+                    break
+                try:
+                    item = stream.feed(line)
+                except StreamRefused as refused:
+                    logger.warning("Codex session refused: %s", refused.reason)
+                    failure = FailureCode.INVALID_RESPONSE
+                    break
+                if isinstance(item, Initialized):
+                    await _send(process, notification("initialized"))
+                    await _send(
+                        process, thread_start(request.model, attachment.system_prompt)
+                    )
+                elif isinstance(item, Ready):
+                    await _send(process, turn_start(item.thread_id, request.prompt))
+                elif isinstance(item, Turn):
+                    if not await request.on_usage(
+                        item.input_tokens, item.output_tokens
+                    ):
+                        stopped = True
+                        break
+                elif isinstance(item, Ended):
+                    ended = item
+                    break
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # the CLI went away; its exit says the rest
+        finally:
+            bridge_ended.cancel()
+            await process.stop()
+        code = await process.wait()
+        if failure is None and not stream.initialized:
+            failure = FailureCode.INVALID_RESPONSE
+        if failure is None and ended is not None and ended.status != "completed":
+            if ended.error in CREDENTIAL_ERRORS:
+                failure = FailureCode.EXPIRED
+            elif ended.error in RATE_ERRORS:
+                failure = FailureCode.RATE_LIMITED
+            else:
+                failure = FailureCode.INTERNAL_ERROR
+        if (
+            failure is None
+            and ended is None
+            and code != 0
+            and not stopped
+            and not attachment.bridge.ended.is_set()
+        ):
+            failure = FailureCode.INTERNAL_ERROR
+        # The totals are the thread's as reported; known once the turn ended
+        # (or, short of that, when every report came: not on a crash).
+        known = ended is not None
+        input_tokens, output_tokens = stream.totals
+        return AgentSessionResult(
+            submission=None,
+            input_tokens=input_tokens if known else None,
+            output_tokens=output_tokens if known else None,
+            failure=failure,
+        )
+
+
+async def _send(process: CodexProcess, line: bytes) -> None:
+    process.stdin.write(line)
+    await process.stdin.drain()
+
+
+def _write(path: Path, text: str) -> None:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o640)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(text)
+
+
+class CodexCliRuntime:
+    """See the module. ``cloud_policy``: the deployment's ``CloudPolicy``
+    (``None``: every session is refused)."""
+
+    def __init__(
+        self,
+        *,
+        model: str,
+        session_base: Path,
+        relay_command: tuple[str, ...],
+        cloud_policy: object | None = None,
+        limits: ToolkitLimits | None = None,
+        node_seconds: float = 1800.0,
+    ) -> None:
+        if not isinstance(model, str) or not model:
+            raise ValueError("model")
+        if node_seconds <= NODE_MARGIN_SECONDS:
+            raise ValueError("node_seconds")
+        self._model = model
+        self._base = Path(session_base)
+        self._relay = tuple(relay_command)
+        self._gate = CloudGate(cloud_policy)
+        self._limits = limits
+        self._timeout = float(node_seconds) - NODE_MARGIN_SECONDS
+
+    def __repr__(self) -> str:
+        return f"CodexCliRuntime(model={self._model!r})"
+
+    async def run_node(self, assignment: NodeAssignment) -> NodeOutcome:
+        return await self._run(assignment, fallback=False)
+
+    async def run_as_fallback(self, assignment: NodeAssignment) -> NodeOutcome:
+        """``HybridRuntime``'s cloud path: a refused gate is
+        ``ComputeUnavailable`` (the node stays on its local rung)."""
+        return await self._run(assignment, fallback=True)
+
+    async def _run(self, assignment: NodeAssignment, *, fallback: bool) -> NodeOutcome:
+        if assignment.role is NodeRole.PLANNER:
+            # Decision 0083, 1: a CLI is never on the planner's ladder.
+            return ErrorClassifier.outcome(
+                Failure.CLOUD_POLICY_DENIED, fallback=fallback
+            )
+        toolkit = NodeToolkit(assignment, self._limits)
+        system, task = node_prompts(toolkit)
+        spec = create_session(self._base, self._relay)
+        bridge = McpBridge(toolkit, token=spec.token)
+        try:
+            server = await bridge.serve(str(spec.socket_path))
+            try:
+                tools = frozenset(t["function"]["name"] for t in toolkit.tools)
+                request = SessionRequest(
+                    self._model,
+                    _PURPOSES[assignment.role],
+                    task,
+                    self._timeout,
+                    attachment=CodexAttachment(spec, bridge, tools, system),
+                )
+                try:
+                    result = await self._gate.session(
+                        assignment,
+                        kind=ConnectionKind.CODEX,
+                        request=request,
+                        agent=AGENT,
+                        model=self._model,
+                    )
+                except RuntimeFailure as refused:
+                    return ErrorClassifier.outcome(refused.failure, fallback=fallback)
+            finally:
+                server.close()
+                await server.wait_closed()
+        finally:
+            remove_session(spec)
+        if bridge.failure is not None:
+            return _ended(bridge.failure)
+        if bridge.outcome is not None:
+            return bridge.outcome
+        failure = getattr(result, "failure", None)
+        if failure is not None:
+            return ErrorClassifier.outcome(_FAILURES.get(failure, Failure.OTHER))
+        return ErrorClassifier.outcome(Failure.NO_SUBMISSION)
+
+
+__all__ = [
+    "AGENT",
+    "DISABLED_FEATURES",
+    "CodexAttachment",
+    "CodexCliRuntime",
+    "CodexCredentials",
+    "CodexLaunch",
+    "CodexLauncher",
+    "CodexProcess",
+    "CodexSessionAdapter",
+    "InteractiveSubprocessLauncher",
+    "session_config",
+]
