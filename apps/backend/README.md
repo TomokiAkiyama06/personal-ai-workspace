@@ -4238,6 +4238,9 @@ Test は `tests/test_connections_session.py`（実 PostgreSQL: 最低の枠、Tu
 - `PAW_SECRET_STORE_DIR` を設定したのに鍵が渡されていない・Directory が Backend の User の 0700 でない・Release / Recovery / Projection / Web の配布物と重なるときは、Backend は起動しない。Backup と Recovery には入れない（Restore の後は入れ直す）。
 
 Test は `tests/test_connections_secret_store.py`（File だけ: 暗号化・認証データ・Compare-and-swap・Lock・掃除・Directory と鍵の確認）、`test_connections_credential_store.py`（実 PostgreSQL: 登録の確認・置き換えと切断での削除・`rotate_credential`・掃除の参照）、`test_credentials_cli.py`（管理 Command と Audit）、`test_connections_reaper.py`（周期の掃除）。
+## Egress の Proxy（Issue #208、Decision 0087 の 3、段階 4b の 2）
+
+CLI の Session の Container（`--network none`）から Provider へ出る唯一の道の `paw-egress` です（[`deploy/egress/paw_egress.py`](deploy/egress/paw_egress.py)、標準ライブラリだけ）。配備は [`deploy/egress/README.md`](deploy/egress/README.md)。Unix Socket だけで受け、`CONNECT <許可した Host 名>:443` だけを、Proxy 自身が引いた Global な Address にだけつなぎ、TLS はそのまま中継します（Credential を足さない）。Container の中の転送（`paw_egress.py forward`）が `127.0.0.1:<Port>` を Socket につなぎ、CLI には `HTTPS_PROXY` を渡します。nftables の例（`paw-egress.nft`）は、その Account の外への通信を DNS と Global な Address の TCP 443 に絞ります。**CLI の Runtime はまだ使いません**（後の PR）。Test は `tests/test_egress_proxy.py`。
 
 ## Tool Broker のファイル・Shell・Git の Tool と Sandbox（Issue #208、Decision 0083 の段階 2）
 
