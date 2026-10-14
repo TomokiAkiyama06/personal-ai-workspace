@@ -105,7 +105,8 @@ def main() -> int:
                     "usage": {"output_tokens": output_tokens},
                 }
                 out({"type": "stream_event", "event": delta})
-            out({"type": "stream_event", "event": {"type": "message_stop"}})
+            if not action.get("no_stop"):
+                out({"type": "stream_event", "event": {"type": "message_stop"}})
         elif "call" in action:
             answer = rpc(
                 "tools/call",

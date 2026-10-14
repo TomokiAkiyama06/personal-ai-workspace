@@ -14,7 +14,10 @@ token, and from then on copies the CLI's stdin and stdout. The bridge:
 * checks the token (constant-time) before anything else, and closes the
   connection on a wrong one; serves one authenticated connection at a time;
 * answers ``initialize``, ``ping``, ``tools/list`` and ``tools/call``
-  (anything else is ``Method not found``; notifications are ignored);
+  (anything else is ``Method not found``; notifications are ignored, except
+  ``notifications/cancelled``: as MCP's cancellation says (2025-06-18,
+  ``basic/utilities/cancellation``), the request it names is stopped and gets
+  no response; an unknown, finished or malformed one is ignored);
 * runs the calls one after another (the toolkit is one attempt's); a call's
   answer is the toolkit's text, ``isError`` for a refused call;
 * keeps what ends the attempt: a successful ``submit`` (:attr:`outcome`) or a
@@ -138,6 +141,8 @@ class McpBridge:
     ) -> None:
         sending = asyncio.Lock()
         pending: set[asyncio.Task] = set()
+        # The requests still being answered, by their id (for a cancellation).
+        running: dict[str | int, asyncio.Task] = {}
 
         async def send(message: Mapping[str, Any]) -> None:
             data = json.dumps(message, ensure_ascii=False).encode() + b"\n"
@@ -166,11 +171,25 @@ class McpBridge:
                 except ValueError:
                     await send(_error(None, _PARSE_ERROR, "Parse error"))
                     continue
+                if _is_cancellation(message):
+                    task = running.get(_cancelled_id(message))
+                    if task is not None:
+                        # The call stops (a cancellation of the call is not
+                        # the attempt's end) and its answer is never sent.
+                        logger.info("MCP bridge: a request was cancelled")
+                        task.cancel()
+                    continue
                 # Each request in its own task (a ``ping`` is answered while a
                 # long tool call runs); the calls themselves take turns.
                 task = asyncio.create_task(answer(message))
                 pending.add(task)
                 task.add_done_callback(pending.discard)
+                request_id = _request_id(message)
+                if request_id is not None and request_id not in running:
+                    running[request_id] = task
+                    task.add_done_callback(
+                        lambda _, key=request_id: running.pop(key, None)
+                    )
         finally:
             for task in list(pending):
                 task.cancel()
@@ -249,6 +268,36 @@ class McpBridge:
                 self.outcome = outcome
                 self.ended.set()
             return _text(text, error=False)
+
+
+def _valid_id(value: Any) -> bool:
+    return isinstance(value, str | int) and not isinstance(value, bool)
+
+
+def _request_id(message: Any) -> str | int | None:
+    """The id of a request that may be cancelled (``initialize`` may not:
+    MCP's cancellation), or ``None``."""
+    if not isinstance(message, dict) or message.get("method") in (None, "initialize"):
+        return None
+    request_id = message.get("id")
+    return request_id if _valid_id(request_id) else None
+
+
+def _is_cancellation(message: Any) -> bool:
+    return (
+        isinstance(message, dict)
+        and message.get("jsonrpc") == "2.0"
+        and message.get("method") == "notifications/cancelled"
+        and "id" not in message
+    )
+
+
+def _cancelled_id(message: Mapping[str, Any]) -> str | int | None:
+    params = message.get("params")
+    if not isinstance(params, dict):
+        return None
+    request_id = params.get("requestId")
+    return request_id if _valid_id(request_id) else None
 
 
 def _result(request_id: Any, result: Mapping[str, Any]) -> dict[str, Any]:

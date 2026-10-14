@@ -447,5 +447,63 @@ class ForwardTest(ProxyCase):
         writer.close()
 
 
+class ForwardHalfCloseTest(unittest.IsolatedAsyncioTestCase):
+    """A half-close (``write_eof``) on one side is passed on as one: the
+    other direction stays open until it ends too."""
+
+    async def asyncSetUp(self):
+        self.directory = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.directory, ignore_errors=True)
+        self.socket_path = str(self.directory / "upstream.sock")
+        self.received = asyncio.get_running_loop().create_future()
+
+    async def serve(self, handler):
+        upstream = await asyncio.start_unix_server(handler, path=self.socket_path)
+        self.addAsyncCleanup(_close, upstream)
+        server = await egress.forward(0, self.socket_path)
+        self.addAsyncCleanup(_close, server)
+        return server.sockets[0].getsockname()[1]
+
+    async def test_the_answer_after_the_clients_eof_still_arrives(self):
+        async def answer_after_eof(reader, writer):
+            request = await reader.read()  # up to the client's EOF
+            await asyncio.sleep(0.1)
+            writer.write(b"answer to " + request)
+            await writer.drain()
+            writer.close()
+
+        port = await self.serve(answer_after_eof)
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        writer.write(b"question")
+        await writer.drain()
+        writer.write_eof()
+        self.assertEqual(
+            await asyncio.wait_for(reader.read(), 5), b"answer to question"
+        )
+        writer.close()
+
+    async def test_the_client_can_still_send_after_the_upstreams_eof(self):
+        async def eof_first(reader, writer):
+            writer.write(b"hello")
+            await writer.drain()
+            writer.write_eof()
+            self.received.set_result(await reader.read())
+            writer.close()
+
+        port = await self.serve(eof_first)
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        self.assertEqual(await asyncio.wait_for(reader.read(), 5), b"hello")
+        writer.write(b"late bytes")
+        await writer.drain()
+        writer.write_eof()
+        self.assertEqual(await asyncio.wait_for(self.received, 5), b"late bytes")
+        writer.close()
+
+
+async def _close(server):
+    server.close()
+    await server.wait_closed()
+
+
 if __name__ == "__main__":
     unittest.main()

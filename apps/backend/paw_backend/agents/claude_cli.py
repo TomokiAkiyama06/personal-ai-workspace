@@ -19,9 +19,12 @@ launcher, never in an argument or a log), the task on stdin, and reads its
 ``stream-json`` (``claude_stream.py``):
 
 * ``system/init`` must show exactly the PAW tools (and ``EndConversation``)
-  and the ``paw`` server connected, or the CLI is stopped (``invalid_response``);
+  and the ``paw`` server connected, or the CLI is stopped (``invalid_response``;
+  the node's failure is ``unsupported_cli``, which escalates: Decision 0087, 4);
 * every model call is reported at once (``on_usage``); when the service
-  answers ``False`` (the budget, the lease, the run) the CLI is stopped;
+  answers ``False`` (the budget, the lease, the run) the CLI is stopped; a
+  ``result`` or the end of the output while a call is still open (started,
+  not stopped, so never reported) is ``invalid_response``;
 * when the bridge ends (a ``submit``, or a failure of the attempt) the CLI is
   stopped;
 * an ``api_retry`` for an authentication failure stops it as ``expired``;
@@ -101,6 +104,16 @@ _FAILURES = {
 }
 
 
+@dataclass(slots=True)
+class SessionNotes:
+    """What the adapter tells the runtime beside the service's result:
+    ``unsupported``: the CLI's ``system/init`` was refused (its version or
+    setup is not one this backend runs; the service records it as
+    ``invalid_response``)."""
+
+    unsupported: bool = False
+
+
 @dataclass(frozen=True, slots=True)
 class ClaudeAttachment:
     """What the runtime hands its adapter through the service
@@ -110,6 +123,7 @@ class ClaudeAttachment:
     bridge: McpBridge = field(repr=False)
     tools: frozenset[str]
     system_prompt: str = field(repr=False)
+    notes: SessionNotes = field(default_factory=SessionNotes, compare=False)
 
 
 class ClaudeSessionAdapter:
@@ -221,12 +235,17 @@ class ClaudeSessionAdapter:
                     break  # the bridge ended: a submit, or the attempt failed
                 line = reading.result()
                 if not line:
+                    if stream.turn_open:
+                        # A call started and was never reported.
+                        logger.warning("Claude session refused: turn_open")
+                        failure = FailureCode.INVALID_RESPONSE
                     break
                 try:
                     item = stream.feed(line)
                 except StreamRefused as refused:
                     logger.warning("Claude session refused: %s", refused.reason)
                     failure = FailureCode.INVALID_RESPONSE
+                    attachment.notes.unsupported = refused.unsupported
                     break
                 if isinstance(item, Turn):
                     if not stream.initialized:
@@ -311,12 +330,25 @@ class ClaudeCliRuntime:
         return f"ClaudeCliRuntime(model={self._model!r})"
 
     async def run_node(self, assignment: NodeAssignment) -> NodeOutcome:
-        return await self._run(assignment, fallback=False)
+        return await self._classified(assignment, fallback=False)
 
     async def run_as_fallback(self, assignment: NodeAssignment) -> NodeOutcome:
         """``HybridRuntime``'s cloud path: a refused gate is
         ``ComputeUnavailable`` (the node stays on its local rung)."""
-        return await self._run(assignment, fallback=True)
+        return await self._classified(assignment, fallback=True)
+
+    async def _classified(
+        self, assignment: NodeAssignment, *, fallback: bool
+    ) -> NodeOutcome:
+        """The runtime's boundary, as the local runtime's: an exception of the
+        session's setup or launcher (a missing CLI, a directory that cannot
+        be made) is classified (``ErrorClassifier.from_error``: its class and
+        text are never read); ``NodeStopped``, a cancellation and
+        ``MemoryError`` pass."""
+        try:
+            return await self._run(assignment, fallback=fallback)
+        except Exception as error:
+            return ErrorClassifier.from_error(error)
 
     async def _run(self, assignment: NodeAssignment, *, fallback: bool) -> NodeOutcome:
         if assignment.role is NodeRole.PLANNER:
@@ -332,14 +364,15 @@ class ClaudeCliRuntime:
             server = await bridge.serve(str(spec.socket_path))
             try:
                 tools = [t["function"]["name"] for t in toolkit.tools]
+                attachment = ClaudeAttachment(
+                    spec, bridge, paw_tool_names(tools), system
+                )
                 request = SessionRequest(
                     self._model,
                     _PURPOSES[assignment.role],
                     task,
                     self._timeout,
-                    attachment=ClaudeAttachment(
-                        spec, bridge, paw_tool_names(tools), system
-                    ),
+                    attachment=attachment,
                 )
                 try:
                     result = await self._gate.session(
@@ -361,6 +394,8 @@ class ClaudeCliRuntime:
         if bridge.outcome is not None:
             return bridge.outcome
         failure = getattr(result, "failure", None)
+        if failure is FailureCode.INVALID_RESPONSE and attachment.notes.unsupported:
+            return ErrorClassifier.outcome(Failure.UNSUPPORTED_CLI)
         if failure is not None:
             return ErrorClassifier.outcome(_FAILURES.get(failure, Failure.OTHER))
         return ErrorClassifier.outcome(Failure.NO_SUBMISSION)

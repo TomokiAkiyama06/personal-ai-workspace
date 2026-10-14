@@ -16,7 +16,10 @@ kept, logged or returned):
   the real count; the ``assistant`` messages carry only a placeholder) ...
   ``message_stop``: a :class:`Turn`. A call is counted once (by its id). A
   version that sends no ``message_delta`` usage cannot report a call's output
-  and is not used: the turn is refused (``turn_without_output``).
+  and is not used: the turn is refused (``turn_without_output``). A call
+  that started and did not stop is open (:attr:`ClaudeStream.turn_open`): it
+  was not reported, so a ``result`` then is refused (``turn_open``) and the
+  adapter refuses the end of the output then too.
 * ``system`` / ``api_retry``: its ``error`` category (``authentication_failed``
   and the like are an expired credential, ``rate_limit`` a rate limit).
 * ``result``: the session's totals from ``modelUsage`` (every model, subagents
@@ -42,15 +45,24 @@ RATE_ERRORS: Final = frozenset({"rate_limit"})
 #: The longest line read (a turn's events are small; a ``result`` with its
 #: text can be larger).
 MAX_LINE_BYTES: Final = 16 * 1024 * 1024
+#: The refusals of ``system/init`` (an unsupported CLI, Decision 0087, 4).
+INIT_REFUSALS: Final = frozenset({"tools", "mcp"})
 
 
 class StreamRefused(Exception):
     """The stream shows a session this backend does not run. ``reason`` is a
-    fixed code (``tools``, ``mcp``, ``turn_without_output``, ``malformed``)."""
+    fixed code (``tools``, ``mcp``, ``turn_without_output``, ``turn_open``,
+    ``malformed``). ``unsupported``: the CLI's ``system/init`` showed other
+    tools or servers (``tools``, ``mcp``): its version or setup is not one
+    this backend runs (Decision 0087, 4), not a malformed answer."""
 
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
         self.reason = reason
+
+    @property
+    def unsupported(self) -> bool:
+        return self.reason in INIT_REFUSALS
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,6 +107,12 @@ class ClaudeStream:
         self._counted: set[str] = set()
         self.initialized = False
 
+    @property
+    def turn_open(self) -> bool:
+        """A model call started (``message_start``) and has not stopped: it
+        has not been reported."""
+        return self._current is not None
+
     def feed(self, line: bytes | str) -> Turn | Totals | Retry | None:
         """Read one line; return what it says that matters, or ``None``."""
         if isinstance(line, bytes):
@@ -121,6 +139,8 @@ class ClaudeStream:
             event = message.get("event")
             return self._event(event) if isinstance(event, dict) else None
         if kind == "result":
+            if self.turn_open:
+                raise StreamRefused("turn_open")
             return _totals(message)
         return None
 
@@ -153,6 +173,9 @@ class ClaudeStream:
             usage = body.get("usage")
             if not isinstance(message_id, str) or not isinstance(usage, dict):
                 raise StreamRefused("malformed")
+            if self.turn_open:
+                # The call before did not stop: it was never reported.
+                raise StreamRefused("turn_open")
             self._current = message_id
             if message_id not in self._counted:
                 self._open[message_id] = sum(
@@ -218,6 +241,7 @@ def _totals(message: Mapping[str, Any]) -> Totals:
 __all__ = [
     "CREDENTIAL_ERRORS",
     "END_CONVERSATION",
+    "INIT_REFUSALS",
     "MAX_LINE_BYTES",
     "PAW_SERVER",
     "RATE_ERRORS",

@@ -41,11 +41,16 @@ class FakeToolkit:
         self.calls = []
         self.answers = {}
         self.gate = None
+        self.cancelled = []
 
     async def run(self, name, arguments):
         self.calls.append((name, arguments))
         if self.gate is not None:
-            await self.gate.wait()
+            try:
+                await self.gate.wait()
+            except asyncio.CancelledError:
+                self.cancelled.append(name)
+                raise
         answer = self.answers.get(name, ("ok", None))
         if isinstance(answer, BaseException):
             raise answer
@@ -247,6 +252,57 @@ class CallTest(BridgeCase):
         self.toolkit.gate.set()
         second = await self.receive(reader)
         self.assertEqual(second["id"], call_id)
+
+    async def test_a_cancelled_call_stops_and_gets_no_answer(self):
+        # MCP's cancellation (2025-06-18, utilities/cancellation): the
+        # receiver stops the request and sends no response for it.
+        reader, writer = await self.connect()
+        self.toolkit.gate = asyncio.Event()
+        call_id = await self.send(
+            writer, "tools/call", {"name": "bash", "arguments": {"command": "x"}}
+        )
+        for _ in range(100):
+            if self.toolkit.calls:
+                break
+            await asyncio.sleep(0.01)
+        await self.send(
+            writer,
+            "notifications/cancelled",
+            {"requestId": call_id, "reason": "timed out"},
+            notify=True,
+        )
+        for _ in range(100):
+            if self.toolkit.cancelled:
+                break
+            await asyncio.sleep(0.01)
+        self.assertEqual(self.toolkit.cancelled, ["bash"])
+        # No answer for the cancelled call: the next line is the ping's.
+        ping_id = await self.send(writer, "ping")
+        self.assertEqual((await self.receive(reader))["id"], ping_id)
+        # Not the attempt's end, and the next call runs.
+        self.assertFalse(self.bridge.ended.is_set())
+        self.assertIsNone(self.bridge.failure)
+        self.toolkit.gate = None
+        answer = await self.call(
+            reader, writer, "tools/call", {"name": "bash", "arguments": {}}
+        )
+        self.assertFalse(answer["result"]["isError"])
+
+    async def test_a_cancellation_of_an_unknown_or_ended_request_is_ignored(self):
+        reader, writer = await self.connect()
+        answer = await self.call(
+            reader, writer, "tools/call", {"name": "bash", "arguments": {}}
+        )
+        for params in (
+            {"requestId": answer["id"]},  # already answered
+            {"requestId": 999},  # unknown
+            {"requestId": True},  # malformed
+            {},
+        ):
+            await self.send(writer, "notifications/cancelled", params, notify=True)
+        ping_id = await self.send(writer, "ping")
+        self.assertEqual((await self.receive(reader))["id"], ping_id)
+        self.assertEqual(self.toolkit.cancelled, [])
 
     async def test_the_real_toolkit_submits_a_readers_findings(self):
         assignment = NodeAssignment(

@@ -68,6 +68,10 @@ class Failure(StrEnum):
     STEP_LIMIT = "step_limit"
     NO_TOOL_CALLS = "no_tool_calls"
     NO_SUBMISSION = "no_submission"
+    # The CLI's ``system/init`` shows tools or MCP servers other than the PAW
+    # ones (Decision 0087, 4): a version or setup this rung cannot run; the
+    # same rung would fail again, a higher one may not.
+    UNSUPPORTED_CLI = "unsupported_cli"
     # The answer is not JSON or its tool calls are broken (three times running).
     MALFORMED_RESPONSE = "malformed_response"
     # The CLI provider's rate limit (``ConnectionService`` records ``rate_limited``).
@@ -117,6 +121,7 @@ _ROWS: dict[Failure, FailureRow] = {
     Failure.STEP_LIMIT: FailureRow(RuntimeError.__name__, escalate=True),
     Failure.NO_TOOL_CALLS: FailureRow(RuntimeError.__name__, escalate=True),
     Failure.NO_SUBMISSION: FailureRow(RuntimeError.__name__, escalate=True),
+    Failure.UNSUPPORTED_CLI: FailureRow(RuntimeError.__name__, escalate=True),
     Failure.MALFORMED_RESPONSE: FailureRow(ValueError.__name__),
     Failure.RATE_LIMITED: FailureRow(ConnectionError.__name__),
     Failure.CREDENTIAL_EXPIRED: FailureRow(ConnectionError.__name__, escalate=True),
