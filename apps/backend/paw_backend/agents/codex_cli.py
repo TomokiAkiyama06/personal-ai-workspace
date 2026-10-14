@@ -225,6 +225,9 @@ class CodexAttachment:
     bridge: McpBridge = field(repr=False)
     tools: frozenset[str]
     system_prompt: str = field(repr=False)
+    # Set by the adapter when the stream was refused (Decision 0089, 2), also
+    # after a submit: the attempt then fails whatever the bridge returned.
+    refused: list[bool] = field(default_factory=list, repr=False)
 
 
 def session_config(spec: CliSessionSpec, tools: Iterable[str]) -> str:
@@ -409,8 +412,10 @@ class CodexSessionAdapter:
                     # The bridge ended: a submit, or the attempt failed. The
                     # line being read is not lost: the drain reads on.
                     ended, stopped = await self._drain_after(
-                        reading, process, stream, request
+                        reading, process, stream, request, attachment
                     )
+                    if attachment.refused:
+                        failure = FailureCode.INVALID_RESPONSE
                     break
                 line = reading.result()
                 if not line:
@@ -419,6 +424,7 @@ class CodexSessionAdapter:
                     item = stream.feed(line)
                 except StreamRefused as refused:
                     logger.warning("Codex session refused: %s", refused.reason)
+                    attachment.refused.append(True)
                     failure = FailureCode.INVALID_RESPONSE
                     break
                 if isinstance(item, Initialized):
@@ -476,7 +482,7 @@ class CodexSessionAdapter:
         # with its reports, or once the call that made the bridge's last tool
         # call (the submit) was reported; not on a crash.
         known = (ended is not None and stream.complete) or (
-            attachment.bridge.ended.is_set() and stream.call_counted
+            attachment.bridge.ended.is_set() and _submit_counted(stream, attachment)
         )
         input_tokens, output_tokens = stream.totals
         return AgentSessionResult(
@@ -492,24 +498,29 @@ class CodexSessionAdapter:
         process: CodexProcess,
         stream: CodexStream,
         request: AgentSessionRequest,
+        attachment: CodexAttachment,
     ) -> tuple[Ended | None, bool]:
         """After the bridge ended: read on (at most ``drain_seconds``) until the
-        model call that made the last tool call is reported (its usage comes
-        when its response completes, which may be after the call began), the
-        turn ends, or anything else stops it. Reported calls go to
-        ``on_usage`` as before. Returns the end of the turn if it came, and
-        whether the service said stop."""
+        model call that made the bridge's last tool call is reported (its
+        usage comes when its response completes, which may be after the call
+        began; and the call's own item may still be on its way), the turn
+        ends, or anything else stops it. Reported calls go to ``on_usage`` as
+        before; a refusal is kept on the attachment (the attempt fails).
+        Returns the end of the turn if it came, and whether the service said
+        stop."""
         ended: Ended | None = None
         stopped = False
         try:
             async with asyncio.timeout(self._drain):
-                while not stream.call_counted:
+                while not _submit_counted(stream, attachment):
                     line = await reading
                     if not line:
                         break
                     try:
                         item = stream.feed(line)
-                    except StreamRefused:
+                    except StreamRefused as refused:
+                        logger.warning("Codex session refused: %s", refused.reason)
+                        attachment.refused.append(True)
                         break
                     if isinstance(item, Turn):
                         if not await request.on_usage(
@@ -529,6 +540,12 @@ class CodexSessionAdapter:
                 with contextlib.suppress(asyncio.CancelledError):
                     await reading
         return ended, stopped
+
+
+def _submit_counted(stream: CodexStream, attachment: CodexAttachment) -> bool:
+    """The stream showed every call the bridge ran, and a report after the
+    last of them: the call that made it is counted."""
+    return stream.calls_seen >= attachment.bridge.calls and stream.call_counted
 
 
 async def _send(process: CodexProcess, line: bytes) -> None:
@@ -597,7 +614,9 @@ class CodexCliRuntime:
                     _PURPOSES[assignment.role],
                     task,
                     self._timeout,
-                    attachment=CodexAttachment(spec, bridge, tools, system),
+                    attachment=(
+                        attachment := CodexAttachment(spec, bridge, tools, system)
+                    ),
                 )
                 try:
                     result = await self._gate.session(
@@ -616,6 +635,10 @@ class CodexCliRuntime:
             remove_session(spec)
         if bridge.failure is not None:
             return _ended(bridge.failure)
+        if attachment.refused:
+            # The stream showed what this backend does not run (Decision
+            # 0089, 2): not even a submit made meanwhile stands.
+            return ErrorClassifier.outcome(Failure.MALFORMED_RESPONSE)
         if bridge.outcome is not None:
             return bridge.outcome
         failure = getattr(result, "failure", None)

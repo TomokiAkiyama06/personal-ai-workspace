@@ -179,6 +179,7 @@ class CodexStream:
         # The order of the reports and the PAW tool calls (``call_counted``).
         self._seen = 0
         self._last_call: int | None = None
+        self._call_ids: set[object] = set()
         self._last_report = 0
 
     @property
@@ -186,6 +187,11 @@ class CodexStream:
         """A report (a growth of the total) came after the last PAW tool call
         began: the model call that made it is counted."""
         return self._last_call is not None and self._last_report > self._last_call
+
+    @property
+    def calls_seen(self) -> int:
+        """The PAW tool calls the stream showed (each once)."""
+        return len(self._call_ids)
 
     @property
     def complete(self) -> bool:
@@ -297,8 +303,11 @@ class CodexStream:
             and item.get("server") == PAW_SERVER
             and item.get("tool") in self._tools
         ):
-            self._seen += 1
-            self._last_call = self._seen
+            ident = item.get("id")
+            if ident not in self._call_ids:  # started, then completed: once
+                self._call_ids.add(ident)
+                self._seen += 1
+                self._last_call = self._seen
             return
         # Everything else can execute something (a command, a file change,
         # another agent, a search, an image), or is a type this table does

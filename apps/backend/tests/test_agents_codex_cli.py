@@ -287,6 +287,36 @@ class TotalsTest(CodexCase):
         self.assertIsNone(raw.input_tokens)
         self.assertEqual(raw.failure.value, "invalid_response")
 
+    async def test_an_earlier_calls_report_does_not_count_for_the_submit(self):
+        # A first call (refused: no summary) was reported; the submit's item
+        # line comes only after the bridge ended. Its own report must be read.
+        await self.run_node(
+            [
+                {"usage": [100, 10]},
+                {"call": "submit", "arguments": {}},
+                {"usage": [1, 1]},
+                {"call": "submit", "arguments": {"summary": "done"}, "item_late": True},
+                {"usage": [5, 1]},
+                {"sleep": 30},
+            ]
+        )
+        raw = self.connections.raw
+        self.assertEqual(self.connections.turns, [(100, 10), (1, 1), (5, 1)])
+        self.assertEqual((raw.input_tokens, raw.output_tokens), (106, 12))
+
+    async def test_a_refusal_after_the_submit_fails_the_attempt(self):
+        outcome = await self.run_node(
+            [
+                {"usage": [100, 10]},
+                {"call": "submit", "arguments": {"summary": "done"}},
+                {"item": {"type": "commandExecution", "id": "x"}},
+                {"sleep": 30},
+            ]
+        )
+        self.assertEqual(self.connections.raw.failure.value, "invalid_response")
+        self.assertIsNone(outcome.result)
+        self.assertEqual(outcome.error_class, "ValueError")
+
 
 class VersionTest(CodexCase):
     def test_no_version_is_verified_yet(self):

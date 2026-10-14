@@ -124,6 +124,7 @@ def main() -> int:
     save()
     item({"type": "userMessage", "id": "item_0", "content": []})
     total = [0, 0]
+    calls = [0]
 
     def usage(last):
         breakdown = {
@@ -161,20 +162,25 @@ def main() -> int:
         elif "repeat_usage" in action:
             usage([0, 0])
         elif "call" in action:
-            item(
-                {
-                    "type": "mcpToolCall",
-                    "id": "item_call",
-                    "server": "paw",
-                    "tool": action["call"],
-                    "status": "inProgress",
-                    "arguments": action.get("arguments", {}),
-                }
-            )
+            calls[0] += 1
+            started = {
+                "type": "mcpToolCall",
+                "id": f"item_call_{calls[0]}",
+                "server": "paw",
+                "tool": action["call"],
+                "status": "inProgress",
+                "arguments": action.get("arguments", {}),
+            }
+            if not action.get("item_late"):
+                item(started)
             answer = rpc(
                 "tools/call",
                 {"name": action["call"], "arguments": action.get("arguments", {})},
             )
+            if action.get("item_late"):
+                # The item's line comes after the call ended (a slow reader).
+                time.sleep(0.3)
+                item(started)
             report["calls"].append(answer["result"])
             save()
         elif "item" in action:
