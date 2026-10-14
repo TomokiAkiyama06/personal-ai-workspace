@@ -4265,6 +4265,16 @@ Test は `tests/test_agents_bridge.py`（一時 Directory の Unix Socket、Fake
 
 Test は `tests/test_agents_claude_cli.py`（本物の Runtime・Adapter・Bridge・Relay・起動の口、Fake の `claude` = `tests/fake_claude_cli.py`、`execute_session` の代わりの Fake）。
 
+## CLI の Session の本番の起動の口（Issue #208、Decision 0083 の 6、段階 4b の 3c）
+
+`agents/cli_session.py` の `SystemdLauncher` と [`deploy/cli-session/`](deploy/cli-session/README.md)（Template Unit `paw-cli-session@.service`・その Program `paw_cli_session_run.py`・polkit の規則・Image の `Containerfile` と `start-claude`・設定の例）です。**CLI の段は組み立てで無効のまま**で、配備と Rootless の Podman の確認は Human が行います。
+
+- Backend は Session の Directory（`/run/paw-cli/<uuid>`、Group `paw-cli-bridge`）に `launch.json`（CLI の引数と許可した名前の環境変数）・`credential.env`（`CLAUDE_CODE_OAUTH_TOKEN` の 1 行、0640）・`prompt` を書き、`stream.sock` で待ってから `systemctl start --no-block paw-cli-session@<uuid>.service`（polkit はこの名前の `start` / `stop` だけを許す）。CLI の stdout はその Socket に来る。止めるのは `systemctl stop`（Unit が SIGTERM → 5 秒 → SIGKILL、Container を消す）。
+- Unit の Program（`paw-agent-cli`、硬くした Unit）は UUID・Digest で固定した Image・環境変数の名前・Credential の行の形を確かめ、`podman run --rm --network none --read-only --cap-drop all --userns keep-id` で Session の Directory を同じ Path に、Egress の Socket を Mount し、Credential は `--env-file` で渡す（引数に出さない）。
+- Session の Directory の名前は `<base>/<uuid>` にした（Unit の Program が Id だけで見つけるため）。
+
+Test は `tests/test_cli_session_units.py`（Fake の `podman` と Fake の `systemctl`。Container・systemd・他の Account は使わない）。
+
 ## Tool Broker のファイル・Shell・Git の Tool と Sandbox（Issue #208、Decision 0083 の段階 2）
 
 `paw_backend/sandbox/` は、Local の Model の Tool loop（段階 3 の `LocalAgentRuntime`）が Benchmark の `bash`・`str_replace`・`write_file` を Tool Broker を通して動かすための Tool と、その実行先の Sandbox です（Decision 0083 の 2・6・8、Approved）。**まだ本番の組み立てには配線していません**（Runtime と一緒に段階 3 で `ToolRunner(execution_timeout=300)` に `ToolExecutors({...WorkingSetExecutor..., ...RepoToolExecutor...})` を渡します）。配備と Server の確認は [`deploy/sandbox/README.md`](deploy/sandbox/README.md)。
