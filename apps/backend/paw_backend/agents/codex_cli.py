@@ -449,12 +449,13 @@ class CodexSessionAdapter:
             failure is None
             and ended is not None
             and ended.status == "completed"
-            and not stream.reported
+            and not stream.complete
         ):
-            # A completed turn made at least one model call: one that
-            # reported none is a CLI that does not report its calls (Decision
-            # 0083, 5 (d); Decision 0089, 3). (A failed turn may have failed
-            # before any call, an expired login.)
+            # A completed turn made at least one model call, and one after
+            # its last tool call: a turn that did not report them is a CLI
+            # that does not report its calls (Decision 0083, 5 (d); Decision
+            # 0089, 3). (A failed turn may have failed before any call, an
+            # expired login.)
             failure = FailureCode.INVALID_RESPONSE
         if failure is None and ended is not None and ended.status != "completed":
             if ended.error in CREDENTIAL_ERRORS:
@@ -474,7 +475,7 @@ class CodexSessionAdapter:
         # The totals are the thread's as reported: known once the turn ended
         # with its reports, or once the call that made the bridge's last tool
         # call (the submit) was reported; not on a crash.
-        known = (ended is not None and stream.reported) or (
+        known = (ended is not None and stream.complete) or (
             attachment.bridge.ended.is_set() and stream.call_counted
         )
         input_tokens, output_tokens = stream.totals

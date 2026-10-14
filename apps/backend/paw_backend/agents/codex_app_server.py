@@ -188,6 +188,13 @@ class CodexStream:
         return self._last_call is not None and self._last_report > self._last_call
 
     @property
+    def complete(self) -> bool:
+        """Every model call is reported as far as the stream can tell: there
+        was a report, and one after the last PAW tool call began (the model
+        always answers a tool's result with another call)."""
+        return self.reported and (self._last_call is None or self.call_counted)
+
+    @property
     def totals(self) -> tuple[int, int]:
         """The thread's tokens as far as the reports went."""
         return self._input, self._output

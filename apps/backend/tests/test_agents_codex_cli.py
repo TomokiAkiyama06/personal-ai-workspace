@@ -274,6 +274,19 @@ class TotalsTest(CodexCase):
         )
         self.assertIsNone(self.connections.raw.input_tokens)
 
+    async def test_a_completed_turn_without_the_last_calls_report_is_refused(self):
+        # The call that made the submit never reported, though the turn ended.
+        await self.run_node(
+            [
+                {"usage": [100, 10]},
+                {"call": "submit", "arguments": {"summary": "done"}},
+                {"complete": "completed"},
+            ]
+        )
+        raw = self.connections.raw
+        self.assertIsNone(raw.input_tokens)
+        self.assertEqual(raw.failure.value, "invalid_response")
+
 
 class VersionTest(CodexCase):
     def test_no_version_is_verified_yet(self):
