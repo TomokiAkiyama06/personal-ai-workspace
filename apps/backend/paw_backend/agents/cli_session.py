@@ -248,8 +248,10 @@ class SystemdLauncher:
         unit_prefix: str = "paw-cli-session@",
         connect_seconds: float = 120.0,
         settle_seconds: float = 30.0,
+        systemctl_seconds: float = 30.0,
     ) -> None:
         self._systemctl = tuple(systemctl)
+        self._systemctl_seconds = systemctl_seconds
         self._prefix = unit_prefix
         self._connect = connect_seconds
         self.settle_seconds = settle_seconds
@@ -264,14 +266,32 @@ class SystemdLauncher:
         )
         talking = asyncio.ensure_future(process.communicate())
         try:
-            out, _ = await asyncio.shield(talking)
+            finished = await self._finish(process, talking)
         except asyncio.CancelledError:
             # A systemctl already running is let finish (a "start" it was
-            # about to send must not come after the caller's "stop").
+            # about to send must not come after the caller's "stop"), but
+            # only within the bound: a hung one (D-Bus or polkit not
+            # answering) is killed, and the cancellation goes on.
             with contextlib.suppress(Exception):
-                await talking
+                await self._finish(process, talking)
             raise
+        if not finished:
+            logger.error("systemctl did not answer in time")
+            return -1, ""
+        out, _ = talking.result()
         return process.returncode or 0, out.decode("ascii", "replace").strip()
+
+    async def _finish(self, process, talking: asyncio.Future) -> bool:
+        """Wait for a systemctl at most ``systemctl_seconds``; past that, kill
+        and reap it (``False``)."""
+        done, _ = await asyncio.wait({talking}, timeout=self._systemctl_seconds)
+        if talking in done:
+            return True
+        with contextlib.suppress(ProcessLookupError):
+            process.kill()
+        with contextlib.suppress(Exception):
+            await talking
+        return False
 
     async def stop_unit(self, unit: str, attempts: int = 3) -> None:
         for attempt in range(attempts):

@@ -248,7 +248,10 @@ class LauncherTest(unittest.IsolatedAsyncioTestCase):
             elif args[0] == "stop":
                 if os.path.exists(os.path.join(root, "stop_fails")):
                     sys.exit(1)
-                text = open(state).read().split()
+                # (a unit that never ran is stopped already)
+                text = ["inactive", "0"]
+                if os.path.exists(state):
+                    text = open(state).read().split()
                 if text[0] == "active":
                     import signal
                     os.kill(int(text[1]), signal.SIGTERM)
@@ -329,6 +332,40 @@ class LauncherTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn(f"stop {unit}", calls)
         # The start that was running finished first: the stop came after it.
         self.assertLess(calls.index(f"queued {unit}"), calls.index(f"stop {unit}"))
+
+    async def test_a_hung_systemctl_does_not_hold_a_cancellation(self):
+        # systemctl start hangs (D-Bus or polkit not answering): the
+        # cancellation of the session's deadline is not held past the bound;
+        # the hung systemctl is killed and the unit is stopped before the
+        # cancellation goes on.
+        (self.sessions / "start_delay").write_text("60")
+        spec = create_session(self.sessions, ("python3", "relay.py"))
+        launch = CliLaunch(
+            ("x",), {}, Secret(TOKEN), "CLAUDE_CODE_OAUTH_TOKEN", b"", spec
+        )
+        launcher = SystemdLauncher(
+            systemctl=(str(self.bin / "systemctl"),),
+            settle_seconds=5,
+            systemctl_seconds=1,
+        )
+        starting = asyncio.create_task(launcher.start(launch))
+        await asyncio.sleep(0.3)  # systemctl start is running (and hangs)
+        starting.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await asyncio.wait_for(asyncio.shield(starting), 10)
+        unit = f"paw-cli-session@{spec.session_id}.service"
+        self.assertIn(f"stop {unit}", self.calls.read_text())
+
+    async def test_a_hung_systemctl_is_a_failed_call(self):
+        (self.sessions / "start_delay").write_text("60")
+        launcher = SystemdLauncher(
+            systemctl=(str(self.bin / "systemctl"),), systemctl_seconds=1
+        )
+        code, _ = await asyncio.wait_for(
+            launcher.systemctl("start", "--no-block", "paw-cli-session@x.service"),
+            10,
+        )
+        self.assertNotEqual(code, 0)
 
     async def test_a_failed_stop_after_a_failed_start_is_raised(self):
         (self.sessions / "start_delay").write_text("1")
