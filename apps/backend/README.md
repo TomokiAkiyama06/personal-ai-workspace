@@ -4238,9 +4238,20 @@ Test は `tests/test_connections_session.py`（実 PostgreSQL: 最低の枠、Tu
 - `PAW_SECRET_STORE_DIR` を設定したのに鍵が渡されていない・Directory が Backend の User の 0700 でない・Release / Recovery / Projection / Web の配布物と重なるときは、Backend は起動しない。Backup と Recovery には入れない（Restore の後は入れ直す）。
 
 Test は `tests/test_connections_secret_store.py`（File だけ: 暗号化・認証データ・Compare-and-swap・Lock・掃除・Directory と鍵の確認）、`test_connections_credential_store.py`（実 PostgreSQL: 登録の確認・置き換えと切断での削除・`rotate_credential`・掃除の参照）、`test_credentials_cli.py`（管理 Command と Audit）、`test_connections_reaper.py`（周期の掃除）。
+
 ## Egress の Proxy（Issue #208、Decision 0087 の 3、段階 4b の 2）
 
 CLI の Session の Container（`--network none`）から Provider へ出る唯一の道の `paw-egress` です（[`deploy/egress/paw_egress.py`](deploy/egress/paw_egress.py)、標準ライブラリだけ）。配備は [`deploy/egress/README.md`](deploy/egress/README.md)。Unix Socket だけで受け、`CONNECT <許可した Host 名>:443` だけを、Proxy 自身が引いた Global な Address にだけつなぎ、TLS はそのまま中継します（Credential を足さない）。Container の中の転送（`paw_egress.py forward`）が `127.0.0.1:<Port>` を Socket につなぎ、CLI には `HTTPS_PROXY` を渡します。nftables の例（`paw-egress.nft`）は、その Account の外への通信を DNS と Global な Address の TCP 443 に絞ります。**CLI の Runtime はまだ使いません**（後の PR）。Test は `tests/test_egress_proxy.py`。
+
+## CLI の Session の PAW の Tool（MCP の Bridge。Issue #208、Decision 0083 の 6、段階 4b の 3a）
+
+CLI（Claude Code・Codex）は組み込みの Tool を止めて動かし（Decision 0087 の 4）、使える Tool は PAW の Tool だけです。**CLI の Runtime はまだありません**（後の PR）。
+
+- **`agents/toolkit.py` の `NodeToolkit`**: Local の Model の Loop（`local.py`）にあった Node の試行の Tool（`bash`・`str_replace`・`write_file`・`submit`、Planner の `submit_plan`）と、その承認の扱い・`submit` の直させ方・Commit を、そのまま取り出したもの。`LocalAgentRuntime` はこれを使い、振る舞いは変わりません（`tests/test_agents_local.py` はそのまま通る）。
+- **`agents/bridge.py` の `McpBridge`**: その Toolkit を MCP の Server（stdio の枠組み = 1 行 1 つの JSON-RPC 2.0）として Session の Directory の Unix Socket（0660）で出す。最初の 1 行の Handshake の Token（定数時間の比較）が合うまで何も答えず、同時に 1 接続だけ。`initialize`・`ping`・`tools/list`・`tools/call` だけを答え、呼び出しは 1 つずつ Toolkit（Tool Broker）を通す。`submit` の成功（`outcome`）と試行の失敗（`failure`。`RuntimeFailure`・`NodeStopped` など）で終わり（`ended`）、その後の呼び出しは拒否する。呼び出しの引数・結果は Log に書かない。
+- **`deploy/cli-session/paw_mcp_relay.py`**（標準ライブラリだけ）: CLI の Container の中で CLI が起動する MCP の Server の Command。Mount された Socket につなぎ、Token を File から読んで Handshake を送り、あとは CLI の stdin / stdout を行ごとに中継する。
+
+Test は `tests/test_agents_bridge.py`（一時 Directory の Unix Socket、Fake の Toolkit と本物の `NodeToolkit`、本物の Relay の Program）。
 
 ## Tool Broker のファイル・Shell・Git の Tool と Sandbox（Issue #208、Decision 0083 の段階 2）
 

@@ -24,6 +24,7 @@ Broker's repository tools of ``paw_backend.sandbox``), wired through
 ``wiring.build_local_agent`` into ``local_runtimes``. The CLI runtimes come later.
 """
 
+from paw_backend.agents.bridge import McpBridge
 from paw_backend.agents.chat import (
     ChatCompletion,
     ChatCompletionsClient,
@@ -48,6 +49,7 @@ from paw_backend.agents.reasoning import (
     estimate_prompt_tokens,
     reasoning_chars,
 )
+from paw_backend.agents.toolkit import NodeToolkit, ToolError, ToolkitLimits
 from paw_backend.agents.wiring import (
     LocalModelSetup,
     build_local_agent,
@@ -67,10 +69,14 @@ __all__ = [
     "LocalAgentLimits",
     "LocalAgentRuntime",
     "LocalModelSetup",
+    "McpBridge",
     "ModelPreferenceInterpreter",
+    "NodeToolkit",
     "ReasoningHistoryPolicy",
     "RuntimeFailure",
     "ToolCall",
+    "ToolError",
+    "ToolkitLimits",
     "Usage",
     "build_local_agent",
     "build_preference_interpreter",
