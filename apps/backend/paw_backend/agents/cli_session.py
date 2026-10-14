@@ -123,6 +123,13 @@ def remove_session(spec: CliSessionSpec) -> None:
 _ENV_NAME = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
 
 
+class UnitNotStoppedError(OSError):
+    """A session's unit that ``systemctl stop`` could not stop (also while a
+    failed or cancelled start was cleaned up): it may still run with the
+    credential and has the session's directory mounted, so nobody may delete
+    that directory."""
+
+
 def _write_bytes(path: Path, data: bytes, mode: int) -> None:
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, mode)
     with os.fdopen(fd, "wb") as handle:
@@ -274,7 +281,7 @@ class SystemdLauncher:
             if attempt + 1 < attempts:
                 await asyncio.sleep(1.0)
         logger.error("A CLI session's unit could not be stopped")
-        raise OSError("the session's unit could not be stopped")
+        raise UnitNotStoppedError("the session's unit could not be stopped")
 
     async def show(self, unit: str, prop: str) -> str:
         _, out = await self.systemctl("show", "--property", prop, "--value", unit)
@@ -380,6 +387,7 @@ __all__ = [
     "CliProcess",
     "CliSessionSpec",
     "SubprocessLauncher",
+    "UnitNotStoppedError",
     "create_session",
     "remove_session",
 ]

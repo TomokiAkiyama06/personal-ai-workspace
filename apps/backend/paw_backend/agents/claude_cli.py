@@ -59,6 +59,7 @@ from paw_backend.agents.cli_session import (
     CliLaunch,
     CliLauncher,
     CliSessionSpec,
+    UnitNotStoppedError,
     create_session,
     remove_session,
 )
@@ -193,16 +194,22 @@ class ClaudeSessionAdapter:
         attachment = request.attachment
         if not isinstance(attachment, ClaudeAttachment):
             raise TypeError("a Claude session needs its attachment")
-        process = await self._launcher.start(
-            CliLaunch(
-                self.arguments(attachment, request.model),
-                self.environment(attachment),
-                secret,
-                TOKEN_ENV,
-                request.prompt.encode("utf-8"),
-                attachment.spec,
+        try:
+            process = await self._launcher.start(
+                CliLaunch(
+                    self.arguments(attachment, request.model),
+                    self.environment(attachment),
+                    secret,
+                    TOKEN_ENV,
+                    request.prompt.encode("utf-8"),
+                    attachment.spec,
+                )
             )
-        )
+        except UnitNotStoppedError:
+            # The start failed and its cleanup could not stop the unit: it
+            # may run with the session's files although no process came back.
+            attachment.unstopped.append(True)
+            raise
         stream = ClaudeStream(attachment.tools)
         totals: Totals | None = None
         failure: FailureCode | None = None

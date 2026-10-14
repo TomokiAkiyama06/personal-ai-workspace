@@ -25,7 +25,7 @@ from pathlib import Path
 
 from paw_backend.agents.claude_cli import ClaudeCliRuntime, ClaudeSessionAdapter
 from paw_backend.agents.claude_stream import ClaudeStream, StreamRefused, paw_tool_names
-from paw_backend.agents.cli_session import SubprocessLauncher
+from paw_backend.agents.cli_session import SubprocessLauncher, UnitNotStoppedError
 from paw_backend.connections import (
     AgentSessionRequest,
     Secret,
@@ -308,6 +308,38 @@ class UnstoppedTest(ClaudeCase):
         outcome = await self.run_node(
             [{"call": "submit", "arguments": {"summary": "s"}}, {"sleep": 30}]
         )
+        self.assertEqual(len(list(self.sessions.iterdir())), 1)  # kept
+        self.assertIsNone(outcome.result)
+        self.assertEqual(outcome.error_class, "AdapterError")
+
+    async def test_a_start_whose_cleanup_cannot_stop_keeps_its_directory(self):
+        # The start failed (a timeout, a cancellation) and the stops that
+        # cleaned it up failed too: the unit may still run with the session's
+        # files mounted, although no process was handed to the adapter.
+        class StartStuckLauncher(SubprocessLauncher):
+            async def start(self, launch):
+                process = await super().start(launch)
+                await process.stop()  # (the test's process does end)
+                raise UnitNotStoppedError(
+                    "the session's unit could not be stopped"
+                ) from TimeoutError()
+
+        def adapter():
+            return ClaudeSessionAdapter(
+                StartStuckLauncher(),
+                executable=(
+                    sys.executable,
+                    "-I",
+                    str(FAKE),
+                    "--scenario",
+                    str(self.scenario),
+                    "--report",
+                    str(self.report),
+                ),
+            )
+
+        self.adapter = adapter
+        outcome = await self.run_node([{"sleep": 30}])
         self.assertEqual(len(list(self.sessions.iterdir())), 1)  # kept
         self.assertIsNone(outcome.result)
         self.assertEqual(outcome.error_class, "AdapterError")

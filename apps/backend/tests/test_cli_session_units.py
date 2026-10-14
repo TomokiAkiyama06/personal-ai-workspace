@@ -30,6 +30,7 @@ from pathlib import Path
 from paw_backend.agents.cli_session import (
     CliLaunch,
     SystemdLauncher,
+    UnitNotStoppedError,
     create_session,
 )
 from paw_backend.connections import Secret
@@ -341,6 +342,7 @@ class LauncherTest(unittest.IsolatedAsyncioTestCase):
         starting.cancel()
         with self.assertRaises(OSError) as caught:
             await starting
+        self.assertIsInstance(caught.exception, UnitNotStoppedError)
         self.assertIsInstance(caught.exception.__cause__, asyncio.CancelledError)
         (self.sessions / "stop_fails").unlink()
         await self.launcher().stop_unit(f"paw-cli-session@{spec.session_id}.service")
