@@ -176,6 +176,16 @@ class CodexStream:
         self.thread_id: str | None = None
         self.initialized = False
         self.reported = False
+        # The order of the reports and the PAW tool calls (``call_counted``).
+        self._seen = 0
+        self._last_call: int | None = None
+        self._last_report = 0
+
+    @property
+    def call_counted(self) -> bool:
+        """A report (a growth of the total) came after the last PAW tool call
+        began: the model call that made it is counted."""
+        return self._last_call is not None and self._last_report > self._last_call
 
     @property
     def totals(self) -> tuple[int, int]:
@@ -265,6 +275,8 @@ class CodexStream:
         if grown.input_tokens == 0 and grown.output_tokens == 0:
             return None  # the same total again (with a rate-limit update)
         self.reported = True
+        self._seen += 1
+        self._last_report = self._seen
         return grown
 
     def _item(self, item: object) -> None:
@@ -278,6 +290,8 @@ class CodexStream:
             and item.get("server") == PAW_SERVER
             and item.get("tool") in self._tools
         ):
+            self._seen += 1
+            self._last_call = self._seen
             return
         # Everything else can execute something (a command, a file change,
         # another agent, a search, an image), or is a type this table does

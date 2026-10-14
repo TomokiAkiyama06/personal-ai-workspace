@@ -127,6 +127,7 @@ class CodexCase(unittest.IsolatedAsyncioTestCase):
     def adapter(self, *, verified=frozenset({VERSION}), credentials=True):
         return CodexSessionAdapter(
             InteractiveSubprocessLauncher(),
+            drain_seconds=1.0,
             credentials=self.credentials if credentials else None,
             executable=(
                 sys.executable,
@@ -240,6 +241,38 @@ class SubmitTest(CodexCase):
         self.assertEqual(self.placement.recorded, [])
         self.assertFalse(self.report.exists())
         self.assertTrue(outcome.escalate)
+
+
+class TotalsTest(CodexCase):
+    async def test_a_completed_turn_without_any_report_is_refused(self):
+        outcome = await self.run_node([{"complete": "completed"}])
+        raw = self.connections.raw
+        self.assertEqual(raw.failure.value, "invalid_response")
+        self.assertIsNone(raw.input_tokens)  # not known: the service estimates
+        self.assertEqual(outcome.error_class, "ValueError")
+
+    async def test_a_submit_keeps_the_totals_once_its_call_is_counted(self):
+        await self.run_node(
+            [
+                {"usage": [100, 10]},
+                {"call": "submit", "arguments": {"summary": "done"}},
+                {"usage": [5, 1]},
+                {"sleep": 30},
+            ]
+        )
+        raw = self.connections.raw
+        self.assertEqual((raw.input_tokens, raw.output_tokens), (105, 11))
+        self.assertEqual(self.connections.turns, [(100, 10), (5, 1)])
+
+    async def test_a_submit_whose_call_was_not_counted_leaves_them_unknown(self):
+        await self.run_node(
+            [
+                {"usage": [100, 10]},
+                {"call": "submit", "arguments": {"summary": "done"}},
+                {"sleep": 30},
+            ]
+        )
+        self.assertIsNone(self.connections.raw.input_tokens)
 
 
 class VersionTest(CodexCase):

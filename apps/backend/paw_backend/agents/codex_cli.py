@@ -132,6 +132,9 @@ DISABLED_FEATURES: Final = (
 #: a little longer for its answer.
 TOOL_TIMEOUT_SECONDS: Final = 360
 STARTUP_TIMEOUT_SECONDS: Final = 30
+#: After the bridge ended (a ``submit``), the stream is read this much longer
+#: for the report of the model call that made it (see ``_drain_after``).
+DRAIN_SECONDS: Final = 5.0
 #: ``codex --version`` answers within this time.
 VERSION_SECONDS: Final = 30.0
 _VERSION_LINE = re.compile(r"\b([0-9]+\.[0-9]+\.[0-9]+[0-9A-Za-z.+-]*)")
@@ -299,6 +302,7 @@ class CodexSessionAdapter:
         executable: tuple[str, ...] = ("codex",),
         proxy_url: str | None = None,
         verified_versions: frozenset[str] = VERIFIED_VERSIONS,
+        drain_seconds: float = DRAIN_SECONDS,
     ) -> None:
         require_async_method(launcher, "start", 1)
         if credentials is not None:
@@ -311,6 +315,7 @@ class CodexSessionAdapter:
         self._executable = executable
         self._proxy_url = proxy_url
         self._verified = frozenset(verified_versions)
+        self._drain = float(drain_seconds)
 
     def __repr__(self) -> str:
         return "CodexSessionAdapter()"
@@ -401,10 +406,12 @@ class CodexSessionAdapter:
                     {reading, bridge_ended}, return_when=asyncio.FIRST_COMPLETED
                 )
                 if reading not in done:
-                    reading.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await reading
-                    break  # the bridge ended: a submit, or the attempt failed
+                    # The bridge ended: a submit, or the attempt failed. The
+                    # line being read is not lost: the drain reads on.
+                    ended, stopped = await self._drain_after(
+                        reading, process, stream, request
+                    )
+                    break
                 line = reading.result()
                 if not line:
                     break
@@ -438,6 +445,17 @@ class CodexSessionAdapter:
         code = await process.wait()
         if failure is None and not stream.initialized:
             failure = FailureCode.INVALID_RESPONSE
+        if (
+            failure is None
+            and ended is not None
+            and ended.status == "completed"
+            and not stream.reported
+        ):
+            # A completed turn made at least one model call: one that
+            # reported none is a CLI that does not report its calls (Decision
+            # 0083, 5 (d); Decision 0089, 3). (A failed turn may have failed
+            # before any call, an expired login.)
+            failure = FailureCode.INVALID_RESPONSE
         if failure is None and ended is not None and ended.status != "completed":
             if ended.error in CREDENTIAL_ERRORS:
                 failure = FailureCode.EXPIRED
@@ -453,9 +471,12 @@ class CodexSessionAdapter:
             and not attachment.bridge.ended.is_set()
         ):
             failure = FailureCode.INTERNAL_ERROR
-        # The totals are the thread's as reported; known once the turn ended
-        # (or, short of that, when every report came: not on a crash).
-        known = ended is not None
+        # The totals are the thread's as reported: known once the turn ended
+        # with its reports, or once the call that made the bridge's last tool
+        # call (the submit) was reported; not on a crash.
+        known = (ended is not None and stream.reported) or (
+            attachment.bridge.ended.is_set() and stream.call_counted
+        )
         input_tokens, output_tokens = stream.totals
         return AgentSessionResult(
             submission=None,
@@ -463,6 +484,50 @@ class CodexSessionAdapter:
             output_tokens=output_tokens if known else None,
             failure=failure,
         )
+
+    async def _drain_after(
+        self,
+        reading: "asyncio.Task[bytes]",
+        process: CodexProcess,
+        stream: CodexStream,
+        request: AgentSessionRequest,
+    ) -> tuple[Ended | None, bool]:
+        """After the bridge ended: read on (at most ``drain_seconds``) until the
+        model call that made the last tool call is reported (its usage comes
+        when its response completes, which may be after the call began), the
+        turn ends, or anything else stops it. Reported calls go to
+        ``on_usage`` as before. Returns the end of the turn if it came, and
+        whether the service said stop."""
+        ended: Ended | None = None
+        stopped = False
+        try:
+            async with asyncio.timeout(self._drain):
+                while not stream.call_counted:
+                    line = await reading
+                    if not line:
+                        break
+                    try:
+                        item = stream.feed(line)
+                    except StreamRefused:
+                        break
+                    if isinstance(item, Turn):
+                        if not await request.on_usage(
+                            item.input_tokens, item.output_tokens
+                        ):
+                            stopped = True
+                            break
+                    elif isinstance(item, Ended):
+                        ended = item
+                        break
+                    reading = asyncio.ensure_future(process.stdout.readline())
+        except TimeoutError:
+            pass
+        finally:
+            if not reading.done():
+                reading.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await reading
+        return ended, stopped
 
 
 async def _send(process: CodexProcess, line: bytes) -> None:
