@@ -1245,6 +1245,7 @@ class ConnectionService:
                         request.prompt,
                         request.timeout_seconds,
                         on_usage,
+                        attachment=request.attachment,
                     ),
                 )
         except TimeoutError:
