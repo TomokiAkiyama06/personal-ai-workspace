@@ -32,6 +32,7 @@ from paw_backend.agents.cli_session import (
     SystemdLauncher,
     UnitNotStoppedError,
     create_session,
+    stop_through_cancellation,
 )
 from paw_backend.connections import Secret
 
@@ -409,6 +410,60 @@ class LauncherTest(unittest.IsolatedAsyncioTestCase):
             await self.launcher().start(launch)
         self.assertFalse(self.calls.exists())
         self.assertFalse((spec.directory / "credential.env").exists())
+
+
+class StopThroughCancellationTest(unittest.IsolatedAsyncioTestCase):
+    """A cancellation of the caller is never lost, also when it comes in the
+    same turn of the event loop as the end of the stop."""
+
+    class Process:
+        def __init__(self):
+            self.ended = asyncio.get_running_loop().create_future()
+
+        async def stop(self):
+            await self.ended
+
+    async def stopped_then_cancelled(self, end):
+        process = self.Process()
+        stopping = asyncio.create_task(stop_through_cancellation(process))
+        await asyncio.sleep(0)  # the stop is running
+        end(process.ended)
+        stopping.cancel()  # in the same turn as the stop's end
+        return await stopping
+
+    async def test_a_cancellation_with_a_stop_that_ended_is_kept(self):
+        failed, cancelled = await self.stopped_then_cancelled(
+            lambda ended: ended.set_result(None)
+        )
+        self.assertIsNone(failed)
+        self.assertTrue(cancelled)
+
+    async def test_a_cancellation_with_a_stop_that_failed_is_kept(self):
+        failed, cancelled = await self.stopped_then_cancelled(
+            lambda ended: ended.set_exception(UnitNotStoppedError("not stopped"))
+        )
+        self.assertIsInstance(failed, UnitNotStoppedError)
+        self.assertTrue(cancelled)
+
+    async def test_a_cancelled_stop_is_a_failed_stop(self):
+        failed, cancelled = await self.stopped_then_cancelled(
+            lambda ended: ended.cancel()
+        )
+        self.assertIsInstance(failed, OSError)
+        self.assertTrue(cancelled)
+
+
+class StopCancelledInsideTest(unittest.IsolatedAsyncioTestCase):
+    async def test_a_stop_cancelled_inside_is_not_a_cancellation_of_the_caller(
+        self,
+    ):
+        process = StopThroughCancellationTest.Process()
+        stopping = asyncio.create_task(stop_through_cancellation(process))
+        await asyncio.sleep(0)
+        process.ended.cancel()  # the stop itself ends cancelled
+        failed, cancelled = await stopping
+        self.assertIsInstance(failed, OSError)
+        self.assertFalse(cancelled)
 
 
 class DeployFilesTest(unittest.TestCase):

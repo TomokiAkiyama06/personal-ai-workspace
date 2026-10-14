@@ -177,18 +177,30 @@ async def stop_through_cancellation(
     meanwhile, which the caller raises after acting on the failure."""
     stopping = asyncio.ensure_future(process.stop())
     cancelled = False
-    while True:
+    while not stopping.done():
         try:
             await asyncio.shield(stopping)
         except asyncio.CancelledError:
-            if not stopping.done():
+            # The caller's cancellation is kept first, whatever the stop's
+            # state (it may have ended in the same turn of the event loop).
+            # Only a stop cancelled inside, with no cancellation of the
+            # caller pending, is not one.
+            task = asyncio.current_task()
+            if not (
+                stopping.cancelled() and task is not None and task.cancelling() == 0
+            ):
                 cancelled = True
-                continue
-            if stopping.cancelled():
-                return OSError("the stop was cancelled"), True
-        except OSError as failed:
-            return failed, cancelled
+        except OSError:
+            pass  # read from the stop below
+    if stopping.cancelled():
+        # A stop that was itself cancelled did not end: a failed stop.
+        return OSError("the stop was cancelled"), cancelled
+    error = stopping.exception()
+    if error is None:
         return None, cancelled
+    if isinstance(error, OSError):
+        return error, cancelled
+    raise error
 
 
 class _Subprocess:
