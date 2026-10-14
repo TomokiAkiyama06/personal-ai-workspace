@@ -62,6 +62,7 @@ from paw_backend.agents.cli_session import (
     UnitNotStoppedError,
     create_session,
     remove_session,
+    stop_through_cancellation,
 )
 from paw_backend.agents.cloud import CloudGate
 from paw_backend.agents.failures import ErrorClassifier, Failure, RuntimeFailure
@@ -258,11 +259,16 @@ class ClaudeSessionAdapter:
                     totals = item
         finally:
             ended.cancel()
-            try:
-                await process.stop()
-            except OSError:
+            # A cancellation (the session's deadline) that comes during the
+            # stop waits for it: a stop that did not end may leave the CLI
+            # running, and then its files must stay.
+            failed, cancelled = await stop_through_cancellation(process)
+            if failed is not None:
                 attachment.unstopped.append(True)
-                raise
+            if cancelled:
+                raise asyncio.CancelledError
+            if failed is not None:
+                raise failed
         code = await process.wait()
         if failure is None and not stream.initialized:
             failure = FailureCode.INVALID_RESPONSE

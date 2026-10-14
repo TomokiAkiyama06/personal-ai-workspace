@@ -167,6 +167,30 @@ class CliLauncher(Protocol):
     async def start(self, launch: CliLaunch) -> CliProcess: ...
 
 
+async def stop_through_cancellation(
+    process: CliProcess,
+) -> tuple[OSError | None, bool]:
+    """``process.stop()`` run to its end even when the caller is cancelled
+    meanwhile: only a stop that ended says whether the CLI (and its
+    credential) is gone, so whether its session's files may go. Returns the
+    stop's failure (``None``: stopped) and whether a cancellation came
+    meanwhile, which the caller raises after acting on the failure."""
+    stopping = asyncio.ensure_future(process.stop())
+    cancelled = False
+    while True:
+        try:
+            await asyncio.shield(stopping)
+        except asyncio.CancelledError:
+            if not stopping.done():
+                cancelled = True
+                continue
+            if stopping.cancelled():
+                return OSError("the stop was cancelled"), True
+        except OSError as failed:
+            return failed, cancelled
+        return None, cancelled
+
+
 class _Subprocess:
     def __init__(self, process: asyncio.subprocess.Process) -> None:
         self._process = process
@@ -349,10 +373,11 @@ class SystemdLauncher:
             # running with the credential; stop it before passing on. A stop
             # that fails is raised instead (chained): nobody may take the
             # unit for stopped and delete its directory under it.
-            try:
-                await asyncio.shield(process.stop())
-            except OSError as failed:
+            failed, cancelled = await stop_through_cancellation(process)
+            if failed is not None:
                 raise failed from error
+            if cancelled:
+                raise asyncio.CancelledError from error
             raise
         finally:
             server.close()  # one connection only; it stays open
@@ -410,4 +435,5 @@ __all__ = [
     "UnitNotStoppedError",
     "create_session",
     "remove_session",
+    "stop_through_cancellation",
 ]

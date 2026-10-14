@@ -312,6 +312,52 @@ class UnstoppedTest(ClaudeCase):
         self.assertIsNone(outcome.result)
         self.assertEqual(outcome.error_class, "AdapterError")
 
+    async def test_a_stop_interrupted_by_cancellation_keeps_its_directory(self):
+        # The session's deadline cancels the attempt while the adapter is
+        # stopping the CLI (a slow systemctl stop): the stop is finished
+        # first, it fails, so the files stay; the cancellation goes on.
+        stopping = asyncio.Event()
+
+        class SlowStuckLauncher(SubprocessLauncher):
+            async def start(self, launch):
+                process = await super().start(launch)
+                real_stop = process.stop
+
+                async def stop():
+                    stopping.set()
+                    await asyncio.sleep(0.5)
+                    await real_stop()  # (the test's process does end)
+                    raise UnitNotStoppedError("the session's unit could not be stopped")
+
+                process.stop = stop
+                return process
+
+        def adapter():
+            return ClaudeSessionAdapter(
+                SlowStuckLauncher(),
+                executable=(
+                    sys.executable,
+                    "-I",
+                    str(FAKE),
+                    "--scenario",
+                    str(self.scenario),
+                    "--report",
+                    str(self.report),
+                ),
+            )
+
+        self.adapter = adapter
+        running = asyncio.create_task(
+            self.run_node(
+                [{"call": "submit", "arguments": {"summary": "s"}}, {"sleep": 30}]
+            )
+        )
+        await asyncio.wait_for(stopping.wait(), 20)
+        running.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await running
+        self.assertEqual(len(list(self.sessions.iterdir())), 1)  # kept
+
     async def test_a_start_whose_cleanup_cannot_stop_keeps_its_directory(self):
         # The start failed (a timeout, a cancellation) and the stops that
         # cleaned it up failed too: the unit may still run with the session's
