@@ -14,7 +14,7 @@
 - 本番の Image は 0083 の 2 のとおり本物の git を消し、`/usr/local/bin/git` を Shim（`status`・`diff`・`log`・`show` を Host の Broker へ渡す）にしている。Shim は作業 Directory を見て Node の Repository として扱うので、`/tmp` に作った一時の Repository への `git init` なども Host へ送られ、拒まれる。
 - Repository の Test には、Test の中で一時の Repository を本物の git で作るものがある。paw-seed の `benchmarks/tests/test_worktree_runner.py` の 89 件は、Benchmark の Sandbox では通るが、本番の Sandbox ではすべて `git -C /tmp/... init` の失敗で errors になる（System Prompt が勧める `python -m unittest discover -s benchmarks/tests` が failures 1・**errors 89**。Benchmark の Sandbox では failures 1 だけ）。この Repository の `apps/backend/tests` も多くが本物の git を使う。
 - Model はこの失敗を自分の変更のせいか確かめようとして、Test を何度も走らせ（5 Task で 30 回。Harness は 14 回）、`git stash` で比べようとして拒まれた。
-- 実験として Image に本物の git を残し、**作業の場所（`cwd` と `-C`）が `/workspace` の外で、`GIT_DIR` などの環境変数も `/workspace` を指す引数もないときだけ本物の git、それ以外は Shim** にしたところ、Test の実行は 14〜16 回、`git stash` は 0 回、Step は平均 13.9（Harness 12.5）、所要は Harness の 1.1 倍になった。
+- 実験として Image に本物の git を残し、**作業の場所（`cwd` と `-C`）が `/workspace` の外で、`GIT_DIR` などの環境変数も `/workspace` を指す引数もないときだけ本物の git、それ以外は Shim** にしたところ（下の 1 の規則より狭い。paw-seed の Test は `-C` で場所を渡すのでこれで足りた）、Test の実行は 14〜16 回、`git stash` は 0 回、Step は平均 13.9（Harness 12.5）、所要は Harness の 1.1 倍になった。
 
 0083 の 2 が Shim にした理由は、(a) Linked Worktree の Git Directory は Mount の外にあり Sandbox からは使えない、(b) `.git` の File を書き換えれば別の Git Directory を指させられる、(c) 共有の Object Store から他の Task・Node・除外の Path の内容を読ませない、の 3 つで、どれも **Node の Repository** についてのものだった。`/tmp` の一時の Repository は Sandbox の中だけの物で、Host の Git Directory にも共有の Object Store にも届かない。
 
@@ -22,13 +22,13 @@
 
 ### 1. Image に本物の git を残し、`/workspace` の外だけで使う（推奨）
 
-- Image の本物の git を Path にない場所（例: `/usr/lib/paw/git`）に移し、`/usr/local/bin/git` を小さな前段にする。前段は次のどれかに当たれば Shim に渡し、どれにも当たらなければ本物の git を実行する:
-  - 作業の場所（`cwd` に、`-C <path>` を順に当てたもの。`realpath` で解決）が `/workspace` か、その下。
-  - 引数に `--git-dir`・`--work-tree`・`--namespace`・`--super-prefix`・`--exec-path` のどれかがある、または `/workspace` を含む引数がある。
-  - 環境変数 `GIT_DIR`・`GIT_WORK_TREE`・`GIT_COMMON_DIR`・`GIT_INDEX_FILE`・`GIT_OBJECT_DIRECTORY`・`GIT_ALTERNATE_OBJECT_DIRECTORIES` のどれかがある。
+- Image の本物の git を Path にない場所（例: `/usr/lib/paw/git`）に移し、`/usr/local/bin/git` を小さな前段にする。前段は **呼び出しが Node の Repository（`/workspace`）に向いているときだけ Shim に渡し、それ以外は本物の git を実行する**:
+  - 作業の場所 = `cwd` に `-C <path>` を順に当てたもの（`realpath` で解決）。
+  - 作業の場所が `/workspace` の外 → 本物の git。ただし、`--git-dir`・`--work-tree` の値か、環境変数 `GIT_DIR`・`GIT_WORK_TREE`・`GIT_COMMON_DIR`・`GIT_INDEX_FILE`・`GIT_OBJECT_DIRECTORY`・`GIT_ALTERNATE_OBJECT_DIRECTORIES` の値が `/workspace` の中を指すときは Shim。
+  - 作業の場所が `/workspace` か、その下 → Shim。ただし、**新しい Repository を作る副コマンド（`init`・`clone`）で、行き先の位置引数（`init` の `<directory>`、`clone` の `<directory>`）が `/workspace` の外を指すとき**は本物の git（Test が `cwd` を変えずに `git init /tmp/repo` や `git clone /tmp/a /tmp/b` を呼ぶ形。例: `apps/backend/tests/repositories_support.py`）。その一時の Repository の中での後の呼び出しは、`-C` か `cwd` がその場所になるので上の規則で本物の git に行く。
 - 前段は安全の境界ではない（Model は本物の git を直接実行できる）。**安全は今と同じく Mount と Mask が守る**: Sandbox から見えるのは Node の Repository の Mount（`.git` の File は読み取り専用、Git Directory と共有の Object Store は Mount されない、除外の Path は空の tmpfs）だけで、本物の git を `/workspace` に向けても、`cat` や `cp` でできる以上のことはできない（Git Directory がないので履歴も Object も読めない。書き込む Worker の Node は `bash` で Worktree に書けるのが今も同じ。読むだけの Node は Mount が読み取り専用）。`--network none` なので `clone` などの外への通信もできない。
 - 前段の役目は使い勝手だけ: `/workspace` での `git status` / `git diff` を今どおり Shim（Host の正しい履歴と Scope の規則）に送ること。
-- Test: 前段の振り分け（`cwd`・`-C` の組み合わせ・相対 Path・Symbolic Link・環境変数・`--git-dir`）、Image に本物の git が `/usr/local/bin/git` の他の名前で Path にないこと、`/workspace` の `.git` が読み取り専用のままであることを、今の Sandbox の Test（`test_sandbox_*`・`test_ssh_git_wrapper_sandbox.py`）に足す。GPU の再確認は要らない（上の実験で振る舞いを見た）。
+- Test: 前段の振り分け（`cwd`・`-C` の組み合わせ・相対 Path・Symbolic Link・環境変数・`--git-dir`、`/workspace` からの `git init /tmp/repo`・`git clone /tmp/a /tmp/b`・`git init`（行き先なし = `/workspace`、Shim））、Image に本物の git が `/usr/local/bin/git` の他の名前で Path にないこと、`/workspace` の `.git` が読み取り専用のままであることを、今の Sandbox の Test（`test_sandbox_*`・`test_ssh_git_wrapper_sandbox.py`）に足す。GPU の再確認は要らない（上の実験で振る舞いを見た）。
 
 ### 2. Shim のまま、System Prompt で知らせる（代わりの案）
 
