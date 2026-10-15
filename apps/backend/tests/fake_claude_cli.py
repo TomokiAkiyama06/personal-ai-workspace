@@ -68,6 +68,57 @@ def main() -> int:
     listed = [t["name"] for t in rpc("tools/list")["result"]["tools"]]
     report["listed"] = listed
     save()
+
+    def run(actions):
+        for action in actions:
+            if "turn" in action:
+                message_id = "msg_" + uuid.uuid4().hex
+                input_tokens, output_tokens = action["turn"]
+                start = {
+                    "type": "message_start",
+                    "message": {
+                        "id": message_id,
+                        "usage": {
+                            "input_tokens": input_tokens,
+                            "cache_creation_input_tokens": 0,
+                            "cache_read_input_tokens": 0,
+                            "output_tokens": 1,
+                        },
+                    },
+                }
+                out({"type": "stream_event", "event": start})
+                if not action.get("no_delta"):
+                    delta = {
+                        "type": "message_delta",
+                        "usage": {"output_tokens": output_tokens},
+                    }
+                    out({"type": "stream_event", "event": delta})
+                if not action.get("no_stop"):
+                    out({"type": "stream_event", "event": {"type": "message_stop"}})
+            elif "call" in action:
+                answer = rpc(
+                    "tools/call",
+                    {"name": action["call"], "arguments": action.get("arguments", {})},
+                )
+                report["calls"].append(answer["result"])
+                save()
+            elif "retry" in action:
+                out(
+                    {"type": "system", "subtype": "api_retry", "error": action["retry"]}
+                )
+            elif "result" in action:
+                out({"type": "result", **action["result"]})
+            elif "sleep" in action:
+                time.sleep(action["sleep"])
+            elif "exit" in action:
+                save()
+                return action["exit"]
+        return None
+
+    # Actions before ``system/init`` (a CLI that calls a tool first).
+    code = run(scenario.get("before_init", []))
+    if code is not None:
+        return code
     tools = scenario.get("init_tools") or [
         *(f"mcp__paw__{name}" for name in listed),
         "EndConversation",
@@ -82,47 +133,9 @@ def main() -> int:
             ),
         }
     )
-    for action in scenario["actions"]:
-        if "turn" in action:
-            message_id = "msg_" + uuid.uuid4().hex
-            input_tokens, output_tokens = action["turn"]
-            start = {
-                "type": "message_start",
-                "message": {
-                    "id": message_id,
-                    "usage": {
-                        "input_tokens": input_tokens,
-                        "cache_creation_input_tokens": 0,
-                        "cache_read_input_tokens": 0,
-                        "output_tokens": 1,
-                    },
-                },
-            }
-            out({"type": "stream_event", "event": start})
-            if not action.get("no_delta"):
-                delta = {
-                    "type": "message_delta",
-                    "usage": {"output_tokens": output_tokens},
-                }
-                out({"type": "stream_event", "event": delta})
-            if not action.get("no_stop"):
-                out({"type": "stream_event", "event": {"type": "message_stop"}})
-        elif "call" in action:
-            answer = rpc(
-                "tools/call",
-                {"name": action["call"], "arguments": action.get("arguments", {})},
-            )
-            report["calls"].append(answer["result"])
-            save()
-        elif "retry" in action:
-            out({"type": "system", "subtype": "api_retry", "error": action["retry"]})
-        elif "result" in action:
-            out({"type": "result", **action["result"]})
-        elif "sleep" in action:
-            time.sleep(action["sleep"])
-        elif "exit" in action:
-            save()
-            return action["exit"]
+    code = run(scenario["actions"])
+    if code is not None:
+        return code
     save()
     return 0
 

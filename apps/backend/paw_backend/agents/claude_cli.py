@@ -9,7 +9,8 @@ as the local model's loop, through the Tool Broker), and sends the session
 through :class:`~paw_backend.agents.cloud.CloudGate` (``CloudPolicy`` ->
 admission -> placement -> the adapter). The answer is the bridge's: the
 ``submit``'s outcome, or the failure that ended the attempt; a session that
-ended without either is ``no_submission``.
+ended without either is ``no_submission``. A session the adapter refused
+(``invalid_response``) is never the bridge's outcome, even after a ``submit``.
 
 :class:`ClaudeSessionAdapter` is the connection's session adapter
 (``ConnectionService(session_adapters={CLAUDE: ...})``). It starts the CLI
@@ -424,11 +425,16 @@ class ClaudeCliRuntime:
             return ErrorClassifier.outcome(Failure.OTHER)
         if bridge.failure is not None:
             return _ended(bridge.failure)
-        if bridge.outcome is not None:
-            return bridge.outcome
         failure = getattr(result, "failure", None)
         if failure is FailureCode.INVALID_RESPONSE and attachment.notes.unsupported:
             return ErrorClassifier.outcome(Failure.UNSUPPORTED_CLI)
+        if failure is FailureCode.INVALID_RESPONSE:
+            # The adapter refused the session (for example a ``submit`` that
+            # came before its ``system/init`` was checked): its refusal wins
+            # over the bridge's outcome.
+            return ErrorClassifier.outcome(Failure.MALFORMED_RESPONSE)
+        if bridge.outcome is not None:
+            return bridge.outcome
         if failure is not None:
             return ErrorClassifier.outcome(_FAILURES.get(failure, Failure.OTHER))
         return ErrorClassifier.outcome(Failure.NO_SUBMISSION)

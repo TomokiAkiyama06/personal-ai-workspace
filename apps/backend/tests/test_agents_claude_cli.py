@@ -406,6 +406,22 @@ class UnstoppedTest(ClaudeCase):
         self.assertEqual(outcome.error_class, "AdapterError")
 
 
+class EarlySubmitTest(ClaudeCase):
+    async def test_a_submit_before_the_init_is_checked_is_not_the_outcome(self):
+        # The CLI calls ``submit`` before its ``system/init`` was read: the
+        # adapter refuses the session (``invalid_response``), and that
+        # refusal wins over the bridge's outcome (the tools and servers were
+        # never checked).
+        outcome = await self.run_node(
+            [{"sleep": 30}],
+            before_init=[{"call": "submit", "arguments": {"summary": "early"}}],
+        )
+        self.assertIsNotNone(self.connections.raw.failure)
+        self.assertEqual(self.connections.raw.failure.value, "invalid_response")
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.error_class, "ValueError")
+
+
 class ReportTest(ClaudeCase):
     async def test_totals_without_any_turn_are_refused(self):
         result = {
@@ -660,6 +676,60 @@ class StreamTest(unittest.TestCase):
         stream.feed(start("msg_1"))
         with self.assertRaises(StreamRefused):
             stream.feed(start("msg_2"))
+
+    def test_malformed_token_counts_are_refused_not_zero(self):
+        def start(usage):
+            event = {"type": "message_start", "message": {"id": "m", "usage": usage}}
+            return json.dumps({"type": "stream_event", "event": event})
+
+        def delta(output):
+            event = {"type": "message_delta", "usage": {"output_tokens": output}}
+            return json.dumps({"type": "stream_event", "event": event})
+
+        def result(model):
+            message = {
+                "type": "result",
+                "subtype": "success",
+                "modelUsage": {"m": model},
+            }
+            return json.dumps(message)
+
+        # Valid: the cache fields may be missing or null.
+        stream = ClaudeStream(frozenset())
+        stream.feed(start({"input_tokens": 5, "cache_read_input_tokens": None}))
+        stream.feed(delta(2))
+        turn = stream.feed(
+            json.dumps({"type": "stream_event", "event": {"type": "message_stop"}})
+        )
+        self.assertEqual((turn.input_tokens, turn.output_tokens), (5, 2))
+        totals = ClaudeStream(frozenset()).feed(
+            result({"inputTokens": 7, "outputTokens": 3})
+        )
+        self.assertEqual((totals.input_tokens, totals.output_tokens), (7, 3))
+        for usage in (
+            {},
+            {"input_tokens": "5"},
+            {"input_tokens": -1},
+            {"input_tokens": True},
+            {"input_tokens": 5, "cache_creation_input_tokens": -3},
+            {"input_tokens": 5, "cache_read_input_tokens": "9"},
+        ):
+            with self.subTest(usage=usage), self.assertRaises(StreamRefused):
+                ClaudeStream(frozenset()).feed(start(usage))
+        for output in (-1, "3", 2.5, None):
+            with self.subTest(output=output), self.assertRaises(StreamRefused):
+                stream = ClaudeStream(frozenset())
+                stream.feed(start({"input_tokens": 5}))
+                stream.feed(delta(output))
+        for model in (
+            {"inputTokens": "7", "outputTokens": 3},
+            {"inputTokens": 7},
+            {"outputTokens": 3},
+            {"inputTokens": 7, "outputTokens": -3},
+            {"inputTokens": 7, "outputTokens": 3, "cacheReadInputTokens": "1"},
+        ):
+            with self.subTest(model=model), self.assertRaises(StreamRefused):
+                ClaudeStream(frozenset()).feed(result(model))
 
     def test_malformed_lines_are_refused(self):
         with self.assertRaises(StreamRefused):
