@@ -35,10 +35,11 @@ Without a handler a session is refused before anything starts.
 
 The CLI rung stays disabled at assembly (Decision 0083, 11's 4: until the
 ``CloudPolicy`` Decision; the provider's terms are still being confirmed by the
-human; and no version is verified). The launcher here,
-:class:`InteractiveSubprocessLauncher`, runs the CLI as a child process for
-development and the tests; production's launcher must also carry the CLI's
-stdin (``app-server`` is a conversation, not one prompt).
+human; and no version is verified). :class:`InteractiveSubprocessLauncher`
+runs the CLI as a child process for development and the tests;
+:class:`SystemdCodexLauncher` is production's (the session's unit of
+``cli_session.SystemdLauncher``, whose stream socket carries the CLI's stdin
+as well as its stdout: ``app-server`` is a conversation, not one prompt).
 """
 
 import asyncio
@@ -56,6 +57,7 @@ from paw_backend.agents.bridge import McpBridge
 from paw_backend.agents.claude_cli import NODE_MARGIN_SECONDS, _ended
 from paw_backend.agents.cli_session import (
     CliSessionSpec,
+    SystemdLauncher,
     UnitNotStoppedError,
     _Subprocess,
     create_session,
@@ -216,6 +218,22 @@ class InteractiveSubprocessLauncher:
             limit=MAX_LINE_BYTES,
         )
         return _Interactive(process)
+
+
+class SystemdCodexLauncher:
+    """Production's launcher: the session's unit (``SystemdLauncher``, #236)
+    in its Codex form (``start_interactive``: the stream socket is the CLI's
+    stdin and stdout; no credential file, no prompt). The version probe and
+    ``app-server`` each start the session's unit in turn."""
+
+    def __init__(self, systemd: SystemdLauncher) -> None:
+        require_async_method(systemd, "start_interactive", 3)
+        self._systemd = systemd
+
+    async def start(self, launch: CodexLaunch) -> CodexProcess:
+        return await self._systemd.start_interactive(
+            launch.argv, launch.env, launch.spec
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -719,5 +737,6 @@ __all__ = [
     "CodexProcess",
     "CodexSessionAdapter",
     "InteractiveSubprocessLauncher",
+    "SystemdCodexLauncher",
     "session_config",
 ]

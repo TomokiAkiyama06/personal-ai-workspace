@@ -40,6 +40,7 @@ DEPLOY = Path(__file__).resolve().parents[1] / "deploy" / "cli-session"
 RUNNER = DEPLOY / "paw_cli_session_run.py"
 TOKEN = "paw-claude-canary-" + "5e1d" + "-token"
 DIGEST = "localhost/paw-claude-cli@sha256:" + "ab" * 32
+CODEX_DIGEST = "localhost/paw-codex-cli@sha256:" + "cd" * 32
 
 
 def fake_tool(directory: Path, name: str, body: str) -> None:
@@ -86,11 +87,77 @@ class RunnerTest(unittest.TestCase):
         )
         (self.directory / "prompt").write_text("the task")
 
-    def write_config(self, image):
-        self.config.write_text(
+    def write_config(self, image, codex_image=None):
+        text = (
             f'root = "{self.root}"\nimage = "{image}"\n'
             'egress_socket = "/run/paw-egress/egress.sock"\n'
         )
+        if codex_image is not None:
+            text += f'codex_image = "{codex_image}"\n'
+        self.config.write_text(text)
+
+    def codex_session(self):
+        """A Codex launch (``app-server`` talks over stdin and stdout): no
+        prompt file, no credential file (the login is in ``CODEX_HOME``)."""
+        self.write_config(DIGEST, CODEX_DIGEST)
+        (self.directory / "credential.env").unlink()
+        (self.directory / "prompt").unlink()
+        (self.directory / "launch.json").write_text(
+            json.dumps(
+                {
+                    "argv": ["/opt/paw/start-codex", "app-server"],
+                    "env": {
+                        "HOME": str(self.directory),
+                        "CODEX_HOME": str(self.directory / "config"),
+                        "HTTPS_PROXY": "http://127.0.0.1:3128",
+                    },
+                    "cli": "codex",
+                }
+            )
+        )
+
+    def run_interactive(self, send):
+        """The runner with the backend's end of ``stream.sock`` talking: it
+        sends ``send``, ends its side, and reads what comes back."""
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(str(self.directory / "stream.sock"))
+        server.listen(1)
+        received = []
+
+        def talk():
+            server.settimeout(10)
+            try:
+                connection, _ = server.accept()
+            except OSError:
+                return
+            with connection:
+                connection.sendall(send)
+                connection.shutdown(socket.SHUT_WR)
+                while data := connection.recv(65536):
+                    received.append(data)
+
+        thread = threading.Thread(target=talk)
+        thread.start()
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                str(RUNNER),
+                self.session,
+                "--config",
+                str(self.config),
+            ],
+            env={"PATH": f"{self.bin}:/usr/bin:/bin"},
+            capture_output=True,
+            timeout=30,
+        )
+        try:
+            server.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        server.close()
+        thread.join(15)
+        return result, b"".join(received)
 
     def run_runner(self, session=None):
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -165,6 +232,54 @@ class RunnerTest(unittest.TestCase):
         )
         self.assertNotIn(TOKEN, json.dumps(argv))
 
+    def test_a_codex_session_talks_over_the_stream_socket(self):
+        # ``codex app-server`` is a conversation: the backend's socket is the
+        # container's stdin as well as its stdout.
+        self.codex_session()
+        result, stream = self.run_interactive(b'{"id": 1, "method": "initialize"}\n')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(stream, b'{"type": "result"}\n')
+        record = json.loads(self.record.read_text())
+        self.assertEqual(record["stdin"], '{"id": 1, "method": "initialize"}\n')
+        argv = record["argv"]
+        self.assertIn("-i", argv)
+        self.assertNotIn("--env-file", argv)
+        for pair in (
+            ["--network", "none"],
+            ["--env", f"CODEX_HOME={self.directory / 'config'}"],
+            ["--env", f"PAW_SESSION_ID={self.session}"],
+            ["--volume", f"{self.directory}:{self.directory}:rw"],
+        ):
+            with self.subTest(pair=pair):
+                index = argv.index(pair[1]) - 1
+                self.assertEqual(argv[index : index + 2], pair)
+        image = argv.index(CODEX_DIGEST)
+        self.assertEqual(argv[image + 1 :], ["/opt/paw/start-codex", "app-server"])
+        self.assertNotIn(DIGEST, argv)
+
+    def test_what_it_refuses_of_a_codex_session_starts_nothing(self):
+        cases = {
+            "no codex image": lambda: self.write_config(DIGEST),
+            "a codex image without its digest": lambda: self.write_config(
+                DIGEST, "localhost/paw-codex-cli:latest"
+            ),
+            "a credential file": lambda: (self.directory / "credential.env").write_text(
+                f"CLAUDE_CODE_OAUTH_TOKEN={TOKEN}\n"
+            ),
+            "an unknown cli": lambda: (self.directory / "launch.json").write_text(
+                json.dumps({"argv": ["x"], "env": {}, "cli": "other"})
+            ),
+        }
+        for name, prepare in cases.items():
+            with self.subTest(name):
+                self.setUp()
+                self.codex_session()
+                prepare()
+                result, _ = self.run_interactive(b"")
+                self.assertEqual(result.returncode, 2)
+                self.assertFalse(self.record.exists())
+                self.assertNotIn(TOKEN.encode(), result.stderr)
+
     def test_what_it_refuses_starts_nothing(self):
         cases = {
             "not a uuid": lambda: None,
@@ -226,6 +341,8 @@ class LauncherTest(unittest.IsolatedAsyncioTestCase):
                     "s = socket.socket(socket.AF_UNIX);"
                     f"s.connect({{os.path.join(root, session, 'stream.sock')!r}});"
                     "s.sendall(b'line one\\\\nline two\\\\n');"
+                    "e = os.path.join(os.path.dirname(sys.argv[1]), 'echo');"
+                    "os.path.exists(e) and s.sendall(s.makefile('rb').readline());"
                     "time.sleep(float(open(sys.argv[1]).read() or 0));"
                     f"open({{state!r}}, 'w').write('inactive 0')"
                 )
@@ -296,6 +413,59 @@ class LauncherTest(unittest.IsolatedAsyncioTestCase):
             f"start --no-block paw-cli-session@{spec.session_id}.service", calls
         )
         self.assertNotIn(TOKEN, calls)
+
+    async def test_an_interactive_session_carries_stdin(self):
+        # Codex's ``app-server`` (#239): the stream socket carries the CLI's
+        # stdin too; no credential file, no prompt; the launch says so.
+        (self.sessions / "echo").write_text("")
+        spec = create_session(self.sessions, ("python3", "relay.py"))
+        process = await self.launcher().start_interactive(
+            ("/opt/paw/start-codex", "app-server"),
+            {"CODEX_HOME": str(spec.config_dir)},
+            spec,
+        )
+        process.stdin.write(b'{"id": 1}\n')
+        await process.stdin.drain()
+        lines = [await process.stdout.readline() for _ in range(3)]
+        self.assertEqual(lines, [b"line one\n", b"line two\n", b'{"id": 1}\n'])
+        self.assertEqual(await process.wait(), 0)
+        launch = json.loads((spec.directory / "launch.json").read_text())
+        self.assertEqual(launch["argv"], ["/opt/paw/start-codex", "app-server"])
+        self.assertEqual(launch["cli"], "codex")
+        self.assertFalse((spec.directory / "credential.env").exists())
+        self.assertFalse((spec.directory / "prompt").exists())
+        await process.stop()
+
+    async def test_interactive_sessions_start_in_turn_in_one_directory(self):
+        # The version probe, then ``app-server``: the same session's unit is
+        # started twice; the second launch replaces the first's files.
+        spec = create_session(self.sessions, ("python3", "relay.py"))
+        launcher = self.launcher()
+        first = await launcher.start_interactive(("codex", "--version"), {}, spec)
+        self.assertEqual(await first.stdout.readline(), b"line one\n")
+        await first.stop()
+        second = await launcher.start_interactive(("codex", "app-server"), {}, spec)
+        self.assertEqual(await second.stdout.readline(), b"line one\n")
+        launch = json.loads((spec.directory / "launch.json").read_text())
+        self.assertEqual(launch["argv"], ["codex", "app-server"])
+        await second.stop()
+        unit = f"paw-cli-session@{spec.session_id}.service"
+        self.assertEqual(self.calls.read_text().count(f"start --no-block {unit}"), 2)
+
+    async def test_the_codex_adapter_takes_the_systemd_launcher(self):
+        from paw_backend.agents.codex_cli import (
+            CodexLaunch,
+            CodexSessionAdapter,
+            SystemdCodexLauncher,
+        )
+
+        launcher = SystemdCodexLauncher(self.launcher())
+        CodexSessionAdapter(launcher)  # its start is checked
+        spec = create_session(self.sessions, ("python3", "relay.py"))
+        process = await launcher.start(CodexLaunch(("codex", "--version"), {}, spec))
+        self.assertEqual(await process.stdout.readline(), b"line one\n")
+        self.assertTrue(hasattr(process, "stdin"))
+        await process.stop()
 
     async def test_stop_stops_exactly_the_sessions_unit(self):
         (self.sessions / "hold").write_text("30")

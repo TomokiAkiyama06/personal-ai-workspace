@@ -1,0 +1,17 @@
+# The CLI image of Codex sessions (Decision 0089). Build it, then pin the
+# digest as codex_image in /etc/paw/cli-session.toml:
+#   podman build -t localhost/paw-codex-cli -f Containerfile.codex ..
+#   podman image inspect --format '{{.Digest}}' localhost/paw-codex-cli
+# Pin the base image's digest and Codex's version before building; the version
+# must be one the backend verified (VERIFIED_VERSIONS, after the fake CLI's
+# stream check and the smoke test of Decision 0089, 2).
+FROM docker.io/library/node:22-bookworm-slim
+ARG CODEX_VERSION
+RUN test -n "$CODEX_VERSION" \
+    && apt-get update && apt-get install -y --no-install-recommends python3 \
+    && rm -rf /var/lib/apt/lists/* \
+    && npm install --global "@openai/codex@${CODEX_VERSION}" \
+    && npm cache clean --force
+COPY cli-session/start-codex cli-session/paw_mcp_relay.py egress/paw_egress.py /opt/paw/
+# No entry point: the backend names /opt/paw/start-codex as the command
+# (CodexSessionAdapter(executable=("/opt/paw/start-codex",))).

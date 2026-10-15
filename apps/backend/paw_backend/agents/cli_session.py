@@ -13,9 +13,11 @@
   file in the session's directory the unit reads; the tests: the variable).
   Stopping is SIGTERM, five seconds, then SIGKILL (Decision 0083, 8).
 * :class:`SubprocessLauncher`: runs the CLI as a child process of the backend
-  (development and the tests with the fake CLI). Production starts it in its
-  own container through a systemd template unit (a later change); the CLI
-  rung stays disabled at assembly until then.
+  (development and the tests with the fake CLI). Production's
+  :class:`SystemdLauncher` starts it in its own container through a systemd
+  template unit (``start``: Claude, the prompt as stdin; ``start_interactive``:
+  Codex, the stream socket as stdin too). The CLI rung stays disabled at
+  assembly.
 """
 
 import asyncio
@@ -233,12 +235,14 @@ class _Subprocess:
 
 
 class _UnitProcess:
-    """A session's unit, as the adapter sees a process."""
+    """A session's unit, as the adapter sees a process. ``stdin`` is the
+    stream socket's writing end (used by an interactive launch only)."""
 
     def __init__(self, launcher: "SystemdLauncher", unit: str, stdout) -> None:
         self._launcher = launcher
         self._unit = unit
         self.stdout = stdout
+        self.stdin: asyncio.StreamWriter | None = None
 
     async def wait(self) -> int:
         """The unit's exit status once it is no longer active."""
@@ -359,13 +363,36 @@ class SystemdLauncher:
             spec.directory / "credential.env", f"{launch.secret_env}={value}\n", 0o640
         )
         _write_bytes(spec.directory / "prompt", launch.stdin, 0o640)
+        return await self._start_unit(spec)
+
+    async def start_interactive(
+        self, argv: Sequence[str], env: Mapping[str, str], spec: CliSessionSpec
+    ) -> _UnitProcess:
+        """A Codex launch (``codex app-server`` talks over stdio, #239): the
+        stream socket is the CLI's stdin as well as its stdout (the
+        returned process's ``stdin``), and there is no credential file and no
+        prompt (Codex's login is a file in its ``CODEX_HOME``). One session
+        starts its unit more than once, in turn (the version probe, then
+        ``app-server``), each after the previous one stopped: a launch
+        replaces the previous one's ``launch.json``."""
+        (spec.directory / "launch.json").unlink(missing_ok=True)
+        _write(
+            spec.directory / "launch.json",
+            json.dumps({"argv": list(argv), "env": dict(env), "cli": "codex"}),
+            0o640,
+        )
+        return await self._start_unit(spec)
+
+    async def _start_unit(self, spec: CliSessionSpec) -> _UnitProcess:
+        """Wait on ``stream.sock`` and start the session's unit; its program
+        connects there."""
         connected: asyncio.Future = asyncio.get_running_loop().create_future()
 
         async def accept(reader, writer) -> None:
             if connected.done():
                 writer.close()
                 return
-            connected.set_result(reader)
+            connected.set_result((reader, writer))
             await writer.wait_closed()
 
         server = await asyncio.start_unix_server(
@@ -378,7 +405,7 @@ class SystemdLauncher:
             code, _ = await self.systemctl("start", "--no-block", unit)
             if code != 0:
                 raise OSError("the session's unit did not start")
-            reader = await asyncio.wait_for(connected, self._connect)
+            reader, writer = await asyncio.wait_for(connected, self._connect)
         except BaseException as error:
             # Whatever ended the start (a refusal, the wait, a cancellation
             # that came while systemctl ran): the unit may be queued or
@@ -394,6 +421,7 @@ class SystemdLauncher:
         finally:
             server.close()  # one connection only; it stays open
         process.stdout = reader
+        process.stdin = writer
         return process
 
 

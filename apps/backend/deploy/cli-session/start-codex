@@ -1,0 +1,10 @@
+#!/bin/sh
+# The CLI image's entry for a Codex session: the egress forwarder in the
+# background (127.0.0.1:3128 -> the mounted proxy socket), then Codex with the
+# arguments the backend chose (``--version``, or ``app-server --listen
+# stdio://``: Decision 0087, 3; Decision 0089). stdin and stdout are the
+# session's stream socket.
+set -eu
+python3 -I /opt/paw/paw_egress.py forward --listen-port 3128 \
+    --socket /run/paw-egress.sock --session "$PAW_SESSION_ID" &
+exec codex "$@"

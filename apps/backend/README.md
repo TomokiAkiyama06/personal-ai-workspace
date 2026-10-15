@@ -4272,6 +4272,7 @@ Test は `tests/test_agents_claude_cli.py`（本物の Runtime・Adapter・Bridg
 - Backend は Session の Directory（`/run/paw-cli/<uuid>`、Group `paw-cli-bridge`）に `launch.json`（CLI の引数と許可した名前の環境変数）・`credential.env`（`CLAUDE_CODE_OAUTH_TOKEN` の 1 行、0640）・`prompt` を書き、`stream.sock` で待ってから `systemctl start --no-block paw-cli-session@<uuid>.service`（polkit はこの名前の `start` / `stop` だけを許す）。CLI の stdout はその Socket に来る。止めるのは `systemctl stop`（Unit が SIGTERM → 5 秒 → SIGKILL、Container を消す）。
 - Unit の Program（`paw-agent-cli`、硬くした Unit）は UUID・Digest で固定した Image・環境変数の名前・Credential の行の形を確かめ、`podman run --rm --network none --read-only --cap-drop all --userns keep-id` で Session の Directory を同じ Path に、Egress の Socket を Mount し、Credential は `--env-file` で渡す（引数に出さない）。
 - Session の Directory の名前は `<base>/<uuid>` にした（Unit の Program が Id だけで見つけるため）。
+- Codex（`launch.json` の `cli` が `codex`。`SystemdLauncher.start_interactive`）: `codex app-server` は stdio の対話なので、Unit の Program は `stream.sock` を Container の stdin と stdout の両方にする。Image は設定の `codex_image`（Digest で固定。`Containerfile.codex` と `start-codex`）、`credential.env` と `prompt` はない（Codex の Login は `CODEX_HOME` の File。`credential.env` があれば拒否）、環境変数に `CODEX_HOME` を許す。
 
 Test は `tests/test_cli_session_units.py`（Fake の `podman` と Fake の `systemctl`。Container・systemd・他の Account は使わない）。
 
@@ -4283,7 +4284,7 @@ Test は `tests/test_cli_session_units.py`（Fake の `podman` と Fake の `sys
 - Adapter はまず Credential なしで `codex --version` を読み、一覧にない版は何も起動しない。次に Session の `$CODEX_HOME/config.toml`（Tool に関わる既定で有効な Feature をすべて `false`・`web_search = "disabled"`・`update_plan` と `request_user_input` を無効・Telemetry と履歴なし・MCP の Server は `paw` の Relay だけで `required`・`enabled_tools`・`default_tools_approval_mode = "approve"`）を書き、`codex app-server --listen stdio://` を起動して `initialize`（`experimentalApi`）→ `thread/start`（`environments: []`・`approvalPolicy: "never"`・`sandbox: "read-only"`・`ephemeral`・PAW の System Prompt）→ `turn/start`（Task）。
 - `thread/tokenUsage/updated` の `total` の増分を `on_usage` で報告（同じ値の再送は数えない、減ったら止める）。Item は閉じた対応（`userMessage`・`agentMessage`・`reasoning`・`contextCompaction` と `paw` の `mcpToolCall` だけを通す。実行できる Item・知らない `type`・Server からの Request は止める）。`unauthorized` は `expired`、`usageLimitExceeded` / `rateLimitExceeded` は `rate_limited`。
 - ChatGPT の Login の `auth.json` は `CodexCredentials`（`place` / `collect`）が Session の `CODEX_HOME` に置いて回収する。**実装はまだなく**、無ければ Session を始めない（`unavailable`）。Connection ごとに 1 Session の Lease と書き戻し・Egress の Allowlist は Smoke の後の ChatGPT の Login の PR（Decision 0087 の 5 の 4、0089 の 4）。
-- 起動の口は子 Process の `InteractiveSubprocessLauncher`（stdin を開いたまま。開発と Test）。本番の起動の口（#236）は stdout だけを運ぶので、Codex には stdin も運ぶ形が要る（後の PR）。
+- 起動の口は子 Process の `InteractiveSubprocessLauncher`（stdin を開いたまま。開発と Test）と、本番の `SystemdCodexLauncher`（#236 の `SystemdLauncher.start_interactive`: `stream.sock` が CLI の stdout だけでなく stdin も運ぶ。`credential.env` と `prompt` は書かず、`launch.json` の `cli` は `codex`。版の確認と `app-server` は同じ Session の Unit を順に起動する）。
 
 Test は `tests/test_agents_codex_cli.py`（本物の Runtime・Adapter・Bridge・Relay・起動の口、Fake の `codex` = `tests/fake_codex_cli.py`（`rust-v0.162.1` の stdio の形）、`execute_session` の代わりの Fake）。
 
