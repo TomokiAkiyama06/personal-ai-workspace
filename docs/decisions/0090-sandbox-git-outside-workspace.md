@@ -1,9 +1,10 @@
 # Tool の Sandbox で、`/workspace` の外の Repository には本物の git を使えるようにするか（#208 の GPU の Smoke の結果）
 
-- Status: Proposed
+- Status: Approved
+- Approval: 2026-10-16、Humanが作業Session内で、判断点の説明（推奨つき）を受けたうえで直接回答して承認（approved as recommended: 決めてほしいことの 1 を推奨どおり承認）
 - Date: 2026-10-15
 - Scope: Issue [#208](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/208) の Tool の Sandbox の Image（`apps/backend/deploy/sandbox/`：`Containerfile`・`paw_git_shim.py`）。[Decision 0083](0083-agent-runtime-adapters.md)（Approved）の 2 の「Sandbox の中では本物の git を使わせず、Sandbox の `git` を小さな Shim にする」の適用の範囲。
-- Supersedes（一部、承認されたら）: 0083 の 2 の上の 1 文を「**Node の Repository（`/workspace` の下）に対して** は本物の git を使わせず Shim にする」に狭める。Shim の許可の規則（副コマンド・Option・Revision・Pathspec・`.git` の File の読み取り専用の Mount）、6 の Mount と Mask、`--network none` は変えない。
+- Supersedes（一部）: 0083 の 2 の上の 1 文を「**Node の Repository（`/workspace` の下）に対して** は本物の git を使わせず Shim にする」に狭める。Shim の許可の規則（副コマンド・Option・Revision・Pathspec・`.git` の File の読み取り専用の Mount）、6 の Mount と Mask、`--network none` は変えない。
 
 ## 背景
 
