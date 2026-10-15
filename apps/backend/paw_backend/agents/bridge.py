@@ -85,6 +85,8 @@ class McpBridge:
         self.outcome: NodeOutcome | None = None
         self.failure: BaseException | None = None
         self.ended = asyncio.Event()
+        # The tool calls run (a session reader matches them to its stream).
+        self.calls = 0
 
     def __repr__(self) -> str:
         return "McpBridge(<session>)"
@@ -248,6 +250,7 @@ class McpBridge:
         async with self._calls:
             if self.ended.is_set():
                 return _text(ENDED_TEXT, error=True)
+            self.calls += 1
             try:
                 text, outcome = await self._toolkit.run(name, arguments)
             except ToolError as error:

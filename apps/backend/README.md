@@ -4275,6 +4275,18 @@ Test は `tests/test_agents_claude_cli.py`（本物の Runtime・Adapter・Bridg
 
 Test は `tests/test_cli_session_units.py`（Fake の `podman` と Fake の `systemctl`。Container・systemd・他の Account は使わない）。
 
+## Codex CLI の Runtime（`codex app-server`。Issue #208、Decision 0083 の 1・5・6・8、Decision 0087 の 4、Decision 0089、段階 4c）
+
+`agents/codex_cli.py` の `CodexCliRuntime` と `CodexSessionAdapter`、`agents/codex_app_server.py`（`codex app-server` の stdio の読み書き）です。**CLI の段は組み立てで無効のまま**で、さらに **確かめた版の一覧（`VERIFIED_VERSIONS`）が空** なので、どの版でも Credential を渡す前に止まります（Decision 0089 の 2: Smoke で Request の `tools` が PAW の Tool だけと確かめた版だけを入れる）。
+
+- Runtime は Claude と同じ（Session の Directory・`McpBridge`・`CloudGate`・`submit` の Outcome・`no_submission`・Planner には使わない・`run_as_fallback`）。
+- Adapter はまず Credential なしで `codex --version` を読み、一覧にない版は何も起動しない。次に Session の `$CODEX_HOME/config.toml`（Tool に関わる既定で有効な Feature をすべて `false`・`web_search = "disabled"`・`update_plan` と `request_user_input` を無効・Telemetry と履歴なし・MCP の Server は `paw` の Relay だけで `required`・`enabled_tools`・`default_tools_approval_mode = "approve"`）を書き、`codex app-server --listen stdio://` を起動して `initialize`（`experimentalApi`）→ `thread/start`（`environments: []`・`approvalPolicy: "never"`・`sandbox: "read-only"`・`ephemeral`・PAW の System Prompt）→ `turn/start`（Task）。
+- `thread/tokenUsage/updated` の `total` の増分を `on_usage` で報告（同じ値の再送は数えない、減ったら止める）。Item は閉じた対応（`userMessage`・`agentMessage`・`reasoning`・`contextCompaction` と `paw` の `mcpToolCall` だけを通す。実行できる Item・知らない `type`・Server からの Request は止める）。`unauthorized` は `expired`、`usageLimitExceeded` / `rateLimitExceeded` は `rate_limited`。
+- ChatGPT の Login の `auth.json` は `CodexCredentials`（`place` / `collect`）が Session の `CODEX_HOME` に置いて回収する。**実装はまだなく**、無ければ Session を始めない（`unavailable`）。Connection ごとに 1 Session の Lease と書き戻し・Egress の Allowlist は Smoke の後の ChatGPT の Login の PR（Decision 0087 の 5 の 4、0089 の 4）。
+- 起動の口は子 Process の `InteractiveSubprocessLauncher`（stdin を開いたまま。開発と Test）。本番の起動の口（#236）は stdout だけを運ぶので、Codex には stdin も運ぶ形が要る（後の PR）。
+
+Test は `tests/test_agents_codex_cli.py`（本物の Runtime・Adapter・Bridge・Relay・起動の口、Fake の `codex` = `tests/fake_codex_cli.py`（`rust-v0.162.1` の stdio の形）、`execute_session` の代わりの Fake）。
+
 ## Tool Broker のファイル・Shell・Git の Tool と Sandbox（Issue #208、Decision 0083 の段階 2）
 
 `paw_backend/sandbox/` は、Local の Model の Tool loop（段階 3 の `LocalAgentRuntime`）が Benchmark の `bash`・`str_replace`・`write_file` を Tool Broker を通して動かすための Tool と、その実行先の Sandbox です（Decision 0083 の 2・6・8、Approved）。**まだ本番の組み立てには配線していません**（Runtime と一緒に段階 3 で `ToolRunner(execution_timeout=300)` に `ToolExecutors({...WorkingSetExecutor..., ...RepoToolExecutor...})` を渡します）。配備と Server の確認は [`deploy/sandbox/README.md`](deploy/sandbox/README.md)。
