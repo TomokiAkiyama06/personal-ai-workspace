@@ -15,6 +15,7 @@ Tool Broker (``tools_support.Harness``):
 import asyncio
 import json
 import os
+import shutil
 import unittest
 from pathlib import Path
 
@@ -144,6 +145,28 @@ class CommitToolTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             await asyncio.to_thread(os.path.exists, f"{self.worktree}/a.py")
         )
+
+    async def test_a_nested_repository_is_listed_and_never_committed(self):
+        # Decision 0090 (risks): with the sandbox's real git the model can make
+        # a repository inside its worktree (``git init sub``).
+        await asyncio.to_thread(Path(self.worktree, "a.py").write_text, "a\n")
+        git("init", "--quiet", "sub", cwd=self.worktree)
+        await asyncio.to_thread(Path(self.worktree, "sub", "b.py").write_text, "b\n")
+        found = await self.changes()
+        self.assertEqual(found["changed"], ["a.py", "sub/"])
+        self.assertEqual(found["nested"], ["sub/"])
+        for paths in (["sub/"], ["a.py", "sub/"], ["sub"]):
+            result = await self.f.result(
+                REPO_GIT_COMMIT, {"workdir": self.worktree, "paths": json.dumps(paths)}
+            )
+            self.assertEqual(result["error"], "path_not_allowed", paths)
+        self.assertEqual(
+            git("rev-parse", "HEAD", cwd=self.worktree), self.f.world.base_commit
+        )
+        await asyncio.to_thread(shutil.rmtree, Path(self.worktree, "sub", ".git"))
+        found = await self.changes()
+        self.assertEqual(found["changed"], ["a.py", "sub/b.py"])
+        self.assertEqual(found["nested"], [])
 
     async def test_only_the_worktree_root_is_asked(self):
         result = await self.f.result(

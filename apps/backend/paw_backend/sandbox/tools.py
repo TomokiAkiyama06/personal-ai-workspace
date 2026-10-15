@@ -395,6 +395,7 @@ class RepoToolExecutor:
                     "head": changes.head,
                     "changed": list(changes.changed),
                     "uncommitted": list(changes.uncommitted),
+                    "nested": list(changes.nested),
                 }
             wanted = json.loads(str(paths))
             if (
@@ -403,6 +404,8 @@ class RepoToolExecutor:
                 or not all(isinstance(p, str) for p in wanted)
                 or len(set(wanted)) != len(wanted)
                 or not set(wanted) <= set(changes.uncommitted)
+                # A nested repository would be committed as a gitlink.
+                or set(wanted) & set(changes.nested)
             ):
                 raise GitReadRefused(GitRefusal.PATH)
             # Each path passes the broker's scope check (and the hidden paths).

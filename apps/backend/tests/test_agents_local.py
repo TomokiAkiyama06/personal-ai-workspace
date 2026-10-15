@@ -171,13 +171,16 @@ def submit(summary="done", changed=()):
     return call("submit", {"summary": summary, "changed_files": list(changed)})
 
 
-def changes(changed=(), uncommitted=(), head=BASE_COMMIT):
-    return lambda arguments, approval: {
+def changes(changed=(), uncommitted=(), head=BASE_COMMIT, nested=None):
+    answer = {
         "base": BASE_COMMIT,
         "head": head,
         "changed": list(changed),
         "uncommitted": list(uncommitted),
     }
+    if nested is not None:
+        answer["nested"] = list(nested)
+    return lambda arguments, approval: answer
 
 
 class RequestShapeTest(unittest.IsolatedAsyncioTestCase):
@@ -647,6 +650,59 @@ class SubmitTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outcome.error_class, "InvalidNodeResultError")
         self.assertIn(
             "the result is not acceptable", server.bodies[1]["messages"][-1]["content"]
+        )
+        self.assertFalse(any(c[0] == "repo.git.commit" for c in tools.calls))
+
+    async def test_a_nested_repository_is_corrected_before_any_commit(self):
+        # Decision 0090 (risks): the sandbox's real git can make a repository
+        # inside the worktree; a node's result never contains one.
+        nested = {"changed": ["a.py", "sub/"], "uncommitted": ["a.py", "sub/"]}
+        answers = iter(
+            [
+                {**nested, "nested": ["sub/"]},
+                {**nested, "nested": ["sub/"]},
+                {"changed": ["a.py"], "uncommitted": ["a.py"], "nested": []},
+            ]
+        )
+        committed = []
+        tools = Tools(
+            **{
+                "repo.git.changes": lambda a, _: {
+                    "base": BASE_COMMIT,
+                    "head": BASE_COMMIT,
+                    **next(answers),
+                },
+                "repo.git.commit": lambda a, _: (
+                    committed.append(json.loads(a["paths"])) or {"commit": "d" * 40}
+                ),
+            }
+        )
+        server = Server(
+            answer(submit(changed=["a.py"])),
+            answer(submit(changed=["a.py", "sub/"])),
+            answer(submit(changed=["a.py"])),
+        )
+        outcome = await runtime(server).run_node(assignment(tools))
+        for body in server.bodies[1:]:
+            correction = body["messages"][-1]["content"]
+            self.assertIn("nested git repository", correction)
+            self.assertIn("sub/", correction)
+        self.assertEqual(committed, [["a.py"]])
+        self.assertEqual(outcome.result.changed_files, ("a.py",))
+
+    async def test_nested_repositories_are_listed_with_the_repository(self):
+        tools = Tools(
+            **{
+                "repo.git.changes": changes(
+                    changed=("x/",), uncommitted=("x/",), nested=("x/",)
+                )
+            }
+        )
+        server = Server(*[answer(submit(changed=["x/"])) for _ in range(4)])
+        outcome = await runtime(server).run_node(assignment(tools))
+        self.assertEqual(outcome.error_class, "InvalidNodeResultError")
+        self.assertIn(
+            "nested git repository: x/", server.bodies[1]["messages"][-1]["content"]
         )
         self.assertFalse(any(c[0] == "repo.git.commit" for c in tools.calls))
 

@@ -1,14 +1,14 @@
 # Tool の Sandbox（`paw-sandbox/v1`）の配備
 
-更新日: 2026-10-11
+更新日: 2026-10-16
 
 Issue [#208](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/208) の段階 2。
 [Decision 0083](../../../../docs/decisions/0083-agent-runtime-adapters.md)（Approved）の 2（ファイル・Shell・Git の Tool と git の Shim）と 6（Sandbox と Mask、SSH の Wrapper の拡張）を実装したもの。
 
 - Backend: `paw_backend/sandbox/`（Tool の定義と Executor・Sandbox の計画・Pool・Runner・git の Shim の受け口）
 - Server 側: [`../ssh-git-wrapper/paw_git_wrapper.py`](../ssh-git-wrapper/paw_git_wrapper.py) の `paw-sandbox/v1`（Decision 0029 の Forced Command の Wrapper を広げたもの。同じ鍵・同じ `authorized_keys` の行）
-- Image に入れるもの: [`paw_git_shim.py`](paw_git_shim.py)（`/usr/local/bin/git`）、[`paw_file_tool.py`](paw_file_tool.py)（`/usr/local/lib/paw/paw-file-tool`）、[`Containerfile`](Containerfile)
-- Test: `tests/test_sandbox_*.py`、`tests/test_ssh_git_wrapper_sandbox.py`（実際の Container・Podman・他の Linux User は使わない。下の「Human がサーバーで行う確認」は手動）
+- Image に入れるもの: [`paw_git_front.py`](paw_git_front.py)（`/usr/local/bin/git`）、[`paw_git_shim.py`](paw_git_shim.py)（`/usr/local/lib/paw/paw-git-shim`）、Base の Image の本物の git（`/usr/lib/paw/git`。Path にない）、[`paw_file_tool.py`](paw_file_tool.py)（`/usr/local/lib/paw/paw-file-tool`）、[`Containerfile`](Containerfile)
+- Test: `tests/test_sandbox_*.py`（`git` の前段は `test_sandbox_git_front.py`）、`tests/test_ssh_git_wrapper_sandbox.py`（実際の Container・Podman・他の Linux User は使わない。下の「Human がサーバーで行う確認」は手動）
 
 **まだ本番の組み立てには配線していません。** これらの Tool を呼ぶ `LocalAgentRuntime` と、その組み立て（`ToolRunner(execution_timeout=300)` と `RepoToolExecutor` の配線、Sandbox の設定）は段階 3 の PR です。
 
@@ -44,9 +44,17 @@ Backend が Scope から作り（`paw_backend/sandbox/plan.py`）、Wrapper が�
 
 Path は `podman --mount` の CSV に入るので、`,`・`"`・制御文字を含む Path は使えない（`unmountable_path` / `bad_path`。起動しない）。
 
-## Sandbox の中の `git`（Shim）
+## Sandbox の中の `git`（前段と Shim）
 
-Sandbox の中に本物の git はない（Image から消す）。`/usr/local/bin/git` は [`paw_git_shim.py`](paw_git_shim.py) で、引数と作業 Directory を `/run/paw-shim/git.sock` に送り、Backend が Tool Broker の `repo.git.read` として判定してから、Host で git を動かす（`SshGitRunner` で Wrapper を通る。`--git-dir` / `--work-tree` を固定）。
+Decision 0090（Approved 2026-10-16）の 1 で、`/usr/local/bin/git` は小さな前段 [`paw_git_front.py`](paw_git_front.py) になった。前段は呼び出しが Node の Repository（`/workspace`）に向いているときだけ Shim に渡し、それ以外（Test が `/tmp` に作る一時の Repository など）は Image の本物の git（`/usr/lib/paw/git`。Path にない）を実行する:
+
+- `init`・`clone` は **作る場所** で決める: 行き先の Directory（省略なら作業の場所。`clone` で省略なら作業の場所の下の Repository の名前）と `--separate-git-dir` のどれかが `/workspace` か、その下なら Shim（今どおり拒否）、外なら本物の git。どこから呼んでも同じ（`/workspace` からの `git init /tmp/repo` は本物の git、`/tmp` からの `git init /workspace/x` は Shim）。
+- それ以外は **作業の場所**（`cwd` に `-C` を順に当てたもの）で決める。`/workspace` か、その下なら Shim、外なら本物の git。
+- どちらも、`--git-dir`・`--work-tree` の値、絶対 Path の `-c` / `--config-env` の値、環境変数 `GIT_DIR`・`GIT_WORK_TREE`・`GIT_COMMON_DIR`・`GIT_INDEX_FILE`・`GIT_OBJECT_DIRECTORY`・`GIT_ALTERNATE_OBJECT_DIRECTORIES` が `/workspace` の中を指せば Shim。Path は `realpath` で解決する。読めない呼び出し（知らない Global Option、値の欠け、多すぎる Directory）も Shim。
+- **前段は境界ではない**（Model は本物の git を直接実行できる）。安全は今と同じく Mount と Mask が守る: Sandbox から Node の Repository の Git Directory と共有の Object Store は見えず（`.git` の File は読み取り専用）、`--network none`。Image の Build は本物の git の写しが Path に残っていれば失敗する。
+- 書き込める Worker は本物の git で `/workspace` の中に入れ子の Repository を作れるので、`submit` の突き合わせ（Decision 0083 の 10）は入れ子の Repository（`repo.git.changes` の `nested`。git は `sub/` と一覧する）があれば何も Commit せずに Model に消させる。`repo.git.commit` もその Path を拒否する（Gitlink として Commit しない）。
+
+Shim（[`paw_git_shim.py`](paw_git_shim.py)、`/usr/local/lib/paw/paw-git-shim`）は、引数と作業 Directory を `/run/paw-shim/git.sock` に送り、Backend が Tool Broker の `repo.git.read` として判定してから、Host で git を動かす（`SshGitRunner` で Wrapper を通る。`--git-dir` / `--work-tree` を固定）。
 
 - 許すのは `status`・`diff`・`log`・`show` と、決まった Option・Revision（`HEAD`・`HEAD~<n>`・起点 `refs/paw/base/<branch>`・40 / 64 桁の Object ID）・Scope の中の Path だけ（`paw_backend/sandbox/gitargs.py`）。`commit`・`checkout`・`--no-index`・`<rev>:<path>` などは `git: <理由> (<code>)` で終了コード 128。
 - Revision は Node の起点から `HEAD` までの Commit だけ（`merge-base --is-ancestor` で 2 回確かめる）。Tree・Blob・Tag の ID は拒否。`log` は常に起点で止まる。**起点の Ref（`refs/paw/base/<branch>`）は段階 3 の Worktree の準備で作る**ので、それまでは書き込む Node も「今の状態だけ」（`show`・Revision つきの `diff`・内容の `log` は拒否）。
@@ -94,6 +102,7 @@ Agent は他の Linux User・Podman を使えないため、次は Human がサ�
 - [ ] 4. Network: Container の中で `python3 -c 'import socket; socket.create_connection(("1.1.1.1", 53), 2)'` が失敗する。
 - [ ] 5. 書き込みの拒否: Checkout を `writable: true` で `start` すると Wrapper が `path_outside_worktrees` で拒否する（Podman は動かない）。
 - [ ] 6. Shim: Container の中の `git status` / `git diff` / `git log --oneline` が動き、`git commit` / `git show <起点より古い Commit>` / `git diff -- <除外の Path>` が 128 で拒否される。`/run/paw-shim` の Socket に Container の User が繋がる（`keep-groups`）。
+- [ ] 6b. 本物の git（Decision 0090）: Container の中で `git init -q /tmp/r && git -C /tmp/r -c user.name=a -c user.email=a@b commit -q --allow-empty -m x && git -C /tmp/r log --oneline` が通り、`/workspace` での `git init`、`git init /workspace/x`（`/tmp` から）、`git init --separate-git-dir=/workspace/m /tmp/r2` が Shim で 128 になる。`which -a git` が `/usr/local/bin/git` だけ。
 - [ ] 7. 時間と停止: `sleep 400` が 300 秒で 124 になる。`stop` で Container が消える。Backend を止めても `--sandbox-lifetime` で消える。
 - [ ] 8. Log: `journalctl -t paw-git-wrapper` に `accepted user=alice sandbox=start` などがあり、Path・Command・出力を含まない。
 

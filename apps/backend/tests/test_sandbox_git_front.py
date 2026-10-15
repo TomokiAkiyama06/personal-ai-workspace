@@ -1,0 +1,281 @@
+"""The sandbox's ``git`` front (Decision 0090, 1; issue #208).
+
+``/usr/local/bin/git`` in the tool sandbox image is ``deploy/sandbox/
+paw_git_front.py``: a call aimed at the node's repository (``/workspace``) goes
+to the shim as before (Decision 0083, 2), anything else to the image's real git
+(a repository a test makes under ``/tmp``). ``init`` and ``clone`` are decided
+by where they create the repository, every other call by where it runs (``cwd``
+and ``-C``) and by what points git at another place (``--git-dir``,
+``--work-tree``, ``GIT_DIR`` and the like).
+
+The front is not a boundary (the model can run the real git itself): the mounts
+and masks are, and they do not change (``test_ssh_git_wrapper_sandbox.py``).
+Here the routing is a pure function (``route``) and the real program runs with
+two stand-ins for the real git and the shim that print what they were given.
+The image itself is checked as text (``Containerfile``).
+"""
+
+import importlib.util
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+BACKEND = Path(__file__).resolve().parents[1]
+SANDBOX = BACKEND / "deploy" / "sandbox"
+FRONT = SANDBOX / "paw_git_front.py"
+CONTAINERFILE = SANDBOX / "Containerfile"
+
+
+def _load_front():
+    spec = importlib.util.spec_from_file_location("paw_git_front", FRONT)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+front = _load_front()
+REAL, SHIM = front.REAL, front.SHIM
+
+
+def route(*argv, cwd="/workspace", env=None):
+    return front.route(list(argv), cwd, env or {})
+
+
+class RouteByPlaceTest(unittest.TestCase):
+    def test_the_node_repository_goes_to_the_shim(self):
+        for cwd in ("/workspace", "/workspace/src", "/workspace/a/../b"):
+            self.assertEqual(route("status", cwd=cwd), SHIM, cwd)
+        self.assertEqual(route("diff", "--stat", cwd="/workspace/x"), SHIM)
+        self.assertEqual(route("-C", "/workspace", "log", cwd="/tmp"), SHIM)
+        self.assertEqual(route("-C", "../workspace/src", "status", cwd="/tmp"), SHIM)
+        self.assertEqual(
+            route("-C", "/", "-C", "workspace", "status", cwd="/tmp"), SHIM
+        )
+
+    def test_a_repository_outside_goes_to_real_git(self):
+        self.assertEqual(route("status", cwd="/tmp/repo"), REAL)
+        self.assertEqual(route("-C", "/tmp/repo", "commit", "-m", "x"), REAL)
+        self.assertEqual(route("-C", "/tmp", "-C", "repo", "add", "."), REAL)
+        self.assertEqual(route("-C", "..", "status", cwd="/workspace"), REAL)
+        self.assertEqual(route("-c", "user.name=a", "-C", "/tmp/r", "commit"), REAL)
+        self.assertEqual(route("--no-pager", "-C", "/tmp/r", "log"), REAL)
+        self.assertEqual(route("--version", cwd="/tmp"), REAL)
+        # A name that only starts like the mount is outside it.
+        self.assertEqual(route("status", cwd="/workspace2/r"), REAL)
+        self.assertEqual(route("status", cwd="/tmp/workspace"), REAL)
+
+    def test_the_last_C_wins_like_in_git(self):
+        self.assertEqual(route("-C", "/tmp/r", "-C", "/workspace", "status"), SHIM)
+        self.assertEqual(route("-C", "/workspace", "-C", "/tmp/r", "status"), REAL)
+
+    def test_symbolic_links_are_resolved(self):
+        base = tempfile.mkdtemp(prefix="paw-front-")
+        self.addCleanup(shutil.rmtree, base, True)
+        os.symlink("/workspace/src", os.path.join(base, "into"))
+        os.mkdir(os.path.join(base, "plain"))
+        os.symlink(os.path.join(base, "plain"), os.path.join(base, "out"))
+        self.assertEqual(route("status", cwd=os.path.join(base, "into")), SHIM)
+        self.assertEqual(route("-C", "into", "status", cwd=base), SHIM)
+        self.assertEqual(route("-C", "out", "status", cwd=base), REAL)
+        self.assertEqual(route("init", "into/new", cwd=base), SHIM)
+
+    def test_options_and_variables_that_point_into_the_mount(self):
+        cases = [
+            ("--git-dir=/workspace/.git", "status"),
+            ("--git-dir", "/workspace/.git", "status"),
+            ("--work-tree=/workspace", "status"),
+            ("--work-tree", "../../workspace", "add", "."),
+            ("-c", "core.worktree=/workspace", "status"),
+        ]
+        for argv in cases:
+            self.assertEqual(route(*argv, cwd="/tmp/r"), SHIM, argv)
+        self.assertEqual(route("--git-dir=/tmp/r/.git", "status", cwd="/tmp"), REAL)
+        for name in (
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_COMMON_DIR",
+            "GIT_INDEX_FILE",
+            "GIT_OBJECT_DIRECTORY",
+        ):
+            env = {name: "/workspace/.git"}
+            self.assertEqual(route("status", cwd="/tmp/r", env=env), SHIM, name)
+            self.assertEqual(route("init", "/tmp/n", cwd="/tmp", env=env), SHIM, name)
+            env = {name: "/tmp/r/.git"}
+            self.assertEqual(route("status", cwd="/tmp/r", env=env), REAL, name)
+        alternates = {"GIT_ALTERNATE_OBJECT_DIRECTORIES": "/tmp/o:/workspace/.git/o"}
+        self.assertEqual(route("status", cwd="/tmp/r", env=alternates), SHIM)
+        # Relative to where git runs.
+        self.assertEqual(
+            route("status", cwd="/tmp", env={"GIT_DIR": "../workspace/.git"}), SHIM
+        )
+        self.assertEqual(
+            route(
+                "--config-env=core.worktree=WT",
+                "status",
+                cwd="/tmp/r",
+                env={"WT": "/workspace"},
+            ),
+            SHIM,
+        )
+
+    def test_what_cannot_be_read_goes_to_the_shim(self):
+        for argv in (
+            ("-C",),
+            ("--git-dir",),
+            ("--unknown-global-option", "status"),
+        ):
+            self.assertEqual(route(*argv, cwd="/tmp/r"), SHIM, argv)
+
+
+class RouteByDestinationTest(unittest.TestCase):
+    def test_init_is_decided_by_its_directory(self):
+        # From the node's repository, as a test calls it without changing cwd
+        # (``tests/repositories_support.py``).
+        self.assertEqual(route("init", "/tmp/repo", cwd="/workspace"), REAL)
+        self.assertEqual(route("init", "-q", "-b", "main", "/tmp/repo"), REAL)
+        self.assertEqual(route("init", "--initial-branch=main", "/tmp/r"), REAL)
+        self.assertEqual(route("init", "--bare", "--", "/tmp/r.git"), REAL)
+        self.assertEqual(route("-C", "/tmp", "init", "repo"), REAL)
+        self.assertEqual(route("init", cwd="/tmp/repo"), REAL)
+        # Into the node's repository, from wherever.
+        self.assertEqual(route("init", cwd="/workspace"), SHIM)
+        self.assertEqual(route("init", "sub", cwd="/workspace"), SHIM)
+        self.assertEqual(route("init", "/workspace/generated", cwd="/tmp"), SHIM)
+        self.assertEqual(route("init", "../workspace/x", cwd="/tmp"), SHIM)
+        self.assertEqual(route("-C", "/workspace", "init"), SHIM)
+        self.assertEqual(route("-C", "/tmp", "init", "/workspace/x"), SHIM)
+        # The separate git directory is a destination too.
+        for argv in (
+            ("init", "--separate-git-dir=/workspace/meta", "/tmp/repo"),
+            ("init", "--separate-git-dir", "/workspace/meta", "/tmp/repo"),
+        ):
+            self.assertEqual(route(*argv, cwd="/tmp"), SHIM, argv)
+        self.assertEqual(
+            route("init", "--separate-git-dir=/tmp/meta", "/tmp/repo"), REAL
+        )
+
+    def test_clone_is_decided_by_its_directory(self):
+        self.assertEqual(route("clone", "/tmp/a", "/tmp/b", cwd="/workspace"), REAL)
+        self.assertEqual(
+            route("clone", "-q", "--branch", "x", "/tmp/a", "/tmp/b"), REAL
+        )
+        self.assertEqual(route("clone", "/tmp/a", cwd="/tmp/work"), REAL)
+        self.assertEqual(route("clone", "--", "/tmp/a", "/tmp/b"), REAL)
+        self.assertEqual(route("clone", "/tmp/a", "/workspace/x", cwd="/tmp"), SHIM)
+        self.assertEqual(route("clone", "/tmp/a", "x", cwd="/workspace"), SHIM)
+        # Without a directory: the repository's name under where git runs.
+        self.assertEqual(route("clone", "/tmp/a", cwd="/workspace"), SHIM)
+        self.assertEqual(route("clone", "/tmp/workspace/.git", cwd="/"), SHIM)
+        self.assertEqual(route("clone", "/tmp/workspace.git", cwd="/"), SHIM)
+        self.assertEqual(route("clone", "/tmp/a/", cwd="/tmp/w"), REAL)
+        for argv in (
+            ("clone", "--separate-git-dir=/workspace/m", "/tmp/a", "/tmp/b"),
+            ("clone", "--separate-git-dir", "/workspace/m", "/tmp/a", "/tmp/b"),
+        ):
+            self.assertEqual(route(*argv, cwd="/tmp"), SHIM, argv)
+
+    def test_a_creation_that_cannot_be_read_goes_to_the_shim(self):
+        for argv in (
+            ("init", "/tmp/a", "/tmp/b"),
+            ("clone",),
+            ("clone", "/tmp/a", "/tmp/b", "/tmp/c"),
+            ("init", "--separate-git-dir"),
+        ):
+            self.assertEqual(route(*argv, cwd="/tmp"), SHIM, argv)
+
+
+class ProgramTest(unittest.TestCase):
+    """The real program, with stand-ins for the real git and the shim."""
+
+    def setUp(self):
+        self.base = tempfile.mkdtemp(prefix="paw-front-")
+        self.addCleanup(shutil.rmtree, self.base, True)
+        self.workspace = os.path.join(self.base, "workspace")
+        self.outside = os.path.join(self.base, "tmp")
+        os.mkdir(self.workspace)
+        os.mkdir(self.outside)
+        stand_ins = {}
+        for name in ("real", "shim"):
+            path = os.path.join(self.base, name)
+            with open(path, "w") as handle:
+                handle.write(
+                    f"#!{sys.executable}\nimport json, sys\n"
+                    f"print(json.dumps([{name!r}, *sys.argv[1:]]))\n"
+                )
+            os.chmod(path, 0o755)
+            stand_ins[name] = path
+        source = FRONT.read_text()
+        for constant, value in (
+            ("WORKSPACE", self.workspace),
+            ("REAL_GIT", stand_ins["real"]),
+            ("SHIM_PROGRAM", stand_ins["shim"]),
+        ):
+            line = next(
+                x for x in source.splitlines() if x.startswith(f"{constant} = ")
+            )
+            source = source.replace(line, f"{constant} = {value!r}")
+        self.program = os.path.join(self.base, "git")
+        with open(self.program, "w") as handle:
+            handle.write(source)
+
+    def run_git(self, *argv, cwd, env=None):
+        result = subprocess.run(
+            [sys.executable, "-I", self.program, *argv],
+            cwd=cwd,
+            env=env or {},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return result.returncode, result.stdout.strip(), result.stderr
+
+    def test_the_call_is_passed_on_unchanged(self):
+        code, out, _ = self.run_git("status", "--short", "a b", cwd=self.workspace)
+        self.assertEqual((code, out), (0, '["shim", "status", "--short", "a b"]'))
+        code, out, _ = self.run_git("init", "-q", "r", cwd=self.outside)
+        self.assertEqual((code, out), (0, '["real", "init", "-q", "r"]'))
+        target = os.path.join(self.outside, "r")
+        code, out, _ = self.run_git("init", target, cwd=self.workspace)
+        self.assertEqual(out, f'["real", "init", "{target}"]')
+        code, out, _ = self.run_git(
+            "status", cwd=self.outside, env={"GIT_DIR": self.workspace}
+        )
+        self.assertEqual(out, '["shim", "status"]')
+
+    def test_a_missing_git_is_gits_fatal(self):
+        os.remove(os.path.join(self.base, "real"))
+        code, out, err = self.run_git("status", cwd=self.outside)
+        self.assertEqual((code, out), (128, ""))
+        self.assertIn("git: ", err)
+
+
+class ContainerfileTest(unittest.TestCase):
+    def setUp(self):
+        self.text = CONTAINERFILE.read_text()
+
+    def test_the_front_the_shim_and_the_real_git_are_installed(self):
+        self.assertIn(
+            "COPY --chmod=0755 paw_git_front.py /usr/local/bin/git", self.text
+        )
+        self.assertIn(
+            f"COPY --chmod=0755 paw_git_shim.py {front.SHIM_PROGRAM}", self.text
+        )
+        self.assertEqual(front.REAL_GIT, "/usr/lib/paw/git")
+        self.assertIn(front.REAL_GIT, self.text)
+        self.assertEqual(front.WORKSPACE, "/workspace")
+
+    def test_the_build_refuses_a_real_git_on_the_path(self):
+        # The image's own git is moved off PATH; the build fails if a copy of
+        # it is still on PATH under any name (only the front is ``git``).
+        self.assertIn("rm -f /usr/bin/git ", self.text)
+        self.assertIn("cmp -s", self.text)
+        self.assertIn(f"{front.REAL_GIT} --version", self.text)
+
+
+if __name__ == "__main__":
+    unittest.main()
