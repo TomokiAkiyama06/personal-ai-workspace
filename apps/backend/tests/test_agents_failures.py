@@ -44,6 +44,9 @@ EXPECTED = [
     (F.STEP_LIMIT, "RuntimeError", True),
     (F.NO_TOOL_CALLS, "RuntimeError", True),
     (F.NO_SUBMISSION, "RuntimeError", True),
+    # Decision 0087, 4: a CLI whose ``system/init`` shows other tools or
+    # servers is a version / setup this rung cannot run.
+    (F.UNSUPPORTED_CLI, "RuntimeError", True),
     (F.MALFORMED_RESPONSE, "ValueError", False),
     (F.RATE_LIMITED, "ConnectionError", False),
     (F.CREDENTIAL_EXPIRED, "ConnectionError", True),

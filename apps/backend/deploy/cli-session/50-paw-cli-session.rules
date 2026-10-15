@@ -1,0 +1,15 @@
+// The backend's user (paw) may start and stop the CLI session units, and
+// nothing else (Decision 0083, 6): exactly paw-cli-session@<uuid>.service,
+// only "start" and "stop". Install as /etc/polkit-1/rules.d/50-paw-cli-session.rules.
+polkit.addRule(function (action, subject) {
+    if (action.id !== "org.freedesktop.systemd1.manage-units" || subject.user !== "paw") {
+        return polkit.Result.NOT_HANDLED;
+    }
+    var unit = action.lookup("unit");
+    var verb = action.lookup("verb");
+    var pattern = /^paw-cli-session@[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.service$/;
+    if (unit && pattern.test(unit) && (verb === "start" || verb === "stop")) {
+        return polkit.Result.YES;
+    }
+    return polkit.Result.NOT_HANDLED;
+});
