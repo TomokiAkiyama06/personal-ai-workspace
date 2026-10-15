@@ -207,6 +207,18 @@ class RouteByDestinationTest(unittest.TestCase):
         os.symlink("/workspace/sub", os.path.join(base, "source.git"))
         for flag in ("--bar", "--mir"):
             self.assertEqual(route("clone", flag, "/tmp/source", cwd=base), SHIM)
+        # --mirror implies bare; --no-mirror does not undo --bare (Codex review
+        # of #248, P2).
+        for flags in (("--mirror", "--no-bare"), ("--bare", "--no-mirror")):
+            self.assertEqual(
+                route("clone", *flags, "/tmp/source", cwd=base), SHIM, flags
+            )
+        self.assertEqual(
+            route("clone", "--bare", "--no-bare", "/tmp/source", cwd=base), REAL
+        )
+        # --recursive is an alias of --recurse-submodules: not ambiguous.
+        for prefix in ("--rec", "--no-rec"):
+            self.assertEqual(route("clone", prefix, "/tmp/a", "/tmp/b"), REAL)
         for argv in (
             ("clone", "--sing", "/tmp/a", "/tmp/b"),  # --single-branch
             ("clone", "--bran", "x", "/tmp/a", "/tmp/b"),

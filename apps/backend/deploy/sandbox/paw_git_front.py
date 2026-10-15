@@ -154,6 +154,11 @@ CLONE_LONG = _long_options(
         "--ipv6": FLAG,
     },
 )
+#: Options that are another's alias (one option when deciding a prefix).
+ALIASES = {
+    "--recursive": "--recurse-submodules",
+    "--no-recursive": "--no-recurse-submodules",
+}
 #: Short options: the flags, and those that take a value (with their long name).
 INIT_SHORT = ({"q"}, {"b": "--initial-branch"})
 CLONE_SHORT = (
@@ -309,12 +314,12 @@ def _created(
                 options.append((short_values[letter], value))
                 break
     created: list[str] = []
-    bare = False
+    flags = {"--bare": False, "--mirror": False}
     for name, value in options:
-        if name in ("--bare", "--mirror"):
-            bare = True
-        elif name in ("--no-bare", "--no-mirror"):
-            bare = False
+        if name in flags:
+            flags[name] = True
+        elif name.replace("--no-", "--", 1) in flags:
+            flags[name.replace("--no-", "--", 1)] = False
         elif name == "--separate-git-dir":
             created.append(_resolve(place, value))
         elif name == "--config":
@@ -331,6 +336,8 @@ def _created(
         else:
             name = _clone_name(positional[0])
             # A bare clone (``--bare``, ``--mirror``) is made in ``<name>.git``.
+            # --mirror implies it; --no-mirror does not undo --bare.
+            bare = flags["--bare"] or flags["--mirror"]
             created.append(_resolve(place, f"{name}.git" if bare else name))
     return created
 
@@ -340,10 +347,10 @@ def _long_name(given: str, options: dict[str, str]) -> str:
     prefix of (as git's option parser accepts)."""
     if given in options:
         return given
-    matches = [name for name in options if name.startswith(given)]
+    matches = {ALIASES.get(name, name) for name in options if name.startswith(given)}
     if len(given) < 3 or len(matches) != 1:
         raise _Unreadable()
-    return matches[0]
+    return matches.pop()
 
 
 def _clone_name(source: str) -> str:
