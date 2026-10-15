@@ -500,19 +500,21 @@ class CodexSessionAdapter:
         request: AgentSessionRequest,
         attachment: CodexAttachment,
     ) -> tuple[Ended | None, bool]:
-        """After the bridge ended: read on (at most ``drain_seconds``) until the
-        model call that made the bridge's last tool call is reported (its
-        usage comes when its response completes, which may be after the call
-        began; and the call's own item may still be on its way), the turn
-        ends, or anything else stops it. Reported calls go to ``on_usage`` as
-        before; a refusal is kept on the attachment (the attempt fails).
-        Returns the end of the turn if it came, and whether the service said
-        stop."""
+        """After the bridge ended: read on until the turn ends, the stream
+        ends, the service says stop, a refusal, or ``drain_seconds`` pass.
+        Not only until the model call that made the bridge's last tool call is
+        reported (its usage comes when its response completes, which may be
+        after the call began; the call's own item may still be on its way):
+        what the CLI wrote after that report is checked too, so an item that
+        can execute fails the attempt even after a submit (Decision 0089, 2).
+        Reported calls go to ``on_usage`` as before; a refusal is kept on the
+        attachment. Returns the end of the turn if it came, and whether the
+        service said stop."""
         ended: Ended | None = None
         stopped = False
         try:
             async with asyncio.timeout(self._drain):
-                while not _submit_counted(stream, attachment):
+                while True:
                     line = await reading
                     if not line:
                         break

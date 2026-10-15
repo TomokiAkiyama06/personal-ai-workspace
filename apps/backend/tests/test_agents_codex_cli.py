@@ -317,6 +317,22 @@ class TotalsTest(CodexCase):
         self.assertIsNone(outcome.result)
         self.assertEqual(outcome.error_class, "ValueError")
 
+    async def test_a_refusal_after_the_submits_report_fails_the_attempt(self):
+        # The submit's own report makes the totals known; an item that can
+        # execute right after it must still be read and refused.
+        outcome = await self.run_node(
+            [
+                {"usage": [100, 10]},
+                {"call": "submit", "arguments": {"summary": "done"}},
+                {"sleep": 0.3},  # the reader is draining by now
+                {"usage": [5, 1]},
+                {"item": {"type": "commandExecution", "id": "x"}},
+                {"sleep": 30},
+            ]
+        )
+        self.assertEqual(self.connections.raw.failure.value, "invalid_response")
+        self.assertIsNone(outcome.result)
+
 
 class VersionTest(CodexCase):
     def test_no_version_is_verified_yet(self):
