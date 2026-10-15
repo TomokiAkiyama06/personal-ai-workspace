@@ -409,15 +409,28 @@ async def forward(
             )
 
         async def copy(source, sink):
-            with contextlib.suppress(Exception):
+            # The end of one direction (a half-close) is passed on as one
+            # (``write_eof``): the other direction stays open until it ends
+            # too. A failure ends both.
+            try:
                 while data := await source.read(_CHUNK):
                     sink.write(data)
                     await sink.drain()
-            await _close(sink)
+                if sink.can_write_eof():
+                    sink.write_eof()
+                else:
+                    await _close(sink)
+            except Exception:
+                await _close(upstream_writer)
+                await _close(writer)
 
-        await asyncio.gather(
-            copy(reader, upstream_writer), copy(upstream_reader, writer)
-        )
+        try:
+            await asyncio.gather(
+                copy(reader, upstream_writer), copy(upstream_reader, writer)
+            )
+        finally:
+            await _close(upstream_writer)
+            await _close(writer)
 
     return await asyncio.start_server(pipe, host="127.0.0.1", port=listen_port)
 

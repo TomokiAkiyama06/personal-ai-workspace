@@ -109,7 +109,13 @@ class ClaudeCase(unittest.IsolatedAsyncioTestCase):
         )
 
     async def run_node(
-        self, actions, *, role=NodeRole.RESEARCHER, budget=10**7, **extra
+        self,
+        actions,
+        *,
+        role=NodeRole.RESEARCHER,
+        budget=10**7,
+        fallback=False,
+        **extra,
     ):
         self.scenario.write_text(json.dumps({"actions": actions, **extra}))
         adapter = self.adapter()
@@ -139,7 +145,8 @@ class ClaudeCase(unittest.IsolatedAsyncioTestCase):
             placement=self.placement,
             connections=self.connections,
         )
-        outcome = await asyncio.wait_for(runtime.run_node(assignment), 60)
+        run = runtime.run_as_fallback if fallback else runtime.run_node
+        outcome = await asyncio.wait_for(run(assignment), 60)
         return outcome
 
     def read_report(self):
@@ -215,13 +222,20 @@ class StopTest(ClaudeCase):
             init_tools=["mcp__paw__submit", "EndConversation", "Bash"],
         )
         self.assertEqual(self.connections.turns, [])
-        self.assertEqual(outcome.error_class, "ValueError")
+        # Decision 0087, 4: an unsupported CLI escalates (the same rung would
+        # fail the same way), not a malformed answer to retry.
+        self.assertEqual(outcome.error_class, "RuntimeError")
+        self.assertEqual(outcome.message, "unsupported_cli")
+        self.assertTrue(outcome.escalate)
+        self.assertEqual(self.connections.raw.failure.value, "invalid_response")
 
     async def test_a_missing_paw_server_stops_the_cli(self):
         outcome = await self.run_node(
             [{"sleep": 30}], mcp_servers=[{"name": "paw", "status": "failed"}]
         )
-        self.assertEqual(outcome.error_class, "ValueError")
+        self.assertEqual(outcome.error_class, "RuntimeError")
+        self.assertEqual(outcome.message, "unsupported_cli")
+        self.assertTrue(outcome.escalate)
 
     async def test_a_turn_without_its_output_count_stops_the_cli(self):
         outcome = await self.run_node(
@@ -229,6 +243,7 @@ class StopTest(ClaudeCase):
         )
         self.assertEqual(self.connections.turns, [])
         self.assertEqual(outcome.error_class, "ValueError")
+        self.assertFalse(outcome.escalate)
 
     async def test_an_authentication_failure_is_an_expired_credential(self):
         outcome = await self.run_node(
@@ -402,6 +417,64 @@ class ReportTest(ClaudeCase):
         self.assertEqual(self.connections.raw.failure.value, "invalid_response")
 
 
+class OpenTurnTest(ClaudeCase):
+    """A turn that started but did not end was never reported (``on_usage``
+    did not check it): a ``result`` or the end of the output then is refused."""
+
+    RESULT = {
+        "subtype": "success",
+        "is_error": False,
+        "modelUsage": {"m": {"inputTokens": 9, "outputTokens": 4}},
+    }
+
+    async def test_a_result_while_a_turn_is_open_is_refused(self):
+        await self.run_node(
+            [
+                {"turn": [7, 3]},
+                {"turn": [2, 1], "no_stop": True},
+                {"result": self.RESULT},
+            ]
+        )
+        self.assertEqual(self.connections.turns, [(7, 3)])
+        self.assertEqual(self.connections.raw.failure.value, "invalid_response")
+
+    async def test_the_end_of_the_output_while_a_turn_is_open_is_refused(self):
+        await self.run_node([{"turn": [7, 3]}, {"turn": [2, 1], "no_stop": True}])
+        self.assertEqual(self.connections.raw.failure.value, "invalid_response")
+
+    async def test_closed_turns_and_a_result_are_accepted(self):
+        await self.run_node(
+            [{"turn": [7, 3]}, {"turn": [2, 1]}, {"result": self.RESULT}]
+        )
+        self.assertIsNone(self.connections.raw.failure)
+
+
+class BoundaryTest(ClaudeCase):
+    """An exception of the session's setup or launcher is classified at the
+    runtime's boundary (``ErrorClassifier.from_error``), as the local
+    runtime's are: it does not escape as its own class."""
+
+    def adapter(self):
+        missing = str(self.base / "no-such-claude")
+        return ClaudeSessionAdapter(SubprocessLauncher(), executable=(missing,))
+
+    async def test_a_missing_executable_is_an_adapter_error(self):
+        outcome = await self.run_node([])
+        self.assertEqual(outcome.error_class, "AdapterError")
+        self.assertEqual(outcome.message, "adapter_error")
+        self.assertEqual(list(self.sessions.iterdir()), [])
+
+    async def test_a_session_directory_that_cannot_be_made_is_an_adapter_error(self):
+        self.sessions.rmdir()  # create_session's base is gone
+        outcome = await self.run_node([])
+        self.assertEqual(outcome.error_class, "AdapterError")
+
+    async def test_the_fallback_path_is_classified_too(self):
+        self.sessions.rmdir()
+        outcome = await self.run_node([], fallback=True)
+        self.assertEqual(outcome.error_class, "AdapterError")
+
+
 class GroupStopTest(unittest.IsolatedAsyncioTestCase):
     async def test_a_child_that_ignores_sigterm_is_killed_too(self):
         import os
@@ -566,6 +639,27 @@ class StreamTest(unittest.TestCase):
         )
         self.assertIsNone(crashed.input_tokens)
         self.assertTrue(crashed.is_error)
+
+    def test_a_result_or_a_new_call_while_a_call_is_open_is_refused(self):
+        def start(message_id):
+            event = {
+                "type": "message_start",
+                "message": {"id": message_id, "usage": {"input_tokens": 5}},
+            }
+            return json.dumps({"type": "stream_event", "event": event})
+
+        result = json.dumps({"type": "result", "subtype": "success"})
+        stream = ClaudeStream(frozenset())
+        stream.feed(start("msg_1"))
+        self.assertTrue(stream.turn_open)
+        with self.assertRaises(StreamRefused) as refused:
+            stream.feed(result)
+        self.assertEqual(refused.exception.reason, "turn_open")
+        self.assertFalse(refused.exception.unsupported)
+        stream = ClaudeStream(frozenset())
+        stream.feed(start("msg_1"))
+        with self.assertRaises(StreamRefused):
+            stream.feed(start("msg_2"))
 
     def test_malformed_lines_are_refused(self):
         with self.assertRaises(StreamRefused):
