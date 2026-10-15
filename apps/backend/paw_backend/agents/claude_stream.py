@@ -25,6 +25,9 @@ kept, logged or returned):
 * ``result``: the session's totals from ``modelUsage`` (every model, subagents
   included), its ``subtype`` and ``is_error``.
 
+A token count that is missing (the cache counts may be missing or ``null``),
+negative or not a whole number is refused (``malformed``), never read as 0.
+
 Everything else (``assistant``, ``user``, hooks, ...) is skipped.
 """
 
@@ -176,24 +179,20 @@ class ClaudeStream:
             if self.turn_open:
                 # The call before did not stop: it was never reported.
                 raise StreamRefused("turn_open")
+            input_tokens = (
+                _count(usage, "input_tokens")
+                + _count(usage, "cache_creation_input_tokens", optional=True)
+                + _count(usage, "cache_read_input_tokens", optional=True)
+            )
             self._current = message_id
             if message_id not in self._counted:
-                self._open[message_id] = sum(
-                    _count(usage.get(name))
-                    for name in (
-                        "input_tokens",
-                        "cache_creation_input_tokens",
-                        "cache_read_input_tokens",
-                    )
-                )
+                self._open[message_id] = input_tokens
             return None
         if kind == "message_delta":
             usage = event.get("usage")
             if self._current is not None and isinstance(usage, dict):
-                output = usage.get("output_tokens")
-                if isinstance(output, int) and not isinstance(output, bool):
-                    # Cumulative within the message: the last one counts.
-                    self._output[self._current] = _count(output)
+                # Cumulative within the message: the last one counts.
+                self._output[self._current] = _count(usage, "output_tokens")
             return None
         if kind == "message_stop":
             message_id, self._current = self._current, None
@@ -206,9 +205,16 @@ class ClaudeStream:
         return None
 
 
-def _count(value: object) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+def _count(usage: Mapping[str, Any], name: str, *, optional: bool = False) -> int:
+    """A token count of ``usage``: a whole number of at least 0. A missing or
+    malformed count is refused (``malformed``), never read as 0 (that would
+    undercount the session and skip the budget's check); only an ``optional``
+    one (the cache counts) may be missing or ``null``, which is 0."""
+    value = usage.get(name)
+    if value is None and optional:
         return 0
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise StreamRefused("malformed")
     return value
 
 
@@ -223,15 +229,12 @@ def _totals(message: Mapping[str, Any]) -> Totals:
     for model in usage.values():
         if not isinstance(model, dict):
             return Totals(None, None, is_error, subtype)
-        input_tokens += sum(
-            _count(model.get(name))
-            for name in (
-                "inputTokens",
-                "cacheReadInputTokens",
-                "cacheCreationInputTokens",
-            )
+        input_tokens += (
+            _count(model, "inputTokens")
+            + _count(model, "cacheReadInputTokens", optional=True)
+            + _count(model, "cacheCreationInputTokens", optional=True)
         )
-        output_tokens += _count(model.get("outputTokens"))
+        output_tokens += _count(model, "outputTokens")
     if input_tokens == 0 and output_tokens == 0:
         # A crash's result may carry zeroed totals: not known.
         return Totals(None, None, is_error, subtype)
