@@ -48,7 +48,7 @@ Path は `podman --mount` の CSV に入るので、`,`・`"`・制御文字を�
 
 Decision 0090（Approved 2026-10-16）の 1 で、`/usr/local/bin/git` は小さな前段 [`paw_git_front.py`](paw_git_front.py) になった。前段は呼び出しが Node の Repository（`/workspace`）に向いているときだけ Shim に渡し、それ以外（Test が `/tmp` に作る一時の Repository など）は Image の本物の git（`/usr/lib/paw/git`。Path にない）を実行する:
 
-- `init`・`clone` は **作る場所** で決める: 行き先の Directory（省略なら作業の場所。`clone` で省略なら作業の場所の下の Repository の名前）と `--separate-git-dir` のどれかが `/workspace` か、その下なら Shim（今どおり拒否）、外なら本物の git。どこから呼んでも同じ（`/workspace` からの `git init /tmp/repo` は本物の git、`/tmp` からの `git init /workspace/x` は Shim）。
+- `init`・`clone` は **作る場所** で決める: 行き先の Directory（省略なら作業の場所。`clone` で省略なら作業の場所の下の Repository の名前。`--bare` / `--mirror` は `<名前>.git`）と `--separate-git-dir` のどれかが `/workspace` か、その下なら Shim（今どおり拒否）、外なら本物の git。どこから呼んでも同じ（`/workspace` からの `git init /tmp/repo` は本物の git、`/tmp` からの `git init /workspace/x` は Shim）。
 - それ以外は **作業の場所**（`cwd` に `-C` を順に当てたもの）で決める。`/workspace` か、その下なら Shim、外なら本物の git。
 - どちらも、`--git-dir`・`--work-tree` の値、絶対 Path の `-c` / `--config-env` の値、環境変数 `GIT_DIR`・`GIT_WORK_TREE`・`GIT_COMMON_DIR`・`GIT_INDEX_FILE`・`GIT_OBJECT_DIRECTORY`・`GIT_ALTERNATE_OBJECT_DIRECTORIES` が `/workspace` の中を指せば Shim。Path は `realpath` で解決する。読めない呼び出し（知らない Global Option、値の欠け、多すぎる Directory）も Shim。
 - **前段は境界ではない**（Model は本物の git を直接実行できる）。安全は今と同じく Mount と Mask が守る: Sandbox から Node の Repository の Git Directory と共有の Object Store は見えず（`.git` の File は読み取り専用）、`--network none`。Image の Build は本物の git の写しが Path に残っていれば失敗する。

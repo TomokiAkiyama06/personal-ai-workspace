@@ -179,6 +179,18 @@ class RouteByDestinationTest(unittest.TestCase):
         ):
             self.assertEqual(route(*argv, cwd="/tmp"), SHIM, argv)
 
+    def test_a_bare_clone_is_named_with_git(self):
+        # Codex review of #248 (P2): ``--bare`` / ``--mirror`` without a
+        # directory clone into ``<name>.git``.
+        base = tempfile.mkdtemp(prefix="paw-front-")
+        self.addCleanup(shutil.rmtree, base, True)
+        os.symlink("/workspace/sub", os.path.join(base, "source.git"))
+        for flag in ("--bare", "--mirror"):
+            for source in ("/tmp/x/source", "/tmp/x/source.git", "/tmp/x/source/.git"):
+                self.assertEqual(route("clone", flag, source, cwd=base), SHIM, flag)
+            self.assertEqual(route("clone", flag, "/tmp/a", "b", cwd=base), REAL)
+        self.assertEqual(route("clone", "/tmp/x/source", cwd=base), REAL)
+
     def test_a_creation_that_cannot_be_read_goes_to_the_shim(self):
         for argv in (
             ("init", "/tmp/a", "/tmp/b"),

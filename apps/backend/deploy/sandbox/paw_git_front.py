@@ -12,13 +12,14 @@ goes and replaces itself with that program:
 
 ``init`` and ``clone`` are decided by the repository they create: the
 directory (by default where git runs, for ``clone`` the source's name under
-it) and ``--separate-git-dir``. Every other call by where it runs: the working
-directory with each ``-C`` applied in turn. Either way the shim takes the call
-when ``--git-dir`` / ``--work-tree``, a ``-c`` / ``--config-env`` value that is
-an absolute path, or ``GIT_DIR`` and the other variables that move the
-repository point into ``/workspace``. Paths are resolved (``realpath``). A call
-it cannot read (an unknown global option, a missing value, more directories
-than the command takes) goes to the shim, which refuses what it does not allow.
+it, ``<name>.git`` for a bare clone) and ``--separate-git-dir``. Every other
+call by where it runs: the working directory with each ``-C`` applied in
+turn. Either way the shim takes the call when ``--git-dir`` / ``--work-tree``,
+a ``-c`` / ``--config-env`` value that is an absolute path, or ``GIT_DIR`` and
+the other variables that move the repository point into ``/workspace``.
+Paths are resolved (``realpath``). A call it cannot read (an unknown global
+option, a missing value, more directories than the command takes) goes to the
+shim, which refuses what it does not allow.
 
 This is not a boundary: the model can run the real git itself. The mounts and
 masks are (Decision 0083, 6): the sandbox sees no git directory and no shared
@@ -224,6 +225,7 @@ def _created(
     takes_value = INIT_VALUES if subcommand == "init" else CLONE_VALUES
     positional: list[str] = []
     created: list[str] = []
+    bare = False
     i = 0
     while i < len(arguments):
         word = arguments[i]
@@ -243,6 +245,8 @@ def _created(
         elif word in takes_value:
             value = _value(arguments, i)
             i += 1
+        if subcommand == "clone" and word in ("--bare", "--mirror"):
+            bare = True
         if name == "--separate-git-dir":
             created.append(_resolve(place, value))
         elif name in ("-c", "--config"):
@@ -258,7 +262,9 @@ def _created(
         if len(positional) == 2:
             created.append(_resolve(place, positional[1]))
         else:
-            created.append(_resolve(place, _clone_name(positional[0])))
+            name = _clone_name(positional[0])
+            # A bare clone (``--bare``, ``--mirror``) is made in ``<name>.git``.
+            created.append(_resolve(place, f"{name}.git" if bare else name))
     return created
 
 
