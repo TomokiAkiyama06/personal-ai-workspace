@@ -191,6 +191,40 @@ class RouteByDestinationTest(unittest.TestCase):
             self.assertEqual(route("clone", flag, "/tmp/a", "b", cwd=base), REAL)
         self.assertEqual(route("clone", "/tmp/x/source", cwd=base), REAL)
 
+    def test_abbreviated_and_clustered_options_are_read_like_git(self):
+        # Codex review of #248 (P2): git accepts a unique prefix of a long
+        # option (``--sep`` is ``--separate-git-dir``) and clustered short
+        # options (``-qb main``).
+        for argv in (
+            ("clone", "--sep=/workspace/m", "/tmp/a", "/tmp/b"),
+            ("clone", "--separate", "/workspace/m", "/tmp/a", "/tmp/b"),
+            ("init", "--sep=/workspace/m", "/tmp/r"),
+            ("init", "--separate-git", "/workspace/m", "/tmp/r"),
+        ):
+            self.assertEqual(route(*argv, cwd="/tmp"), SHIM, argv)
+        base = tempfile.mkdtemp(prefix="paw-front-")
+        self.addCleanup(shutil.rmtree, base, True)
+        os.symlink("/workspace/sub", os.path.join(base, "source.git"))
+        for flag in ("--bar", "--mir"):
+            self.assertEqual(route("clone", flag, "/tmp/source", cwd=base), SHIM)
+        for argv in (
+            ("clone", "--sing", "/tmp/a", "/tmp/b"),  # --single-branch
+            ("clone", "--bran", "x", "/tmp/a", "/tmp/b"),
+            ("clone", "-qb", "x", "/tmp/a", "/tmp/b"),
+            ("clone", "-qbx", "/tmp/a", "/tmp/b"),
+            ("init", "-qb", "main", "/tmp/r"),
+            ("init", "--init=main", "/tmp/r"),
+        ):
+            self.assertEqual(route(*argv, cwd="/tmp"), REAL, argv)
+        # An option git would not take (unknown, or a prefix of two).
+        for argv in (
+            ("clone", "--no-such-option", "/tmp/a", "/tmp/b"),
+            ("clone", "--s", "/tmp/a", "/tmp/b"),
+            ("clone", "-Z", "/tmp/a", "/tmp/b"),
+            ("init", "--unknown", "/tmp/r"),
+        ):
+            self.assertEqual(route(*argv, cwd="/tmp"), SHIM, argv)
+
     def test_a_creation_that_cannot_be_read_goes_to_the_shim(self):
         for argv in (
             ("init", "/tmp/a", "/tmp/b"),

@@ -17,9 +17,10 @@ call by where it runs: the working directory with each ``-C`` applied in
 turn. Either way the shim takes the call when ``--git-dir`` / ``--work-tree``,
 a ``-c`` / ``--config-env`` value that is an absolute path, or ``GIT_DIR`` and
 the other variables that move the repository point into ``/workspace``.
-Paths are resolved (``realpath``). A call it cannot read (an unknown global
-option, a missing value, more directories than the command takes) goes to the
-shim, which refuses what it does not allow.
+Paths are resolved (``realpath``); the options of ``init`` / ``clone`` are
+read like git does (unique prefixes of long options, clustered short ones). A
+call it cannot read (an unknown option, a missing value, more directories than
+the command takes) goes to the shim, which refuses what it does not allow.
 
 This is not a boundary: the model can run the real git itself. The mounts and
 masks are (Decision 0083, 6): the sandbox sees no git directory and no shared
@@ -79,43 +80,91 @@ GLOBAL_OTHER_VALUES = frozenset(
     {"--namespace", "--super-prefix", "--attr-source", "--list-cmds", "--exec-path"}
 )
 
-#: Options of ``init`` / ``clone`` that take a value (``--name value`` or
-#: ``--name=value``; the short ones also ``-xvalue``).
-INIT_VALUES = frozenset(
+#: The options of ``init`` / ``clone`` (git 2.47, ``git init -h`` / ``git
+#: clone -h``): ``VALUE`` takes one (``--name value`` or ``--name=value``),
+#: ``OPTIONAL`` only as ``--name=value``, ``FLAG`` none. ``NEGATABLE`` ones are
+#: also ``--no-<name>`` (a flag). git accepts a unique prefix of a long option
+#: (``--sep``), and clustered short options (``-qb main``, ``-qbmain``).
+VALUE, OPTIONAL, FLAG = "value", "optional", "flag"
+
+
+def _long_options(negatable: dict[str, str], plain: dict[str, str]) -> dict[str, str]:
+    options = dict(plain)
+    for name, kind in negatable.items():
+        options[f"--{name}"] = kind
+        options[f"--no-{name}"] = FLAG
+    return options
+
+
+INIT_LONG = _long_options(
     {
-        "--template",
-        "--separate-git-dir",
-        "-b",
-        "--initial-branch",
-        "--object-format",
-        "--ref-format",
-    }
+        "template": VALUE,
+        "bare": FLAG,
+        "quiet": FLAG,
+        "separate-git-dir": VALUE,
+        "initial-branch": VALUE,
+        "object-format": VALUE,
+        "ref-format": VALUE,
+    },
+    {"--shared": OPTIONAL},
 )
-CLONE_VALUES = frozenset(
+CLONE_LONG = _long_options(
     {
-        "-o",
-        "--origin",
-        "-b",
-        "--branch",
-        "-u",
-        "--upload-pack",
-        "--reference",
-        "--reference-if-able",
-        "--separate-git-dir",
-        "--depth",
-        "--shallow-since",
-        "--shallow-exclude",
-        "-c",
-        "--config",
-        "--server-option",
-        "--template",
-        "-j",
-        "--jobs",
-        "--filter",
-        "--bundle-uri",
-        "--ref-format",
-        "--revision",
-    }
+        "verbose": FLAG,
+        "quiet": FLAG,
+        "progress": FLAG,
+        "reject-shallow": FLAG,
+        "bare": FLAG,
+        "mirror": FLAG,
+        "local": FLAG,
+        "shared": FLAG,
+        "recurse-submodules": OPTIONAL,
+        "recursive": OPTIONAL,
+        "jobs": VALUE,
+        "template": VALUE,
+        "reference": VALUE,
+        "reference-if-able": VALUE,
+        "dissociate": FLAG,
+        "origin": VALUE,
+        "branch": VALUE,
+        "upload-pack": VALUE,
+        "depth": VALUE,
+        "shallow-since": VALUE,
+        "shallow-exclude": VALUE,
+        "single-branch": FLAG,
+        "shallow-submodules": FLAG,
+        "separate-git-dir": VALUE,
+        "ref-format": VALUE,
+        "config": VALUE,
+        "server-option": VALUE,
+        "filter": VALUE,
+        "also-filter-submodules": FLAG,
+        "remote-submodules": FLAG,
+        "sparse": FLAG,
+        "bundle-uri": VALUE,
+    },
+    {
+        "--no-checkout": FLAG,
+        "--checkout": FLAG,
+        "--no-hardlinks": FLAG,
+        "--hardlinks": FLAG,
+        "--no-tags": FLAG,
+        "--tags": FLAG,
+        "--ipv4": FLAG,
+        "--ipv6": FLAG,
+    },
+)
+#: Short options: the flags, and those that take a value (with their long name).
+INIT_SHORT = ({"q"}, {"b": "--initial-branch"})
+CLONE_SHORT = (
+    {"v", "q", "n", "l", "s", "4", "6"},
+    {
+        "o": "--origin",
+        "b": "--branch",
+        "u": "--upload-pack",
+        "c": "--config",
+        "j": "--jobs",
+    },
 )
 
 
@@ -222,36 +271,54 @@ def _created(
     subcommand: str, arguments: list[str], place: str, environ: dict[str, str]
 ) -> list[str]:
     """The places ``init`` / ``clone`` create (resolved)."""
-    takes_value = INIT_VALUES if subcommand == "init" else CLONE_VALUES
+    if subcommand == "init":
+        long_options, (short_flags, short_values) = INIT_LONG, INIT_SHORT
+    else:
+        long_options, (short_flags, short_values) = CLONE_LONG, CLONE_SHORT
     positional: list[str] = []
-    created: list[str] = []
-    bare = False
+    options: list[tuple[str, str]] = []
     i = 0
     while i < len(arguments):
         word = arguments[i]
+        i += 1
         if word == "--":
-            positional += arguments[i + 1 :]
+            positional += arguments[i:]
             break
         if not word.startswith("-") or word == "-":
             positional.append(word)
-            i += 1
-            continue
-        name, has_value, value = word.partition("=")
-        short = len(word) > 2 and not word.startswith("--") and word[:2]
-        if has_value and name.startswith("--"):
-            pass
-        elif short and short in takes_value:
-            name, value = short, word[2:]
-        elif word in takes_value:
-            value = _value(arguments, i)
-            i += 1
-        if subcommand == "clone" and word in ("--bare", "--mirror"):
+        elif word.startswith("--"):
+            given, has_value, value = word.partition("=")
+            name = _long_name(given, long_options)
+            kind = long_options[name]
+            if kind == VALUE and not has_value:
+                value = _value(arguments, i - 1)
+                i += 1
+            elif kind == FLAG and has_value:
+                raise _Unreadable()
+            options.append((name, value))
+        else:
+            for at, letter in enumerate(word[1:], start=2):
+                if letter in short_flags:
+                    continue
+                if letter not in short_values:
+                    raise _Unreadable()
+                value = word[at:]
+                if not value:
+                    value = _value(arguments, i - 1)
+                    i += 1
+                options.append((short_values[letter], value))
+                break
+    created: list[str] = []
+    bare = False
+    for name, value in options:
+        if name in ("--bare", "--mirror"):
             bare = True
-        if name == "--separate-git-dir":
+        elif name in ("--no-bare", "--no-mirror"):
+            bare = False
+        elif name == "--separate-git-dir":
             created.append(_resolve(place, value))
-        elif name in ("-c", "--config"):
+        elif name == "--config":
             created += [_resolve(place, p) for p in _config_paths(value)]
-        i += 1
     if subcommand == "init":
         if len(positional) > 1:
             raise _Unreadable()
@@ -266,6 +333,17 @@ def _created(
             # A bare clone (``--bare``, ``--mirror``) is made in ``<name>.git``.
             created.append(_resolve(place, f"{name}.git" if bare else name))
     return created
+
+
+def _long_name(given: str, options: dict[str, str]) -> str:
+    """The long option ``given`` names: itself, or the one it is a unique
+    prefix of (as git's option parser accepts)."""
+    if given in options:
+        return given
+    matches = [name for name in options if name.startswith(given)]
+    if len(given) < 3 or len(matches) != 1:
+        raise _Unreadable()
+    return matches[0]
 
 
 def _clone_name(source: str) -> str:
