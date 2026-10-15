@@ -35,10 +35,11 @@ Without a handler a session is refused before anything starts.
 
 The CLI rung stays disabled at assembly (Decision 0083, 11's 4: until the
 ``CloudPolicy`` Decision; the provider's terms are still being confirmed by the
-human; and no version is verified). The launcher here,
-:class:`InteractiveSubprocessLauncher`, runs the CLI as a child process for
-development and the tests; production's launcher must also carry the CLI's
-stdin (``app-server`` is a conversation, not one prompt).
+human; and no version is verified). :class:`InteractiveSubprocessLauncher`
+runs the CLI as a child process for development and the tests;
+:class:`SystemdCodexLauncher` is production's (the session's unit of
+``cli_session.SystemdLauncher``, whose stream socket carries the CLI's stdin
+as well as its stdout: ``app-server`` is a conversation, not one prompt).
 """
 
 import asyncio
@@ -56,9 +57,12 @@ from paw_backend.agents.bridge import McpBridge
 from paw_backend.agents.claude_cli import NODE_MARGIN_SECONDS, _ended
 from paw_backend.agents.cli_session import (
     CliSessionSpec,
+    SystemdLauncher,
+    UnitNotStoppedError,
     _Subprocess,
     create_session,
     remove_session,
+    stop_through_cancellation,
 )
 from paw_backend.agents.cloud import CloudGate
 from paw_backend.agents.codex_app_server import (
@@ -216,6 +220,22 @@ class InteractiveSubprocessLauncher:
         return _Interactive(process)
 
 
+class SystemdCodexLauncher:
+    """Production's launcher: the session's unit (``SystemdLauncher``, #236)
+    in its Codex form (``start_interactive``: the stream socket is the CLI's
+    stdin and stdout; no credential file, no prompt). The version probe and
+    ``app-server`` each start the session's unit in turn."""
+
+    def __init__(self, systemd: SystemdLauncher) -> None:
+        require_async_method(systemd, "start_interactive", 3)
+        self._systemd = systemd
+
+    async def start(self, launch: CodexLaunch) -> CodexProcess:
+        return await self._systemd.start_interactive(
+            launch.argv, launch.env, launch.spec
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class CodexAttachment:
     """What the runtime hands its adapter through the service
@@ -228,6 +248,11 @@ class CodexAttachment:
     # Set by the adapter when the stream was refused (Decision 0089, 2), also
     # after a submit: the attempt then fails whatever the bridge returned.
     refused: list[bool] = field(default_factory=list, repr=False)
+    # Set by the adapter when the CLI (the version probe or ``app-server``)
+    # could not be stopped: the runtime then keeps the session's directory
+    # (the unit still has it mounted) for the operator, instead of deleting
+    # it under a running session (as Claude's).
+    unstopped: list[bool] = field(default_factory=list, repr=False)
 
 
 def session_config(spec: CliSessionSpec, tools: Iterable[str]) -> str:
@@ -363,12 +388,13 @@ class CodexSessionAdapter:
 
     async def _version(self, attachment: CodexAttachment) -> str | None:
         """``codex --version``'s version (``codex-cli 0.162.1``), or ``None``."""
-        process = await self._launcher.start(
+        process = await self._start(
             CodexLaunch(
                 (*self._executable, "--version"),
                 self.environment(attachment),
                 attachment.spec,
-            )
+            ),
+            attachment,
         )
         try:
             async with asyncio.timeout(VERSION_SECONDS):
@@ -376,9 +402,20 @@ class CodexSessionAdapter:
         except (TimeoutError, ValueError):
             line = b""
         finally:
-            await process.stop()
+            await _stop(process, attachment)
         match = _VERSION_LINE.search(line.decode("ascii", "replace"))
         return match.group(1) if match else None
+
+    async def _start(
+        self, launch: CodexLaunch, attachment: CodexAttachment
+    ) -> CodexProcess:
+        try:
+            return await self._launcher.start(launch)
+        except UnitNotStoppedError:
+            # The start failed and its cleanup could not stop the unit: it
+            # may run with the session's files although no process came back.
+            attachment.unstopped.append(True)
+            raise
 
     async def _collect(self, codex_home: Path) -> None:
         assert self._credentials is not None
@@ -393,8 +430,11 @@ class CodexSessionAdapter:
     async def _converse(
         self, request: AgentSessionRequest, attachment: CodexAttachment
     ) -> AgentSessionResult:
-        process = await self._launcher.start(
-            CodexLaunch(self.arguments(), self.environment(attachment), attachment.spec)
+        process = await self._start(
+            CodexLaunch(
+                self.arguments(), self.environment(attachment), attachment.spec
+            ),
+            attachment,
         )
         stream = CodexStream(attachment.tools, self._verified)
         ended: Ended | None = None
@@ -447,7 +487,7 @@ class CodexSessionAdapter:
             pass  # the CLI went away; its exit says the rest
         finally:
             bridge_ended.cancel()
-            await process.stop()
+            await _stop(process, attachment)
         code = await process.wait()
         if failure is None and not stream.initialized:
             failure = FailureCode.INVALID_RESPONSE
@@ -550,6 +590,19 @@ def _submit_counted(stream: CodexStream, attachment: CodexAttachment) -> bool:
     return stream.calls_seen >= attachment.bridge.calls and stream.call_counted
 
 
+async def _stop(process: CodexProcess, attachment: CodexAttachment) -> None:
+    """Stop the CLI. A cancellation (the session's deadline) that comes
+    during the stop waits for it: a stop that did not end may leave the CLI
+    running, and then its files must stay (``attachment.unstopped``)."""
+    failed, cancelled = await stop_through_cancellation(process)
+    if failed is not None:
+        attachment.unstopped.append(True)
+    if cancelled:
+        raise asyncio.CancelledError
+    if failed is not None:
+        raise failed
+
+
 async def _send(process: CodexProcess, line: bytes) -> None:
     process.stdin.write(line)
     await process.stdin.drain()
@@ -590,12 +643,25 @@ class CodexCliRuntime:
         return f"CodexCliRuntime(model={self._model!r})"
 
     async def run_node(self, assignment: NodeAssignment) -> NodeOutcome:
-        return await self._run(assignment, fallback=False)
+        return await self._classified(assignment, fallback=False)
 
     async def run_as_fallback(self, assignment: NodeAssignment) -> NodeOutcome:
         """``HybridRuntime``'s cloud path: a refused gate is
         ``ComputeUnavailable`` (the node stays on its local rung)."""
-        return await self._run(assignment, fallback=True)
+        return await self._classified(assignment, fallback=True)
+
+    async def _classified(
+        self, assignment: NodeAssignment, *, fallback: bool
+    ) -> NodeOutcome:
+        """The runtime's boundary, as Claude's and the local runtime's: an
+        exception of the session's setup or launcher (a missing CLI, a
+        directory that cannot be made) is classified
+        (``ErrorClassifier.from_error``: its class and text are never read);
+        ``NodeStopped``, a cancellation and ``MemoryError`` pass."""
+        try:
+            return await self._run(assignment, fallback=fallback)
+        except Exception as error:
+            return ErrorClassifier.from_error(error)
 
     async def _run(self, assignment: NodeAssignment, *, fallback: bool) -> NodeOutcome:
         if assignment.role is NodeRole.PLANNER:
@@ -607,18 +673,18 @@ class CodexCliRuntime:
         system, task = node_prompts(toolkit)
         spec = create_session(self._base, self._relay)
         bridge = McpBridge(toolkit, token=spec.token)
+        attachment = None
         try:
             server = await bridge.serve(str(spec.socket_path))
             try:
                 tools = frozenset(t["function"]["name"] for t in toolkit.tools)
+                attachment = CodexAttachment(spec, bridge, tools, system)
                 request = SessionRequest(
                     self._model,
                     _PURPOSES[assignment.role],
                     task,
                     self._timeout,
-                    attachment=(
-                        attachment := CodexAttachment(spec, bridge, tools, system)
-                    ),
+                    attachment=attachment,
                 )
                 try:
                     result = await self._gate.session(
@@ -630,11 +696,22 @@ class CodexCliRuntime:
                     )
                 except RuntimeFailure as refused:
                     return ErrorClassifier.outcome(refused.failure, fallback=fallback)
+                except Exception:
+                    if not attachment.unstopped:
+                        raise
+                    result = None  # answered below: the CLI did not stop
             finally:
                 server.close()
                 await server.wait_closed()
         finally:
-            remove_session(spec)
+            if attachment is not None and attachment.unstopped:
+                # The CLI's unit did not stop: its directory stays (the unit
+                # has it mounted); the operator stops the unit and removes it.
+                logger.error("A CLI session could not be stopped; its files stay")
+            else:
+                remove_session(spec)
+        if attachment is not None and attachment.unstopped:
+            return ErrorClassifier.outcome(Failure.OTHER)
         if bridge.failure is not None:
             return _ended(bridge.failure)
         if attachment.refused:
@@ -660,5 +737,6 @@ __all__ = [
     "CodexProcess",
     "CodexSessionAdapter",
     "InteractiveSubprocessLauncher",
+    "SystemdCodexLauncher",
     "session_config",
 ]

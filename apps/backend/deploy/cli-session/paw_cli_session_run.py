@@ -7,14 +7,20 @@ Podman. Everything it takes comes from root-owned configuration or from the
 session's directory that the backend made (``<root>/<uuid>``, group
 ``paw-cli-bridge``):
 
-* ``launch.json``: the CLI's arguments (strings) and its environment (names
-  from a fixed list only);
-* ``credential.env``: the one ``NAME=value`` line of the credential
-  (``CLAUDE_CODE_OAUTH_TOKEN``), handed to Podman as an env file;
-* ``prompt``: the task, the container's stdin;
+* ``launch.json``: the CLI's arguments (strings), its environment (names
+  from a fixed list only) and which CLI it is (``cli``: ``claude``, the
+  default, or ``codex``);
+* ``credential.env`` (Claude only): the one ``NAME=value`` line of the
+  credential (``CLAUDE_CODE_OAUTH_TOKEN``), handed to Podman as an env file;
+* ``prompt`` (Claude only): the task, the container's stdin;
 * ``stream.sock``: the backend's socket; the container's stdout goes there.
+  For Codex (``codex app-server`` is a conversation over stdio) it is the
+  container's stdin as well, and there is no prompt and no credential file
+  (Codex's login is a file in its ``CODEX_HOME``; a credential file is
+  refused).
 
-The container: the image pinned by digest (``/etc/paw/cli-session.toml``),
+The container: the image pinned by digest (``/etc/paw/cli-session.toml``:
+``image`` for Claude, ``codex_image`` for Codex),
 ``--network none``, a read-only root, no capabilities, no new privileges,
 PID and memory limits, the session's directory mounted at the same path (the
 MCP configuration names its socket and token file there) and the egress
@@ -47,8 +53,11 @@ ALLOWED_ENV = frozenset(
         "DISABLE_ERROR_REPORTING",
         "ENABLE_CLAUDEAI_MCP_SERVERS",
         "HTTPS_PROXY",
+        "CODEX_HOME",
     }
 )
+#: Which image each CLI runs, and whether the stream socket is its stdin.
+CLIS = {"claude": ("image", False), "codex": ("codex_image", True)}
 ALLOWED_CREDENTIALS = frozenset({"CLAUDE_CODE_OAUTH_TOKEN"})
 EGRESS_IN_CONTAINER = "/run/paw-egress.sock"
 
@@ -67,6 +76,11 @@ def load_config(path: str) -> dict:
         raise Refused("root must be an absolute path")
     if not isinstance(image, str) or not _DIGEST.fullmatch(image):
         raise Refused("image must be pinned by its digest")
+    codex_image = config.get("codex_image")
+    if codex_image is not None and (
+        not isinstance(codex_image, str) or not _DIGEST.fullmatch(codex_image)
+    ):
+        raise Refused("codex_image must be pinned by its digest")
     if not isinstance(egress, str) or not os.path.isabs(egress):
         raise Refused("egress_socket must be an absolute path")
     for name, default in (("memory", "4g"), ("pids", 512), ("cpus", 2)):
@@ -74,9 +88,12 @@ def load_config(path: str) -> dict:
     return config
 
 
-def read_launch(directory: Path) -> tuple[list[str], dict[str, str]]:
+def read_launch(directory: Path) -> tuple[list[str], dict[str, str], str]:
     data = json.loads((directory / "launch.json").read_text(encoding="utf-8"))
     argv, env = data.get("argv"), data.get("env")
+    cli = data.get("cli", "claude")
+    if not isinstance(cli, str) or cli not in CLIS:
+        raise Refused("launch.json: cli")
     if (
         not isinstance(argv, list)
         or not argv
@@ -88,11 +105,17 @@ def read_launch(directory: Path) -> tuple[list[str], dict[str, str]]:
         for k, v in env.items()
     ):
         raise Refused("launch.json: env")
-    return argv, env
+    return argv, env, cli
 
 
-def check_credential(directory: Path) -> Path:
+def check_credential(directory: Path, cli: str) -> Path | None:
     path = directory / "credential.env"
+    if cli == "codex":
+        # Codex's login is its CODEX_HOME's file, never an environment
+        # variable: a credential file here is not one this program passes.
+        if os.path.lexists(path):
+            raise Refused("credential.env")
+        return None
     lines = path.read_text(encoding="utf-8").splitlines()
     if len(lines) != 1 or lines[0].split("=", 1)[0] not in ALLOWED_CREDENTIALS:
         raise Refused("credential.env")
@@ -105,7 +128,8 @@ def podman_command(
     config: dict,
     argv: Sequence[str],
     env: dict[str, str],
-    credential: Path,
+    credential: Path | None,
+    image: str,
 ) -> list[str]:
     command = [
         "podman",
@@ -136,8 +160,10 @@ def podman_command(
         f"{directory}:{directory}:rw",
         "--volume",
         f"{config['egress_socket']}:{EGRESS_IN_CONTAINER}",
-        "--env-file",
-        str(credential),
+    ]
+    if credential is not None:
+        command += ["--env-file", str(credential)]
+    command += [
         # The session's id for the egress forwarder's X-PAW-Session (set by
         # this program, not by the backend's launch.json nor the CLI).
         "--env",
@@ -145,7 +171,7 @@ def podman_command(
     ]
     for name in sorted(env):
         command += ["--env", f"{name}={env[name]}"]
-    command += [config["image"], *argv]
+    command += [image, *argv]
     return command
 
 
@@ -159,10 +185,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise Refused("the session id must be a UUID")
         config = load_config(arguments.config)
         directory = Path(config["root"]) / arguments.session_id
-        launch_argv, env = read_launch(directory)
-        credential = check_credential(directory)
+        launch_argv, env, cli = read_launch(directory)
+        image_key, interactive = CLIS[cli]
+        image = config.get(image_key)
+        if not isinstance(image, str):
+            raise Refused(f"{image_key} must be pinned by its digest")
+        credential = check_credential(directory, cli)
         command = podman_command(
-            arguments.session_id, directory, config, launch_argv, env, credential
+            arguments.session_id,
+            directory,
+            config,
+            launch_argv,
+            env,
+            credential,
+            image,
         )
         stream = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         stream.connect(str(directory / "stream.sock"))
@@ -170,10 +206,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         reason = str(error) if isinstance(error, Refused) else type(error).__name__
         print(f"paw-cli-session: refused ({reason})", file=sys.stderr)
         return 2
-    with open(directory / "prompt", "rb") as prompt, stream:
-        result = subprocess.run(
-            command, stdin=prompt, stdout=stream.fileno(), stderr=subprocess.DEVNULL
-        )
+    with stream:
+        if interactive:
+            # The conversation: the backend's socket is stdin and stdout.
+            result = subprocess.run(
+                command,
+                stdin=stream.fileno(),
+                stdout=stream.fileno(),
+                stderr=subprocess.DEVNULL,
+            )
+        else:
+            with open(directory / "prompt", "rb") as prompt:
+                result = subprocess.run(
+                    command,
+                    stdin=prompt,
+                    stdout=stream.fileno(),
+                    stderr=subprocess.DEVNULL,
+                )
     return result.returncode
 
 

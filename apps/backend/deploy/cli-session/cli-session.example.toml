@@ -3,6 +3,9 @@
 root = "/run/paw-cli"
 # The CLI image, pinned by its digest (Containerfile; an update changes it).
 image = "localhost/paw-claude-cli@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+# Codex's image (Containerfile.codex), pinned the same way. Without it a Codex
+# session is refused.
+codex_image = "localhost/paw-codex-cli@sha256:0000000000000000000000000000000000000000000000000000000000000000"
 egress_socket = "/run/paw-egress/egress.sock"
 memory = "4g"
 pids = 512

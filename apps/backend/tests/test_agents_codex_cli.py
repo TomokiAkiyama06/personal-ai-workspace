@@ -28,6 +28,7 @@ import unittest
 import uuid
 from pathlib import Path
 
+from paw_backend.agents.cli_session import UnitNotStoppedError
 from paw_backend.agents.codex_app_server import (
     VERIFIED_VERSIONS,
     CodexStream,
@@ -142,7 +143,14 @@ class CodexCase(unittest.IsolatedAsyncioTestCase):
         )
 
     async def run_node(
-        self, actions, *, role=NodeRole.RESEARCHER, budget=10**7, adapter=None, **extra
+        self,
+        actions,
+        *,
+        role=NodeRole.RESEARCHER,
+        budget=10**7,
+        adapter=None,
+        fallback=False,
+        **extra,
     ):
         self.scenario.write_text(json.dumps({"actions": actions, **extra}))
         self.connections = Connections(adapter or self.adapter(), budget=budget)
@@ -171,7 +179,8 @@ class CodexCase(unittest.IsolatedAsyncioTestCase):
             placement=self.placement,
             connections=self.connections,
         )
-        return await asyncio.wait_for(runtime.run_node(assignment), 60)
+        run = runtime.run_as_fallback if fallback else runtime.run_node
+        return await asyncio.wait_for(run(assignment), 60)
 
     def read_report(self):
         return json.loads(self.report.read_text())
@@ -460,6 +469,191 @@ class StopTest(CodexCase):
         self.assertEqual(raw.failure.value, "internal_error")
         self.assertIsNone(raw.input_tokens)
         self.assertEqual(self.connections.turns, [(4, 4)])
+
+
+class UnstoppedTest(CodexCase):
+    """A CLI whose stop failed (the unit's ``systemctl stop``) may still run
+    with the session's files mounted: its directory stays for the operator
+    and the attempt is an adapter error (as Claude's)."""
+
+    def stuck_adapter(self, launcher):
+        return CodexSessionAdapter(
+            launcher,
+            drain_seconds=1.0,
+            credentials=self.credentials,
+            executable=(
+                sys.executable,
+                "-I",
+                str(FAKE),
+                "--scenario",
+                str(self.scenario),
+                "--report",
+                str(self.report),
+            ),
+            verified_versions=frozenset({VERSION}),
+        )
+
+    async def test_a_cli_that_cannot_be_stopped_keeps_its_directory(self):
+        class StuckLauncher(InteractiveSubprocessLauncher):
+            async def start(self, launch):
+                process = await super().start(launch)
+                if "app-server" not in launch.argv:
+                    return process
+                real_stop = process.stop
+
+                async def stop():
+                    await real_stop()  # (the test's process does end)
+                    raise UnitNotStoppedError("the session's unit could not be stopped")
+
+                process.stop = stop
+                return process
+
+        outcome = await self.run_node(
+            [
+                {"usage": [100, 10]},
+                {"call": "submit", "arguments": {"summary": "s"}},
+                {"sleep": 30},
+            ],
+            adapter=self.stuck_adapter(StuckLauncher()),
+        )
+        self.assertEqual(len(list(self.sessions.iterdir())), 1)  # kept
+        self.assertIsNone(outcome.result)
+        self.assertEqual(outcome.error_class, "AdapterError")
+        self.assertEqual(len(self.credentials.collected), 1)
+
+    async def test_a_version_probe_that_cannot_be_stopped_keeps_its_directory(self):
+        class StuckLauncher(InteractiveSubprocessLauncher):
+            async def start(self, launch):
+                process = await super().start(launch)
+                real_stop = process.stop
+
+                async def stop():
+                    await real_stop()
+                    raise UnitNotStoppedError("the session's unit could not be stopped")
+
+                process.stop = stop
+                return process
+
+        outcome = await self.run_node(
+            [{"usage": [1, 1]}], adapter=self.stuck_adapter(StuckLauncher())
+        )
+        self.assertFalse(self.report.exists())  # app-server never started
+        self.assertEqual(self.credentials.placed, [])
+        self.assertEqual(len(list(self.sessions.iterdir())), 1)  # kept
+        self.assertEqual(outcome.error_class, "AdapterError")
+
+    async def test_a_stop_interrupted_by_cancellation_keeps_its_directory(self):
+        stopping = asyncio.Event()
+
+        class SlowStuckLauncher(InteractiveSubprocessLauncher):
+            async def start(self, launch):
+                process = await super().start(launch)
+                if "app-server" not in launch.argv:
+                    return process
+                real_stop = process.stop
+
+                async def stop():
+                    stopping.set()
+                    await asyncio.sleep(0.5)
+                    await real_stop()
+                    raise UnitNotStoppedError("the session's unit could not be stopped")
+
+                process.stop = stop
+                return process
+
+        running = asyncio.create_task(
+            self.run_node(
+                [
+                    {"usage": [100, 10]},
+                    {"call": "submit", "arguments": {"summary": "s"}},
+                    {"sleep": 30},
+                ],
+                adapter=self.stuck_adapter(SlowStuckLauncher()),
+            )
+        )
+        await asyncio.wait_for(stopping.wait(), 20)
+        running.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await running
+        self.assertEqual(len(list(self.sessions.iterdir())), 1)  # kept
+
+    async def test_a_start_whose_cleanup_cannot_stop_keeps_its_directory(self):
+        class StartStuckLauncher(InteractiveSubprocessLauncher):
+            async def start(self, launch):
+                process = await super().start(launch)
+                if "app-server" not in launch.argv:
+                    return process
+                await process.stop()
+                raise UnitNotStoppedError(
+                    "the session's unit could not be stopped"
+                ) from TimeoutError()
+
+        outcome = await self.run_node(
+            [{"sleep": 30}], adapter=self.stuck_adapter(StartStuckLauncher())
+        )
+        self.assertEqual(len(list(self.sessions.iterdir())), 1)  # kept
+        self.assertIsNone(outcome.result)
+        self.assertEqual(outcome.error_class, "AdapterError")
+        self.assertEqual(len(self.credentials.collected), 1)
+
+    async def test_a_stopped_cli_still_removes_its_directory(self):
+        await self.run_node([{"usage": [1, 1]}, {"complete": "completed"}])
+        self.assertEqual(list(self.sessions.iterdir()), [])
+
+
+class BoundaryTest(CodexCase):
+    """An exception of the session's setup or launcher is classified at the
+    runtime's boundary (``ErrorClassifier.from_error``), as Claude's and the
+    local runtime's are: it does not escape as its own class."""
+
+    def missing_adapter(self):
+        missing = str(self.base / "no-such-codex")
+        return CodexSessionAdapter(
+            InteractiveSubprocessLauncher(),
+            credentials=self.credentials,
+            executable=(missing,),
+            verified_versions=frozenset({VERSION}),
+        )
+
+    async def test_a_missing_executable_is_an_adapter_error(self):
+        outcome = await self.run_node([], adapter=self.missing_adapter())
+        self.assertEqual(outcome.error_class, "AdapterError")
+        self.assertEqual(outcome.message, "adapter_error")
+        self.assertEqual(list(self.sessions.iterdir()), [])
+
+    async def test_a_session_directory_that_cannot_be_made_is_an_adapter_error(self):
+        self.sessions.rmdir()  # create_session's base is gone
+        outcome = await self.run_node([])
+        self.assertEqual(outcome.error_class, "AdapterError")
+
+    async def test_the_fallback_path_is_classified_too(self):
+        self.sessions.rmdir()
+        outcome = await self.run_node([], fallback=True)
+        self.assertEqual(outcome.error_class, "AdapterError")
+
+    async def test_a_cancellation_is_not_classified(self):
+        started = asyncio.Event()
+
+        class Hanging(InteractiveSubprocessLauncher):
+            async def start(self, launch):
+                started.set()
+                await asyncio.sleep(60)
+
+        running = asyncio.create_task(
+            self.run_node([], adapter=self.stuck_adapter_for(Hanging()))
+        )
+        await asyncio.wait_for(started.wait(), 20)
+        running.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await running
+
+    def stuck_adapter_for(self, launcher):
+        return CodexSessionAdapter(
+            launcher,
+            credentials=self.credentials,
+            executable=("codex",),
+            verified_versions=frozenset({VERSION}),
+        )
 
 
 class ReprTest(unittest.TestCase):
