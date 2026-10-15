@@ -24,11 +24,11 @@
 
 - Image の本物の git を Path にない場所（例: `/usr/lib/paw/git`）に移し、`/usr/local/bin/git` を小さな前段にする。前段は **呼び出しが Node の Repository（`/workspace`）に向いているときだけ Shim に渡し、それ以外は本物の git を実行する**:
   - 作業の場所 = `cwd` に `-C <path>` を順に当てたもの（`realpath` で解決）。
-  - 作業の場所が `/workspace` の外 → 本物の git。ただし、`--git-dir`・`--work-tree` の値か、環境変数 `GIT_DIR`・`GIT_WORK_TREE`・`GIT_COMMON_DIR`・`GIT_INDEX_FILE`・`GIT_OBJECT_DIRECTORY`・`GIT_ALTERNATE_OBJECT_DIRECTORIES` の値が `/workspace` の中を指すときは Shim。
-  - 作業の場所が `/workspace` か、その下 → Shim。ただし、**新しい Repository を作る副コマンド（`init`・`clone`）で、行き先の位置引数（`init` の `<directory>`、`clone` の `<directory>`）が `/workspace` の外を指すとき**は本物の git（Test が `cwd` を変えずに `git init /tmp/repo` や `git clone /tmp/a /tmp/b` を呼ぶ形。例: `apps/backend/tests/repositories_support.py`）。その一時の Repository の中での後の呼び出しは、`-C` か `cwd` がその場所になるので上の規則で本物の git に行く。
+  - **新しい Repository を作る副コマンド（`init`・`clone`）は、作業の場所ではなく行き先で決める**: 行き先（`init` の `<directory>`、`clone` の `<directory>`。省略なら作業の場所、`clone` で省略なら作業の場所の下の Repository の名前）が `/workspace` か、その下なら Shim（今どおり拒否）、外なら本物の git。どこから呼んでも同じ（`cd /tmp && git init /workspace/generated` も、`/workspace` からの `git init /tmp/repo` も、行き先で決まる。後者は Test が `cwd` を変えずに呼ぶ形。例: `apps/backend/tests/repositories_support.py`）。
+  - それ以外の副コマンドは、作業の場所が `/workspace` か、その下なら Shim、外なら本物の git。ただし、`--git-dir`・`--work-tree` の値か、環境変数 `GIT_DIR`・`GIT_WORK_TREE`・`GIT_COMMON_DIR`・`GIT_INDEX_FILE`・`GIT_OBJECT_DIRECTORY`・`GIT_ALTERNATE_OBJECT_DIRECTORIES` の値が `/workspace` の中を指すときは Shim。
 - 前段は安全の境界ではない（Model は本物の git を直接実行できる）。**安全は今と同じく Mount と Mask が守る**: Sandbox から見えるのは Node の Repository の Mount（`.git` の File は読み取り専用、Git Directory と共有の Object Store は Mount されない、除外の Path は空の tmpfs）だけで、本物の git を `/workspace` に向けても、`cat` や `cp` でできる以上のことはできない（Git Directory がないので履歴も Object も読めない。書き込む Worker の Node は `bash` で Worktree に書けるのが今も同じ。読むだけの Node は Mount が読み取り専用）。`--network none` なので `clone` などの外への通信もできない。
 - 前段の役目は使い勝手だけ: `/workspace` での `git status` / `git diff` を今どおり Shim（Host の正しい履歴と Scope の規則）に送ること。
-- Test: 前段の振り分け（`cwd`・`-C` の組み合わせ・相対 Path・Symbolic Link・環境変数・`--git-dir`、`/workspace` からの `git init /tmp/repo`・`git clone /tmp/a /tmp/b`・`git init`（行き先なし = `/workspace`、Shim））、Image に本物の git が `/usr/local/bin/git` の他の名前で Path にないこと、`/workspace` の `.git` が読み取り専用のままであることを、今の Sandbox の Test（`test_sandbox_*`・`test_ssh_git_wrapper_sandbox.py`）に足す。GPU の再確認は要らない（上の実験で振る舞いを見た）。
+- Test: 前段の振り分け（`cwd`・`-C` の組み合わせ・相対 Path・Symbolic Link・環境変数・`--git-dir`、`/workspace` からの `git init /tmp/repo`・`git clone /tmp/a /tmp/b`（本物の git）、`/tmp` からの `git init /workspace/x`・`git clone /tmp/a /workspace/x`・`/workspace` での行き先なしの `git init`（Shim））、Image に本物の git が `/usr/local/bin/git` の他の名前で Path にないこと、`/workspace` の `.git` が読み取り専用のままであることを、今の Sandbox の Test（`test_sandbox_*`・`test_ssh_git_wrapper_sandbox.py`）に足す。GPU の再確認は要らない（上の実験で振る舞いを見た）。
 
 ### 2. Shim のまま、System Prompt で知らせる（代わりの案）
 
@@ -45,7 +45,8 @@
 ## リスク
 
 - Image の git の版の脆弱性が Sandbox に入る（Network なし・Capability なし・Account の権限だけなので、影響は Sandbox の中に限られる）。Image の更新で追う。
-- 前段の振り分けの誤り（`/workspace` を指すのに本物の git に行く）は、Git Directory がないので `fatal: not a git repository` で失敗するだけで、範囲の外は見えない。
+- 前段の振り分けの誤りで、既存の Node の Repository に向いた呼び出しが本物の git に行っても、Git Directory がないので `fatal: not a git repository` で失敗するだけで、範囲の外は見えない。
+- **本物の git は Model が Path を指定して直接実行もできるので、書き込める Worker の `/workspace` の中に入れ子の Repository（`.git` の Directory）を作れる**（今も `bash` の中の Python などで `.git` の Directory を書くことはできるが、本物の git で手軽になる）。入れ子の Repository が Node の結果に入らないよう、実装の PR で `submit` の突き合わせ（Decision 0083 の 10）が Worktree の中の入れ子の `.git` を見つけたら受け付けない（Model に消させる）ことを Test で固定する。
 
 ## 承認後の扱い
 
