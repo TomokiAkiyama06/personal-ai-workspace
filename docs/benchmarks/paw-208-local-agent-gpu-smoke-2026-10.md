@@ -68,9 +68,9 @@ Task ごとの Step 数（run1 / run2）:
 | spec-02 | 19 / 29 | 27 / 27 | 25 / 29 | 21 / 22 / 17 |
 | spec-03 | 12 / 11 | 16 / 18 | 14 / 12 | 14 / 17 / 11 |
 
-- **Tool 呼び出しの形は Harness と同じ**: 4 つの Tool（`bash`・`str_replace`・`write_file`・`submit`）、`tool_choice: auto`、`max_tokens` 16,384 が毎回送られ、Model は Parser を通った構造化された `tool_calls` で答えた（壊れた引数・Tool なしの応答は 0）。1 つの応答に複数の呼び出しを並べる割合も同じくらい。Reasoning は毎回 `reasoning_content` として返り、履歴に残った（Prompt が 32,768 を超えた Step がないので、`DropOlderReasoning` が外した Reasoning は 0。Harness も同じ）。
+- **Tool 呼び出しの形は Harness と同じ**: 4 つの Tool（`bash`・`str_replace`・`write_file`・`submit`）、`tool_choice: auto`、`max_tokens` 16,384 が毎回送られ、Model は Parser を通った構造化された `tool_calls` で答えた（壊れた引数・Tool なしの応答は 0）。1 つの応答に複数の呼び出しを並べる割合も同じくらい。Reasoning は毎回 `reasoning_content` として返り、履歴に残った。`DropOlderReasoning` が外した Reasoning は、runtime では 0（送った履歴の Assistant の Message がすべて Reasoning を持っていたことで確認。外す前の見積もり〔直前の `prompt_tokens + completion_tokens` + その後の Tool の結果 ÷ 3〕の最大は約 31,300 で閾値 32,768 を超えなかった）、Harness では 1 回（harness_run2 の spec-02、見積もりが閾値を超えた Step で 25 件を外した）。
 - **Backend の側の処理は期待どおり**: すべての Tool が Broker で `allow`（`scoped_auto` / `auto`）になり、Executor の失敗は 0。20 回の `submit` はすべて Branch の差分と突き合わされて 1 つの Commit になり（未 Commit の変更は 0、`refs/paw/base/<branch>` は起点のまま）、spec-02 では申告の `changed_files` が差分と合わず 1 回直させた（2 回とも）。
-- **Step 数は runtime が Harness より多い**（平均 12.5 → 16.1、5 Task 中 4 Task で多い）。**所要は約 1.9 倍**で、その大半は Tool の実行の時間（下）。原因は次の 3 の Sandbox の git で、それを変えた実験では Step 数・所要とも Harness に近づいた（13.9、1.1 倍）。
+- **Step 数は runtime が Harness より多い**（平均 12.5 → 16.1。2 回の合計では 5 Task すべてで多い）。**所要は約 1.9 倍**で、その大半は Tool の実行の時間（下）。原因は次の 3 の Sandbox の git で、それを変えた実験では Step 数・所要とも Harness に近づいた（13.9、1.1 倍）。
 
 ## 3. 大きな違い: Sandbox に本物の git がないため、Repository の Test が失敗して見える
 
