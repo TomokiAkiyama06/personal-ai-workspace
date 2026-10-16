@@ -199,7 +199,7 @@ def route(
         if environ.get(name):
             pointed.append(_resolve(place, environ[name]))
     for name in LIST_VARIABLES:
-        pointed += [_resolve(place, p) for p in environ.get(name, "").split(":") if p]
+        pointed += [_resolve(place, p) for p in _alternates(environ.get(name, ""))]
     if any(inside(p) for p in pointed):
         return SHIM
     subcommand, arguments = (rest[0], rest[1:]) if rest else (None, [])
@@ -210,6 +210,79 @@ def route(
             return SHIM
         return SHIM if any(inside(t) for t in targets) else REAL
     return SHIM if inside(os.path.realpath(place)) else REAL
+
+
+#: The escapes of a C-style quoted path (git's ``unquote_c_style``).
+C_ESCAPES = {
+    "a": "\a",
+    "b": "\b",
+    "f": "\f",
+    "n": "\n",
+    "r": "\r",
+    "t": "\t",
+    "v": "\v",
+    "\\": "\\",
+    '"': '"',
+}
+
+
+def _alternates(value: str) -> list[str]:
+    """The entries of a ``:``-separated list of object directories, read like
+    git's ``parse_alt_odb_entry``: an entry that starts with ``"`` is a
+    C-style quoted path (one that does not unquote is taken as it is), one
+    that starts with ``#`` is a comment, empty ones are skipped."""
+    entries: list[str] = []
+    at = 0
+    while at < len(value):
+        if value[at] == "#":
+            end = _find(value, ":", at)
+            entry = ""
+        else:
+            unquoted = _unquote(value, at) if value[at] == '"' else None
+            if unquoted is not None:
+                entry, end = unquoted
+            else:
+                end = _find(value, ":", at)
+                entry = value[at:end]
+        if entry:
+            entries.append(entry)
+        # git skips the one character after the entry (the separator).
+        at = end + 1
+    return entries
+
+
+def _find(value: str, character: str, start: int) -> int:
+    found = value.find(character, start)
+    return len(value) if found < 0 else found
+
+
+def _unquote(value: str, at: int) -> tuple[str, int] | None:
+    """The C-style quoted path at ``value[at]`` (a ``"``) and where it ends
+    (after the closing quote), or None when it is not quoted correctly. Paths
+    are bytes to git: an octal escape is a byte."""
+    out = bytearray()
+    i = at + 1
+    while i < len(value):
+        character = value[i]
+        i += 1
+        if character == '"':
+            # git then uses the path as a C string: it ends at a NUL.
+            return os.fsdecode(bytes(out).split(b"\0")[0]), i
+        if character != "\\":
+            out += os.fsencode(character)
+            continue
+        if i >= len(value):
+            return None
+        escape = value[i]
+        i += 1
+        if escape in C_ESCAPES:
+            out += C_ESCAPES[escape].encode()
+        elif escape in "0123" and re.fullmatch("[0-7]{2}", value[i : i + 2]):
+            out.append(int(escape + value[i : i + 2], 8))
+            i += 2
+        else:
+            return None
+    return None
 
 
 def _global_options(
@@ -334,11 +407,10 @@ def _created(
         if len(positional) == 2:
             created.append(_resolve(place, positional[1]))
         else:
-            name = _clone_name(positional[0])
             # A bare clone (``--bare``, ``--mirror``) is made in ``<name>.git``.
             # --mirror implies it; --no-mirror does not undo --bare.
             bare = flags["--bare"] or flags["--mirror"]
-            created.append(_resolve(place, f"{name}.git" if bare else name))
+            created.append(_resolve(place, _clone_name(positional[0], place, bare)))
     return created
 
 
@@ -353,16 +425,102 @@ def _long_name(given: str, options: dict[str, str]) -> str:
     return matches.pop()
 
 
-def _clone_name(source: str) -> str:
-    """The directory ``git clone <source>`` makes (git's "humanish" name)."""
-    name = source.rstrip("/")
-    name = name.removesuffix("/.git").rstrip("/")
-    name = re.split(r"[/:]", name)[-1]
-    for suffix in (".git", ".bundle"):
-        name = name.removesuffix(suffix)
+def _clone_name(source: str, place: str, bare: bool) -> str:
+    """The directory ``git clone <source>`` makes: git's "humanish" name
+    (``git_url_basename``). It strips ``.bundle`` when the source is a bundle
+    file and ``.git`` otherwise (only one of them); a bare clone's name ends in
+    ``.git`` (added before control characters are turned into spaces)."""
+    start = source.find("://")
+    start = 0 if start < 0 else start + 3
+    # Authentication data: up to the last ``@`` before the first ``/``.
+    host_end = _find(source, "/", start)
+    at = source.rfind("@", start, host_end)
+    if at >= 0:
+        start = at + 1
+    end = len(source)
+    while start < end and (source[end - 1] == "/" or source[end - 1] in SPACES):
+        end -= 1
+    if end - start > 5 and source[end - 5 : end] == "/.git":
+        end -= 5
+        while start < end and source[end - 1] == "/":
+            end -= 1
+    # A port after a host alone (``host:2222``).
+    if "/" not in source[start:end] and ":" in source[start:end]:
+        port = end
+        while start < port and source[port - 1] in "0123456789":
+            port -= 1
+        if start < port and source[port - 1] == ":":
+            end = port - 1
+    # The last component; a ``:`` separates too.
+    last = end
+    while start < last and source[last - 1] not in "/:":
+        last -= 1
+    name = source[last:end]
+    name = name.removesuffix(".bundle" if _is_bundle(source, place) else ".git")
+    if not name or name == "/":
+        raise _Unreadable()
+    if bare:
+        name += ".git"
+    # Control characters and spaces: one space, none at the ends.
+    name = re.sub(r"[\x00-\x20]+", " ", name).strip(" ")
     if not name:
         raise _Unreadable()
     return name
+
+
+#: git's ``isspace``.
+SPACES = " \t\n\r"
+
+
+def _is_bundle(source: str, place: str) -> bool:
+    """Whether git clones ``source`` as a bundle (``get_repo_path``): no
+    repository is at ``source`` (as a directory or a ``gitdir:`` file, with
+    git's suffixes) and a regular file is at ``source.bundle`` or ``source``."""
+    path = os.path.join(place, source)
+    for suffix in ("/.git", "", ".git/.git", ".git"):
+        candidate = path + suffix
+        if os.path.isdir(candidate):
+            if _is_git_directory(candidate):
+                return False
+        elif os.path.isfile(candidate) and _gitfile_target(candidate):
+            return False
+    return any(os.path.isfile(path + suffix) for suffix in (".bundle", ""))
+
+
+def _is_git_directory(path: str) -> bool:
+    """git's ``is_git_directory``, nearly: a HEAD, and objects and refs in the
+    common directory (the one ``commondir`` names, as in a linked worktree's
+    git directory, or itself)."""
+    if not os.path.lexists(os.path.join(path, "HEAD")):
+        return False
+    common = path
+    try:
+        with open(os.path.join(path, "commondir"), "rb") as handle:
+            named = os.fsdecode(handle.read()).rstrip("\r\n")
+    except (OSError, ValueError):
+        named = ""
+    if named:
+        common = os.path.join(path, named)
+    return os.path.isdir(os.path.join(common, "objects")) and os.path.isdir(
+        os.path.join(common, "refs")
+    )
+
+
+def _gitfile_target(path: str) -> bool:
+    """Whether ``path`` is a ``gitdir: <repository>`` file (more than eight
+    bytes) that points at a git directory."""
+    try:
+        if os.path.getsize(path) <= 8:
+            return False
+        with open(path, "rb") as handle:
+            text = os.fsdecode(handle.read(65536))
+    except (OSError, ValueError):
+        return False
+    if not text.startswith("gitdir: "):
+        return False
+    target = text[len("gitdir: ") :].rstrip("\r\n")
+    target = os.path.join(os.path.dirname(path), target)
+    return os.path.isdir(target) and _is_git_directory(target)
 
 
 def main(argv: list[str]) -> int:

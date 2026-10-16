@@ -123,6 +123,34 @@ class RouteByPlaceTest(unittest.TestCase):
             SHIM,
         )
 
+    def test_quoted_alternates_are_decoded_like_git(self):
+        # Codex review of #248 (P2), issue #250: an entry that starts with a
+        # double quote is a C-style quoted path (git's parse_alt_odb_entry);
+        # ``:`` inside it does not separate, ``#`` starts a comment.
+        def alternates(value):
+            env = {"GIT_ALTERNATE_OBJECT_DIRECTORIES": value}
+            return route("status", cwd="/tmp/r", env=env)
+
+        for value in (
+            '"/workspace/a:b/.git/objects"',
+            '/tmp/o:"/workspace/a:b/.git/objects"',
+            '"/tmp/o":"/workspace/.git/objects"',
+            '"/work\\163pace/.git/objects"',  # octal escape: s
+            '"/tmp/o\\"x":/workspace/.git/objects',
+            # git reads the path as a C string: it ends at a NUL (Codex
+            # review of #254, P2).
+            '"/workspace/.git/objects\\000/tmp/o"',
+        ):
+            self.assertEqual(alternates(value), SHIM, value)
+        for value in (
+            '"/tmp/a:/workspace/.git/objects"',  # one entry under /tmp
+            "#/workspace/.git/objects",  # a comment
+            '"/workspace/x',  # broken quoting: a relative path, as is
+            '"/workspace\\q"',  # unknown escape: a relative path, as is
+            '"/tmp/o\\000/workspace/.git/objects"',
+        ):
+            self.assertEqual(alternates(value), REAL, value)
+
     def test_what_cannot_be_read_goes_to_the_shim(self):
         for argv in (
             ("-C",),
@@ -190,6 +218,101 @@ class RouteByDestinationTest(unittest.TestCase):
                 self.assertEqual(route("clone", flag, source, cwd=base), SHIM, flag)
             self.assertEqual(route("clone", flag, "/tmp/a", "b", cwd=base), REAL)
         self.assertEqual(route("clone", "/tmp/x/source", cwd=base), REAL)
+
+    def test_a_clone_keeps_bundle_unless_the_source_is_a_bundle(self):
+        # Codex review of #248 (P2), issue #250: git strips ``.bundle`` only
+        # when the source is a bundle file, ``.git`` otherwise (one of them;
+        # git_url_basename), as git 2.53 does.
+        base = tempfile.mkdtemp(prefix="paw-front-")
+        self.addCleanup(shutil.rmtree, base, True)
+        source = os.path.join(base, "source")
+        work = os.path.join(base, "work")
+        os.mkdir(source)
+        os.mkdir(work)
+
+        def repository(path):
+            for name in ("objects", "refs"):
+                os.makedirs(os.path.join(path, name))
+            with open(os.path.join(path, "HEAD"), "w") as handle:
+                handle.write("ref: refs/heads/main\n")
+
+        def bundle(path):
+            with open(path, "w") as handle:
+                handle.write("# v2 git bundle\n0000\n\n")
+
+        repository(os.path.join(source, "repo.bundle"))
+        repository(os.path.join(source, "with-git.bundle", ".git"))
+        bundle(os.path.join(source, "file.bundle"))
+        bundle(os.path.join(source, "named.git.bundle"))
+        # A directory that is no repository, next to a bundle of its name.
+        os.mkdir(os.path.join(source, "plain.git"))
+        bundle(os.path.join(source, "plain.git.bundle"))
+        with open(os.path.join(source, "link.bundle"), "w") as handle:
+            handle.write(f"gitdir: {os.path.join(source, 'repo.bundle')}\n")
+        # A linked worktree's git directory: a HEAD, and objects and refs in
+        # the common directory it names (Codex review of #254, P2).
+        linked = os.path.join(source, "repo.bundle", "worktrees", "w")
+        os.makedirs(linked)
+        with open(os.path.join(linked, "HEAD"), "w") as handle:
+            handle.write("ref: refs/heads/w\n")
+        with open(os.path.join(linked, "commondir"), "w") as handle:
+            handle.write("../..\n")
+        with open(os.path.join(source, "worktree.bundle"), "w") as handle:
+            handle.write(f"gitdir: {linked}\n")
+        os.mkdir(os.path.join(source, "checkout.bundle"))
+        with open(os.path.join(source, "checkout.bundle", ".git"), "w") as handle:
+            handle.write("gitdir: ../repo.bundle/worktrees/w\n")
+        expected = {
+            "repo.bundle": "repo.bundle",
+            "repo.bundle/": "repo.bundle",
+            "with-git.bundle": "with-git.bundle",
+            "with-git.bundle/.git": "with-git.bundle",
+            "file.bundle": "file",
+            "file": "file",
+            "named.git.bundle": "named.git",
+            "plain.git": "plain.git",
+            "link.bundle": "link.bundle",
+            "worktree.bundle": "worktree.bundle",
+            "checkout.bundle": "checkout.bundle",
+        }
+        for given, name in expected.items():
+            os.symlink("/workspace/sub", os.path.join(work, name))
+            self.assertEqual(
+                route("clone", os.path.join(source, given), cwd=work), SHIM, given
+            )
+            # Relative to where git runs.
+            self.assertEqual(
+                route("clone", os.path.join("..", "source", given), cwd=work),
+                SHIM,
+                given,
+            )
+            os.remove(os.path.join(work, name))
+        # A source that is not a local path is never a bundle.
+        os.symlink("/workspace/sub", os.path.join(work, "remote.bundle"))
+        for given in (
+            "https://example.com/remote.bundle",
+            "https://user@example.com/x/remote.bundle/",
+            "example.com:x/remote.bundle",
+        ):
+            self.assertEqual(route("clone", given, cwd=work), SHIM, given)
+        # Like git: one suffix is stripped, trailing spaces and a port go.
+        os.symlink("/workspace/sub", os.path.join(work, "remote"))
+        for given in (
+            "https://example.com/remote.git",
+            "https://example.com/remote.git  ",
+            "ssh://example.com:2222/remote/.git",
+        ):
+            self.assertEqual(route("clone", given, cwd=work), SHIM, given)
+        os.symlink("/workspace/sub", os.path.join(work, "example.com"))
+        self.assertEqual(route("clone", "example.com:22", cwd=work), SHIM)
+        self.assertEqual(route("clone", "https://example.com:22", cwd=work), SHIM)
+        # git adds ``.git`` for a bare clone before it turns control
+        # characters into spaces (Codex review of #254, P2).
+        os.symlink("/workspace/sub", os.path.join(work, "a .git"))
+        for flag in ("--bare", "--mirror"):
+            self.assertEqual(
+                route("clone", flag, "foo://host/a\x01", cwd=work), SHIM, flag
+            )
 
     def test_abbreviated_and_clustered_options_are_read_like_git(self):
         # Codex review of #248 (P2): git accepts a unique prefix of a long
