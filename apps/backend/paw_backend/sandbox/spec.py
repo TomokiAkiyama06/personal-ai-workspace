@@ -68,6 +68,13 @@ class SandboxUnavailableError(PermissionError):
         self.reason = reason
 
 
+class SandboxOutOfMemoryError(Exception):
+    """The sandbox's container counted an OOM kill while the command ran
+    (Decision 0092, 5: the wrapper's ``oom=1``). The node's attempt ends as
+    ``AgentOutOfMemory`` (Decision 0083, 4); nothing the command printed is in
+    it."""
+
+
 class SandboxGoneError(Exception):
     """The container is no longer running (it was stopped, reached its lifetime
     or the host restarted): the pool starts a new one and tries once more."""
@@ -229,6 +236,8 @@ class SandboxExecResult:
     stdout: str = field(repr=False)
     stderr: str = field(repr=False)
     truncated: bool = False
+    # The container counted an OOM kill while it ran (Decision 0092, 5).
+    out_of_memory: bool = False
 
 
 def new_sandbox_id() -> uuid.UUID:

@@ -171,6 +171,12 @@ class Settings(BaseSettings):
     # with the scheduler's read-only probe (``nvidia-smi --query-*`` only) for
     # the report. Off by default: a host without a GPU would report an error.
     health_gpu_probe: bool = False
+    # The repository tools' sandbox (Decision 0092, 5; issue #251): ask the
+    # server's wrapper with ``paw-sandbox/v2 exec`` whether a command's container
+    # counted an OOM kill (the node then fails as ``AgentOutOfMemory``). Turn it
+    # on only after every account's wrapper is one that knows ``v2`` (an older
+    # one refuses it: the sandbox is then unavailable).
+    sandbox_oom_status: bool = False
 
     # Memory Markdown Projection (PAW-045, Decision 0038 Approved): the directory
     # ``python -m paw_backend.cli memory-projection-run`` writes the Markdown view

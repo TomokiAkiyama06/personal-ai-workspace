@@ -50,10 +50,15 @@ class SandboxSetup:
 
 
 def repository_tools(
-    setup: SandboxSetup, *, git_runner: GitRunner, accounts: AccountDirectory
+    setup: SandboxSetup,
+    *,
+    git_runner: GitRunner,
+    accounts: AccountDirectory,
+    oom_status: bool = False,
 ) -> tuple[RepoToolExecutor, SandboxPool]:
     """The executor of the repository tools and its sandbox pool. Its git shim
-    still needs the tool runner (``RepoToolExecutor.bind_git_caller``)."""
+    still needs the tool runner (``RepoToolExecutor.bind_git_caller``).
+    ``oom_status``: ``PAW_SANDBOX_OOM_STATUS`` (Decision 0092, 5)."""
     if not isinstance(setup, SandboxSetup):
         raise TypeError("sandbox must be a SandboxSetup")
     pool = SandboxPool(
@@ -61,6 +66,7 @@ def repository_tools(
         shim_base=setup.shim_base,
         shim_group=setup.shim_group,
         idle_seconds=setup.idle_seconds,
+        oom_status=oom_status,
     )
     return RepoToolExecutor(pool, GitReader(git_runner), accounts), pool
 

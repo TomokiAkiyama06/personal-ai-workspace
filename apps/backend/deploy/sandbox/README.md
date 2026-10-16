@@ -92,6 +92,18 @@ Shim（[`paw_git_shim.py`](paw_git_shim.py)、`/usr/local/lib/paw/paw-git-shim`�
    | `--sandbox-command-timeout=<秒>` | `300` | 1 つの Command の上限（Decision 0083 の 8） |
    | `--sandbox-keep-groups=yes` | `no` | `--group-add keep-groups`（Container の中から Group `paw-sandbox` の Socket に届くため。crun が必要） |
 
+### OOM の検出（`paw-sandbox/v2`、[Decision 0092](../../../../docs/decisions/0092-runtime-oom-kill-detection.md) の 5）
+
+Wrapper は `paw-sandbox/v2 exec` を受けると、`podman container inspect --format '{{.State.Running}} {{.State.CgroupPath}}'` で Container の cgroup を知り、Host の側の `/sys/fs/cgroup/<CgroupPath>/memory.events` の `oom_kill` を Command の前と後に読み（Account の User のまま、読むだけ。Path は正規化し、`/sys/fs/cgroup/` の下で `..` のないものだけ）、状態行に `oom=1`（増えた）・`oom=0`（増えない）・`oom=-`（読めない）を足す。`v1` の `exec` の行は変わらない。`start` / `stop` は `v1` だけ。
+
+Backend が `v2` を送るのは `PAW_SANDBOX_OOM_STATUS=true` のときだけ。入れる順序:
+
+1. **すべての Workspace User の `authorized_keys` が指す Wrapper**（`/usr/local/lib/paw/paw-git-wrapper`）をこの版に入れ替える（Application とは別に入れ替わる。古い Backend は `v1` を送るので、Wrapper を先に入れ替えても壊れない）。
+2. その後で Backend の環境に `PAW_SANDBOX_OOM_STATUS=true` を置いて再起動する。
+3. 戻すときは、Backend を先に `false`（または古い版）に戻してから Wrapper を戻す。古い Wrapper に `v2` を送ると `bad_protocol` で拒まれ、Tool は Sandbox が使えない失敗（`PermissionError`）になる（OOM を黙って見逃すのではなく、失敗として見える）。
+
+`oom=1` の Tool の呼び出しは、Executor が `SandboxOutOfMemoryError` を上げ、Toolkit が Node の試行を `AgentOutOfMemory`（`escalate` なし）で終える（Local の Tool loop と CLI の MCP の Bridge の両方）。1 つの Sandbox で同時に走る `exec` はない（`SandboxPool` が Key ごとに 1 つずつ走らせる）ので、OOM を別の Command のせいにすることはない。
+
 ## Human がサーバーで行う確認（チェックリスト）
 
 Agent は他の Linux User・Podman を使えないため、次は Human がサーバーで行う（段階 3 の配線の前）。`paw_ssh` は [`../ssh-git-wrapper/README.md`](../ssh-git-wrapper/README.md) の確認と同じ関数。`ID=$(python3 -c 'import uuid; print(uuid.uuid4())')`。
@@ -105,6 +117,7 @@ Agent は他の Linux User・Podman を使えないため、次は Human がサ�
 - [ ] 6b. 本物の git（Decision 0090）: Container の中で `git init -q /tmp/r && git -C /tmp/r -c user.name=a -c user.email=a@b commit -q --allow-empty -m x && git -C /tmp/r log --oneline` が通り、`/workspace` での `git init`、`git init /workspace/x`（`/tmp` から）、`git init --separate-git-dir=/workspace/m /tmp/r2` が Shim で 128 になる。`which -a git` が `/usr/local/bin/git` だけ。
 - [ ] 7. 時間と停止: `sleep 400` が 300 秒で 124 になる。`stop` で Container が消える。Backend を止めても `--sandbox-lifetime` で消える。
 - [ ] 8. Log: `journalctl -t paw-git-wrapper` に `accepted user=alice sandbox=start` などがあり、Path・Command・出力を含まない。
+- [ ] 9. OOM（Decision 0092 の 7）: `alice` として `podman container inspect --format '{{.State.CgroupPath}}' <container>` の Path の `/sys/fs/cgroup/<Path>/memory.events` が `alice` で読める。`paw-sandbox/v2 exec` で Memory を食う Command（`python3 -c 'b = bytearray(16 << 30)'` など、`--sandbox-memory` を超える量）の状態行が `oom=1`、普通の Command（`true`）が `oom=0` になる。
 
 1 つでも期待と違えば段階 3 で配線せず、結果を #208 に書く。
 

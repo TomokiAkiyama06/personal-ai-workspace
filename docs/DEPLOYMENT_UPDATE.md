@@ -122,6 +122,22 @@ the sum of its four parts) of the benchmark's measured peak, not
 `gpu-memory-utilization` × the GPU: `max(GPU memory used during the run − used before
 the load) + 2 GiB`. vLLM exceeded its `gpu-memory-utilization` budget by up to 8.4 GiB.
 
+## Tool sandbox wrapper and `PAW_SANDBOX_OOM_STATUS` (Decision 0092, 5)
+
+The server's SSH wrapper (`apps/backend/deploy/ssh-git-wrapper/paw_git_wrapper.py`) is
+installed per workspace account and moves on its own, apart from the application. Its
+`paw-sandbox/v2 exec` adds `oom=<0|1|->` to the status line; the backend sends `v2`
+only with `PAW_SANDBOX_OOM_STATUS=true`. Order:
+
+1. Replace the wrapper of **every** account first (an old backend keeps sending `v1`,
+   which the new wrapper answers as before).
+2. Then set `PAW_SANDBOX_OOM_STATUS=true` and restart the backend.
+3. To roll back, set it back to `false` (or roll the backend back) **before** an old
+   wrapper returns: an old wrapper refuses `v2` (`bad_protocol`) and the sandbox tools
+   fail as unavailable, visibly, instead of missing an OOM kill.
+
+Details: `apps/backend/deploy/sandbox/README.md` ("OOM の検出").
+
 ## Implementation (Issue #54, Decision 0079)
 
 [Decision 0079](decisions/0079-deploy-update-rollback.md) (Approved 2026-10-08) decides the
