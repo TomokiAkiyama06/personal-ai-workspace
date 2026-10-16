@@ -4,7 +4,7 @@
 - Date: 2026-10-16
 - Scope: Issue [#239](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/239) の残りの「Egress: Session ごとの Socket で Session を結び付ける（設計が要る）」。Issue [#208](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/208) の CLI の段を組み立てで有効にする前の前提。この Decision は設計だけで、コードは承認の後の PR で書く。関係する既存の口: `apps/backend/deploy/egress/`（`paw_egress.py`・`paw-egress.socket`・`paw-egress.service`・`paw-egress.nft`。#233・#240）、`apps/backend/deploy/cli-session/`（`paw-cli-session@.service`・`paw_cli_session_run.py`・`start-claude`・`start-codex`。#236・#244）、`apps/backend/paw_backend/agents/cli_session.py`（`create_session`・`SystemdLauncher`）。
 - 具体化: [Decision 0087](0087-cli-secret-store-and-egress.md)（Approved）の 3 の「1 つの接続ごとに Session の ID（Socket の前に置く小さな Header か、Session ごとの Socket）…を Log に残す」の 2 つの候補のうち、**Session ごとの Socket** を選ぶ。
-- Supersedes（一部）: 0087 の 3 の「受けるのは Unix Socket だけ（`/run/paw-egress/egress.sock`、Group は `paw-cli-bridge`、Mode 0660）」のうち **共有の 1 つの Socket** の部分を、下の 1 の Session ごとの Socket（Group・Mode は同じ）に置き換える。0087 の 3 の他（`CONNECT` だけ、Host 名の完全一致の Allowlist と 443、Global な Address だけ、TLS を開かない、nftables の `meta skuid paw-egress`、Proxy の Process を `paw-cli-bridge` に入れないこと（0088））と 4 の表は変えない。
+- Supersedes（一部）: 0087 の 3 の「受けるのは Unix Socket だけ（`/run/paw-egress/egress.sock`、Group は `paw-cli-bridge`、Mode 0660）」のうち **共有の 1 つの Socket** の部分を、下の 1 の Session ごとの Socket（Group・Mode は同じ）に置き換える。0087 の 3 の他（`CONNECT` だけ、Host 名の完全一致の Allowlist と 443、Global な Address だけ、TLS を開かない、nftables の `meta skuid paw-egress` の宛先の規則、Proxy の Process を `paw-cli-bridge` に入れないこと（0088））と 4 の表は変えない。nftables には Host 全体の同時接続の上限の規則だけを足す（下の 3）。
 
 ## 背景
 
@@ -63,7 +63,7 @@ Container
   - `BindsTo=` は、相手が明示的に止められたときだけでなく、**相手が自分で終わった・失敗したときも** 自分を止める（`Requires=` より強い）。Session の Unit（`Restart=no`）の Program が終わると、Socket とその Proxy も止まる。
 - Socket と Proxy の Unit は、Session の Unit の `Requires=` で systemd が同じ Job の中で起動する。Backend の polkit の規則（`50-paw-cli-session.rules`: `paw-cli-session@<uuid>.service` の start / stop だけ）は変えない見込み（polkit が見るのは Backend が頼んだ Unit で、依存で引き込まれた Unit ではない）。**配備の確認で確かめる**（下の「リスク」）。違えば、規則に `paw-egress-session@<uuid>.socket` の start / stop を足す（同じ UUID の形だけ）。
 - 置き場所は `/run/paw-egress/session/`（親は `DirectoryMode=0755` で systemd が作る）。Session の Directory（`/run/paw-cli/<uuid>`、Backend の持ち物）には置かない（Backend が消す File と systemd が消す File を混ぜない）。
-- 費用: CLI の Session 1 つにつき Python の小さな Process が 1 つ（標準ライブラリだけ。数十 MB の見込み）。CLI の Session の数は Orchestrator の並列の上限（Decision 0084）と Connection ごとの Lease で小さい。
+- 費用: CLI の Session 1 つにつき Python の小さな Process が 1 つ（標準ライブラリだけ。数十 MB の見込み）。**CLI の Session の数は Host 全体では今は何にも抑えられていない**（Decision 0084 の容量の計算は Cloud の Agent を除き、`max_parallel_nodes` は 1 つの Run の中の値で、Connection の Lease も Claude の Subscription の Session を全体で抑えない）。そのため Session ごとの上限とは別に、Host 全体の上限を下の 3 で持つ。
 
 ### (B) 共有の Proxy のまま、Container の外（`paw_cli_session_run.py`）で Header を付けて中継する
 
@@ -105,7 +105,10 @@ Container
 
 - Session ごとの同時接続は **16**（暫定。今の全体の 64 を Session ごとの値に替える）。超えた接続は `503`（`busy`）で、Log に残す。CONNECT の Request の 8 KiB・10 秒、両方向 15 分の Idle は変えない。
 - Byte 数の上限は置かない（正しい長い Session を落とさないため）。代わりに、Proxy の Instance が止まるとき（Session の終わり）に **集計の 1 行**（`session=`・接続の数・拒否の数（理由ごと）・送った / 受けた Byte の合計）を書く。値・中身は書かない（0087 の 3 のまま）。
-- 全体の上限は、CLI の Session の数（Decision 0084 の並列の上限と Connection ごとの Lease）× 16 で決まる。
+- **Host 全体の上限も残す**（Session ごとの上限だけでは、Session の数だけ上限が増える）:
+  - 外への接続の数: nftables で、`paw-egress` の Account の新しい TCP 443 の接続を **Host 全体で同時 64**（今の全体の上限と同じ値）に抑え、超えたものは TCP の Reset で拒む（`paw-egress.nft` に、`nft(8)` の例の形の `ct count over` の規則を足す。正確な規則は実装の PR で `nft -c` で確かめる）。Proxy はその失敗を `connect` の拒否として Log に残す。Kernel が数えるので、Session ごとの Proxy が何個あっても全体で効く。
+  - Proxy の Process の資源: すべての `paw-egress-session@<uuid>.service` を 1 つの Slice（`paw-egress.slice`）に入れ、Slice の `TasksMax=`・`MemoryMax=`（値は実装の PR で、暫定の目安は Process 32 個分）で Host 全体を抑える。超えると新しい Session の Proxy が起動できず、その Session の通信は拒否になる（外へは出ない）。
+  - CLI の Session の数そのものを Host 全体で抑える上限（Backend の側）は、この Decision では決めない（Egress だけの話ではないので、CLI を有効にする前の別の Issue にする）。
 
 ### 4. Backend の Log に Session の UUID と Node を残す
 
@@ -120,17 +123,17 @@ Container
 
 承認の後、1 つの PR（Refs #239、Refs #208）で:
 
-- `deploy/egress/`: `paw-egress-session@.socket`・`paw-egress-session@.service`（今の Service と同じ硬さ）、`paw_egress.py` の `serve --session`・Session ごとの上限・集計の 1 行・Header の読み取りと `forward --session` の削除、共有の Unit の削除、README。
+- `deploy/egress/`: `paw-egress-session@.socket`・`paw-egress-session@.service`（今の Service と同じ硬さ、`Slice=paw-egress.slice`）・`paw-egress.slice`（3 の上限）、`paw-egress.nft` の Host 全体の同時接続の規則、`paw_egress.py` の `serve --session`・Session ごとの上限・集計の 1 行・Header の読み取りと `forward --session` の削除、共有の Unit の削除、README。
 - `deploy/cli-session/`: Unit の依存、`paw_cli_session_run.py` の Mount と `PAW_SESSION_ID` の削除、`start-*` の転送、`cli-session.example.toml`、README の配備と「確かめること」。
 - `paw_backend/agents/`: 4 の Log の 1 行。
-- Test: `tests/test_egress_proxy.py`（`--session` の形で Log の `session=` が引数の値であること・Header を偽っても変わらないこと・17 本目の接続の `busy`・集計の 1 行・渡された Socket がないと起動しないこと）、`tests/test_cli_session_units.py`（Unit の依存・Mount が Session の Socket だけで共有の Socket を Mount しないこと・Socket がないと拒否すること・`PAW_SESSION_ID` がないこと）。CI の中では本物の systemd は動かさない（Unit の File を読んで形を確かめる今の Test と同じ）。
+- Test: `tests/test_egress_proxy.py`（`--session` の形で Log の `session=` が引数の値であること・Header を偽っても変わらないこと・17 本目の接続の `busy`・Unit が Slice に入り nftables の例に全体の上限の規則があること・集計の 1 行・渡された Socket がないと起動しないこと）、`tests/test_cli_session_units.py`（Unit の依存・Mount が Session の Socket だけで共有の Socket を Mount しないこと・Socket がないと拒否すること・`PAW_SESSION_ID` がないこと）。CI の中では本物の systemd は動かさない（Unit の File を読んで形を確かめる今の Test と同じ）。
 - 配備の確認（Human、CLI を有効にする前の README の「確かめること」に足す）: Backend の `systemctl start paw-cli-session@<uuid>.service` だけで Socket が作られること（polkit の追加なし）、Session の Unit の終わりで Socket と Proxy が止まり Socket の File が消えること、Container の中から見える Egress の Socket が自分の 1 つだけであること、Log の `session=` と集計の 1 行。
 
 ## 決めてほしいこと
 
 1. **Egress の Proxy への接続は、systemd の Template の Socket で作る Session ごとの Socket で Session に結び付け、Session ごとに Proxy を 1 つ動かす（A）。Header（`X-PAW-Session`）は使わない**（1）でよいか。推奨: はい。代わりの案: 共有の Proxy のまま Container の外で Header を付ける（B）、HMAC の Header（C）、`SO_PEERCRED` と cgroup（D）、変えない（E）。
 2. **共有の Socket（`paw-egress.socket` / `paw-egress.service`）を本番の配備から外し、Header の読み取りと `forward --session` を消す**（2）でよいか。推奨: はい。
-3. **Session ごとの同時接続の上限を 16（暫定）にし、Byte 数の上限は置かず、Session の終わりに集計の 1 行を Log に書く**（3）でよいか。推奨: はい。
+3. **Session ごとの同時接続の上限を 16（暫定）にし、Host 全体の上限（nftables で外への同時接続 64、Proxy の Slice の `TasksMax=`・`MemoryMax=`）も残す。Byte 数の上限は置かず、Session の終わりに集計の 1 行を Log に書く**（3）でよいか。推奨: はい。
 4. **Backend は CLI の Session を起動するとき、Session の UUID と Task・Node・Connection・CLI の種類を 1 行の Log に書く。DB の列は後続**（4）でよいか。推奨: はい。
 5. **CLI の種類ごとの Allowlist は今は分けず、Codex の宛先が決まるときに決める**（5）でよいか。推奨: はい。
 6. **6 のとおり 1 つの PR で入れ、systemd と polkit の振る舞いは CLI を有効にする前の配備の確認で確かめる**（6）でよいか。推奨: はい。
@@ -138,7 +141,7 @@ Container
 ## リスク
 
 - **polkit**: 依存で引き込まれる Socket の Unit の起動に、polkit が別の許可を求めないことは配備の確認で確かめる。求められた場合は、規則に `paw-egress-session@<uuid>.socket` の start / stop だけを足す（同じ UUID の形の Pattern。Backend に許す範囲は Session の Unit と同じ Session の Socket だけで、広げない）。
-- **Process の数**: Session ごとに Proxy の Process が 1 つ増える。CLI の Session の数は並列の上限で小さいが、上げるときは Host の Memory を見て決める。
+- **Process の数**: Session ごとに Proxy の Process が 1 つ増える。CLI の Session の数は Host 全体では今は抑えられていないので、3 の Slice の上限で抑え、Backend の側の上限は別の Issue にする。Slice の上限に当たると新しい Session の通信が拒否で失敗する（Log で分かる）。
 - **起動の順と止め方の誤り**: `BindsTo=` / `Requires=` の組み合わせを誤ると、Socket が Session より先に止まる（CLI の通信が拒否で失敗するだけで、外へは出ない）か、Session の後に残る（使う Container がないので無害だが、File が残る）。配備の確認と、残った Socket の Unit を見つける手順を README に書く。
 - **Codex の 2 回の起動**: Codex は同じ Session の Unit を `--version` と `app-server` で 2 回起動する（README）。1 回目の終わりで Socket が止まり、2 回目の起動で `Requires=` により作り直される。集計の 1 行は起動ごとに出る（Log を読む側は Session の UUID で合わせる）。
 - **IPv6 / DNS など宛先の判定**: この Decision では変えない（0087 の 3 のまま）。
