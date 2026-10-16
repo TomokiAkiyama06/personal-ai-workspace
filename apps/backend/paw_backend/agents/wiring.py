@@ -2,13 +2,14 @@
 
 A deployment that serves the main model gives ``create_app`` a
 :class:`LocalModelSetup` (with ``compute``: the model is used only under the
-scheduler's leases). There is no environment setting, like ``ComputeSetup``
-(Decision 0058, 1). For now it wires one caller: the Inferred Preference
-interpreter (#38), as ``app.state.preference_interpreter``
-(:func:`build_preference_interpreter`). The local agent runtime of a later stage
-uses the same setup, with its ``reasoning_history`` policy (Decision 0076, 1:
-the older steps' reasoning is dropped by default; ``KeepAllReasoning`` keeps
-it, as the benchmark).
+scheduler's leases). Like ``ComputeSetup``, it has no environment setting: in
+production the runtime configuration file's ``[local_model]`` builds it
+(``paw_backend/runtime_config.py``, Decision 0093). It wires the Inferred
+Preference interpreter (#38), as ``app.state.preference_interpreter``
+(:func:`build_preference_interpreter`), and the local agent runtime
+(:func:`build_local_agent`), with its ``reasoning_history`` policy (Decision
+0076, 1: the older steps' reasoning is dropped by default;
+``KeepAllReasoning`` keeps it, as the benchmark).
 """
 
 import dataclasses

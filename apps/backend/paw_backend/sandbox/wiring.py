@@ -1,11 +1,13 @@
 """The repository tools in the application (#208, Decision 0083, 2, 6 and 11).
 
 A deployment that runs agents on its repositories gives ``create_app`` a
-:class:`SandboxSetup` (like ``ComputeSetup``: no environment setting, Decision
-0058, 1): the sandbox runner (``SshSandboxRunner`` through the forced-command
-wrapper, or ``LocalWrapperSandboxRunner`` for a single-user backend) and where
-the git shims' sockets go. The composition then registers the repository tools
-next to the Working Set's in the Tool Broker (:func:`repository_tools`), and the
+:class:`SandboxSetup` (like ``ComputeSetup``: no environment setting; in
+production the runtime configuration file's ``[sandbox]`` builds it,
+``paw_backend/runtime_config.py``, Decision 0093): the sandbox runner
+(``SshSandboxRunner`` through the forced-command wrapper, or
+``LocalWrapperSandboxRunner`` for a single-user backend) and where the git
+shims' sockets go. The composition then registers the repository tools next to
+the Working Set's in the Tool Broker (:func:`repository_tools`), and the
 lifespan stops idle sandboxes (:func:`reap_idle_sandboxes`) and every sandbox at
 shutdown.
 """

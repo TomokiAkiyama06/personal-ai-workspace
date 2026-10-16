@@ -5,9 +5,20 @@ or a reverse proxy (for example ``tailscale serve`` or Caddy) does while the
 backend listens on loopback only. A listener that is reachable from other
 hosts must not speak plain HTTP, so that combination is refused unless
 ``PAW_ALLOW_PLAINTEXT_HTTP=true`` states that the network path is protected.
+
+The runtime configuration (Decision 0093, Approved; issue #208): when
+``PAW_RUNTIME_CONFIG_FILE`` names a file, it is read once here, before the
+application is built (:func:`runtime_wiring`), and what it enables (the Compute
+Scheduler, the local model, the sandbox, the git runner, the orchestrator) is
+passed to ``create_app``. Anything wrong in it, or anything ``create_app``
+refuses of it, stops the start with exit code 2 and
+``Invalid runtime configuration: <section>.<key>: <reason>`` (no value). Unset:
+nothing more is built than before, and a warning says so once.
 """
 
+import logging
 import sys
+from collections.abc import Callable
 
 import uvicorn
 from fastapi import FastAPI
@@ -15,6 +26,48 @@ from pydantic import ValidationError
 
 from paw_backend.app import create_app
 from paw_backend.config import Settings
+from paw_backend.runtime_config import (
+    RuntimeConfigError,
+    RuntimeWiring,
+    check_environment,
+    load_runtime_config,
+)
+
+logger = logging.getLogger("paw_backend.server")
+
+
+class _StartupLogHandler(logging.StreamHandler):
+    """Writes to the current ``sys.stderr`` (the journal under systemd)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setFormatter(logging.Formatter("%(levelname)s:     %(message)s"))
+
+    @property
+    def stream(self):
+        return sys.stderr
+
+    @stream.setter
+    def stream(self, _value) -> None:
+        pass
+
+
+def show_startup_log() -> None:
+    """Make this module's start-up lines (the runtime configuration's summary
+    at INFO, its warning) reach stderr: the process configures no logging of
+    its own, and Uvicorn configures only its own loggers, later (Codex review
+    #265). Idempotent."""
+    if not any(isinstance(h, _StartupLogHandler) for h in logger.handlers):
+        logger.addHandler(_StartupLogHandler())
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+
+
+#: Logged once at start when ``PAW_RUNTIME_CONFIG_FILE`` is not set.
+RUNTIME_CONFIG_NOT_SET = (
+    "runtime configuration not set: compute, local model, sandbox and "
+    "orchestrator are disabled"
+)
 
 # The event endpoints ignore client frames; keep inbound messages small.
 WEBSOCKET_MAX_MESSAGE_BYTES = 64 * 1024
@@ -61,12 +114,53 @@ def build_server_config(settings: Settings, app: FastAPI) -> uvicorn.Config:
     )
 
 
+def runtime_wiring(
+    settings: Settings,
+    *,
+    load: Callable[[str, Settings], RuntimeWiring] | None = None,
+) -> RuntimeWiring:
+    """What ``PAW_RUNTIME_CONFIG_FILE`` enables (``RuntimeConfigError`` when it
+    cannot be used); nothing, with a warning, when it is not set. ``load``:
+    tests pass one."""
+    if settings.runtime_config_file is None:
+        logger.warning(RUNTIME_CONFIG_NOT_SET)
+        return RuntimeWiring()
+    load = load_runtime_config if load is None else load
+    wiring = load(str(settings.runtime_config_file), settings)
+    check_environment(wiring, settings)
+    logger.info("Runtime configuration: %s", wiring.summary())
+    return wiring
+
+
+def build_app(settings: Settings, wiring: RuntimeWiring) -> FastAPI:
+    """``create_app`` with what the runtime configuration enables; a
+    ``TypeError`` / ``ValueError`` of it becomes ``RuntimeConfigError`` (by its
+    type only: its text is not shown)."""
+    arguments = wiring.create_app_arguments()
+    if not arguments:
+        return create_app(settings)
+    try:
+        return create_app(settings, **arguments)
+    except ValidationError:
+        raise
+    except (TypeError, ValueError) as error:
+        raise RuntimeConfigError(
+            "create_app", f"refused the configuration ({type(error).__name__})"
+        ) from None
+
+
 def main() -> None:
+    show_startup_log()
     try:
         settings = Settings()
-        config = build_server_config(settings, create_app(settings))
+        wiring = runtime_wiring(settings)
+        config = build_server_config(settings, build_app(settings, wiring))
     except (ValidationError, ServerConfigurationError) as error:
         # Neither message contains setting values (see Settings.model_config).
         print(f"Invalid configuration: {error}", file=sys.stderr)
+        raise SystemExit(2) from None
+    except RuntimeConfigError as error:
+        # Section, key and a fixed reason: no value (runtime_config.py).
+        print(f"Invalid runtime configuration: {error}", file=sys.stderr)
         raise SystemExit(2) from None
     uvicorn.Server(config).run()
