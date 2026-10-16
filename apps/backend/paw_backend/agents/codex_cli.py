@@ -407,6 +407,10 @@ class CodexSessionAdapter:
             line = b""
         finally:
             await _stop(process, attachment)
+        if getattr(process, "oom_killed", False):
+            # The probe's unit was ended by the OOM killer (Decision 0092, 4):
+            # the attempt ran out of memory, whatever the probe printed.
+            attachment.out_of_memory.append(True)
         match = _VERSION_LINE.search(line.decode("ascii", "replace"))
         return match.group(1) if match else None
 
