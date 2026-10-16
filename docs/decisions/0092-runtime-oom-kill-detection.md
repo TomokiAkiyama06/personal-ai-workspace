@@ -66,7 +66,7 @@ Decision 0071 は「OOM を見分けるのは Runtime（Adapter）」とし、De
 
 - Tool の Sandbox は Node の間ずっと動く Container（`sleep infinity`）で、Command は `podman exec` で走る。Command の Process が OOM Kill されても Container は動き続けるので、Podman の `OOMKilled` は使えない（終わるまで更新されない）。
 - **読み方**: `run_sandbox_exec` が今も最初に読んでいる `podman container inspect --format '{{.State.Running}}'` を `'{{.State.Running}} {{.State.CgroupPath}}'` にし、Host の側の `/sys/fs/cgroup/<CgroupPath>/memory.events` の `oom_kill` を `exec` の **前と後** に読む（Wrapper は Account の User のまま。cgroup の File は読み取り専用で、Account の Rootless の Container の cgroup はその User のもの）。Path は正規化し、`/sys/fs/cgroup/` の下で `..` を含まないことを確かめる。Container の中から読む（`podman exec … cat`）のは、中の `cat` を Model が置き換えられるので使わない。
-- **返し方**: 状態の行に `oom=<0|1|->` を足す: `paw-sandbox-status <nonce> exit=<code> truncated=<0|1> oom=<0|1|->`。`1` は後の値が前より大きい、`-` は読めなかった（File がない・形が違う）。`sandbox/wire.py` の正規表現は `oom=` がない行（古い Wrapper）も受け付け、そのときは「分からない」とする（Wrapper は Account ごとに Deploy されるので、版がずれても壊れない）。
+- **返し方（Backend が求めたときだけ、新しい形）**: 状態の行に `oom=<0|1|->` を足した形 `paw-sandbox-status <nonce> exit=<code> truncated=<0|1> oom=<0|1|->` は、Backend が `exec` を **新しい Tag `paw-sandbox/v2`**（`exec` の語の並びは `paw-sandbox/v1` と同じ）で送ったときだけ返す。`1` は後の値が前より大きい、`-` は読めなかった（File がない・形が違う）。`paw-sandbox/v1` の `exec` には今までどおり `oom=` のない行を返す。Wrapper は Account ごとに Deploy され、Application とは別に版が進む・戻るので、両方の向きで壊さないため（Codex review #253）: (a) **Application を戻したとき**（新しい Wrapper・古い Backend）: 古い Backend は `v1` を送り、古い形の行を受け取る（今の `wire.py` の `_STATUS` は `fullmatch` で `oom=` のある行を受け付けないので、無条件に足すと全ての `exec` が失敗に見える）。(b) **Wrapper が古いとき**（古い Wrapper・新しい Backend）: Backend は設定 `PAW_SANDBOX_OOM_STATUS`（既定 `false`）が `true` のときだけ `v2` を送る。運用は、全ての Account の Wrapper を入れ替えてから `true` にする（`docs/` の Deploy の手順に書く）。古い Wrapper は `v2` を `bad_protocol` で拒むので、設定を誤っても黙って OOM を見逃すのではなく、Sandbox が使えない失敗として見える。`start` / `stop` は `v1` のまま変えない。`wire.py` は `v2` の行に `oom=` がなければ拒む（形の取り違えを見逃さない）。
 - **同じ Sandbox で同時に 2 つの `exec`** があると、片方の OOM をもう片方の Command のせいにしうる。Sandbox は Node ごとで、Tool 呼び出しは Node の中で 1 つずつなので、今は起きない（実装の PR で、同じ Sandbox への同時の `exec` がないことを確かめる）。
 - **Runtime の扱い**（Decision 0083 の 4 の表のとおり）: `oom=1` の Tool の結果を受けた Runtime（Local の Tool loop と CLI の MCP の Bridge の両方。どちらも Backend の Toolkit を通る）は、その Node の試行を `AgentOutOfMemory` で終える（`escalate` なし）。`oom=0` / `-` は今までどおり（終了 Code を Model に返す）。
 - 他の案: (a) OOM を Model に伝え（Tool の結果に `out_of_memory: true`）、Node は続け、`DagStore.record_incident` で数だけ残す。Model が小さく分けて走り直せるが、Decision 0083 の 4 を一部置き換えることになり（Supersedes が要る）、OOM のたびに Model が同じ重い Command を繰り返すと Sandbox の上限を何度も叩く。6 の判断点に挙げる。(b) Sandbox の Container ごと止める（次の Tool 呼び出しが `missing` になるだけで、原因が残らない）。
@@ -88,7 +88,7 @@ Decision 0071 は「OOM を見分けるのは Runtime（Adapter）」とし、De
 1. Scheduler の Unit の終わりの状態（`DeploymentCommands.unit`、`systemctl show` の読み取り、1 の 3 つの時点、`ComputeStatus` の欄）と `compute` の Health の理由（2）、`paw-llm-main.service` の `OOMPolicy=stop`。Fake の Runner で Test。
 2. `HybridRuntime` の分類の直し（3）。1 の後。
 3. CLI の Session（4）: Unit の設定、`--cgroups=split`、`_UnitProcess.stop()` が止める前に `Result` を覚えること、Adapter の分類と優先順位。CLI の段は組み立てでは無効のまま。
-4. Tool の Sandbox（5）: Wrapper の前後の読み取りと状態の行、`sandbox/wire.py` の後方互換の解析、Toolkit と Runtime の分類。
+4. Tool の Sandbox（5）: Wrapper の前後の読み取りと `paw-sandbox/v2` の `exec`（`v1` の行は変えない）、`sandbox/wire.py` の `v2` の解析と `PAW_SANDBOX_OOM_STATUS`（既定 `false`）、Deploy の手順、Toolkit と Runtime の分類。
 5. 7 の Smoke の報告（`docs/benchmarks/` または Issue のコメント）。
 
 ## 決めてほしいこと
@@ -98,7 +98,7 @@ Decision 0071 は「OOM を見分けるのは Runtime（Adapter）」とし、De
 3. **Model の Server の OOM Kill は `compute` の Component で、直近 1 時間に 1 回でも `WARNING`（`model_server_oom_killed`）。`agent_incidents` には書かない**（2）でよいか。推奨: **はい**（数値は暫定値）。
 4. **Local の Node の `ConnectionError` は、Lease の後に Unit が `oom-kill` で終わっていたら `HybridRuntime` が `AgentOutOfMemory` に直す（最大 10 秒待つ）。同時に走っていた Node はそれぞれ数える**（3）でよいか。推奨: **はい**（1 回の Kill で 3 件以上になり `task_queue` が `ERROR` になりうるが、閾値は Decision 0071 の暫定値で、運用で見直す）。
 5. **CLI の Session は Unit の `Result=oom-kill` で知る（`OOMPolicy=stop`・`MemoryAccounting=yes`・`podman run --cgroups=split`、`Result` は `_UnitProcess.stop()` が、CLI が自分で終わった後なら Unit が `active` から離れるのを最大 10 秒待ってから、`systemctl stop` を出す前に読んで覚える）。`submit` の前の OOM は他の失敗より優先して `AgentOutOfMemory`**（4）でよいか。推奨: **はい**（Smoke で `split` が使えなければ、Wrapper が `OOMKilled` を読んで終了 Code で返す案に、新しい Decision で替える）。
-6. **Tool の Sandbox は Wrapper が `exec` の前後で Host の側から Container の `memory.events` の `oom_kill` を比べ、状態の行に `oom=<0|1|->` を足す（古い Wrapper の行も受け付ける）。`oom=1` なら Node の試行を `AgentOutOfMemory` で終える（Decision 0083 の 4 のとおり）**（5）でよいか。推奨: **はい**。代わりの案: Model に OOM を伝えて Node を続け、数だけ残す（Decision 0083 の 4 を一部置き換える）。
+6. **Tool の Sandbox は Wrapper が `exec` の前後で Host の側から Container の `memory.events` の `oom_kill` を比べ、Backend が新しい Tag `paw-sandbox/v2` で `exec` を送ったときだけ状態の行に `oom=<0|1|->` を足す（`v1` には今までどおりの行。Backend は全ての Wrapper を入れ替えた後に `PAW_SANDBOX_OOM_STATUS=true` で `v2` を使い始める。Application を戻しても Wrapper を戻さなくても壊れない）。`oom=1` なら Node の試行を `AgentOutOfMemory` で終える（Decision 0083 の 4 のとおり）**（5）でよいか。推奨: **はい**。代わりの案: Model に OOM を伝えて Node を続け、数だけ残す（Decision 0083 の 4 を一部置き換える）。
 7. **PR を 8 の 5 つに分ける**でよいか。推奨: **はい**。
 
 ## リスク
