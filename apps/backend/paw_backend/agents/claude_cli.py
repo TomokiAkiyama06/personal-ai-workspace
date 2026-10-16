@@ -65,6 +65,7 @@ from paw_backend.agents.cli_session import (
     CliSessionSpec,
     UnitNotStoppedError,
     create_session,
+    log_session_start,
     remove_session,
     stop_through_cancellation,
 )
@@ -210,6 +211,7 @@ class ClaudeSessionAdapter:
         attachment = request.attachment
         if not isinstance(attachment, ClaudeAttachment):
             raise TypeError("a Claude session needs its attachment")
+        log_session_start(attachment.spec, "claude", request.connection_id)
         try:
             process = await self._launcher.start(
                 CliLaunch(
@@ -380,7 +382,12 @@ class ClaudeCliRuntime:
             )
         toolkit = NodeToolkit(assignment, self._limits)
         system, task = node_prompts(toolkit)
-        spec = create_session(self._base, self._relay)
+        spec = create_session(
+            self._base,
+            self._relay,
+            task_id=assignment.task_id,
+            node_key=assignment.node_key,
+        )
         bridge = McpBridge(toolkit, token=spec.token)
         attachment = None
         try:

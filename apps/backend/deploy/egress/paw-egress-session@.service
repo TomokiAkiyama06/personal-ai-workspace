@@ -1,0 +1,60 @@
+# One CLI session's CONNECT-only egress proxy (Decision 0091, 1 and 3;
+# Decision 0087, 3; deploy/egress/README.md). systemd starts it at the first
+# connection to the session's socket (paw-egress-session@<uuid>.socket) and
+# stops it with that socket, at the end of the session. It logs the session
+# it was started for (%i), never anything the container sends. nftables
+# limits its account's own outbound traffic (paw-egress.nft).
+#
+# Install (as root):
+#   useradd --system --user-group --no-create-home \
+#       --shell /usr/sbin/nologin paw-egress
+#   groupadd --system paw-cli-bridge
+#   useradd --system --home-dir /var/lib/paw-agent-cli --create-home \
+#       --shell /usr/sbin/nologin paw-agent-cli
+#   usermod -aG paw-cli-bridge paw-agent-cli   # its only member
+#   install -m 0755 paw_egress.py /usr/local/lib/paw/paw_egress.py
+#   install -m 0644 egress.example.toml /etc/paw/egress.toml   # then edit
+#   install -m 0644 paw-egress.tmpfiles.conf /etc/tmpfiles.d/paw-egress.conf
+#   systemd-tmpfiles --create /etc/tmpfiles.d/paw-egress.conf
+#   cp paw-egress.slice paw-egress-session@.socket paw-egress-session@.service \
+#       /etc/systemd/system/
+#   systemctl daemon-reload
+# Nothing is enabled: the CLI session's unit pulls in its socket.
+
+[Unit]
+Description=Personal AI Workspace egress proxy of CLI session %i
+Requires=paw-egress-session@%i.socket
+BindsTo=paw-egress-session@%i.socket
+Wants=network-online.target
+After=network-online.target paw-egress-session@%i.socket
+
+[Service]
+Type=exec
+User=paw-egress
+Group=paw-egress
+UMask=0077
+ExecStart=/usr/bin/python3 -I /usr/local/lib/paw/paw_egress.py serve --config /etc/paw/egress.toml --session %i
+# SIGTERM: the open tunnels are closed and logged, then the summary line.
+TimeoutStopSec=10s
+# Killed (out of memory, say): the next connection starts it again.
+Restart=no
+# Its own limits (Decision 0091, 3): a proxy that grows is the only one the
+# OOM killer stops. TasksMax= counts the main thread and the name lookups'
+# (paw_egress.RESOLVER_THREADS). The slice holds every session's proxy.
+Slice=paw-egress.slice
+MemoryAccounting=yes
+MemoryMax=128M
+MemorySwapMax=0
+TasksMax=8
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateDevices=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+LockPersonality=yes
+MemoryDenyWriteExecute=yes

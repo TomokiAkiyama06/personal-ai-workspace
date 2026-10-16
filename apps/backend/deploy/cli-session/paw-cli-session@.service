@@ -8,7 +8,10 @@
 
 [Unit]
 Description=Personal AI Workspace CLI session %i
-After=paw-egress.service
+# The session's own egress socket (Decision 0091, 1): made before the program
+# runs, and stopped with this unit (its BindsTo=), with its proxy.
+Requires=paw-egress-session@%i.socket
+After=paw-egress-session@%i.socket
 
 [Service]
 Type=exec

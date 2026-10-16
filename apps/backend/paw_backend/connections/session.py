@@ -65,6 +65,9 @@ class AgentSessionRequest:
     # directory, bridge socket and token file: ``agents.cli_session``), passed
     # through as it is; never read by the service.
     attachment: Any = field(default=None, repr=False)
+    # The shared connection the session was admitted on (Decision 0091, 4: a
+    # CLI session's start is logged with it). ``None``: not told.
+    connection_id: uuid.UUID | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "model", validate_model("model", self.model))
@@ -78,6 +81,8 @@ class AgentSessionRequest:
         )
         if not callable(self.on_usage):
             raise TypeError("on_usage must be callable")
+        if self.connection_id is not None and type(self.connection_id) is not uuid.UUID:
+            raise TypeError("connection_id must be a UUID")
 
 
 @dataclass(frozen=True, slots=True)

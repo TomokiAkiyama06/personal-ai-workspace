@@ -1246,6 +1246,7 @@ class ConnectionService:
                         request.timeout_seconds,
                         on_usage,
                         attachment=request.attachment,
+                        connection_id=admission.connection_id,
                     ),
                 )
         except TimeoutError:

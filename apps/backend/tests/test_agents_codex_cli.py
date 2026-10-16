@@ -21,6 +21,7 @@ protocol of ``rust-v0.162.1``) and a fake connection service that does what
 import asyncio
 import json
 import logging
+import re
 import shutil
 import sys
 import tempfile
@@ -90,6 +91,7 @@ class Connections:
         self.adapter = adapter
         self.turns = []
         self.budget = budget
+        self.connection_id = uuid.uuid4()
         self.raw = None
 
     async def execute_session(self, kind, request, *, gate=None):
@@ -109,6 +111,7 @@ class Connections:
                 request.timeout_seconds,
                 on_usage,
                 attachment=request.attachment,
+                connection_id=self.connection_id,
             ),
         )
         self.raw = raw
@@ -161,8 +164,9 @@ class CodexCase(unittest.IsolatedAsyncioTestCase):
             relay_command=(sys.executable, "-I", str(RELAY)),
             cloud_policy=Policy(),
         )
+        self.task_id = uuid.uuid4()
         assignment = NodeAssignment(
-            task_id=uuid.uuid4(),
+            task_id=self.task_id,
             node_key="r",
             role=role,
             title="Find the parser",
@@ -236,6 +240,24 @@ class SubmitTest(CodexCase):
         self.assertIn("CODEX_HOME", report["env"])
         self.assertEqual(list(self.sessions.iterdir()), [])  # cleaned up
         self.assertEqual(len(self.placement.recorded), 1)
+
+    async def test_the_session_start_is_logged_once(self):
+        # Decision 0091, 4: the egress log's session=<uuid> is tied to the
+        # task, the node, the connection and the CLI by one backend line.
+        with self.assertLogs("paw_backend.agents.cli_session", "INFO") as logs:
+            await self.run_node(
+                [{"call": "submit", "arguments": {"summary": "It is in parse.py"}}]
+            )
+        (line,) = [line for line in logs.output if "CLI session started" in line]
+        session = re.search(r" session=([0-9a-f-]{36}) ", line)
+        self.assertIsNotNone(session)
+        uuid.UUID(session.group(1))
+        self.assertIn(f" task={self.task_id} ", line)
+        self.assertIn(" node=r ", line)
+        self.assertIn(f" connection={self.connections.connection_id} ", line)
+        self.assertTrue(line.endswith(" cli=codex"))
+        self.assertNotIn(TOKEN, "\n".join(logs.output))
+        self.assertNotIn("Where is the parser?", "\n".join(logs.output))
 
     async def test_a_session_without_submit_is_no_submission(self):
         outcome = await self.run_node([{"usage": [7, 3]}, {"complete": "completed"}])

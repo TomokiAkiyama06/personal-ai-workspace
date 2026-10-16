@@ -18,6 +18,9 @@
   template unit (``start``: Claude, the prompt as stdin; ``start_interactive``:
   Codex, the stream socket as stdin too). The CLI rung stays disabled at
   assembly.
+* :func:`log_session_start`: the one line a session adapter writes as it
+  starts a session (Decision 0091, 4): the session's UUID (the egress proxy's
+  ``session=``, the units' instance) with its task, node, connection and CLI.
 """
 
 import asyncio
@@ -57,6 +60,9 @@ class CliSessionSpec:
     directory: Path
     token: str = field(repr=False)
     relay_command: tuple[str, ...]
+    # The attempt it is for (Decision 0091, 4: the start's log line).
+    task_id: uuid.UUID | None = None
+    node_key: str | None = None
 
     @property
     def socket_path(self) -> Path:
@@ -80,11 +86,17 @@ class CliSessionSpec:
 
 
 def create_session(
-    base: Path, relay_command: Sequence[str], *, settings: Mapping | None = None
+    base: Path,
+    relay_command: Sequence[str],
+    *,
+    settings: Mapping | None = None,
+    task_id: uuid.UUID | None = None,
+    node_key: str | None = None,
 ) -> CliSessionSpec:
     """Make a session's directory under ``base`` (0750) with its token file
     (0640), the MCP configuration (the PAW relay as the only server) and the
-    CLI's settings, and return its spec."""
+    CLI's settings, and return its spec (with the attempt's task and node, for
+    :func:`log_session_start`)."""
     session_id = uuid.uuid4()
     # ``<base>/<uuid>``: the template unit's program finds it by the id alone.
     directory = Path(base) / str(session_id)
@@ -94,7 +106,12 @@ def create_session(
     setgid = Path(base).stat().st_mode & stat.S_ISGID
     os.chmod(directory, 0o750 | setgid)
     spec = CliSessionSpec(
-        session_id, directory, secrets.token_urlsafe(32), tuple(relay_command)
+        session_id,
+        directory,
+        secrets.token_urlsafe(32),
+        tuple(relay_command),
+        task_id,
+        node_key,
     )
     _write(spec.token_path, spec.token + "\n", 0o640)
     config = {
@@ -115,6 +132,22 @@ def create_session(
     _write(spec.settings_path, json.dumps(dict(settings or {})), 0o640)
     spec.config_dir.mkdir(mode=0o750)
     return spec
+
+
+def log_session_start(
+    spec: CliSessionSpec, cli: str, connection_id: uuid.UUID | None
+) -> None:
+    """One line as a session starts (Decision 0091, 4): what ties the egress
+    log's ``session=<uuid>`` to the task, the node, the connection and the
+    CLI. Identifiers only: never a credential, a prompt or a path."""
+    logger.info(
+        "CLI session started: session=%s task=%s node=%s connection=%s cli=%s",
+        spec.session_id,
+        spec.task_id or "-",
+        spec.node_key or "-",
+        connection_id or "-",
+        cli,
+    )
 
 
 def remove_session(spec: CliSessionSpec) -> None:
@@ -465,6 +498,7 @@ class SubprocessLauncher:
 
 
 __all__ = [
+    "log_session_start",
     "STOP_GRACE_SECONDS",
     "SystemdLauncher",
     "CliLaunch",

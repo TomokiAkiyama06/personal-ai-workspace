@@ -65,6 +65,7 @@ class FakeSession:
     async def run_session(self, secret, request):
         self.calls += 1
         self.attachment = request.attachment
+        self.connection_id = request.connection_id
         if self.before is not None:
             await self.before()
         for input_tokens, output_tokens in self.turns:
@@ -447,6 +448,13 @@ class AdmissionTest(SessionCase):
         row = self.row()
         self.assertEqual((row["status"], row["input_tokens"]), ("cancelled", 0))
         self.assertEqual(await self.consumed(), 0)
+
+    async def test_the_adapter_is_told_the_admitted_connection(self):
+        # Decision 0091, 4: the CLI runtime logs it with the session's UUID.
+        adapter = FakeSession()
+        await self.start(adapter)
+        (row,) = self.rows("SELECT id FROM shared_connections")
+        self.assertEqual(adapter.connection_id, row["id"])
 
     async def test_the_gate_runs_after_the_admission(self):
         seen = []
