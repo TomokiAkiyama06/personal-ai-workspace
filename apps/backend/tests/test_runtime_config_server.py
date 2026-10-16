@@ -10,6 +10,7 @@ and a message without a value. The file system is the fake one of
 import contextlib
 import functools
 import io
+import logging
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -124,6 +125,18 @@ class BuildAppTest(unittest.TestCase):
 
 
 class MainTest(unittest.TestCase):
+    def setUp(self):
+        # main() gives the module's logger a stderr handler: undo it after.
+        log = logging.getLogger("paw_backend.server")
+        saved = (list(log.handlers), log.level, log.propagate)
+
+        def restore():
+            log.handlers[:] = saved[0]
+            log.setLevel(saved[1])
+            log.propagate = saved[2]
+
+        self.addCleanup(restore)
+
     def run_main(self, **environment):
         stderr = io.StringIO()
         with (
@@ -140,8 +153,7 @@ class MainTest(unittest.TestCase):
         return code, stderr.getvalue(), create, server
 
     def test_unset_starts_as_before(self):
-        with self.assertLogs("paw_backend.server", "WARNING"):
-            code, _, create, server = self.run_main()
+        code, _, create, server = self.run_main()
         self.assertEqual(code, 0)
         self.assertEqual(create.call_count, 1)
         self.assertEqual(create.call_args.kwargs, {})
@@ -151,10 +163,22 @@ class MainTest(unittest.TestCase):
         with patch(
             "paw_backend.server.load_runtime_config", fake_load(MINIMAL_COMPUTE)
         ):
-            code, _, create, server = self.run_main(PAW_RUNTIME_CONFIG_FILE=PATH)
+            code, stderr, create, server = self.run_main(PAW_RUNTIME_CONFIG_FILE=PATH)
         self.assertEqual(code, 0)
         self.assertEqual(set(create.call_args.kwargs), {"compute"})
         server.return_value.run.assert_called_once()
+        # The summary reaches stderr at INFO, before Uvicorn configures any
+        # logging (Codex review #265).
+        self.assertIn(
+            "INFO:     Runtime configuration: compute: deployments=main control=no\n",
+            stderr,
+        )
+
+    def test_unset_warns_on_stderr(self):
+        code, stderr, *_ = self.run_main()
+        self.assertEqual(code, 0)
+        self.assertEqual(stderr.count(RUNTIME_CONFIG_NOT_SET), 1)
+        self.assertIn(f"WARNING:     {RUNTIME_CONFIG_NOT_SET}\n", stderr)
 
     def test_a_missing_file_exits_2_without_its_path(self):
         code, stderr, create, server = self.run_main(
