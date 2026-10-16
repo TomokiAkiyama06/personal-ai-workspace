@@ -142,6 +142,97 @@ only with `PAW_SANDBOX_OOM_STATUS=true`. Order:
 
 Details: `apps/backend/deploy/sandbox/README.md` ("OOM の検出").
 
+## Runtime configuration (`PAW_RUNTIME_CONFIG_FILE`, Decision 0093)
+
+[Decision 0093](decisions/0093-production-runtime-config.md) (Approved, issue #208).
+Without `PAW_RUNTIME_CONFIG_FILE` the backend builds only authentication, projects /
+repositories and System Health: the scheduler's routes answer `503`
+(`compute_not_configured`), no orchestrator or worker runs, and git is
+`SubprocessGitRunner` (another account's checkout is refused as `identity_mismatch`).
+The start logs one warning, `runtime configuration not set: ...`. The file
+(`/etc/paw/runtime.toml`) turns the parts on; it is read once at start (restart after a
+change, `paw-release` restarts too).
+
+Files in `apps/backend/deploy/runtime/`:
+[`runtime.example.toml`](../apps/backend/deploy/runtime/runtime.example.toml) (this host's
+example, Decision 0093 4), [`paw-unit-pids`](../apps/backend/deploy/runtime/paw-unit-pids)
+(the `pids` command; a stopped unit has no cgroup, so `cat .../cgroup.procs` would fail and the
+scheduler would never start the model),
+[`50-paw-llm-main.rules`](../apps/backend/deploy/runtime/50-paw-llm-main.rules) (polkit).
+
+**Whoever can write the file runs commands as `paw`**, so the backend refuses to start
+(exit code 2, `Invalid runtime configuration: <section>.<key>: <reason>`, no value) unless
+the file is owned by root and not writable by its group or others, every directory up to
+`/` is root's and not group/other-writable, and every command's `argv[0]` — each
+symbolic link on its way, each link's directory, and a script's `#!` interpreter — is
+too (no `/usr/bin/env`, a Python script needs `-I`). A shell or a launcher as `argv[0]`
+(`sh`, `bash`, `env`, `sudo`, `python*`, ...), a URL that is not
+`http://127.0.0.1:<port>/...` / `http://[::1]:<port>/...`, an unknown key, a value a
+Decision fixed (headroom, timeouts, the 40 GiB host memory minimum, parallelism, ...),
+`[orchestrator]` without `[compute]` + `[local_model]` + `[sandbox]` (or without
+`PAW_DATABASE_URL`), and `[sandbox] runner = "ssh"` without `[git] runner = "ssh"` are
+refused too. No part starts without the rest.
+
+Install (as root; the agent never does this):
+
+```sh
+install -d -o root -g root -m 0755 /usr/local/lib/paw /etc/paw
+install -o root -g root -m 0755 apps/backend/deploy/runtime/paw-unit-pids /usr/local/lib/paw/paw-unit-pids
+install -o root -g root -m 0644 apps/backend/deploy/runtime/50-paw-llm-main.rules /etc/polkit-1/rules.d/50-paw-llm-main.rules
+install -o root -g paw -m 0640 apps/backend/deploy/runtime/runtime.example.toml /etc/paw/runtime.toml
+# Edit /etc/paw/runtime.toml: keep only the sections of the step below.
+# /etc/paw/backend.env: PAW_RUNTIME_CONFIG_FILE=/etc/paw/runtime.toml
+# As paw, with backend.env's settings ([orchestrator] needs PAW_DATABASE_URL; no connection is made):
+systemd-run --uid=paw --pipe --wait --quiet -p EnvironmentFile=/etc/paw/backend.env \
+  /opt/paw/current/venv/bin/python -m paw_backend.cli runtime-config-check /etc/paw/runtime.toml
+systemctl restart paw-backend.service
+```
+
+Enable it in three steps, restarting and checking after each:
+
+1. `[ssh]` + `[git] runner = "ssh"` + `[compute]` (the scheduler starts
+   `paw-llm-main.service`; do not enable that unit).
+2. `[local_model]` (the Inferred Preference interpreter asks the main model).
+3. `[sandbox]` + `[orchestrator]` (the local agent runs task nodes). **The worker takes
+   queued tasks at once** (`PAW_ORCHESTRATOR_WORKERS`, default 1): check the queue first,
+   or start with `PAW_ORCHESTRATOR_WORKERS=0` to check the wiring only.
+
+Checklist (Decision 0093 5; the human, not an agent):
+
+- [ ] `ls -l /etc/paw/runtime.toml` is `root paw -rw-r-----`; `/etc/paw` is
+  `root root drwxr-xr-x`.
+- [ ] The polkit rule lets `paw` start / stop `paw-llm-main.service` only, and
+  `sudo -u paw /usr/bin/systemctl show -p Result -p ActiveState -p InvocationID -- paw-llm-main.service`
+  reads (Decision 0092 1).
+- [ ] `sudo -u paw /usr/local/lib/paw/paw-unit-pids paw-llm-main.service` prints every
+  vLLM pid while the unit runs, nothing with exit code 0 while it is stopped, and exits
+  non-zero for a unit name that does not exist.
+- [ ] `namei -l /usr/bin/systemctl /usr/local/lib/paw/paw-unit-pids /usr/bin/nvidia-smi /usr/bin/python3`:
+  every step root's, not writable by group / others.
+- [ ] `tomoki`'s `authorized_keys` has the wrapper's `command=`
+  (`--sandbox-image=...@sha256:...`, `--sandbox-shim-base=/run/paw-sandbox`,
+  `--sandbox-keep-groups=yes`) and `from="127.0.0.1"`; `/etc/paw/ssh-keys/tomoki.key`
+  (owned by `paw`, `0600`); `/etc/paw/ssh_known_hosts` (Decision 0029,
+  `apps/backend/deploy/ssh-git-wrapper/README.md`, `apps/backend/deploy/sandbox/README.md`).
+- [ ] `/usr/local/lib/paw/paw-git-wrapper` knows `paw-sandbox/v2` (the sandbox README's
+  checklist item 9); otherwise `PAW_SANDBOX_OOM_STATUS=false`.
+- [ ] `/run/paw-sandbox` (`paw:paw-sandbox 0711`, `tmpfiles.d`) and the group
+  `paw-sandbox` (`paw`, `tomoki`).
+- [ ] `paw-llm-main.service`'s `--port 18080` matches `base_url` / `metrics_url`,
+  `--served-model-name main` matches `served_model`, and the footprint matches its
+  `--gpu-memory-utilization` (the parser does not read the unit).
+- [ ] `runtime-config-check` passes and lists the expected parts.
+- [ ] After each step: `GET /api/v1/system/health` shows `compute`,
+  `GET /api/v1/admin/compute/full-gpu` is not `503`, the main model shows as `gpu`.
+  After step 2 the preference confirmation answers with the model. After step 3 a small
+  task (a read-only look at a repository) runs on a local node and
+  `agent_dag_node_attempts` records `local_gpu` — run it on the GPU only with the
+  human's go-ahead, as for the GPU smoke (Decision 0083 9).
+
+The CLI runtimes (`[agents.codex]` / `[agents.claude]`) cannot be enabled yet: the names
+are reserved and refused until a `CloudPolicy` Decision and the CLI smoke (Decision
+0093 3).
+
 ## Implementation (Issue #54, Decision 0079)
 
 [Decision 0079](decisions/0079-deploy-update-rollback.md) (Approved 2026-10-08) decides the

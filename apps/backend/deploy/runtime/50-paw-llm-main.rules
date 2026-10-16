@@ -1,0 +1,16 @@
+// The backend's user (paw) may start and stop the main LLM's runtime unit, and
+// nothing else (Decision 0093, 5; the runtime configuration's gpu / unload
+// commands): exactly paw-llm-main.service, only "start" and "stop". Reading
+// the unit (systemctl show, paw-unit-pids) needs no rule.
+// Install as /etc/polkit-1/rules.d/50-paw-llm-main.rules.
+polkit.addRule(function (action, subject) {
+    if (action.id !== "org.freedesktop.systemd1.manage-units" || subject.user !== "paw") {
+        return polkit.Result.NOT_HANDLED;
+    }
+    var unit = action.lookup("unit");
+    var verb = action.lookup("verb");
+    if (unit === "paw-llm-main.service" && (verb === "start" || verb === "stop")) {
+        return polkit.Result.YES;
+    }
+    return polkit.Result.NOT_HANDLED;
+});

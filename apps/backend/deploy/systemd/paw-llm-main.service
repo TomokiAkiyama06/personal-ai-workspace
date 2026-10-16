@@ -1,8 +1,13 @@
 # Example: the main LLM's vLLM runtime of the Personal AI Workspace, started and
 # stopped by the Compute Resource Scheduler through CommandModelControl
-# (PAW-036): gpu = ("systemctl", "start", "paw-llm-main.service"), unload =
-# ("systemctl", "stop", "paw-llm-main.service"), pids = ("cat",
-# "/sys/fs/cgroup/system.slice/paw-llm-main.service/cgroup.procs").
+# (PAW-036), with the commands of /etc/paw/runtime.toml (Decision 0093;
+# apps/backend/deploy/runtime/runtime.example.toml): gpu = ["/usr/bin/systemctl",
+# "start", "paw-llm-main.service"], unload = ["/usr/bin/systemctl", "stop",
+# "paw-llm-main.service"], pids = ["/usr/local/lib/paw/paw-unit-pids",
+# "paw-llm-main.service"] (not "cat .../cgroup.procs": this unit is not enabled,
+# and a stopped unit has no cgroup, so cat would fail and the scheduler would
+# never start it). Keep --port, --served-model-name and the footprint in step
+# with that file's base_url / metrics_url, served_model and *_mib.
 #
 # Host memory (issue #182, Decision 0039 4; the values: Decision 0072,
 # Approved). On 2026-09-30 vLLM's first load built FlashInfer JIT kernels with
@@ -36,7 +41,7 @@
 #
 # User: a dedicated OS user (here paw-llm) that owns the model store's caches,
 # not the backend's user; the backend's user may only start / stop this unit
-# (for example a polkit rule limited to this unit name).
+# (the polkit rule apps/backend/deploy/runtime/50-paw-llm-main.rules).
 #
 # Install (as root), adjusting the paths, the model and the port:
 #   cp paw-llm-main.service /etc/systemd/system/

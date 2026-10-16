@@ -1,0 +1,94 @@
+# The backend's runtime configuration (Decision 0093, Approved; issue #208):
+# which parts of the backend run, and with which commands. An EXAMPLE: this
+# host's first deployment (2026-10-16). Check every value when you deploy it
+# (docs/DEPLOYMENT_UPDATE.md, "Runtime configuration").
+#
+# Install (as root) and name it in /etc/paw/backend.env:
+#   install -o root -g paw -m 0640 runtime.example.toml /etc/paw/runtime.toml
+#   PAW_RUNTIME_CONFIG_FILE=/etc/paw/runtime.toml
+# The file must stay root's: owned by root, not writable by its group or
+# others, every directory above it too (/etc/paw: root:root 0755), and every
+# command's argv[0] (and each symbolic link on its way, and a script's #!
+# interpreter) likewise. Anything wrong stops the backend's start (exit code 2,
+# "Invalid runtime configuration: <section>.<key>: <reason>"). Check it first,
+# as the backend's user, on this host:
+#   systemd-run --uid=paw --pipe --wait --quiet \
+#     -p EnvironmentFile=/etc/paw/backend.env \
+#     /opt/paw/current/venv/bin/python -m paw_backend.cli \
+#     runtime-config-check /etc/paw/runtime.toml
+# (as paw, with backend.env's settings: [orchestrator] needs PAW_DATABASE_URL;
+# the database is not connected to).
+# It is read once at start: restart the backend after a change.
+#
+# No secret goes here (there is no key for one). The SSH connection
+# (PAW_REPOSITORY_SSH_*), PAW_ORCHESTRATOR_WORKERS and PAW_SANDBOX_OOM_STATUS
+# stay in backend.env. The values a Decision fixed (the scheduler's headroom,
+# kv_safety, timeouts, the 40 GiB host memory minimum, the orchestrator's
+# parallelism, node timeout and retries) cannot be set here.
+#
+# Enable it in three steps, restarting and checking after each (Decision 0093,
+# 3 and 5): (1) [git] + [ssh] + [compute]; (2) [local_model];
+# (3) [sandbox] + [orchestrator]. Leave the later sections out until then.
+version = 1
+
+# --- step 1 -----------------------------------------------------------------
+
+[compute]
+nvidia_smi = "/usr/bin/nvidia-smi"
+gpu_index = 0
+restore_margin_mib = 4096            # Decision 0075, 2
+
+[[compute.deployments]]
+name = "main"
+role = "main"
+# Footprint 54,152 MiB (Decision 0075, 1: the peak during the load + 2 GiB)
+# = weights etc. 34,286 + the KV pool 19,866 (the 2026-10-15 smoke's vLLM log:
+# "Available KV cache memory: 19.4 GiB", "GPU KV cache size: 305,081 tokens").
+# Must match paw-llm-main.service (--gpu-memory-utilization 0.51).
+weights_mib = 34286
+kv_pool_mib = 19866
+kv_bytes_per_token = 68279           # 19.4 GiB / 305,081 tokens
+max_sequences = 8                    # --max-num-seqs 8
+max_context_tokens = 131072          # --max-model-len 131072
+residency = "always"
+initial = "gpu"
+
+[compute.deployments.commands]
+# The backend's user (paw) may start / stop this unit only (polkit:
+# 50-paw-llm-main.rules). No shell: each command is an argv list.
+gpu = ["/usr/bin/systemctl", "start", "paw-llm-main.service"]
+unload = ["/usr/bin/systemctl", "stop", "paw-llm-main.service"]
+# Not "cat .../cgroup.procs": a stopped unit has no cgroup (paw-unit-pids).
+pids = ["/usr/local/lib/paw/paw-unit-pids", "paw-llm-main.service"]
+metrics_url = "http://127.0.0.1:18080/metrics"   # --port 18080
+unit = "paw-llm-main.service"        # Decision 0092, 1
+
+[ssh]
+identity_template = "/etc/paw/ssh-keys/{user}.key"   # tomoki: /etc/paw/ssh-keys/tomoki.key
+
+[git]
+runner = "ssh"
+
+# --- step 2 -----------------------------------------------------------------
+
+[local_model]
+base_url = "http://127.0.0.1:18080/v1"
+deployment = "main"
+served_model = "main"                # --served-model-name main
+model_id = "Qwen3.8-27B-FP8"
+agent_label = "local"
+
+# --- step 3 (check the task queue first: the worker takes queued tasks) -----
+
+[sandbox]
+runner = "ssh"                       # tomoki@127.0.0.1's forced-command wrapper
+shim_base = "/run/paw-sandbox"
+shim_group = "paw-sandbox"
+idle_seconds = 900
+
+[orchestrator]
+[orchestrator.ladders]
+planner = ["local"]
+worker = ["local"]
+researcher = ["local"]
+reviewer = ["local"]

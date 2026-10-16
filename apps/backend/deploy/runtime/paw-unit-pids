@@ -1,0 +1,182 @@
+#!/usr/bin/python3 -I
+"""paw-unit-pids <unit>: print the pids of every process of a systemd service.
+
+The ``pids`` command of a deployment in the backend's runtime configuration
+(``/etc/paw/runtime.toml``, Decision 0093, 4, Approved): ``CommandModelControl``
+runs it to learn which of the GPU's processes are the model runtime's, the
+whole unit's (vLLM holds the GPU memory in child processes), not only its main
+pid.
+
+``cat /sys/fs/cgroup/system.slice/<unit>/cgroup.procs`` is not used: the
+scheduler starts the unit (it is not enabled), and a unit that is stopped or
+failed has no cgroup, so ``cat`` fails, the scheduler does not know whether the
+model runs and never starts it (Codex review #263). This helper:
+
+1. checks the unit's name (``^[A-Za-z0-9@._-]+\\.service$``);
+2. reads ``/usr/bin/systemctl show -p LoadState -p ControlGroup -- <unit>``
+   (a read any user may do; no polkit rule, no sudo);
+3. fails unless ``LoadState`` is ``loaded`` (a misspelt name is not taken for a
+   stopped unit);
+4. succeeds printing nothing when ``ControlGroup`` is empty (the unit runs no
+   process);
+5. otherwise prints the pids of ``/sys/fs/cgroup<ControlGroup>/cgroup.procs``
+   and of every cgroup below it, one per line, and fails when one cannot be
+   read.
+
+It never starts or stops anything, uses no shell and prints nothing else (an
+error is one fixed line on stderr). Exit codes: 0 the pids were printed (maybe
+none), 1 they could not be read, 2 a usage error.
+
+Install (as root): ``install -o root -g root -m 0755 paw-unit-pids
+/usr/local/lib/paw/paw-unit-pids``. ``#!/usr/bin/python3 -I``: no user site,
+no working directory on ``sys.path`` (the runtime configuration's check
+refuses a Python script without ``-I``).
+"""
+
+import os
+import re
+import subprocess
+import sys
+
+SYSTEMCTL = "/usr/bin/systemctl"
+CGROUP_ROOT = "/sys/fs/cgroup"
+TIMEOUT_SECONDS = 10
+EXIT_OK = 0
+EXIT_FAILED = 1
+EXIT_USAGE = 2
+
+_UNIT = re.compile(r"[A-Za-z0-9@._-]+\.service")
+_PROPERTIES = ("LoadState", "ControlGroup")
+_MAX_OUTPUT = 64 * 1024
+_MAX_CGROUPS = 4_096
+_MAX_PIDS = 65_536
+
+
+class Failure(Exception):
+    """A fixed reason, printed as ``paw-unit-pids: <reason>``."""
+
+
+def unit_properties(unit, *, systemctl=SYSTEMCTL, run=subprocess.run):
+    """``LoadState`` and ``ControlGroup`` of ``unit``."""
+    argv = [systemctl, "show"]
+    for name in _PROPERTIES:
+        argv += ["-p", name]
+    argv += ["--", unit]
+    try:
+        result = run(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env={"PATH": "/usr/bin:/bin", "LC_ALL": "C", "SYSTEMD_PAGER": ""},
+            timeout=TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        raise Failure("systemctl could not be run") from None
+    if result.returncode != 0 or len(result.stdout) > _MAX_OUTPUT:
+        raise Failure("systemctl show failed")
+    try:
+        text = result.stdout.decode("utf-8")
+    except UnicodeDecodeError:
+        raise Failure("systemctl show printed something unexpected") from None
+    values = {}
+    for line in text.splitlines():
+        key, separator, value = line.partition("=")
+        if not separator or key not in _PROPERTIES or key in values:
+            raise Failure("systemctl show printed something unexpected")
+        values[key] = value
+    if set(values) != set(_PROPERTIES):
+        raise Failure("systemctl show printed something unexpected")
+    return values["LoadState"], values["ControlGroup"]
+
+
+def _read_pids(path):
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError:
+        raise Failure("a cgroup.procs could not be read") from None
+    try:
+        data = b""
+        while chunk := os.read(descriptor, 65_536):
+            data += chunk
+            if len(data) > 16 * _MAX_OUTPUT:
+                raise Failure("a cgroup.procs is too large")
+    except OSError:
+        raise Failure("a cgroup.procs could not be read") from None
+    finally:
+        os.close(descriptor)
+    pids = []
+    for word in data.split():
+        if not word.isdigit():
+            raise Failure("a cgroup.procs holds something unexpected")
+        pids.append(int(word))
+    return pids
+
+
+def cgroup_pids(control_group, *, cgroup_root=CGROUP_ROOT):
+    """The pids of ``control_group`` and of every cgroup below it."""
+    if (
+        not control_group.startswith("/")
+        or control_group.startswith("//")
+        or os.path.normpath(control_group) != control_group
+        or "\x00" in control_group
+    ):
+        raise Failure("systemctl show printed something unexpected")
+    top = cgroup_root + control_group if control_group != "/" else cgroup_root
+    if not os.path.isdir(top) or os.path.islink(top):
+        raise Failure("the unit's cgroup could not be read")
+    pids = []
+    seen = 0
+
+    def failed(_error):
+        raise Failure("the unit's cgroup could not be read")
+
+    for directory, _subdirectories, files in os.walk(
+        top, onerror=failed, followlinks=False
+    ):
+        seen += 1
+        if seen > _MAX_CGROUPS:
+            raise Failure("the unit has too many cgroups")
+        if "cgroup.procs" not in files:
+            raise Failure("a cgroup.procs could not be read")
+        pids.extend(_read_pids(os.path.join(directory, "cgroup.procs")))
+        if len(pids) > _MAX_PIDS:
+            raise Failure("the unit has too many processes")
+    return sorted(set(pids))
+
+
+def main(
+    argv=None,
+    *,
+    systemctl=SYSTEMCTL,
+    cgroup_root=CGROUP_ROOT,
+    run=subprocess.run,
+    stdout=None,
+    stderr=None,
+):
+    arguments = sys.argv[1:] if argv is None else list(argv)
+    out = sys.stdout if stdout is None else stdout
+    err = sys.stderr if stderr is None else stderr
+    if len(arguments) != 1 or _UNIT.fullmatch(arguments[0]) is None:
+        print("usage: paw-unit-pids <name>.service", file=err)
+        return EXIT_USAGE
+    try:
+        load_state, control_group = unit_properties(
+            arguments[0], systemctl=systemctl, run=run
+        )
+        if load_state != "loaded":
+            raise Failure("the unit is not loaded")
+        if not control_group:
+            return EXIT_OK  # it runs no process
+        pids = cgroup_pids(control_group, cgroup_root=cgroup_root)
+    except Failure as failure:
+        print(f"paw-unit-pids: {failure}", file=err)
+        return EXIT_FAILED
+    for pid in pids:
+        print(pid, file=out)
+    return EXIT_OK
+
+
+if __name__ == "__main__":
+    sys.exit(main())
