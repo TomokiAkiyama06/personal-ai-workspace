@@ -328,13 +328,16 @@ def commit_message(marker: str) -> str:
 @dataclass(frozen=True, slots=True)
 class BranchChanges:
     """What a Worker node changed since its base: ``changed`` (committed since
-    the base, uncommitted and untracked; repository-relative paths) and
-    ``uncommitted`` (the part not committed yet)."""
+    the base, uncommitted and untracked; repository-relative paths),
+    ``uncommitted`` (the part not committed yet) and ``nested`` (the
+    untracked repositories inside the worktree, as git lists them: ``sub/``;
+    Decision 0090, they are never committed)."""
 
     base: str
     head: str
     changed: tuple[str, ...]
     uncommitted: tuple[str, ...]
+    nested: tuple[str, ...] = ()
 
 
 def _paths(output: str) -> set[str]:
@@ -373,6 +376,9 @@ async def branch_changes(
         head,
         tuple(sorted(since_base | untracked)),
         tuple(sorted(since_head | untracked)),
+        # git lists an untracked repository (a directory with its own ``.git``)
+        # as the directory itself, with a trailing ``/``, and never descends.
+        tuple(sorted(p for p in untracked if p.endswith("/"))),
     )
 
 

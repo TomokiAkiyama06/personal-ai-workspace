@@ -1,10 +1,12 @@
 #!/usr/bin/env -S python3 -I
 """``git`` inside the tool sandbox (Decision 0083, 2): it runs no git here.
 
-Installed in the image as ``/usr/local/bin/git`` (the image has no other git).
-It sends its arguments and working directory to the backend over the sandbox's
-own Unix socket (``/run/paw-shim/git.sock``, with the token next to it), which
-runs a read-only git on the host, pinned to the repository and limited to
+Installed in the image as ``/usr/local/lib/paw/paw-git-shim``; the image's
+``git`` (``paw_git_front.py``) runs it for a call aimed at the node's
+repository (``/workspace``; Decision 0090, 1). It sends its arguments and
+working directory to the backend over the sandbox's own Unix socket
+(``/run/paw-shim/git.sock``, with the token next to it), which runs a
+read-only git on the host, pinned to the repository and limited to
 ``status`` / ``diff`` / ``log`` / ``show`` with a fixed list of options, the
 node's own commits and the paths in scope. It prints git's output and exits
 with git's status, or prints why the call was refused and exits 128 (git's own

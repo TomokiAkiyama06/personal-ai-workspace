@@ -404,6 +404,22 @@ class NodeToolkit:
             if not isinstance(found, Mapping) or "changed" not in found:
                 raise RuntimeFailure(Failure.OTHER)
             changes[repository.repo_id] = found
+        # Decision 0090: the sandbox's real git can make a repository inside
+        # the worktree; a node's result never contains one (it would be
+        # committed as a gitlink). The model removes it (or its ``.git``).
+        nested = []
+        for repository in writing:
+            listed = changes[repository.repo_id].get("nested") or []
+            if not isinstance(listed, list):
+                raise RuntimeFailure(Failure.OTHER)
+            prefix = "" if self.workspace.single else f"{repository.repo_id}/"
+            nested += [f"{prefix}{p}" for p in listed]
+        if nested:
+            self._correct(
+                "ValueError: a node's changes cannot contain a nested git "
+                "repository (remove it, or its .git, first): "
+                + "; ".join(f"nested git repository: {p}" for p in nested[:50]),
+            )
         problems = []
         for repository in writing:
             changed = set(changes[repository.repo_id]["changed"])
