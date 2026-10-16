@@ -199,7 +199,7 @@ def route(
         if environ.get(name):
             pointed.append(_resolve(place, environ[name]))
     for name in LIST_VARIABLES:
-        pointed += [_resolve(place, p) for p in environ.get(name, "").split(":") if p]
+        pointed += [_resolve(place, p) for p in _alternates(environ.get(name, ""))]
     if any(inside(p) for p in pointed):
         return SHIM
     subcommand, arguments = (rest[0], rest[1:]) if rest else (None, [])
@@ -210,6 +210,78 @@ def route(
             return SHIM
         return SHIM if any(inside(t) for t in targets) else REAL
     return SHIM if inside(os.path.realpath(place)) else REAL
+
+
+#: The escapes of a C-style quoted path (git's ``unquote_c_style``).
+C_ESCAPES = {
+    "a": "\a",
+    "b": "\b",
+    "f": "\f",
+    "n": "\n",
+    "r": "\r",
+    "t": "\t",
+    "v": "\v",
+    "\\": "\\",
+    '"': '"',
+}
+
+
+def _alternates(value: str) -> list[str]:
+    """The entries of a ``:``-separated list of object directories, read like
+    git's ``parse_alt_odb_entry``: an entry that starts with ``"`` is a
+    C-style quoted path (one that does not unquote is taken as it is), one
+    that starts with ``#`` is a comment, empty ones are skipped."""
+    entries: list[str] = []
+    at = 0
+    while at < len(value):
+        if value[at] == "#":
+            end = _find(value, ":", at)
+            entry = ""
+        else:
+            unquoted = _unquote(value, at) if value[at] == '"' else None
+            if unquoted is not None:
+                entry, end = unquoted
+            else:
+                end = _find(value, ":", at)
+                entry = value[at:end]
+        if entry:
+            entries.append(entry)
+        # git skips the one character after the entry (the separator).
+        at = end + 1
+    return entries
+
+
+def _find(value: str, character: str, start: int) -> int:
+    found = value.find(character, start)
+    return len(value) if found < 0 else found
+
+
+def _unquote(value: str, at: int) -> tuple[str, int] | None:
+    """The C-style quoted path at ``value[at]`` (a ``"``) and where it ends
+    (after the closing quote), or None when it is not quoted correctly. Paths
+    are bytes to git: an octal escape is a byte."""
+    out = bytearray()
+    i = at + 1
+    while i < len(value):
+        character = value[i]
+        i += 1
+        if character == '"':
+            return os.fsdecode(bytes(out)), i
+        if character != "\\":
+            out += os.fsencode(character)
+            continue
+        if i >= len(value):
+            return None
+        escape = value[i]
+        i += 1
+        if escape in C_ESCAPES:
+            out += C_ESCAPES[escape].encode()
+        elif escape in "0123" and re.fullmatch("[0-7]{2}", value[i : i + 2]):
+            out.append(int(escape + value[i : i + 2], 8))
+            i += 2
+        else:
+            return None
+    return None
 
 
 def _global_options(

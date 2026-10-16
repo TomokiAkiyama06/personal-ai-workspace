@@ -123,6 +123,30 @@ class RouteByPlaceTest(unittest.TestCase):
             SHIM,
         )
 
+    def test_quoted_alternates_are_decoded_like_git(self):
+        # Codex review of #248 (P2), issue #250: an entry that starts with a
+        # double quote is a C-style quoted path (git's parse_alt_odb_entry);
+        # ``:`` inside it does not separate, ``#`` starts a comment.
+        def alternates(value):
+            env = {"GIT_ALTERNATE_OBJECT_DIRECTORIES": value}
+            return route("status", cwd="/tmp/r", env=env)
+
+        for value in (
+            '"/workspace/a:b/.git/objects"',
+            '/tmp/o:"/workspace/a:b/.git/objects"',
+            '"/tmp/o":"/workspace/.git/objects"',
+            '"/work\\163pace/.git/objects"',  # octal escape: s
+            '"/tmp/o\\"x":/workspace/.git/objects',
+        ):
+            self.assertEqual(alternates(value), SHIM, value)
+        for value in (
+            '"/tmp/a:/workspace/.git/objects"',  # one entry under /tmp
+            "#/workspace/.git/objects",  # a comment
+            '"/workspace/x',  # broken quoting: a relative path, as is
+            '"/workspace\\q"',  # unknown escape: a relative path, as is
+        ):
+            self.assertEqual(alternates(value), REAL, value)
+
     def test_what_cannot_be_read_goes_to_the_shim(self):
         for argv in (
             ("-C",),
