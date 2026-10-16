@@ -14,15 +14,18 @@ Backend（User paw）
   │    bridge.sock（MCP の Bridge）・bridge.token・mcp.json・settings.json・config/
   │    launch.json（CLI の引数と許可した環境変数）・credential.env（CLAUDE_CODE_OAUTH_TOKEN の 1 行、0640）・prompt・stream.sock
   └─ systemctl start --no-block paw-cli-session@<uuid>.service（polkit がこの名前の start / stop だけを許す）
+       ├─ Requires= / After= paw-egress-session@<uuid>.socket（/run/paw-egress/session/<uuid>.sock。Session の Unit と一緒に止まる: ../egress/README.md）
        └─ paw_cli_session_run.py <uuid>（User paw-agent-cli、硬くした Unit）
             └─ podman run --rm --cgroups=split --network none --read-only --cap-drop all --userns keep-id
-                 -v /run/paw-cli/<uuid>（同じ Path）-v /run/paw-egress/egress.sock --env-file credential.env
+                 -v /run/paw-cli/<uuid>（同じ Path）-v /run/paw-egress/session/<uuid>.sock:/run/paw-egress.sock --env-file credential.env
                  <Image@sha256:...> /opt/paw/start-claude <引数>   stdin = prompt、stdout = stream.sock
-                   ├─ paw_egress.py forward（127.0.0.1:3128 → egress.sock）
+                   ├─ paw_egress.py forward（127.0.0.1:3128 → 自分の Session の Egress の Socket）
                    └─ claude -p ...（MCP の Server = paw_mcp_relay.py → bridge.sock）
 ```
 
 Codex の Session（`launch.json` の `cli` が `codex`）は `codex app-server`（stdio の JSON-RPC の対話）なので、Program は `stream.sock` を Container の stdin と stdout の両方にする。Image は `codex_image`（`Containerfile.codex`、入口は `/opt/paw/start-codex`）。`credential.env` と `prompt` は書かない（Codex の Login は `CODEX_HOME` の `auth.json`。`credential.env` があれば拒否する）。版の確認（`codex --version`）と `app-server` は同じ Session の Unit を順に起動する。
+
+Egress（[Decision 0091](../../../../docs/decisions/0091-egress-per-session-socket.md)）: Container に Mount するのは自分の Session の Socket（`<egress_session_dir>/<uuid>.sock`、既定 `/run/paw-egress/session`）だけで、Proxy はどの Socket で受けたかで Session を知る（Header は使わない。`PAW_SESSION_ID` も渡さない）。その Socket がなければ Program は起動を拒む（共有の Socket に戻らない）。設定に古い `egress_socket` が残っていても拒む。Backend は Session を起動するとき 1 行の Log（`CLI session started: session=<uuid> task=<id> node=<key> connection=<id> cli=<claude|codex>`）を書き、Egress の Log の `session=` を Task・Node・Connection に結び付ける。
 
 `credential.env` は 0640・所有者 Backend・Group `paw-cli-bridge`（Decision 0088 で承認。Decision 0087 の「0400・所有者 `paw-agent-cli`」の代わり。Backend は別の Account に File を渡せないため）。
 
@@ -34,7 +37,7 @@ Memory 不足（[Decision 0092](../../../../docs/decisions/0092-runtime-oom-kill
 
 1. Account と Group: `useradd --system --home-dir /var/lib/paw-agent-cli --create-home --shell /usr/sbin/nologin paw-agent-cli`、`groupadd --system paw-cli-bridge`（`paw-egress` の README と同じ Group）、`usermod -aG paw-cli-bridge paw-agent-cli`。Backend の User（`paw`）は Group に入れない（Directory の所有者なので要らない）。Rootless の Podman の `XDG_RUNTIME_DIR` は Unit の `RuntimeDirectory`（`/run/paw-cli-session/<uuid>`）にする（`ProtectHome=yes` が `/run/user` を隠すため。Linger は要らない）。
 2. `/run/paw-cli`: `tmpfiles.d` で作る（`/etc/tmpfiles.d/paw-cli.conf` に `d /run/paw-cli 2750 paw paw-cli-bridge -` を書き、`systemd-tmpfiles --create /etc/tmpfiles.d/paw-cli.conf`）。`paw-backend.service` の `RuntimeDirectory=` は使わない（Group が Unit の `Group=`（`paw`）になり、`paw-cli-bridge` にできない。Unit の停止で消えもする）。
-3. `install -m 0755 paw_cli_session_run.py /usr/local/lib/paw/`、`paw-cli-session@.service` を `/etc/systemd/system/`、`50-paw-cli-session.rules` を `/etc/polkit-1/rules.d/`、`cli-session.example.toml` を `/etc/paw/cli-session.toml`（Image の Digest を入れる）。
+3. `install -m 0755 paw_cli_session_run.py /usr/local/lib/paw/`、`paw-cli-session@.service` を `/etc/systemd/system/`、`50-paw-cli-session.rules` を `/etc/polkit-1/rules.d/`、`cli-session.example.toml` を `/etc/paw/cli-session.toml`（Image の Digest を入れる）。Egress の Session ごとの Unit（`paw-egress-session@.socket` など）は [`../egress/README.md`](../egress/README.md) の配備で先に置く（`paw-cli-session@.service` が `Requires=` で引き込む。無いと Session の Unit は起動しない）。共有の `paw-egress.socket` を配備した Host は、同じ README の移行の手順を先に行う。
 4. Image: `Containerfile` の Base の Digest と Claude Code の版を固定して `paw-agent-cli` で Build し、Digest を `cli-session.toml` に入れる。Codex は `Containerfile.codex`（Codex の版は Backend の `VERIFIED_VERSIONS` にあるもの）を同じく Build して `codex_image` に入れる。
 
 ## 確かめること（有効にする前）
@@ -43,6 +46,6 @@ Memory 不足（[Decision 0092](../../../../docs/decisions/0092-runtime-oom-kill
 - Unit の `Delegate=yes` の下で、Podman の `--memory`・`--cpus`・`--pids-limit` が効くこと（cgroup v2 の Controller の委任）。
 - **`--cgroups=split` で Container の cgroup が Unit の cgroup の下にあること**（`podman inspect --format '{{.State.CgroupPath}}' paw-cli-<uuid>` が `/system.slice/system-paw\x2dcli\x2dsession.slice/paw-cli-session@<uuid>.service/` の下）。`--memory` を小さくした Session で Memory を食わせ、Unit が `systemctl show -p Result` で `oom-kill` になり、Node が `AgentOutOfMemory` になること（Decision 0092 の 7）。`split` が使えなければ、Decision 0092 の 4 の他の案 (a)（Wrapper が `OOMKilled` を読む）に新しい Decision で替える。
 - CLI の Unit が止められなかった（`systemctl stop` が 3 回とも失敗した）ときは、Runtime は Session の Directory を消さずに残す（Unit が Mount しているため）。Log の `A CLI session could not be stopped` を見たら、Unit を止めてから `/run/paw-cli/<uuid>` を消す。
-- `paw-egress` が動いていて、Container の中から `127.0.0.1:3128` 経由で `api.anthropic.com` に届き、他の Host は拒否されること（Proxy の Log）。
+- Container の中から `127.0.0.1:3128` 経由で `api.anthropic.com` に届き、他の Host は拒否されること（Proxy の Log）。Egress の Session ごとの Socket と Proxy の確認（polkit の追加なしで Socket が作られる・Session の終わりで止まり File が消える・Container から見える Socket が自分の 1 つだけ・Log の `session=` と集計の 1 行）は [`../egress/README.md`](../egress/README.md) の「確かめること」。
 - `claude` の `system/init` に PAW の Tool と `EndConversation` だけが出ること（違えば Runtime が止める）。
 - Provider の規約の確認（Human）。

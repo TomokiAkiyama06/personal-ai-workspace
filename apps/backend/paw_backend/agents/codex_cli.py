@@ -61,6 +61,7 @@ from paw_backend.agents.cli_session import (
     UnitNotStoppedError,
     _Subprocess,
     create_session,
+    log_session_start,
     remove_session,
     stop_through_cancellation,
 )
@@ -373,6 +374,7 @@ class CodexSessionAdapter:
         if self._credentials is None:
             # No way to hand the login over yet (Decision 0089, 4).
             return AgentSessionResult(failure=FailureCode.UNAVAILABLE)
+        log_session_start(attachment.spec, "codex", request.connection_id)
         # The version first, without any credential: ``app-server`` may reach
         # the provider as it starts with a login (Decision 0089, 2: an
         # unverified version sends nothing).
@@ -681,7 +683,12 @@ class CodexCliRuntime:
             )
         toolkit = NodeToolkit(assignment, self._limits)
         system, task = node_prompts(toolkit)
-        spec = create_session(self._base, self._relay)
+        spec = create_session(
+            self._base,
+            self._relay,
+            task_id=assignment.task_id,
+            node_key=assignment.node_key,
+        )
         bridge = McpBridge(toolkit, token=spec.token)
         attachment = None
         try:

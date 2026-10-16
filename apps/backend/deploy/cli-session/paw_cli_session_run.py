@@ -23,8 +23,12 @@ The container: the image pinned by digest (``/etc/paw/cli-session.toml``:
 ``image`` for Claude, ``codex_image`` for Codex),
 ``--network none``, a read-only root, no capabilities, no new privileges,
 PID and memory limits, the session's directory mounted at the same path (the
-MCP configuration names its socket and token file there) and the egress
-proxy's socket. Nothing else of the host. Standard library only.
+MCP configuration names its socket and token file there) and the session's
+own egress socket (``<egress_session_dir>/<uuid>.sock``, which systemd made
+with this unit: ``paw-egress-session@<uuid>.socket``, Decision 0091) at
+``/run/paw-egress.sock``. Without that socket the session does not start: it
+never falls back to a socket shared by the sessions. Nothing else of the host.
+Standard library only.
 
     paw_cli_session_run.py <uuid> [--config /etc/paw/cli-session.toml]
 """
@@ -34,6 +38,7 @@ import json
 import os
 import re
 import socket
+import stat
 import subprocess
 import sys
 import tomllib
@@ -60,6 +65,8 @@ ALLOWED_ENV = frozenset(
 CLIS = {"claude": ("image", False), "codex": ("codex_image", True)}
 ALLOWED_CREDENTIALS = frozenset({"CLAUDE_CODE_OAUTH_TOKEN"})
 EGRESS_IN_CONTAINER = "/run/paw-egress.sock"
+#: Where systemd makes each session's egress socket (Decision 0091, 1).
+DEFAULT_EGRESS_SESSION_DIR = "/run/paw-egress/session"
 
 
 class Refused(Exception):
@@ -71,7 +78,6 @@ def load_config(path: str) -> dict:
         config = tomllib.load(handle)
     root = config.get("root")
     image = config.get("image")
-    egress = config.get("egress_socket")
     if not isinstance(root, str) or not os.path.isabs(root):
         raise Refused("root must be an absolute path")
     if not isinstance(image, str) or not _DIGEST.fullmatch(image):
@@ -81,8 +87,12 @@ def load_config(path: str) -> dict:
         not isinstance(codex_image, str) or not _DIGEST.fullmatch(codex_image)
     ):
         raise Refused("codex_image must be pinned by its digest")
+    if "egress_socket" in config:
+        # The shared socket of before Decision 0091: never mounted again.
+        raise Refused("egress_socket is no longer used (egress_session_dir)")
+    egress = config.setdefault("egress_session_dir", DEFAULT_EGRESS_SESSION_DIR)
     if not isinstance(egress, str) or not os.path.isabs(egress):
-        raise Refused("egress_socket must be an absolute path")
+        raise Refused("egress_session_dir must be an absolute path")
     for name, default in (("memory", "4g"), ("pids", 512), ("cpus", 2)):
         config.setdefault(name, default)
     return config
@@ -122,10 +132,24 @@ def check_credential(directory: Path, cli: str) -> Path | None:
     return path
 
 
+def egress_socket(config: dict, session_id: str) -> Path:
+    """The session's own egress socket, which must exist (systemd made it
+    before this unit started: ``Requires=``/``After=``)."""
+    path = Path(config["egress_session_dir"]) / f"{session_id}.sock"
+    try:
+        mode = os.lstat(path).st_mode
+    except FileNotFoundError:
+        raise Refused("no egress socket of this session") from None
+    if not stat.S_ISSOCK(mode):
+        raise Refused("the session's egress path is not a socket")
+    return path
+
+
 def podman_command(
     session_id: str,
     directory: Path,
     config: dict,
+    egress: Path,
     argv: Sequence[str],
     env: dict[str, str],
     credential: Path | None,
@@ -162,16 +186,10 @@ def podman_command(
         "--volume",
         f"{directory}:{directory}:rw",
         "--volume",
-        f"{config['egress_socket']}:{EGRESS_IN_CONTAINER}",
+        f"{egress}:{EGRESS_IN_CONTAINER}",
     ]
     if credential is not None:
         command += ["--env-file", str(credential)]
-    command += [
-        # The session's id for the egress forwarder's X-PAW-Session (set by
-        # this program, not by the backend's launch.json nor the CLI).
-        "--env",
-        f"PAW_SESSION_ID={session_id}",
-    ]
     for name in sorted(env):
         command += ["--env", f"{name}={env[name]}"]
     command += [image, *argv]
@@ -194,10 +212,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not isinstance(image, str):
             raise Refused(f"{image_key} must be pinned by its digest")
         credential = check_credential(directory, cli)
+        egress = egress_socket(config, arguments.session_id)
         command = podman_command(
             arguments.session_id,
             directory,
             config,
+            egress,
             launch_argv,
             env,
             credential,

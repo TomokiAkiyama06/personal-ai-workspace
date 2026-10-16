@@ -1,0 +1,15 @@
+# Every CLI session's egress proxy (paw-egress-session@.service), together
+# (Decision 0091, 3). TasksMax= bounds the proxies on the whole host: about 32
+# of them at their own TasksMax= (8); beyond it a new session's proxy cannot
+# start and that session's traffic is refused (nothing goes out). MemoryMax=
+# is above the proxies' own limits together (32 x 128M) and is a last guard:
+# an OOM kill at the slice does not choose which proxy it stops.
+
+[Unit]
+Description=Personal AI Workspace egress proxies of the CLI sessions
+Before=slices.target
+
+[Slice]
+TasksMax=256
+MemoryAccounting=yes
+MemoryMax=5G

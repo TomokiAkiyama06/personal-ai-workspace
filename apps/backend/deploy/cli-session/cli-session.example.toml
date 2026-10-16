@@ -6,7 +6,10 @@ image = "localhost/paw-claude-cli@sha256:000000000000000000000000000000000000000
 # Codex's image (Containerfile.codex), pinned the same way. Without it a Codex
 # session is refused.
 codex_image = "localhost/paw-codex-cli@sha256:0000000000000000000000000000000000000000000000000000000000000000"
-egress_socket = "/run/paw-egress/egress.sock"
+# Where systemd makes each session's egress socket (<dir>/<uuid>.sock:
+# paw-egress-session@.socket, Decision 0091). The session's own is mounted;
+# without it the session does not start.
+egress_session_dir = "/run/paw-egress/session"
 memory = "4g"
 pids = 512
 cpus = 2

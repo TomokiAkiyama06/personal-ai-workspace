@@ -6,8 +6,9 @@ fake ``systemctl`` on ``PATH``; no container, no systemd, no other account.
   digest, an environment name it does not know and a credential file of any
   other form, before starting anything;
 * it runs Podman with no network, a read-only root, no capabilities, the
-  session's directory at its own path, the egress socket and the credential
-  as an env file, the prompt as stdin and the stream socket as stdout;
+  session's directory at its own path, the session's own egress socket (never
+  a shared one: Decision 0091; no socket, no session) and the credential as an
+  env file, the prompt as stdin and the stream socket as stdout;
 * the launcher writes the session's files (the credential in its own file,
   mode 0640, never in an argument), starts and stops exactly
   ``paw-cli-session@<uuid>.service``, and reads the CLI's stream.
@@ -71,8 +72,16 @@ class RunnerTest(unittest.TestCase):
             """,
         )
         self.config = self.base / "cli-session.toml"
+        self.egress = self.base / "egress"
+        self.egress.mkdir()
         self.write_config(DIGEST)
         self.session = str(uuid.uuid4())
+        # The session's egress socket (systemd's paw-egress-session@.socket).
+        self.egress_socket = self.egress / f"{self.session}.sock"
+        listening = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listening.bind(str(self.egress_socket))
+        listening.listen()
+        self.addCleanup(listening.close)
         self.directory = self.root / self.session
         self.directory.mkdir()
         (self.directory / "launch.json").write_text(
@@ -91,7 +100,7 @@ class RunnerTest(unittest.TestCase):
     def write_config(self, image, codex_image=None):
         text = (
             f'root = "{self.root}"\nimage = "{image}"\n'
-            'egress_socket = "/run/paw-egress/egress.sock"\n'
+            f'egress_session_dir = "{self.egress}"\n'
         )
         if codex_image is not None:
             text += f'codex_image = "{codex_image}"\n'
@@ -219,9 +228,8 @@ class RunnerTest(unittest.TestCase):
             ["--userns", "keep-id"],
             ["--env-file", str(self.directory / "credential.env")],
             ["--env", "HTTPS_PROXY=http://127.0.0.1:3128"],
-            ["--env", f"PAW_SESSION_ID={self.session}"],
             ["--volume", f"{self.directory}:{self.directory}:rw"],
-            ["--volume", "/run/paw-egress/egress.sock:/run/paw-egress.sock"],
+            ["--volume", f"{self.egress_socket}:/run/paw-egress.sock"],
         ):
             with self.subTest(pair=pair):
                 index = argv.index(
@@ -229,6 +237,18 @@ class RunnerTest(unittest.TestCase):
                 )
                 self.assertEqual(argv[index : index + 2], pair)
         self.assertIn("--read-only", argv)
+        # Exactly two mounts: the session's directory and its own egress
+        # socket. No shared socket, no session id for a header (Decision 0091).
+        volumes = [argv[i + 1] for i, a in enumerate(argv) if a == "--volume"]
+        self.assertEqual(
+            volumes,
+            [
+                f"{self.directory}:{self.directory}:rw",
+                f"{self.egress_socket}:/run/paw-egress.sock",
+            ],
+        )
+        self.assertNotIn("/run/paw-egress/egress.sock", json.dumps(argv))
+        self.assertNotIn("PAW_SESSION_ID", json.dumps(argv))
         image = argv.index(DIGEST)
         self.assertEqual(
             argv[image + 1 :], ["/opt/paw/start-claude", "-p", "--tools", ""]
@@ -250,12 +270,13 @@ class RunnerTest(unittest.TestCase):
         for pair in (
             ["--network", "none"],
             ["--env", f"CODEX_HOME={self.directory / 'config'}"],
-            ["--env", f"PAW_SESSION_ID={self.session}"],
             ["--volume", f"{self.directory}:{self.directory}:rw"],
+            ["--volume", f"{self.egress_socket}:/run/paw-egress.sock"],
         ):
             with self.subTest(pair=pair):
                 index = argv.index(pair[1]) - 1
                 self.assertEqual(argv[index : index + 2], pair)
+        self.assertNotIn("PAW_SESSION_ID", json.dumps(argv))
         image = argv.index(CODEX_DIGEST)
         self.assertEqual(argv[image + 1 :], ["/opt/paw/start-codex", "app-server"])
         self.assertNotIn(DIGEST, argv)
@@ -298,6 +319,21 @@ class RunnerTest(unittest.TestCase):
             "another credential name": lambda: (
                 self.directory / "credential.env"
             ).write_text("ANTHROPIC_API_KEY=x\n"),
+            # Decision 0091, 1: no session socket, no session (never the
+            # shared socket instead).
+            "no egress socket of its own": lambda: self.egress_socket.unlink(),
+            "an egress path that is not a socket": lambda: (
+                self.egress_socket.unlink(),
+                self.egress_socket.write_text(""),
+            ),
+            "the shared socket configured": lambda: self.config.write_text(
+                self.config.read_text()
+                + 'egress_socket = "/run/paw-egress/egress.sock"\n'
+            ),
+            "a relative egress directory": lambda: self.config.write_text(
+                f'root = "{self.root}"\nimage = "{DIGEST}"\n'
+                'egress_session_dir = "egress"\n'
+            ),
         }
         for name, prepare in cases.items():
             with self.subTest(name):
@@ -734,6 +770,27 @@ class DeployFilesTest(unittest.TestCase):
         # unit's own, and nothing under /run/user is asked for.
         settings = [line for line in unit.splitlines() if not line.startswith("#")]
         self.assertFalse([line for line in settings if "/run/user" in line])
+        # Decision 0091, 1: the session's own egress socket comes with the
+        # unit and goes with it (the socket's BindsTo=); the shared proxy is
+        # gone.
+        directives = [
+            line.strip()
+            for line in settings
+            if line.strip() and not line.startswith(";")
+        ]
+        self.assertIn("Requires=paw-egress-session@%i.socket", directives)
+        after = [d for d in directives if d.startswith("After=")]
+        self.assertEqual(after, ["After=paw-egress-session@%i.socket"])
+        self.assertFalse([d for d in directives if "paw-egress.service" in d])
+        for script in ("start-claude", "start-codex"):
+            with self.subTest(script=script):
+                text = (DEPLOY / script).read_text()
+                self.assertIn("forward --listen-port 3128", text)
+                self.assertNotIn("--session", text)
+                self.assertNotIn("PAW_SESSION_ID", text)
+        example = (DEPLOY / "cli-session.example.toml").read_text()
+        self.assertIn('egress_session_dir = "/run/paw-egress/session"', example)
+        self.assertNotIn("egress_socket", example)
         rule = (DEPLOY / "50-paw-cli-session.rules").read_text()
         self.assertIn('subject.user !== "paw"', rule)
         self.assertIn('verb === "start" || verb === "stop"', rule)

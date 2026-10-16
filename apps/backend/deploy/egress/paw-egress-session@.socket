@@ -1,0 +1,22 @@
+# One CLI session's egress socket (Decision 0091, 1; Decision 0087, 3): the
+# instance is the session's UUID. paw-cli-session@<uuid>.service pulls it in
+# (Requires=/After=) and it goes with that unit (BindsTo=: also when the
+# session's program ends by itself), and with it its proxy
+# (paw-egress-session@<uuid>.service) and every connection. systemd makes it
+# for the CLI accounts' group and passes it to the proxy, whose own process is
+# not in that group (Decision 0088: paw-cli-bridge also reads the sessions'
+# credential files). Only that session's container mounts it, so the proxy
+# knows the session by the socket, not by anything the container sends. See
+# paw-egress-session@.service for the install steps.
+
+[Unit]
+Description=Personal AI Workspace egress socket of CLI session %i
+BindsTo=paw-cli-session@%i.service
+
+[Socket]
+ListenStream=/run/paw-egress/session/%i.sock
+SocketUser=paw-egress
+SocketGroup=paw-cli-bridge
+SocketMode=0660
+DirectoryMode=0755
+RemoveOnStop=yes
