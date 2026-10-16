@@ -113,6 +113,9 @@ pip CUDA wheels (`CUDA_HOME` = `site-packages/nvidia/cu13` of the runtime's venv
 - When the pip `nvcc` is newer than the pip CUDA headers, FlashInfer's bundled CCCL refuses
   to compile ("CUDA compiler and CUDA toolkit headers are incompatible"); set
   `FLASHINFER_EXTRA_CUDAFLAGS=-DCCCL_DISABLE_CTK_COMPATIBILITY_CHECK` for that runtime.
+- The JIT runs `ninja` (from the venv) and `nvcc` (`$CUDA_HOME/bin`). A unit does not have
+  the venv on `PATH`, so the first sampling fails with `No such file or directory: 'ninja'`
+  (first deploy, 2026-10-16); put both directories on the unit's `PATH`.
 
 [`apps/backend/deploy/systemd/paw-llm-main.service`](../apps/backend/deploy/systemd/paw-llm-main.service)
 is an example unit with all of the above.

@@ -53,6 +53,10 @@ User=paw-llm
 Environment=MAX_JOBS=4
 Environment=FLASHINFER_NVCC_THREADS=1
 Environment=CUDA_HOME=/opt/paw/runtime-venv/lib/python3.12/site-packages/nvidia/cu13
+# The FlashInfer JIT runs ninja (in the venv) and nvcc (CUDA_HOME/bin); a unit
+# gets no venv on PATH, so without this the first sampling fails with
+# "No such file or directory: 'ninja'" (first deploy, 2026-10-16).
+Environment=PATH=/opt/paw/runtime-venv/bin:/opt/paw/runtime-venv/lib/python3.12/site-packages/nvidia/cu13/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 Environment=LIBRARY_PATH=/opt/paw/cudalib
 Environment=XDG_CACHE_HOME=/srv/paw-llm/cache
 Environment=VLLM_CACHE_ROOT=/srv/paw-llm/cache/vllm

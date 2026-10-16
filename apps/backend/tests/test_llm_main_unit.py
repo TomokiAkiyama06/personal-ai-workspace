@@ -59,6 +59,18 @@ class LlmMainUnitTest(unittest.TestCase):
         self.assertEqual(option(argv, "--tool-call-parser"), "qwen3_coder")
         self.assertIn("--enable-auto-tool-choice", argv)
 
+    def test_the_jit_tools_are_on_path(self):
+        # FlashInfer's JIT runs ninja from the venv and nvcc from CUDA_HOME/bin.
+        env = dict(
+            line.split("=", 2)[1:]
+            for line in UNIT.read_text(encoding="utf-8").splitlines()
+            if line.startswith("Environment=")
+        )
+        path = env["PATH"].split(":")
+        self.assertIn("/opt/paw/runtime-venv/bin", path)
+        self.assertIn(env["CUDA_HOME"] + "/bin", path)
+        self.assertIn("/usr/bin", path)
+
     def test_an_oom_kill_stops_the_whole_unit_as_oom_kill(self):
         # Decision 0092, 1: ``OOMPolicy=stop`` whatever ``DefaultOOMPolicy=``
         # says, so the unit ends with ``Result=oom-kill`` (also when the kernel
