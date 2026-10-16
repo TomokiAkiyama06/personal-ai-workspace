@@ -475,11 +475,11 @@ class OutOfMemoryTest(CodexCase):
     """Decision 0092, 4: the CLI's unit ended with ``Result=oom-kill``
     (``CliProcess.oom_killed``, read before the stop)."""
 
-    def oom_adapter(self):
+    def oom_adapter(self, killed="app-server"):
         class OomLauncher(InteractiveSubprocessLauncher):
             async def start(self, launch):
                 process = await super().start(launch)
-                if "app-server" in launch.argv:
+                if killed in launch.argv:
                     process.oom_killed = True
                 return process
 
@@ -526,6 +526,17 @@ class OutOfMemoryTest(CodexCase):
             adapter=self.oom_adapter(),
         )
         self.assertEqual(outcome.result.summary, "It is in parse.py")
+
+    async def test_an_oom_kill_of_the_version_probe(self):
+        # Codex review #258 (P2): the probe ended without a version it knows
+        # because it was killed: out of memory, not a malformed answer.
+        outcome = await self.run_node(
+            [{"usage": [1, 1]}],
+            adapter=self.oom_adapter(killed="--version"),
+            version="0.163.0",
+        )
+        self.assertFalse(self.report.exists())  # app-server never started
+        self.assertEqual(outcome.error_class, "AgentOutOfMemory")
 
 
 class UnstoppedTest(CodexCase):
