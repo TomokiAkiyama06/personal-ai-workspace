@@ -9,9 +9,13 @@ without a value (no path, command or URL), and ends: it does not start the
 backend, connect to the database or run any command of the file. Run it after
 the file changed and before the backend is restarted.
 
-The SSH connection's settings (``PAW_REPOSITORY_SSH_*``) come from the
-environment, as for the backend; that the orchestrator needs ``PAW_DATABASE_URL``
-is checked by the backend's start only.
+The settings (``PAW_REPOSITORY_SSH_*``, and ``PAW_DATABASE_URL``, which
+``[orchestrator]`` needs) come from the environment, as for the backend: run it
+with the backend's environment file, e.g.
+``systemd-run --uid=paw --pipe --wait --quiet -p
+EnvironmentFile=/etc/paw/backend.env /opt/paw/current/venv/bin/python -m
+paw_backend.cli runtime-config-check /etc/paw/runtime.toml`` (the database is
+not connected to).
 
 Exit codes follow ``paw_backend.cli.owner``: ``0`` the file can be used, ``1`` a
 usage error, ``2`` the settings or the file are refused (the backend would not
@@ -30,6 +34,7 @@ from paw_backend.config import Settings
 from paw_backend.runtime_config import (
     RuntimeConfigError,
     RuntimeWiring,
+    check_environment,
     load_runtime_config,
 )
 
@@ -92,6 +97,7 @@ def main(
             wiring = (load_runtime_config if load is None else load)(
                 arguments.path, settings
             )
+            check_environment(wiring, settings)
         except RuntimeConfigError as error:
             print(f"Invalid runtime configuration: {error}", file=err)
             return EXIT_REFUSED
