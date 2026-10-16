@@ -403,6 +403,15 @@ def load_runtime_config(
     ).parse(document)
 
 
+def check_environment(wiring: RuntimeWiring, settings: Settings) -> None:
+    """What the file needs of the environment's settings, checked by the
+    backend's start and by ``runtime-config-check`` alike: the orchestrator
+    (its local agent runtime) needs ``PAW_DATABASE_URL`` (``create_app``
+    refuses ``local_runtimes`` without a database). Nothing is connected to."""
+    if wiring.orchestrator_config is not None and settings.database_url is None:
+        raise RuntimeConfigError("orchestrator", "needs PAW_DATABASE_URL")
+
+
 # --- the parser -----------------------------------------------------------------
 
 
@@ -1112,6 +1121,7 @@ __all__ = [
     "RealHost",
     "RuntimeConfigError",
     "RuntimeWiring",
+    "check_environment",
     "load_runtime_config",
     "read_config_file",
 ]

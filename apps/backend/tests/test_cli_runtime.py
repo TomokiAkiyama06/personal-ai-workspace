@@ -9,6 +9,7 @@ from paw_backend.runtime_config import load_runtime_config
 
 from .runtime_config_support import EXAMPLE, PYTHON, standard_host
 from .support import paw_environment
+from .test_scratch_janitor_lifespan import UNREACHABLE
 
 PATH = "/etc/paw/runtime.toml"
 
@@ -29,8 +30,20 @@ class RuntimeConfigCheckTest(unittest.TestCase):
     def test_the_dispatcher_picks_it(self):
         self.assertIs(dispatch.command_module(["runtime-config-check", PATH]), runtime)
 
-    def test_a_file_that_can_be_used(self):
+    def test_the_orchestrator_needs_the_database(self):
+        # As the backend's start does (Codex review #265).
         code, out, err = self.check(["runtime-config-check", PATH], fake_load(EXAMPLE))
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn(
+            "Invalid runtime configuration: orchestrator: needs PAW_DATABASE_URL", err
+        )
+
+    def test_a_file_that_can_be_used(self):
+        code, out, err = self.check(
+            ["runtime-config-check", PATH],
+            fake_load(EXAMPLE),
+            PAW_DATABASE_URL=UNREACHABLE,
+        )
         self.assertEqual(code, 0, err)
         self.assertEqual(
             out.splitlines(),

@@ -29,6 +29,7 @@ from paw_backend.config import Settings
 from paw_backend.runtime_config import (
     RuntimeConfigError,
     RuntimeWiring,
+    check_environment,
     load_runtime_config,
 )
 
@@ -126,9 +127,7 @@ def runtime_wiring(
         return RuntimeWiring()
     load = load_runtime_config if load is None else load
     wiring = load(str(settings.runtime_config_file), settings)
-    if wiring.orchestrator_config is not None and settings.database_url is None:
-        # ``create_app`` builds the local agent runtime, which needs the database.
-        raise RuntimeConfigError("orchestrator", "needs PAW_DATABASE_URL")
+    check_environment(wiring, settings)
     logger.info("Runtime configuration: %s", wiring.summary())
     return wiring
 
