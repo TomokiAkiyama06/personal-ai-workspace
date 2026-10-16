@@ -71,6 +71,19 @@ class LlmMainUnitTest(unittest.TestCase):
         self.assertIn(env["CUDA_HOME"] + "/bin", path)
         self.assertIn("/usr/bin", path)
 
+    def test_the_benchmark_environment_is_set(self):
+        env = dict(
+            line.split("=", 2)[1:]
+            for line in UNIT.read_text(encoding="utf-8").splitlines()
+            if line.startswith("Environment=")
+        )
+        self.assertEqual(
+            env["FLASHINFER_EXTRA_CUDAFLAGS"], "-DCCCL_DISABLE_CTK_COMPATIBILITY_CHECK"
+        )
+        self.assertEqual(env["VLLM_USE_DEEP_GEMM"], "0")
+        self.assertEqual(env["VLLM_USE_FLASHINFER_SAMPLER"], "0")
+        self.assertEqual(env["HF_HUB_OFFLINE"], "1")
+
     def test_an_oom_kill_stops_the_whole_unit_as_oom_kill(self):
         # Decision 0092, 1: ``OOMPolicy=stop`` whatever ``DefaultOOMPolicy=``
         # says, so the unit ends with ``Result=oom-kill`` (also when the kernel
