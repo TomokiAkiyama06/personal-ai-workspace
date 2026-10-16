@@ -24,6 +24,7 @@ from paw_backend.compute.control import (
     CommandModelControl,
     DeploymentCommands,
     ModelControl,
+    UnitState,
 )
 from paw_backend.compute.domain import (
     DeploymentState,
@@ -142,6 +143,7 @@ __all__ = [
     "SchedulerMode",
     "TaskHolds",
     "TrackerLateGpuCharge",
+    "UnitState",
     "VramDeferral",
     "VramView",
     "VramWarningSink",

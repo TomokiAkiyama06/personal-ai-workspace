@@ -83,5 +83,12 @@ TimeoutStopSec=90
 # The ExecStartPre minimum (and the backend's min_host_available_bytes) is this
 # plus 8 GiB: raise them together if the runtime needs more.
 MemoryMax=32G
+# When the OOM killer ends a process of this unit (also only a child process),
+# systemd stops the whole unit and it ends with Result=oom-kill, whatever
+# DefaultOOMPolicy= says (Decision 0092, 1; issue #251). The scheduler reads that
+# result (DeploymentCommands.unit) and the local agents on it fail with
+# AgentOutOfMemory instead of a lost connection. systemd sees the kill through
+# memory accounting, which MemoryMax= turns on.
+OOMPolicy=stop
 NoNewPrivileges=true
 PrivateTmp=true

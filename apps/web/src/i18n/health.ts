@@ -108,6 +108,8 @@ export const healthJa = {
   "health.reason.vram_pressure": "VRAM が逼迫しています",
   "health.reason.relief_active": "VRAM を空ける処理を実行中です",
   "health.reason.waiting_for_vram": "VRAM の空きを待つ仕事があります",
+  "health.reason.model_server_oom_killed":
+    "直近 1 時間にモデルのサーバーがメモリ不足（OOM）で止まりました",
   "health.reason.model_failed": "{role} のモデルの操作が失敗しました",
   "health.reason.main_model_not_resident": "Main Model が GPU にいません",
   "health.reason.full_gpu_resume_stuck": "Full GPU Mode の後に Main Model が戻りません",
@@ -284,6 +286,8 @@ export const healthEn: Record<keyof typeof healthJa, string> = {
   "health.reason.vram_pressure": "VRAM is under pressure",
   "health.reason.relief_active": "VRAM is being freed",
   "health.reason.waiting_for_vram": "Work is waiting for free VRAM",
+  "health.reason.model_server_oom_killed":
+    "A model server was stopped by running out of memory (OOM) in the last hour",
   "health.reason.model_failed": "An action on the {role} model failed",
   "health.reason.main_model_not_resident": "The main model is not on the GPU",
   "health.reason.full_gpu_resume_stuck": "The main model did not come back after Full GPU Mode",
