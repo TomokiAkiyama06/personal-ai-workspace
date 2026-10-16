@@ -49,10 +49,10 @@
 - **上の Directory の検査**: File から `/` までの各 Directory が root の持ち物で、Group と Others が書けない（`/etc/paw` は `root:root 0755`）。Directory を書ける人は File を `rename` で差し替えられるため。
 - **Command の検査**（`gpu`・`unload`・`cpu`・`pids`。今の `DeploymentCommands._argv` の検査 — 1〜64 個の空でない文字列、NUL なし、4,096 文字まで — に足す）:
   - argv の List だけ（文字列 1 つは拒否。**Shell は使わない**: `CommandModelControl` はもともと `create_subprocess_exec` で Shell を通さない）。
-  - `argv[0]` は正規化した絶対 Path（`..`・`.`・二重の `/` なし）で、`os.path.realpath` が同じ Path（途中に Symbolic Link がない。`/usr/bin/systemctl` のように書く）、起動の時に存在する通常の File、所有者 root、Group と Others が書けない、実行できる。
-  - **`argv[0]` から `/` までの各 Directory も root の持ち物で、Group と Others が書けない**（設定 File の上の Directory の検査と同じ規則）。File 自身が root の持ち物でも、Directory を Backend の User（またはその Group）が書ければ、起動の検査の後に `rename` で差し替えられ、`CommandModelControl` は Path 名で実行するので差し替えた File が動くため（Codex review #263）。Sticky の付いた Directory（`/tmp` など）も拒否する。
+  - `argv[0]` は正規化した絶対 Path（`..`・`.`・二重の `/` なし）で、起動の時に存在する通常の File、所有者 root、Group と Others が書けない、実行できる。Symbolic Link（Debian / Ubuntu の `/usr/bin/python3` → `python3.12` など）は、**書いた Path の各 Directory と、`os.path.realpath` で解決した先の File とその各 Directory の両方**が下の規則を満たすときだけ受け付ける（Link を差し替えられるのは Link のある Directory を書ける人だけなので、両方の側を確かめれば足りる）。
+  - **`argv[0]` から `/` までの各 Directory も（Link なら解決した先の側も）root の持ち物で、Group と Others が書けない**（設定 File の上の Directory の検査と同じ規則）。File 自身が root の持ち物でも、Directory を Backend の User（またはその Group）が書ければ、起動の検査の後に `rename` で差し替えられ、`CommandModelControl` は Path 名で実行するので差し替えた File が動くため（Codex review #263）。Sticky の付いた Directory（`/tmp` など）も拒否する。
   - `argv[0]` が Shell と汎用の起動役（`sh`・`bash`・`dash`・`zsh`・`env`・`sudo`・`su`・`python*`・`perl`・`busybox`）の名前なら拒否する。これは境界ではなく（境界は root だけが書ける File）、`/bin/sh -c '…'` の形で Shell を持ち込む書き間違いを防ぐためである。
-  - **Script の Interpreter も同じ規則で確かめる**（Codex review #263）: `argv[0]` の先頭が `#!` なら、その行の Interpreter（最初の語）も正規化した絶対 Path・Link なし・root の持ち物・Group と Others が書けない・`/` までの各 Directory も同じ、を満たさなければ拒否する。`#!/usr/bin/env …`（`PATH` で Interpreter を探す）と、Interpreter がさらに `#!` の Script である形は拒否する。Python の Script は `#!/usr/bin/python3 -I`（User の site と作業 Directory を `sys.path` に入れない）でなければ拒否する。Interpreter を Backend の User が差し替えられると、Script 自身を守っても差し替えた Interpreter が動くため。
+  - **Script の Interpreter も同じ規則で確かめる**（Codex review #263）: `argv[0]` の先頭が `#!` なら、その行の Interpreter（最初の語）も `argv[0]` と同じ規則（正規化した絶対 Path・root の持ち物・Group と Others が書けない・`/` までの各 Directory も同じ。Link なら解決した先の File とその Directory も）を満たさなければ拒否する。`#!/usr/bin/env …`（`PATH` で Interpreter を探す）と、Interpreter がさらに `#!` の Script である形は拒否する。Python の Script は `#!/usr/bin/python3 -I`（User の site と作業 Directory を `sys.path` に入れない）でなければ拒否する。Interpreter を Backend の User が差し替えられると、Script 自身を守っても差し替えた Interpreter が動くため。
   - 読み取りの Command（`pids`）も同じ規則。
 - **URL の検査**: `[local_model].base_url` と `metrics_url` は `http://127.0.0.1:<port>/…` か `http://[::1]:<port>/…` だけ（Loopback）。Host 名（`localhost` を含む）・外の Address は拒否する（Prompt と Metrics を Host の外へ送る設定を作らない）。
 - **Path の検査**: `shim_base`・`wrapper`・`nvidia_smi`・`identity_template` は絶対 Path（既存の Dataclass の検査に加えて）。`nvidia_smi` と `wrapper` は `argv[0]` と同じ所有者・権限の検査（File と、`/` までの各 Directory）。
@@ -96,8 +96,9 @@ PAW_RUNTIME_CONFIG_FILE=/etc/paw/runtime.toml
 PAW_REPOSITORY_SSH_HOST=127.0.0.1
 PAW_REPOSITORY_SSH_KNOWN_HOSTS_PATH=/etc/paw/ssh_known_hosts
 PAW_ORCHESTRATOR_WORKERS=1
-# Wrapper を paw-sandbox/v2 の版に入れ替えた後だけ（Decision 0092 の 5）
-PAW_SANDBOX_OOM_STATUS=false
+# tomoki の Wrapper が paw-sandbox/v2 を知る版（Decision 0092 の 5）なら true。
+# v1 だけの古い Wrapper が残る間だけ false（その間 Sandbox の OOM は検出されない）。
+PAW_SANDBOX_OOM_STATUS=true
 ```
 
 `/etc/paw/runtime.toml`（`root:paw`、`0640`）:
@@ -174,6 +175,7 @@ reviewer = ["local"]
 - [ ] `sudo -u paw /usr/local/lib/paw/paw-unit-pids paw-llm-main.service` が、Unit が動いている間は vLLM の全 Process の PID を返し、止まっている間は何も出さずに終了 Code 0、存在しない Unit の名前では 0 以外になる。
 - [ ] `namei -l /usr/bin/systemctl /usr/local/lib/paw/paw-unit-pids /usr/bin/nvidia-smi` のどの段も root の持ち物で、Group / Others が書けない。
 - [ ] `tomoki` の `authorized_keys` に Wrapper の `command=`（`--sandbox-image=…@sha256:…`・`--sandbox-shim-base=/run/paw-sandbox`・`--sandbox-keep-groups=yes`）と `from="127.0.0.1"`、`/etc/paw/ssh-keys/tomoki.key`（`paw` の持ち物、`0600`）、`/etc/paw/ssh_known_hosts`（Decision 0029、`deploy/ssh-git-wrapper/README.md`、`deploy/sandbox/README.md` のチェックリスト）。
+- [ ] `/usr/local/lib/paw/paw-git-wrapper` が `paw-sandbox/v2` を知る版（`deploy/sandbox/README.md` のチェックリストの 9 が通る）。そうでなければ `PAW_SANDBOX_OOM_STATUS=false` にする。
 - [ ] `/run/paw-sandbox`（`paw:paw-sandbox 0711`、`tmpfiles.d`）と Group `paw-sandbox`（`paw`・`tomoki`）。
 - [ ] `python -m paw_backend.cli runtime-config-check /etc/paw/runtime.toml`（下の 8 の PR 2）が通り、有効な部分の一覧が期待どおり。
 - [ ] 3 の順に有効にして、各段で: `GET /api/v1/system/health` の `compute`、`GET /api/v1/admin/compute/full-gpu` が `503` でない、Main が `gpu` に見える。(2) の後に Preference の確認が Model で答える。(3) の後に小さな Task（読むだけの Repository の調べもの）が Local の Node で走り、`agent_dag_node_attempts` に `local_gpu` が記録される。
