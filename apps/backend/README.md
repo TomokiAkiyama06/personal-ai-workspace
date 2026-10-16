@@ -3907,6 +3907,7 @@ install -d -o root -g root -m 0755 /var/lib/paw
 useradd --system --user-group --home-dir /var/lib/paw --no-create-home --shell /usr/sbin/nologin paw  # Backend
 useradd --system --no-create-home --shell /usr/sbin/nologin paw-maint  # Decision 0031 6
 useradd --system --user-group --home-dir /srv/paw-llm --no-create-home --shell /usr/sbin/nologin paw-llm  # paw-llm-main.service
+install -d -o paw-llm -g paw-llm -m 0750 /srv/paw-llm /srv/paw-llm/cache  # XDG_CACHE_HOME・VLLM_CACHE_ROOT など
 groupadd --system paw-sandbox && usermod -aG paw-sandbox paw           # deploy/sandbox/README.md
 useradd --system --user-group --no-create-home --shell /usr/sbin/nologin paw-egress  # deploy/egress
 groupadd --system paw-cli-bridge                                        # deploy/cli-session/README.md
