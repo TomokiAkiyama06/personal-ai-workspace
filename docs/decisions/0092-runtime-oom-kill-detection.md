@@ -36,13 +36,13 @@ Decision 0071 は「OOM を見分けるのは Runtime（Adapter）」とし、De
   1. Scheduler の 5 秒ごとの Probe（`_sample` → `_inspect`）で、GPU に置いているはずの Deployment の Process が **空になった**とき（今の `_reconcile` の前。Lease があっても読む）。
   2. Scheduler が Unit を `start`（`place`）する **前**（再起動で `Result` が消えるので、その前に一度だけ読んで残す）。
   3. 3 の `HybridRuntime` が問い合わせたとき（その場で読む）。
-- **残すもの**: Deployment ごとに最後に見た「終わり」を 1 つだけ Memory に持つ: `result`（`oom-kill` かそれ以外か）と、終わった時刻（`InactiveEnterTimestampMonotonic`、まだ止まりかけ＝`deactivating` なら読んだ時刻）。DB には書かない（Process の再起動で消えてよい。数えるのは 3 の Agent の失敗と 2 の Health で足りる）。
+- **残すもの**（Memory の中だけ）: Deployment ごとに 2 つを別に持つ。(a) 最後に見た「終わり」1 つ: `result`（`oom-kill` かそれ以外か）と、終わった時刻（`InactiveEnterTimestampMonotonic`、まだ止まりかけ＝`deactivating` なら読んだ時刻）。3 の問い合わせに使う。(b) `oom-kill` で終わった時刻の一覧（直近 1 時間の分だけ、上限 64 件。古いものから捨てる）。後の普通の終わり（Unload・正常な停止）で (a) が上書きされても (b) は残るので、2 の 1 時間の窓と回数が早く消えない（Codex review #253）。同じ終わりを 2 回数えないよう、(b) には `InactiveEnterTimestampMonotonic` が前と違うときだけ足す。DB には書かない（Process の再起動で消えてよい。数えるのは 3 の Agent の失敗と 2 の Health で足りる）。
 - **Unit の設定**: `paw-llm-main.service` に `OOMPolicy=stop` を明示する（既定の `DefaultOOMPolicy=` を誰かが変えても `oom-kill` で終わるように。Kernel が子の Process だけを殺したときも Unit 全体が止まり、半分壊れた Server が残らない）。`MemoryMax=` があるので Accounting は有効。
 - 他の案: (a) 動いている Unit を定期的に読む（`Result` は終わるまで変わらないので無駄。5 秒の Probe で Process が消えたのは分かる）。(b) Unit の `OnFailure=` で別の Unit を起こして Backend に知らせる（Backend への入口が増え、Root の設定が要る）。(c) `journalctl` の `SD_MESSAGE_UNIT_OUT_OF_MEMORY` を読む（Backend の User に Journal を読む Group が要り、文の形に依存する）。(d) Unit の cgroup の `memory.events` を読む（Unit が止まると cgroup ごと消えるので、終わった後には読めない）。
 
 ### 2. System Health: `compute` の Component に Model の Server の OOM を出す
 
-- Decision 0071 の 1 のとおり、Model の Load / Unload の失敗は `compute` の Component で扱う。1 の状態から、**直近 1 時間に `oom-kill` で終わった Deployment があれば `compute` を `WARNING`**、理由の Code は `model_server_oom_killed`、数値は `model_server_oom_kills_last_hour`（Scheduler の Memory の中の、Deployment ごとの直近の時刻の一覧から数える）。Agent が動いていないとき（Memory Worker だけが使っていたときなど）も見えるようにするため。
+- Decision 0071 の 1 のとおり、Model の Load / Unload の失敗は `compute` の Component で扱う。1 の状態から、**直近 1 時間に `oom-kill` で終わった Deployment があれば `compute` を `WARNING`**、理由の Code は `model_server_oom_killed`、数値は `model_server_oom_kills_last_hour`（1 の (b) の、Deployment ごとの `oom-kill` の時刻の一覧から数える）。Agent が動いていないとき（Memory Worker だけが使っていたときなど）も見えるようにするため。
 - `agent_incidents`（Decision 0071 の 3）には書かない（あれは Agent の試行の数。Agent の失敗は 3 で別に数える）。
 - 他の案: `ERROR` にする（1 回の OOM Kill は Scheduler が次の Load で回復させるので、Decision 0071 と同じく「連発」でなければ `WARNING`）。`health_events` だけに残す（Severity の変化の記録で、件数ではない）。
 
@@ -58,7 +58,7 @@ Decision 0071 は「OOM を見分けるのは Runtime（Adapter）」とし、De
 
 - **経路**: Backend は今も `_UnitProcess.wait()` で `systemctl show <unit> -p ExecMainStatus` を読んでいる。これを `-p Result -p ExecMainStatus` にし、`Result=oom-kill` なら Session の終わりを OOM とする。新しい返す口（File・終了 Code の予約）は作らない。
 - **Unit の設定**（`paw-cli-session@.service`）: `OOMPolicy=stop` と `MemoryAccounting=yes` を明示する（`Delegate=yes` の Unit は既定が `continue` で、そのままでは `oom-kill` にならない）。Container の cgroup が **Unit の cgroup の下** にあることが前提（`memory.events` は子孫を含むので、Container の中の OOM Kill が Unit に見える）。Rootless の Podman はそのままでは User の systemd（`user@.service`）の下に cgroup を作りうるので、`paw_cli_session_run.py` の `podman run` に `--cgroups=split` を付ける（呼び出した Process ＝ Unit の cgroup を分けて、その下に Container を置く）。Smoke で `podman inspect --format '{{.State.CgroupPath}}'` が Unit の cgroup の下であることを確かめる（7）。
-- **読む順序**: `Result` は Unit が `stop` されると消えうる（`systemctl(1)`）。`_UnitProcess.wait()` で `Result` を読むのは、Adapter が Unit を止める（`_stop`）**前**にする。今の `claude_cli.py`・`codex_cli.py` は `_stop` の後に `wait()` を呼んでいるので、`wait()` が終わりを見た時点で `Result` を覚えておき、`_stop` の後にはそれを返す（実装の PR で Test に固定する）。
+- **読む順序**: `Result` は Unit が `stop` されると消えうる（`systemctl(1)`）。今の `claude_cli.py`・`codex_cli.py` は `finally` で `_stop`（`_UnitProcess.stop()`）を呼んでから `wait()` を呼ぶので、`wait()` で読むのでは遅い（Codex review #253）。そこで **`_UnitProcess.stop()` 自身が、`systemctl stop` を出す前に** `systemctl show -p ActiveState -p Result -p ExecMainStatus` を 1 回読み、Unit が既に終わっている・終わりかけ（`deactivating` / `failed` / `inactive`）なら `Result` と `ExecMainStatus` を `_UnitProcess` に覚える。`wait()` は覚えた値があればそれを返し、なければ今までどおり読む（`stop()` を通らず自然に終わった場合）。Unit がまだ `active` のとき（Adapter が自分で止める Timeout・取り消しなど）は覚えず、その後の `Result` は OOM として扱わない（Backend が止めたものなので）。実装の PR で、「OOM で終わった Unit を Adapter が `stop()` してから `wait()` しても `oom-kill` が返る」ことを Test に固定する。
 - **Adapter の分類**: `Result=oom-kill` で、Session が `submit` で結果を出していなければ `Failure.OUT_OF_MEMORY`（`AgentOutOfMemory`）。これは他の失敗（`no_submission`・`INVALID_RESPONSE` など。OOM の結果として起きるもの）より優先する。`submit` の後に起きた OOM は Node の結果を変えない（結果は出ている）。
 - 他の案: (a) Wrapper が `--rm` をやめ、終了の後に `podman inspect --format '{{.State.OOMKilled}}'` を読んでから `podman rm` し、予約した終了 Code（例: 3）で返す。CLI 自身の終了 Code と重なり、`OOMKilled` は Kill のない `oom` でも立つ（確かめた事実）ので推奨しない（Smoke で `--cgroups=split` が使えなかったときの代わり）。(b) Session の Directory に結果の File を書く（`paw-agent-cli` は Directory に書けず、Mode の変更が要る。Decision 0088 の前提が変わる）。(c) `sd_notify` の `STATUS=`（`NotifyAccess=` の変更が要り、`StatusText` が終わった後に残るかが文書にない）。
 
@@ -87,7 +87,7 @@ Decision 0071 は「OOM を見分けるのは Runtime（Adapter）」とし、De
 
 1. Scheduler の Unit の終わりの状態（`DeploymentCommands.unit`、`systemctl show` の読み取り、1 の 3 つの時点、`ComputeStatus` の欄）と `compute` の Health の理由（2）、`paw-llm-main.service` の `OOMPolicy=stop`。Fake の Runner で Test。
 2. `HybridRuntime` の分類の直し（3）。1 の後。
-3. CLI の Session（4）: Unit の設定、`--cgroups=split`、`_UnitProcess` の `Result`、Adapter の分類と優先順位。CLI の段は組み立てでは無効のまま。
+3. CLI の Session（4）: Unit の設定、`--cgroups=split`、`_UnitProcess.stop()` が止める前に `Result` を覚えること、Adapter の分類と優先順位。CLI の段は組み立てでは無効のまま。
 4. Tool の Sandbox（5）: Wrapper の前後の読み取りと状態の行、`sandbox/wire.py` の後方互換の解析、Toolkit と Runtime の分類。
 5. 7 の Smoke の報告（`docs/benchmarks/` または Issue のコメント）。
 
@@ -97,7 +97,7 @@ Decision 0071 は「OOM を見分けるのは Runtime（Adapter）」とし、De
 2. **見る Unit は Deployment の設定に `unit` で名前を書いたものだけとし（今は `paw-llm-main.service`）、その Unit に `OOMPolicy=stop` を明示する**（1）でよいか。推奨: **はい**。
 3. **Model の Server の OOM Kill は `compute` の Component で、直近 1 時間に 1 回でも `WARNING`（`model_server_oom_killed`）。`agent_incidents` には書かない**（2）でよいか。推奨: **はい**（数値は暫定値）。
 4. **Local の Node の `ConnectionError` は、Lease の後に Unit が `oom-kill` で終わっていたら `HybridRuntime` が `AgentOutOfMemory` に直す（最大 10 秒待つ）。同時に走っていた Node はそれぞれ数える**（3）でよいか。推奨: **はい**（1 回の Kill で 3 件以上になり `task_queue` が `ERROR` になりうるが、閾値は Decision 0071 の暫定値で、運用で見直す）。
-5. **CLI の Session は Unit の `Result=oom-kill` で知る（`OOMPolicy=stop`・`MemoryAccounting=yes`・`podman run --cgroups=split`、`Result` は Unit を止める前に読む）。`submit` の前の OOM は他の失敗より優先して `AgentOutOfMemory`**（4）でよいか。推奨: **はい**（Smoke で `split` が使えなければ、Wrapper が `OOMKilled` を読んで終了 Code で返す案に、新しい Decision で替える）。
+5. **CLI の Session は Unit の `Result=oom-kill` で知る（`OOMPolicy=stop`・`MemoryAccounting=yes`・`podman run --cgroups=split`、`Result` は `_UnitProcess.stop()` が `systemctl stop` を出す前に読んで覚える）。`submit` の前の OOM は他の失敗より優先して `AgentOutOfMemory`**（4）でよいか。推奨: **はい**（Smoke で `split` が使えなければ、Wrapper が `OOMKilled` を読んで終了 Code で返す案に、新しい Decision で替える）。
 6. **Tool の Sandbox は Wrapper が `exec` の前後で Host の側から Container の `memory.events` の `oom_kill` を比べ、状態の行に `oom=<0|1|->` を足す（古い Wrapper の行も受け付ける）。`oom=1` なら Node の試行を `AgentOutOfMemory` で終える（Decision 0083 の 4 のとおり）**（5）でよいか。推奨: **はい**。代わりの案: Model に OOM を伝えて Node を続け、数だけ残す（Decision 0083 の 4 を一部置き換える）。
 7. **PR を 8 の 5 つに分ける**でよいか。推奨: **はい**。
 
