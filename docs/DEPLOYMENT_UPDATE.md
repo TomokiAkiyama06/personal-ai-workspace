@@ -1,6 +1,6 @@
 # Deployment / Update / Rollback
 
-更新日: 2026-10-08
+更新日: 2026-10-16
 Status: [FIXED DIRECTION]
 
 ## Principles
@@ -170,8 +170,11 @@ the workspace later:
    `paw-audit-retention-failure.service` and run `systemctl enable --now paw-audit-retention.timer`
    (Decision 0031). Without it no `audit_events` partition is created and every audited action
    fails once the existing ones run out.
-2. Likewise enable `paw-recovery-backup.timer` (Decision 0054), `paw-memory-projection.timer`
-   and `paw-user-erasure.timer`.
+2. Likewise enable `paw-memory-projection.timer` and `paw-user-erasure.timer`, and
+   `paw-recovery-backup.timer` (Decision 0054) once the Recovery Repository (private repository,
+   deploy key, checkout, `PAW_RECOVERY_REPOSITORY_DIR`) exists. Until then keep that timer out of
+   the release configuration's `start` and `precheck` (`apps/backend/README.md`, "配置");
+   `paw-release update` is refused until a recovery backup has succeeded.
 3. Before each update, `paw-release precheck` must pass: it runs `audit-retention-check`'s
    coverage check (partitions to the end of next month) and checks that the timers are enabled.
 

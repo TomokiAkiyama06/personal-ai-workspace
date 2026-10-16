@@ -3899,25 +3899,48 @@ python -m paw_backend.cli recovery-restore --apply  # 1 Transaction で書く
 
 ### 配置（承認の後、運用者が行う。root で）
 
+前提: PostgreSQL 18 と pgvector、`uv`（`/usr/local/bin/uv`）、Node 24（`apps/web` は `>=24.21.0 <25` で `engine-strict`。Distribution の `nodejs` は古いことが多い（Ubuntu 26.04 は 22）ので、公式の Build を `/usr/local/lib/nodejs` に置く）。Host に `python3.13` がなくてもよい（`uv` が `/opt/paw/python` に入れる）。Build の Command と理由は [`release.example.toml`](deploy/release/release.example.toml) の `build` の注釈にある。
+
 ```bash
+# System の User と Group（Unit の User=・Group= と各 README が前提にするもの）
+install -d -o root -g root -m 0755 /var/lib/paw
+useradd --system --user-group --home-dir /var/lib/paw --no-create-home --shell /usr/sbin/nologin paw  # Backend
 useradd --system --no-create-home --shell /usr/sbin/nologin paw-maint  # Decision 0031 6
-install -d -m 0755 /opt/paw/releases
+useradd --system --user-group --home-dir /srv/paw-llm --no-create-home --shell /usr/sbin/nologin paw-llm  # paw-llm-main.service
+groupadd --system paw-sandbox && usermod -aG paw-sandbox paw           # deploy/sandbox/README.md
+useradd --system --user-group --no-create-home --shell /usr/sbin/nologin paw-egress  # deploy/egress
+groupadd --system paw-cli-bridge                                        # deploy/cli-session/README.md
+useradd --system --home-dir /var/lib/paw-agent-cli --create-home --shell /usr/sbin/nologin paw-agent-cli
+usermod -aG paw-cli-bridge paw-agent-cli   # 唯一の Member（paw・paw-egress は入れない）
+
+# Node 24（sha256 を nodejs.org の SHASUMS256.txt で確かめてから）
+install -d -m 0755 /usr/local/lib/nodejs
+tar -xJf node-v24.21.0-linux-x64.tar.xz -C /usr/local/lib/nodejs
+chown -R root:root /usr/local/lib/nodejs/node-v24.21.0-linux-x64
+
+install -d -m 0755 /opt/paw /opt/paw/releases
 install -d -m 0700 /var/lib/paw/deploy
 install -d -m 0700 -o paw-maint /var/lib/paw/restore-points
 cp deploy/release/paw_release.py /usr/local/sbin/paw-release && chmod 0755 /usr/local/sbin/paw-release
-cp deploy/release/release.example.toml /etc/paw/release.toml        # Path と Unit 名を合わせる
+cp deploy/release/release.example.toml /etc/paw/release.toml        # Path・Port・Unit 名を合わせる
 # /etc/paw/deploy.env（chmod 600、root）: PAW_MIGRATION_DATABASE_URL、PAW_DATABASE_URL、
 # PAW_RECOVERY_REPOSITORY_DIR、PAW_DEPLOY_ADMIN_DATABASE_URL、PAW_APP_DATABASE_ROLE など
+# /etc/paw/backend.env（root:paw 0640）: PAW_DATABASE_URL など。Port 8000 が他で使われていれば
+# PAW_PORT=<空いている Port> を置き、release.toml の health の URL も同じ Port にする
 cp deploy/systemd/*.service deploy/systemd/*.timer /etc/systemd/system/
 systemctl daemon-reload
 paw-release build --repo /srv/paw/source --commit origin/main
 paw-release install <version>
 # Audit の保存期間（Decision 0031、Issue #54 のコメント）と他の定期実行
-systemctl enable --now paw-audit-retention.timer paw-recovery-backup.timer \
+systemctl enable --now paw-audit-retention.timer \
   paw-memory-projection.timer paw-user-erasure.timer paw-release-prune.timer \
   paw-backend.service
+# Recovery Repository を用意した後（下の順序）
+systemctl enable --now paw-recovery-backup.timer
 python3 /usr/local/sbin/paw-release precheck <next version>   # Timer と Partition の確認を含む
 ```
+
+**Recovery Backup の順序**: `paw-recovery-backup.timer` は Recovery Repository（専用の Private Repository、`paw` の Deploy Key、Checkout、`/etc/paw/recovery-backup.env` と `deploy.env` の `PAW_RECOVERY_REPOSITORY_DIR`。[`paw-recovery-backup.service`](deploy/systemd/paw-recovery-backup.service) の注釈と [Recovery Repository](#recovery-repositorybackup--restore)）を用意してから有効にする。用意する前に `paw-release install` するときは、`/etc/paw/release.toml` の `start` と `precheck` から `paw-recovery-backup.timer` を外しておき（`stop` には残してよい）、用意した後に Timer を有効にして戻す。外さないと `install` の `start` が Timer を起動し、毎回の失敗で `crit` の通知が出る。`deploy-precheck` は 90 分以内の Recovery Backup の成功を求めるので、Recovery Repository を用意するまで `paw-release update` は拒否される。
 
 `/opt/paw/releases` は root が所有し、Backend の User（`paw`）にも `paw-maint` にも書き込ませない。復旧点の Directory は `backend_prefix` の User（例 `paw-maint`）の 0700。
 
