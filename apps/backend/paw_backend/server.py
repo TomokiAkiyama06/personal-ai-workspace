@@ -34,6 +34,34 @@ from paw_backend.runtime_config import (
 
 logger = logging.getLogger("paw_backend.server")
 
+
+class _StartupLogHandler(logging.StreamHandler):
+    """Writes to the current ``sys.stderr`` (the journal under systemd)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setFormatter(logging.Formatter("%(levelname)s:     %(message)s"))
+
+    @property
+    def stream(self):
+        return sys.stderr
+
+    @stream.setter
+    def stream(self, _value) -> None:
+        pass
+
+
+def show_startup_log() -> None:
+    """Make this module's start-up lines (the runtime configuration's summary
+    at INFO, its warning) reach stderr: the process configures no logging of
+    its own, and Uvicorn configures only its own loggers, later (Codex review
+    #265). Idempotent."""
+    if not any(isinstance(h, _StartupLogHandler) for h in logger.handlers):
+        logger.addHandler(_StartupLogHandler())
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+
+
 #: Logged once at start when ``PAW_RUNTIME_CONFIG_FILE`` is not set.
 RUNTIME_CONFIG_NOT_SET = (
     "runtime configuration not set: compute, local model, sandbox and "
@@ -123,6 +151,7 @@ def build_app(settings: Settings, wiring: RuntimeWiring) -> FastAPI:
 
 
 def main() -> None:
+    show_startup_log()
     try:
         settings = Settings()
         wiring = runtime_wiring(settings)
