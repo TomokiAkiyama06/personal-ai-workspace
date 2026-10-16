@@ -16,6 +16,14 @@
 # the application role, PAW_WEB_DIST_DIR=/opt/paw/current/apps/web/dist, ...)
 # and is readable by root and the backend's user only. It never holds
 # PAW_MIGRATION_DATABASE_URL (Decision 0004 5.2).
+#
+# PAW_RUNTIME_CONFIG_FILE=/etc/paw/runtime.toml in backend.env turns on the
+# Compute Scheduler, the local model, the sandbox, git over SSH and the
+# orchestrator (Decision 0093; apps/backend/deploy/runtime/runtime.example.toml,
+# root:paw 0640). Without it none of them run (one warning at start). A file
+# that is wrong stops the start (exit code 2): check it first with
+#   sudo -u paw /opt/paw/current/venv/bin/python -m paw_backend.cli \
+#     runtime-config-check /etc/paw/runtime.toml
 
 [Unit]
 Description=Personal AI Workspace backend

@@ -68,7 +68,7 @@ apps/backend/
 │  │  ├─ passkeys/         # Passkey（WebAuthn）: Ceremony の検証、Challenge、登録・認証・失効、Passkey の Step-up の Verifier、Tool Broker の強い承認の Step-up（PAW-023）
 │  │  └─ onboarding/       # 招待、QR / リンクの端末の Pairing、User の Lifecycle（削除・復元）、1 回限りの Token（PAW-024）
 │  ├─ identity/            # 最小の users、One-time Token。`redeemer.py` は Web 側、`operator.py`（Owner の作成・Token の発行）は cli だけが使う（PAW-021）
-│  ├─ cli/                 # server-local の管理コマンド `python -m paw_backend.cli`（PAW-021。`deploy-*` は PAW-068。`audit-retention-*` は Issue #117、`memory-projection-*` は PAW-045、`compute-status` は PAW-036、`user-erasure-run` は Issue #127）
+│  ├─ cli/                 # server-local の管理コマンド `python -m paw_backend.cli`（PAW-021。`deploy-*` は PAW-068。`audit-retention-*` は Issue #117、`memory-projection-*` は PAW-045、`compute-status` は PAW-036、`user-erasure-run` は Issue #127、`runtime-config-check` は Decision 0093）
 │  ├─ compute/             # GPU / Compute Resource Scheduler: 読み取り専用の GPU Probe、VRAM の勘定、KV Cache の Admission、縮退と常駐、Exclusive、Hybrid の Runtime（PAW-036）、Kaggle / Full GPU Mode（PAW-037）
 │  ├─ orchestrator/        # DAG Agent Orchestrator: Plan、Scheduler、DAG の永続化と Fencing、Runtime の Protocol、Tool・Budget の Gateway、Project 削除の Sweep（PAW-034）、worktree と統合の継ぎ目 `workspaces.py`（PAW-035）
 │  ├─ integration/         # Parallel Worktree / Integration Node: Worker ごとの worktree・branch、integration branch への統合と Conflict の検知、統合後の Test → Evaluator → Review の Gate（PAW-035）、Gate を通った `target` の Push と PR の作成（#132）
@@ -192,6 +192,24 @@ Database には pgvector が必要です（CI は `pgvector/pgvector:pg18` を�
 | `PAW_EVENT_QUEUE_SIZE` | `100` | 接続ごとの Event Queue。溢れた場合は古い Event を捨てる |
 | `PAW_EVENT_MAX_SUBSCRIBERS` | `100` | 同時に接続できる SSE / WebSocket の数。超えた接続は SSE が 503、WebSocket が Close Code 1013 |
 | `PAW_LOG_LEVEL` | `info` | Uvicorn の Log Level |
+
+### 本番の組み立て（`PAW_RUNTIME_CONFIG_FILE`、Decision 0093）
+
+[Decision 0093](../../docs/decisions/0093-production-runtime-config.md)（Approved、Issue #208）。`server.main()` は `PAW_RUNTIME_CONFIG_FILE` の TOML（本番は `/etc/paw/runtime.toml`、`root:paw 0640`）を起動の時に 1 回だけ読み（`paw_backend/runtime_config.py`）、書いた Section だけを `create_app` に渡します。未設定なら今までどおり何も組み立てず（Scheduler の経路は `503`、Orchestrator なし、git は `SubprocessGitRunner`）、WARNING を 1 回出します。
+
+| Section | 組み立てるもの |
+| --- | --- |
+| `[compute]`（`nvidia_smi`・`gpu_index`・`restore_margin_mib`）、`[[compute.deployments]]`（`name`・`role`・`weights_mib`・`kv_pool_mib`・`runtime_mib`・`workspace_mib`・`kv_bytes_per_token`・`max_sequences`・`max_context_tokens`・`residency`・`cpu_fallback`・`initial`）、`[compute.deployments.commands]`（`gpu`・`unload`・`cpu`・`pids` の argv、`metrics_url`、`unit`） | `ComputeSetup`（`ComputeConfig`・`NvidiaSmiProbe`・`CommandModelControl`。`commands` がどこにも無ければ `control=None`） |
+| `[local_model]`（`base_url`・`deployment`・`served_model`・`model_id`・`agent_label`。`[compute]` が要る） | `LocalModelSetup` |
+| `[ssh]`（`identity_template`、既定 `/etc/paw/ssh-keys/{user}.key`） | `[git]` と `[sandbox]` の `ssh` が共有する `TemplateSshKeyDirectory`。接続先は `PAW_REPOSITORY_SSH_*` |
+| `[git]`（`runner = "subprocess"` / `"ssh"`） | `git_runner`（`SshGitRunner`） |
+| `[sandbox]`（`runner = "ssh"` / `"local_wrapper"`、`shim_base`、`shim_group`（Group の名前）、`idle_seconds`、local_wrapper は `wrapper`・`wrapper_options`） | `SandboxSetup`。`ssh` は `[git] runner = "ssh"` が要る |
+| `[orchestrator.ladders]`（`planner`・`worker`・`researcher`・`reviewer`） | `OrchestratorConfig`。Label は有効な Runtime（`[compute]`+`[local_model]`+`[sandbox]` のときの `agent_label`）だけ。`PAW_DATABASE_URL` が要る |
+| `[agents.codex]` / `[agents.claude]` | 予約（書けば起動しない） |
+
+- File・その上の Directory・各 Command の `argv[0]`（Link の各段とその Directory、Script の `#!` の Interpreter を含む）・`nvidia_smi`・`wrapper` は root の持ち物で Group / Others が書けないこと、Shell の名前の `argv[0]` の拒否、Loopback だけの URL、不明な Key・Decision が値を決めた Key（Headroom・Timeout・並列数など）の拒否。どの誤りでも Backend は起動しません（終了 Code 2、`Invalid runtime configuration: <section>.<key>: <理由>`、値は出さない）。Secret は書けません（その Key がない）。
+- 変えたら再起動の前に、配備の Host で `paw` として `python -m paw_backend.cli runtime-config-check /etc/paw/runtime.toml` を動かします（同じ検査、有効な部分の一覧を値なしで出す。起動・DB・Command の実行はしない。0 / 1 / 2）。
+- 例・Helper・polkit の規則は `deploy/runtime/` の [`runtime.example.toml`](deploy/runtime/runtime.example.toml)、[`paw-unit-pids`](deploy/runtime/paw-unit-pids)、[`50-paw-llm-main.rules`](deploy/runtime/50-paw-llm-main.rules)。配備の手順と確認は [`docs/DEPLOYMENT_UPDATE.md`](../../docs/DEPLOYMENT_UPDATE.md) の「Runtime configuration」。
 
 ## HTTPS
 
@@ -4459,6 +4477,8 @@ Scheduler の外で動く Process（他の User の vLLM など）は Lease の�
 
 ### 組み立て（例）
 
+本番は Python で組み立てず、設定 File の `[compute]` が同じものを組み立てます（[本番の組み立て](#本番の組み立てpaw_runtime_config_filedecision-0093)、Decision 0093）。下は Test と GPU の Smoke の形です。
+
 ```python
 from paw_backend.compute import (
     CommandModelControl,
@@ -4490,13 +4510,11 @@ main = DeploymentSpec(
 control = CommandModelControl(
     {
         "main": DeploymentCommands(
-            gpu=("systemctl", "start", "paw-llm-main.service"),
-            unload=("systemctl", "stop", "paw-llm-main.service"),
-            # Unit の cgroup の全 Process（MainPID だけでは足りません）。
-            pids=(
-                "/usr/bin/cat",
-                "/sys/fs/cgroup/system.slice/paw-llm-main.service/cgroup.procs",
-            ),
+            gpu=("/usr/bin/systemctl", "start", "paw-llm-main.service"),
+            unload=("/usr/bin/systemctl", "stop", "paw-llm-main.service"),
+            # Unit の cgroup の全 Process（MainPID だけでは足りません）。止まった
+            # Unit には cgroup が無いので cat ではなく paw-unit-pids（Decision 0093）。
+            pids=("/usr/local/lib/paw/paw-unit-pids", "paw-llm-main.service"),
             # vLLM の KV の使用率（Decision 0076 の 3）。paw-llm-main.service の
             # --port 18080 と同じ Port。
             metrics_url="http://127.0.0.1:18080/metrics",

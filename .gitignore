@@ -38,6 +38,8 @@ logs/
 tmp/
 temp/
 runtime/
+# ... but not the runtime configuration's deployment files (Decision 0093, 8).
+!/apps/backend/deploy/runtime/
 
 # Local AI model weights / caches
 models/
