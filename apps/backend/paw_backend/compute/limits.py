@@ -58,6 +58,19 @@ DEFAULT_CONTROL_TIMEOUT_SECONDS = 900.0
 MAX_CONTROL_TIMEOUT_SECONDS = 1_800.0
 DEFAULT_MAX_CONTEXT_TOKENS = 32_768
 
+# -- how a model server's unit ended (Decision 0092, 1 to 3; issue #251) --------
+# ``systemctl show`` of the unit: a read, never as long as a load.
+DEFAULT_UNIT_SHOW_TIMEOUT_SECONDS = 10.0
+# The ``oom-kill`` ends of each deployment's unit are kept this long (System
+# Health counts the last hour) and at most this many (the oldest go first).
+MODEL_SERVER_OOM_WINDOW_SECONDS = 3_600.0
+MAX_MODEL_SERVER_OOM_ENDS = 64
+# A runtime that lost its model server asks whether the unit was killed by the
+# OOM killer; while the unit is still ``active`` (systemd has not noticed the
+# kill yet) it is read again every 0.5 s for up to 10 s.
+UNIT_END_WAIT_SECONDS = 10.0
+UNIT_END_POLL_SECONDS = 0.5
+
 # -- Exclusive -----------------------------------------------------------------
 DEFAULT_VERIFY_TIMEOUT_SECONDS = 60.0  # to see the VRAM free after the unloads
 DEFAULT_VERIFY_POLL_SECONDS = 2.0

@@ -211,6 +211,32 @@ class ComputeSourceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((health.severity, health.status), (Severity.INFO, Status.OK))
         self.assertEqual(health.metrics["models_on_gpu"], 3)
 
+    async def test_a_model_server_killed_by_the_oom_killer_is_a_warning(self):
+        # Decision 0092, 2: an ``oom-kill`` end of a model server's unit in the
+        # last hour, also when no agent ran on it.
+        scheduler, _, _, _ = build()
+        await scheduler.refresh()
+        status = scheduler.status()
+        health = await ComputeSource(StaticScheduler(status)).check()
+        self.assertEqual(health.metrics["model_server_oom_kills_last_hour"], 0)
+        self.assertNotIn("model_server_oom_killed", health.reasons)
+        main = status.deployment("main")
+        others = tuple(d for d in status.deployments if d.name != "main")
+        killed = replace(
+            status,
+            deployments=(replace(main, oom_kills_last_hour=2), *others),
+            model_server_oom_kills_last_hour=2,
+        )
+        health = await ComputeSource(StaticScheduler(killed)).check()
+        self.assertEqual(
+            (health.severity, health.status, health.reasons),
+            (Severity.WARNING, Status.DEGRADED, ("model_server_oom_killed",)),
+        )
+        self.assertEqual(health.metrics["model_server_oom_kills_last_hour"], 2)
+        parts = {part["role"]: part for part in health.parts}
+        self.assertEqual(parts["main"]["oom_kills_last_hour"], 2)
+        self.assertEqual(parts["memory_worker"]["oom_kills_last_hour"], 0)
+
     async def test_full_gpu_mode(self):
         scheduler, _, _, _ = build()
         await scheduler.refresh()

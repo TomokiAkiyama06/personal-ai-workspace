@@ -208,6 +208,9 @@ class ComputeSource:
             "waiting": sum(status.waiting.values()),
             "waiting_for_vram": status.vram_waiting,
             "exclusive_age_seconds": _seconds(status.exclusive_age_seconds),
+            "model_server_oom_kills_last_hour": (
+                status.model_server_oom_kills_last_hour
+            ),
         }
         for resource_class, count in status.leases.items():
             metrics[f"leases_{resource_class.value}"] = count
@@ -238,6 +241,13 @@ class ComputeSource:
         if status.vram_waiting or status.exclusive_waiting_for_vram:
             warnings = True
             reasons.append("waiting_for_vram")
+        if status.model_server_oom_kills_last_hour:
+            # Decision 0092, 2: a model server's unit was ended by the OOM
+            # killer in the last hour. The scheduler loads it again, so one kill
+            # is a warning (as Decision 0071 for the agents' OOM); it shows also
+            # when no agent was running on it.
+            warnings = True
+            reasons.append("model_server_oom_killed")
         parts = []
         for deployment in status.deployments:
             parts.append(
@@ -252,6 +262,7 @@ class ComputeSource:
                     "max_sequences": deployment.max_sequences,
                     "observed_kv_fraction": deployment.observed_kv_fraction,
                     "observed_on_gpu": deployment.observed_on_gpu,
+                    "oom_kills_last_hour": deployment.oom_kills_last_hour,
                 }
             )
             if deployment.state is DeploymentState.FAILED:

@@ -20,11 +20,15 @@ UNIT = (
 )
 
 
-def exec_start() -> list[str]:
+def service() -> configparser.SectionProxy:
     parser = configparser.ConfigParser(strict=False, interpolation=None)
     parser.optionxform = str  # systemd keys are case-sensitive
     parser.read_string(UNIT.read_text(encoding="utf-8"))
-    return shlex.split(parser["Service"]["ExecStart"])
+    return parser["Service"]
+
+
+def exec_start() -> list[str]:
+    return shlex.split(service()["ExecStart"])
 
 
 def option(argv: list[str], name: str) -> str | None:
@@ -54,6 +58,16 @@ class LlmMainUnitTest(unittest.TestCase):
         self.assertEqual(option(argv, "--reasoning-parser"), "qwen3")
         self.assertEqual(option(argv, "--tool-call-parser"), "qwen3_coder")
         self.assertIn("--enable-auto-tool-choice", argv)
+
+    def test_an_oom_kill_stops_the_whole_unit_as_oom_kill(self):
+        # Decision 0092, 1: ``OOMPolicy=stop`` whatever ``DefaultOOMPolicy=``
+        # says, so the unit ends with ``Result=oom-kill`` (also when the kernel
+        # kills only a child process) and the scheduler can read it; systemd
+        # sees the kill only with memory accounting, which ``MemoryMax=`` turns on.
+        unit = service()
+        self.assertEqual(unit.get("OOMPolicy"), "stop")
+        self.assertEqual(unit.get("MemoryMax"), "32G")
+        self.assertNotIn("Delegate", unit)
 
 
 if __name__ == "__main__":

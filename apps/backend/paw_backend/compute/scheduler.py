@@ -51,6 +51,18 @@ Observed free VRAM (Decision 0042)
     workload holds it) waits the same way before anything is drained or
     unloaded. The GPU utilisation is never used for admission.
 
+How a model server's unit ended (Decision 0092, 1 to 3, Approved; issue #251)
+    For a deployment whose control names a systemd unit, the scheduler reads the
+    unit's ``Result`` (``ModelControl.unit_state``) only when a reading finds the
+    processes of a deployment it holds on the GPU gone, before it starts the unit
+    again (a start erases the last result), and when a runtime asks
+    (``model_server_oom_killed``): ``Result`` does not change while the unit
+    runs, so a running unit is never read. One end is one ``InvocationID``; the
+    time it was first seen is kept and never moved by a later reading. Per
+    deployment, in memory only: the last end seen, and the ``oom-kill`` ends of
+    the last hour (at most 64), which a later normal end does not erase. System
+    Health counts those (``model_server_oom_kills_last_hour``).
+
 Everything happens on one event loop; the state changes between awaits are
 synchronous, so the only lock serialises the model actions (and the Exclusive
 transition) with each other.
@@ -61,6 +73,7 @@ import contextlib
 import logging
 import math
 import uuid
+from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from itertools import count
@@ -81,7 +94,7 @@ from paw_backend.compute.concurrency import (
     usable_tokens,
 )
 from paw_backend.compute.config import ComputeConfig, DeploymentSpec, check_name
-from paw_backend.compute.control import check_control
+from paw_backend.compute.control import UnitState, check_control
 from paw_backend.compute.domain import (
     CAPACITY_REFUSALS,
     CLASS_RANK,
@@ -104,7 +117,13 @@ from paw_backend.compute.errors import (
     ExclusiveUnavailableError,
     InvalidComputeArgumentError,
 )
-from paw_backend.compute.limits import DEFAULT_REFRESH_SECONDS
+from paw_backend.compute.limits import (
+    DEFAULT_REFRESH_SECONDS,
+    MAX_MODEL_SERVER_OOM_ENDS,
+    MODEL_SERVER_OOM_WINDOW_SECONDS,
+    UNIT_END_POLL_SECONDS,
+    UNIT_END_WAIT_SECONDS,
+)
 from paw_backend.compute.probe import GpuDevice, GpuProcess
 from paw_backend.orchestrator.config import Clock, SystemClock
 from paw_backend.tools.interfaces import require_async_method
@@ -298,6 +317,9 @@ class DeploymentStatus:
     # its processes could not be asked, none on the GPU); ``None`` there is no
     # model control to ask (the state is all there is).
     observed_on_gpu: bool | None = None
+    # How often its unit ended with ``Result=oom-kill`` in the last hour
+    # (Decision 0092, 2; 0 without a unit).
+    oom_kills_last_hour: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -323,6 +345,8 @@ class ComputeStatus:
     # Exclusive job waits for VRAM another workload holds (Decision 0042).
     vram_waiting: int = 0
     exclusive_waiting_for_vram: bool = False
+    # The deployments' ``oom_kills_last_hour`` together (Decision 0092, 2).
+    model_server_oom_kills_last_hour: int = 0
 
     def deployment(self, name: str) -> DeploymentStatus | None:
         for deployment in self.deployments:
@@ -349,6 +373,16 @@ class CodingCapacity:
     limit: int
 
 
+@dataclass(frozen=True, slots=True)
+class _UnitEnd:
+    """One end of a deployment's unit: its run (``invocation_id``), whether the
+    OOM killer ended it, and when the scheduler first saw it (monotonic)."""
+
+    invocation_id: str
+    oom_killed: bool
+    seen_at: float
+
+
 @dataclass(eq=False, slots=True)
 class _Deployment:
     spec: DeploymentSpec
@@ -368,6 +402,10 @@ class _Deployment:
     retry_at: float | None = None
     # See ``DeploymentStatus.observed_on_gpu``.
     seen_on_gpu: bool = False
+    # How its unit last ended, and its ``oom-kill`` ends (``InvocationID``,
+    # first seen) of the last hour, oldest first (Decision 0092, 1).
+    unit_end: _UnitEnd | None = None
+    oom_ends: deque[tuple[str, float]] = field(default_factory=deque)
 
     @property
     def counts_on_gpu(self) -> bool:
@@ -799,6 +837,32 @@ class ComputeScheduler:
         # Coding work is admitted at all.
         return max(1, tokens)
 
+    async def model_server_oom_killed(self, deployment: str, *, since: float) -> bool:
+        """Whether the unit of ``deployment`` was ended by the OOM killer at or
+        after ``since`` (a lease's ``granted_at``; Decision 0092, 3): an
+        ``oom-kill`` end first seen then or later. The unit is read now; while it
+        is still ``active`` (the kernel killed a process and systemd has not
+        stopped the unit yet) it is read again every 0.5 s for up to 10 s.
+        ``False`` without a unit, when it cannot be read or ended otherwise."""
+        entry = self._deployment(deployment)
+        if (
+            isinstance(since, bool)
+            or not isinstance(since, int | float)
+            or not math.isfinite(since)
+            or since < 0
+        ):
+            raise InvalidComputeArgumentError("since")
+        polls = round(UNIT_END_WAIT_SECONDS / UNIT_END_POLL_SECONDS)
+        for attempt in range(polls + 1):
+            state = await self._observe_unit(entry)
+            if self._oom_killed_since(entry, since):
+                return True
+            if state is None or state.ended:
+                return False
+            if attempt < polls:
+                await self._clock.sleep(UNIT_END_POLL_SECONDS)
+        return False
+
     def status(self) -> ComputeStatus:
         fresh = self._fresh()
         leases = dict.fromkeys(ResourceClass, 0)
@@ -837,6 +901,7 @@ class ComputeScheduler:
                     observed_on_gpu=(
                         None if self._control is None else entry.seen_on_gpu
                     ),
+                    oom_kills_last_hour=self._oom_kills(entry),
                 )
                 for entry in self._deployments.values()
             ),
@@ -855,6 +920,9 @@ class ComputeScheduler:
                 if waiter.last is Refusal.INSUFFICIENT_FREE_VRAM
             ),
             exclusive_waiting_for_vram=self._exclusive_waits_for_vram,
+            model_server_oom_kills_last_hour=sum(
+                self._oom_kills(entry) for entry in self._deployments.values()
+            ),
         )
 
     # -- the probe ------------------------------------------------------------
@@ -883,6 +951,13 @@ class ComputeScheduler:
         for entry in self._ordered:
             if not entry.busy and entry.counts_on_gpu:
                 inspected[entry] = await self._inspect(entry)
+                if (
+                    entry.state is DeploymentState.GPU
+                    and inspected[entry][0] == frozenset()
+                ):
+                    # Its processes are gone: how did its unit end (Decision
+                    # 0092, 1)? Read before it may be started again.
+                    await self._observe_unit(entry)
         if self._probe_failing:
             logger.info("GPU probe is available again")
         self._probe_failing = False
@@ -959,6 +1034,65 @@ class ComputeScheduler:
         ):
             observed = None
         return pids, (None if observed is None else float(observed))
+
+    # -- how a unit ended (Decision 0092) -------------------------------------
+
+    async def _observe_unit(self, entry: _Deployment) -> UnitState | None:
+        """Read the deployment's unit and keep an end it shows (``None``: no
+        unit, no control that reads one, or it could not be read)."""
+        read = getattr(self._control, "unit_state", None)
+        if read is None:
+            return None
+        try:
+            state = await read(entry.spec.name)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            logger.warning(
+                "The unit of deployment %s could not be read (%s)",
+                entry.spec.name,
+                type(error).__name__,
+            )
+            return None
+        if not isinstance(state, UnitState):
+            return None
+        if state.ended and state.invocation_id:
+            self._note_unit_end(entry, state)
+        return state
+
+    def _note_unit_end(self, entry: _Deployment, state: UnitState) -> None:
+        now = self._clock.monotonic()
+        last = entry.unit_end
+        if last is None or last.invocation_id != state.invocation_id:
+            last = _UnitEnd(state.invocation_id, state.oom_killed, now)
+        elif state.oom_killed and not last.oom_killed:
+            # Read while ``deactivating`` before systemd set the result.
+            last = replace(last, oom_killed=True)
+        entry.unit_end = last
+        if not last.oom_killed or any(
+            invocation == last.invocation_id for invocation, _ in entry.oom_ends
+        ):
+            return
+        entry.oom_ends.append((last.invocation_id, last.seen_at))
+        while len(entry.oom_ends) > MAX_MODEL_SERVER_OOM_ENDS:
+            entry.oom_ends.popleft()
+        self._prune_oom_ends(entry)
+        logger.warning(
+            "The unit of deployment %s was ended by the OOM killer", entry.spec.name
+        )
+
+    def _prune_oom_ends(self, entry: _Deployment) -> None:
+        horizon = self._clock.monotonic() - MODEL_SERVER_OOM_WINDOW_SECONDS
+        while entry.oom_ends and entry.oom_ends[0][1] < horizon:
+            entry.oom_ends.popleft()
+
+    def _oom_kills(self, entry: _Deployment) -> int:
+        self._prune_oom_ends(entry)
+        return len(entry.oom_ends)
+
+    @staticmethod
+    def _oom_killed_since(entry: _Deployment, since: float) -> bool:
+        return any(seen_at >= since for _, seen_at in entry.oom_ends)
 
     def _lose_sample(self, error_class: str) -> None:
         if not self._probe_failing:
@@ -1541,6 +1675,8 @@ class ComputeScheduler:
         entry.busy = True
         try:
             if action.operation == "gpu":
+                # Starting the unit erases how it last ended (Decision 0092, 1).
+                await self._observe_unit(entry)
                 await self._control.place(name, Placement.LOCAL_GPU)
                 state = DeploymentState.GPU
             elif action.operation == "cpu":
