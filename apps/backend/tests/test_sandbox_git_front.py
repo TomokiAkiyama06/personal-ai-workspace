@@ -306,6 +306,13 @@ class RouteByDestinationTest(unittest.TestCase):
         os.symlink("/workspace/sub", os.path.join(work, "example.com"))
         self.assertEqual(route("clone", "example.com:22", cwd=work), SHIM)
         self.assertEqual(route("clone", "https://example.com:22", cwd=work), SHIM)
+        # git adds ``.git`` for a bare clone before it turns control
+        # characters into spaces (Codex review of #254, P2).
+        os.symlink("/workspace/sub", os.path.join(work, "a .git"))
+        for flag in ("--bare", "--mirror"):
+            self.assertEqual(
+                route("clone", flag, "foo://host/a\x01", cwd=work), SHIM, flag
+            )
 
     def test_abbreviated_and_clustered_options_are_read_like_git(self):
         # Codex review of #248 (P2): git accepts a unique prefix of a long

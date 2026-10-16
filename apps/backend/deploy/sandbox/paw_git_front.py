@@ -407,11 +407,10 @@ def _created(
         if len(positional) == 2:
             created.append(_resolve(place, positional[1]))
         else:
-            name = _clone_name(positional[0], place)
             # A bare clone (``--bare``, ``--mirror``) is made in ``<name>.git``.
             # --mirror implies it; --no-mirror does not undo --bare.
             bare = flags["--bare"] or flags["--mirror"]
-            created.append(_resolve(place, f"{name}.git" if bare else name))
+            created.append(_resolve(place, _clone_name(positional[0], place, bare)))
     return created
 
 
@@ -426,10 +425,11 @@ def _long_name(given: str, options: dict[str, str]) -> str:
     return matches.pop()
 
 
-def _clone_name(source: str, place: str) -> str:
+def _clone_name(source: str, place: str, bare: bool) -> str:
     """The directory ``git clone <source>`` makes: git's "humanish" name
     (``git_url_basename``). It strips ``.bundle`` when the source is a bundle
-    file and ``.git`` otherwise (only one of them)."""
+    file and ``.git`` otherwise (only one of them); a bare clone's name ends in
+    ``.git`` (added before control characters are turned into spaces)."""
     start = source.find("://")
     start = 0 if start < 0 else start + 3
     # Authentication data: up to the last ``@`` before the first ``/``.
@@ -459,6 +459,8 @@ def _clone_name(source: str, place: str) -> str:
     name = name.removesuffix(".bundle" if _is_bundle(source, place) else ".git")
     if not name or name == "/":
         raise _Unreadable()
+    if bare:
+        name += ".git"
     # Control characters and spaces: one space, none at the ends.
     name = re.sub(r"[\x00-\x20]+", " ", name).strip(" ")
     if not name:
