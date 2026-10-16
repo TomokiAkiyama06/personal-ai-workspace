@@ -1,6 +1,7 @@
 # Runtime の OOM の検出の残り: Model の Server の Unit の `oom-kill` と、CLI・Tool の Sandbox の Container の cgroup の `oom_kill` をどこで・どう読むか
 
-- Status: Proposed
+- Status: Approved
+- Approval: 2026-10-16、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで直接回答して承認（approved as recommended, all 7 points）
 - Date: 2026-10-16
 - Scope: Issue [#251](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/251)（[#208](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/208) の後続、[#183](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/183) の残り）。`apps/backend/paw_backend/compute/`（`control.DeploymentCommands`・`ComputeScheduler`・`runtimes.HybridRuntime`）、`health/sources.ComputeSource`、`agents/cli_session.py`（`SystemdLauncher`・`_UnitProcess`）・`agents/claude_cli.py`・`agents/codex_cli.py`、`sandbox/wire.py`・`sandbox/tools.py`、`apps/backend/deploy/systemd/paw-llm-main.service`、`deploy/cli-session/`（`paw-cli-session@.service`・`paw_cli_session_run.py`）、`deploy/ssh-git-wrapper/paw_git_wrapper.py`（`SandboxCall`・`run_sandbox_exec`）
 - Supersedes: なし。[Decision 0083](0083-agent-runtime-adapters.md)（Approved）の 4 の表の `AgentOutOfMemory` の行のうち、「Model の Server の Unit が OOM Killer で終わった（`systemctl show` の `Result=oom-kill`。Scheduler / System Health が持つ状態から読む）」と「CLI や Tool の Process が Container の cgroup の `memory.events` の `oom_kill` の増加とともに終わった」を **どう実装するか** を決める（行の意味は変えない）。[Decision 0071](0071-agent-oom-and-escalation-records.md)（Approved）の 1〜4（Runtime が見分けて `AgentOutOfMemory` で報告する、Orchestrator は推測しない、`agent_incidents` に数える、`task_queue` の閾値）はそのまま使う
