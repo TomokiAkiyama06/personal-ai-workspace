@@ -1,6 +1,7 @@
 # Egress の Proxy への接続を Session に結び付ける方法（Session ごとの Socket を systemd の Template の Socket で作り、Session ごとに Proxy を 1 つ動かす）
 
-- Status: Proposed
+- Status: Approved
+- Approval: 2026-10-16、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで直接回答して承認（approved as recommended, all 6 points: 決めてほしいことの 1〜6 をすべて推奨どおり承認。3 は Review の修正（Host 全体の `flock` の枠と Slice の `TasksMax=`、Proxy ごとの Memory の上限、新しい接続の速さの上限、1 接続ごとの Log の行で数えること）の後に 2026-10-16 に改めて承認。2 の移行の手順も含む）
 - Date: 2026-10-16
 - Scope: Issue [#239](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/239) の残りの「Egress: Session ごとの Socket で Session を結び付ける（設計が要る）」。Issue [#208](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/208) の CLI の段を組み立てで有効にする前の前提。この Decision は設計だけで、コードは承認の後の PR で書く。関係する既存の口: `apps/backend/deploy/egress/`（`paw_egress.py`・`paw-egress.socket`・`paw-egress.service`・`paw-egress.nft`。#233・#240）、`apps/backend/deploy/cli-session/`（`paw-cli-session@.service`・`paw_cli_session_run.py`・`start-claude`・`start-codex`。#236・#244）、`apps/backend/paw_backend/agents/cli_session.py`（`create_session`・`SystemdLauncher`）。
 - 具体化: [Decision 0087](0087-cli-secret-store-and-egress.md)（Approved）の 3 の「1 つの接続ごとに Session の ID（Socket の前に置く小さな Header か、Session ごとの Socket）…を Log に残す」の 2 つの候補のうち、**Session ごとの Socket** を選ぶ。
@@ -149,7 +150,7 @@ Container
 
 ## 承認後の扱い
 
-承認されたら `Approval` に記録し、Status を Approved に改め、6 の PR を作る。
+承認されたので（上の `Approval`）、6 の PR を作る。
 方針を変えるときは、この Decision を書き換えず、新しい Decision から `Supersedes` する。
 [REQUIREMENTS.md](../../REQUIREMENTS.md) の原文は書き換えない。
 
