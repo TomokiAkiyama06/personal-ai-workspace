@@ -12,8 +12,12 @@
 # interpreter) likewise. Anything wrong stops the backend's start (exit code 2,
 # "Invalid runtime configuration: <section>.<key>: <reason>"). Check it first,
 # as the backend's user, on this host:
-#   sudo -u paw /opt/paw/current/venv/bin/python -m paw_backend.cli \
+#   systemd-run --uid=paw --pipe --wait --quiet \
+#     -p EnvironmentFile=/etc/paw/backend.env \
+#     /opt/paw/current/venv/bin/python -m paw_backend.cli \
 #     runtime-config-check /etc/paw/runtime.toml
+# (as paw, with backend.env's settings: [orchestrator] needs PAW_DATABASE_URL;
+# the database is not connected to).
 # It is read once at start: restart the backend after a change.
 #
 # No secret goes here (there is no key for one). The SSH connection

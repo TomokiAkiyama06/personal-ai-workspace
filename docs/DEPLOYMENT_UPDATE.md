@@ -182,7 +182,9 @@ install -o root -g root -m 0644 apps/backend/deploy/runtime/50-paw-llm-main.rule
 install -o root -g paw -m 0640 apps/backend/deploy/runtime/runtime.example.toml /etc/paw/runtime.toml
 # Edit /etc/paw/runtime.toml: keep only the sections of the step below.
 # /etc/paw/backend.env: PAW_RUNTIME_CONFIG_FILE=/etc/paw/runtime.toml
-sudo -u paw /opt/paw/current/venv/bin/python -m paw_backend.cli runtime-config-check /etc/paw/runtime.toml
+# As paw, with backend.env's settings ([orchestrator] needs PAW_DATABASE_URL; no connection is made):
+systemd-run --uid=paw --pipe --wait --quiet -p EnvironmentFile=/etc/paw/backend.env \
+  /opt/paw/current/venv/bin/python -m paw_backend.cli runtime-config-check /etc/paw/runtime.toml
 systemctl restart paw-backend.service
 ```
 

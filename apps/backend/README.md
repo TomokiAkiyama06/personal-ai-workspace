@@ -208,7 +208,7 @@ Database には pgvector が必要です（CI は `pgvector/pgvector:pg18` を�
 | `[agents.codex]` / `[agents.claude]` | 予約（書けば起動しない） |
 
 - File・その上の Directory・各 Command の `argv[0]`（Link の各段とその Directory、Script の `#!` の Interpreter を含む）・`nvidia_smi`・`wrapper` は root の持ち物で Group / Others が書けないこと、Shell の名前の `argv[0]` の拒否、Loopback だけの URL、不明な Key・Decision が値を決めた Key（Headroom・Timeout・並列数など）の拒否。どの誤りでも Backend は起動しません（終了 Code 2、`Invalid runtime configuration: <section>.<key>: <理由>`、値は出さない）。Secret は書けません（その Key がない）。
-- 変えたら再起動の前に、配備の Host で `paw` として `python -m paw_backend.cli runtime-config-check /etc/paw/runtime.toml` を動かします（同じ検査、有効な部分の一覧を値なしで出す。起動・DB・Command の実行はしない。0 / 1 / 2）。
+- 変えたら再起動の前に、配備の Host で `paw` として `backend.env` の環境で `python -m paw_backend.cli runtime-config-check /etc/paw/runtime.toml` を動かします（例 `systemd-run --uid=paw --pipe --wait --quiet -p EnvironmentFile=/etc/paw/backend.env /opt/paw/current/venv/bin/python -m paw_backend.cli runtime-config-check /etc/paw/runtime.toml`。`[orchestrator]` は `PAW_DATABASE_URL` が要る）（同じ検査、有効な部分の一覧を値なしで出す。起動・DB・Command の実行はしない。0 / 1 / 2）。
 - 例・Helper・polkit の規則は `deploy/runtime/` の [`runtime.example.toml`](deploy/runtime/runtime.example.toml)、[`paw-unit-pids`](deploy/runtime/paw-unit-pids)、[`50-paw-llm-main.rules`](deploy/runtime/50-paw-llm-main.rules)。配備の手順と確認は [`docs/DEPLOYMENT_UPDATE.md`](../../docs/DEPLOYMENT_UPDATE.md) の「Runtime configuration」。
 
 ## HTTPS
