@@ -28,14 +28,36 @@ pg_restore = "/usr/lib/postgresql/18/bin/pg_restore"
 
 [commands]
 # Run in the new release's directory ({release}) after it is extracted.
+# The build runs as root. Without a python3.13 on the host, uv downloads a
+# managed CPython into root's home (/root/.local/share/uv/python) and the
+# venv's python links to it, which paw / paw-maint cannot run: so
+# UV_PYTHON_INSTALL_DIR puts it under /opt/paw/python (root-owned, 0755), and
+# UV_LINK_MODE=copy keeps the release from sharing inodes with root's uv cache.
+# uv leaves an empty venv/.lock writable by everyone (0666, uv 0.12): the find
+# takes write access for others from anything in the venv.
+# apps/web needs Node >=24.21.0 <25 (engine-strict; apps/web/.node-version); a
+# distribution's nodejs is often older (Ubuntu 26.04: 22). Install the official
+# build (sha256 from nodejs.org SHASUMS256.txt) as root, for example
+#   install -d -m 0755 /usr/local/lib/nodejs
+#   tar -xJf node-v24.21.0-linux-x64.tar.xz -C /usr/local/lib/nodejs
+#   chown -R root:root /usr/local/lib/nodejs/node-v24.21.0-linux-x64
+# and use its npm with its node first on PATH (npm starts with "env node").
 build = [
-  ["/usr/local/bin/uv", "venv", "--python", "3.13", "{release}/venv"],
-  ["/usr/local/bin/uv", "pip", "install", "--python", "{release}/venv/bin/python", "{release}/apps/backend"],
-  ["/usr/bin/npm", "--prefix", "{release}/apps/web", "ci", "--ignore-scripts"],
-  ["/usr/bin/npm", "--prefix", "{release}/apps/web", "run", "build"],
+  ["/usr/bin/env", "UV_PYTHON_INSTALL_DIR=/opt/paw/python", "UV_LINK_MODE=copy", "/usr/local/bin/uv", "venv", "--python", "3.13", "{release}/venv"],
+  ["/usr/bin/env", "UV_PYTHON_INSTALL_DIR=/opt/paw/python", "UV_LINK_MODE=copy", "/usr/local/bin/uv", "pip", "install", "--python", "{release}/venv/bin/python", "{release}/apps/backend"],
+  ["/usr/bin/find", "{release}/venv", "-perm", "-0002", "!", "-type", "l", "-exec", "/usr/bin/chmod", "o-w", "{}", "+"],
+  ["/usr/bin/env", "PATH=/usr/local/lib/nodejs/node-v24.21.0-linux-x64/bin:/usr/bin:/bin", "/usr/local/lib/nodejs/node-v24.21.0-linux-x64/bin/npm", "--prefix", "{release}/apps/web", "ci", "--ignore-scripts"],
+  ["/usr/bin/env", "PATH=/usr/local/lib/nodejs/node-v24.21.0-linux-x64/bin:/usr/bin:/bin", "/usr/local/lib/nodejs/node-v24.21.0-linux-x64/bin/npm", "--prefix", "{release}/apps/web", "run", "build"],
 ]
 # Extra pre-update checks: the timers whose jobs the update relies on must be
 # enabled (Decision 0031: no audit_events partitions without its timer).
+# paw-recovery-backup.timer (here, in "stop" and in "start") assumes the
+# Recovery Repository is set up (private repository, deploy key, checkout,
+# PAW_RECOVERY_REPOSITORY_DIR; deploy/systemd/paw-recovery-backup.service).
+# Until then leave it out of "precheck" and "start" and do not enable it (its
+# runs would only fail and alert); add it back once the repository exists.
+# deploy-precheck also needs a recovery backup of the last 90 minutes, so
+# "paw-release update" refuses until then.
 precheck = [
   ["/usr/bin/systemctl", "is-enabled", "--quiet", "paw-audit-retention.timer"],
   ["/usr/bin/systemctl", "is-enabled", "--quiet", "paw-recovery-backup.timer"],
@@ -53,6 +75,8 @@ start = [
   ["/usr/bin/systemctl", "start", "paw-backend.service"],
   ["/usr/bin/systemctl", "start", "paw-audit-retention.timer", "paw-recovery-backup.timer", "paw-memory-projection.timer", "paw-user-erasure.timer"],
 ]
+# The backend's address (PAW_HOST / PAW_PORT in /etc/paw/backend.env; default
+# 127.0.0.1:8000). Use the same port here if 8000 is taken on the host.
 health = [
   ["/usr/bin/curl", "-fsS", "--max-time", "5", "-o", "/dev/null", "http://127.0.0.1:8000/api/v1/health/ready"],
 ]
