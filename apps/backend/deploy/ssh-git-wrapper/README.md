@@ -1,6 +1,6 @@
 # SSH の Forced Command の Wrapper（`paw-git-wrapper`）の配備
 
-更新日: 2026-10-11
+更新日: 2026-10-16
 
 Issue [#134](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/134)。
 [Decision 0029](../../../../docs/decisions/0029-per-user-git-runner-ssh.md)（Approved）の SSH の Wrapper と、
@@ -243,7 +243,7 @@ paw_ssh() {
 }
 # Backend と同じ形式の Remote Command を作る（語ごとに引用される）
 paw_cmd() {  # paw_cmd <cwd> <ceiling または -> <git の引数...>
-  /opt/paw/venv/bin/python - "$@" <<'EOF'
+  /opt/paw/current/venv/bin/python - "$@" <<'EOF'
 import shlex, sys
 from paw_backend.repositories.git import git_config_arguments
 cwd, ceiling, *args = sys.argv[1:]
@@ -254,7 +254,7 @@ EOF
 W=/home/alice/workspaces
 ```
 
-（`/opt/paw/venv` は Backend の仮想環境の Path に読み替える。確認用の Checkout として `alice` で `$W/check` に `git init` した Repository を 1 つ用意し、最初の Commit を作っておく。）
+（`/opt/paw/current/venv` は `paw-release` の配置での Backend の仮想環境。別の配置ならその Path に読み替える。確認用の Checkout として `alice` で `$W/check` に `git init` した Repository を 1 つ用意し、最初の Commit を作っておく。）
 
 - [ ] 1. 版: `git --version` が 2.45.1 以上（または上の Maintenance 版以降）、`ssh -V` が OpenSSH 7.2 以上、`/usr/bin/python3 --version` が 3.10 以上。
 - [ ] 2. 権限: `stat -c '%U %a' /usr/local/lib/paw/paw-git-wrapper` が `root 755`、`/etc/paw/ssh-keys` が `paw 700`、`/etc/paw/ssh-keys/alice.key` が `paw 600`、`/home/alice/.ssh/authorized_keys` が `alice 600`。

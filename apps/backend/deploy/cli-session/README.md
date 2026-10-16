@@ -1,6 +1,6 @@
 # CLI の Session の Container の配備（Claude Code・Codex の Subscription）
 
-更新日: 2026-10-15
+更新日: 2026-10-16
 
 [Decision 0083](../../../../docs/decisions/0083-agent-runtime-adapters.md) の 6 と [Decision 0087](../../../../docs/decisions/0087-cli-secret-store-and-egress.md) の 3・4（どちらも Approved）。
 Backend の側は `paw_backend/agents/cli_session.py` の `SystemdLauncher`、`claude_cli.py` の `ClaudeSessionAdapter` / `ClaudeCliRuntime`、`codex_cli.py` の `SystemdCodexLauncher` / `CodexSessionAdapter` / `CodexCliRuntime`（[Decision 0089](../../../../docs/decisions/0089-codex-cli-runtime-route.md)）、`bridge.py` の `McpBridge`。
@@ -31,7 +31,7 @@ Codex の Session（`launch.json` の `cli` が `codex`）は `codex app-server`
 ## 配備（root）
 
 1. Account と Group: `useradd --system --home-dir /var/lib/paw-agent-cli --create-home --shell /usr/sbin/nologin paw-agent-cli`、`groupadd --system paw-cli-bridge`（`paw-egress` の README と同じ Group）、`usermod -aG paw-cli-bridge paw-agent-cli`。Backend の User（`paw`）は Group に入れない（Directory の所有者なので要らない）。Rootless の Podman の `XDG_RUNTIME_DIR` は Unit の `RuntimeDirectory`（`/run/paw-cli-session/<uuid>`）にする（`ProtectHome=yes` が `/run/user` を隠すため。Linger は要らない）。
-2. `/run/paw-cli`: `paw-backend.service` に `RuntimeDirectory=paw-cli` と `RuntimeDirectoryMode=2750` を足し、Group を `paw-cli-bridge` にする（`tmpfiles.d` の `d /run/paw-cli 2750 paw paw-cli-bridge -` でもよい）。
+2. `/run/paw-cli`: `tmpfiles.d` で作る（`/etc/tmpfiles.d/paw-cli.conf` に `d /run/paw-cli 2750 paw paw-cli-bridge -` を書き、`systemd-tmpfiles --create /etc/tmpfiles.d/paw-cli.conf`）。`paw-backend.service` の `RuntimeDirectory=` は使わない（Group が Unit の `Group=`（`paw`）になり、`paw-cli-bridge` にできない。Unit の停止で消えもする）。
 3. `install -m 0755 paw_cli_session_run.py /usr/local/lib/paw/`、`paw-cli-session@.service` を `/etc/systemd/system/`、`50-paw-cli-session.rules` を `/etc/polkit-1/rules.d/`、`cli-session.example.toml` を `/etc/paw/cli-session.toml`（Image の Digest を入れる）。
 4. Image: `Containerfile` の Base の Digest と Claude Code の版を固定して `paw-agent-cli` で Build し、Digest を `cli-session.toml` に入れる。Codex は `Containerfile.codex`（Codex の版は Backend の `VERIFIED_VERSIONS` にあるもの）を同じく Build して `codex_image` に入れる。
 
