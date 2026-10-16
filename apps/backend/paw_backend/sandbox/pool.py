@@ -94,6 +94,7 @@ class SandboxPool:
         command_timeout_s: float = COMMAND_TIMEOUT_SECONDS,
         idle_seconds: float = DEFAULT_IDLE_SECONDS,
         clock: Callable[[], float] = time.monotonic,
+        oom_status: bool = False,
     ) -> None:
         for name in ("start", "exec", "stop"):
             if not callable(getattr(runner, name, None)):
@@ -108,6 +109,9 @@ class SandboxPool:
         self._command_timeout = float(command_timeout_s)
         self._idle = float(idle_seconds)
         self._clock = clock
+        # Ask the wrapper whether a command's container counted an OOM kill
+        # (``paw-sandbox/v2``, ``PAW_SANDBOX_OOM_STATUS``; Decision 0092, 5).
+        self._oom_status = bool(oom_status)
         self._sandboxes: dict[SandboxKey, _Sandbox] = {}
         # The lock of each key and how many hold or wait for it.
         self._locks: dict[SandboxKey, list] = {}
@@ -168,11 +172,15 @@ class SandboxPool:
         self, key: SandboxKey, sandbox: _Sandbox, command: SandboxCommand
     ) -> SandboxExecResult:
         try:
+            # One command at a time per sandbox (the key's lock in ``run``):
+            # an OOM kill the wrapper sees while it runs is this command's.
+            options = {"oom_status": True} if self._oom_status else {}
             return await self._runner.exec(
                 sandbox.account,
                 sandbox.sandbox_id,
                 command,
                 timeout_s=self._command_timeout + EXEC_MARGIN_SECONDS,
+                **options,
             )
         except SandboxGoneError:
             raise

@@ -80,11 +80,15 @@ class SandboxRunner(Protocol):
         command: SandboxCommand,
         *,
         timeout_s: float,
+        oom_status: bool = False,
     ) -> SandboxExecResult:
         """Run ``command``; ``SandboxGoneError`` when the sandbox was not
         running (the command did not run), ``SandboxUnavailableError`` when the
         call was refused or did not complete (it may have run), ``TimeoutError``
-        when ``timeout_s`` passed (the caller stops the sandbox)."""
+        when ``timeout_s`` passed (the caller stops the sandbox).
+        ``oom_status``: ask (``paw-sandbox/v2``) whether the container counted
+        an OOM kill meanwhile (``SandboxExecResult.out_of_memory``; Decision
+        0092, 5). The pool passes it only when it is on."""
         ...
 
     async def stop(self, account: LinuxAccount, sandbox_id: uuid.UUID) -> None:
@@ -213,15 +217,16 @@ class _WrapperRunner:
         command: SandboxCommand,
         *,
         timeout_s: float,
+        oom_status: bool = False,
     ) -> SandboxExecResult:
         nonce = secrets.token_hex(16)
         result = await self._call(
             account,
-            exec_command(sandbox_id, nonce, command),
+            exec_command(sandbox_id, nonce, command, oom_status=oom_status),
             stdin=exec_input(command),
             timeout_s=timeout_s,
         )
-        stderr, status = split_status(result.stderr, nonce)
+        stderr, status = split_status(result.stderr, nonce, oom_status=oom_status)
         if status is None or result.returncode != 0:
             if result.returncode == WRAPPER_REJECTED_CODE:
                 raise SandboxUnavailableError("refused")
@@ -236,6 +241,7 @@ class _WrapperRunner:
             result.stdout.decode("utf-8", "replace"),
             stderr.decode("utf-8", "replace"),
             status.truncated or result.truncated,
+            out_of_memory=status.out_of_memory is True,
         )
 
     async def stop(self, account: LinuxAccount, sandbox_id: uuid.UUID) -> None:

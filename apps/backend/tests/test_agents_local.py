@@ -440,6 +440,25 @@ class LimitTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(outcome.error_class, "PermissionError")
 
+    async def test_an_oom_kill_in_the_sandbox_ends_the_attempt(self):
+        # Decision 0092, 5: the wrapper's oom=1 (the executor's
+        # SandboxOutOfMemoryError) is AgentOutOfMemory, no escalation.
+        def killed(arguments, approval_id):
+            return ToolOutcome(
+                BrokerDecision(Verdict.ALLOW, BrokerReason.SCOPED_AUTO, uuid.uuid4()),
+                ExecutionStatus.FAILED,
+                error_type="SandboxOutOfMemoryError",
+            )
+
+        server = Server(answer(call("bash", {"command": "ls"})))
+        outcome = await runtime(server).run_node(
+            assignment(Tools(**{"repo.shell.run": killed}))
+        )
+        self.assertEqual(
+            (outcome.error_class, outcome.message, outcome.escalate),
+            ("AgentOutOfMemory", "out_of_memory", False),
+        )
+
     async def test_node_stopped_passes(self):
         server = Server(answer(call("bash", {"command": "ls"})))
         with self.assertRaises(NodeStopped):

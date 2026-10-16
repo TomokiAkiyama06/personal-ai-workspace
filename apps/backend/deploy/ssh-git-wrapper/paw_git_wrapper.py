@@ -59,7 +59,11 @@ revisions. And the tool sandbox (§6): a command whose first word is
 ``paw-sandbox/v1`` (:data:`SANDBOX_TAG`) starts, runs a command in or stops a
 rootless Podman container of a fixed image (``--sandbox-image``, by digest),
 with the mounts and masks re-checked here (:func:`sandbox_plan`); see
-``../sandbox/README.md``.
+``../sandbox/README.md``. Decision 0092 (5) adds ``paw-sandbox/v2 exec``: the
+same ``exec``, whose status line also says ``oom=1`` when the container's
+cgroup counted an ``oom_kill`` (its host-side ``memory.events``, read before and
+after the command) while it ran, ``oom=0`` when not, ``oom=-`` when it could not
+be read; ``v1`` keeps its old line.
 
 The client's ``-c`` values are checked, then **dropped**: git always gets this
 file's own hardening (:func:`hardening`) and, for ``merge``, this file's own
@@ -1640,6 +1644,14 @@ def _read_small_file(git_dir: str, name: str) -> str:
 
 #: The first word of a sandbox command (``paw_backend.sandbox.wire``).
 SANDBOX_TAG = "paw-sandbox/v1"
+#: The same ``exec`` whose status line also says whether the container's cgroup
+#: counted an OOM kill while the command ran (``oom=<0|1|->``; Decision 0092,
+#: 5). ``start`` and ``stop`` stay ``v1``; a backend sends ``v2`` only once every
+#: account's wrapper is this one (``PAW_SANDBOX_OOM_STATUS``).
+SANDBOX_TAG_V2 = "paw-sandbox/v2"
+#: Where the host's cgroup v2 hierarchy is mounted (read only, as the account).
+CGROUP_ROOT = "/sys/fs/cgroup"
+MAX_MEMORY_EVENTS_BYTES = 4096
 #: A sandbox command may be longer than a git one (a start lists every mask).
 MAX_SANDBOX_COMMAND_BYTES = 128 * 1024
 SANDBOX_NAME_PREFIX = "paw-sbx-"
@@ -1681,6 +1693,8 @@ class SandboxCall:
     inspect: list[str] = field(default_factory=list)
     nonce: str = ""
     kind: str = ""
+    #: ``paw-sandbox/v2``: the status line carries ``oom=``.
+    oom: bool = False
 
 
 def _sandbox_id(word: str) -> str:
@@ -1852,8 +1866,11 @@ def sandbox_plan(original: str, config: Config) -> SandboxCall:
     if config.sandbox_image is None:
         raise Rejected("sandbox_not_configured")
     words = _split(original, limit=MAX_SANDBOX_COMMAND_BYTES)
-    if len(words) < 3 or words[0] != SANDBOX_TAG:
+    if len(words) < 3 or words[0] not in (SANDBOX_TAG, SANDBOX_TAG_V2):
         raise Rejected("bad_protocol")
+    oom = words[0] == SANDBOX_TAG_V2
+    if oom and words[1] != "exec":
+        raise Rejected("bad_protocol")  # only ``exec`` has a ``v2``
     op, name = words[1], _sandbox_id(words[2])
     env = sandbox_environment(config)
     podman = config.podman
@@ -1948,10 +1965,11 @@ def sandbox_plan(original: str, config: Config) -> SandboxCall:
             "container",
             "inspect",
             "--format",
-            "{{.State.Running}}",
+            # ``v2``: where its cgroup is, to read its ``memory.events``.
+            "{{.State.Running}} {{.State.CgroupPath}}" if oom else "{{.State.Running}}",
             name,
         ]
-        return SandboxCall("exec", name, argv, env, inspect, nonce, kind)
+        return SandboxCall("exec", name, argv, env, inspect, nonce, kind, oom)
     raise Rejected("bad_arguments")
 
 
@@ -2025,12 +2043,52 @@ class SandboxTimeout(Exception):
     """An ``exec`` that outlived even the wrapper's own deadline."""
 
 
+def memory_events_path(cgroup_path: str, root: str = CGROUP_ROOT) -> str | None:
+    """The host's ``memory.events`` of a container's ``State.CgroupPath``
+    (``None``: not a path under ``root``: relative, empty, or with ``..``)."""
+    if not cgroup_path.startswith("/") or "\x00" in cgroup_path:
+        return None
+    parts = cgroup_path.split("/")
+    if ".." in parts or "." in parts:
+        return None
+    path = os.path.normpath(root + cgroup_path)
+    if path == root or not path.startswith(root.rstrip("/") + "/"):
+        return None
+    return path + "/memory.events"
+
+
+def read_oom_kills(path: str | None) -> int | None:
+    """The ``oom_kill`` count of a cgroup's ``memory.events`` (counting its
+    descendants), ``None`` when it cannot be read or has another form."""
+    if path is None:
+        return None
+    try:
+        with open(path, "rb") as handle:
+            data = handle.read(MAX_MEMORY_EVENTS_BYTES + 1)
+    except OSError:
+        return None
+    if len(data) > MAX_MEMORY_EVENTS_BYTES:
+        return None
+    try:
+        text = data.decode("ascii")
+    except UnicodeDecodeError:
+        return None
+    for line in text.splitlines():
+        key, _, value = line.partition(" ")
+        if key == "oom_kill":
+            if re.fullmatch(r"[0-9]{1,20}", value) is None:
+                return None
+            return int(value)
+    return None
+
+
 def run_sandbox_exec(
     call: SandboxCall,
     config: Config,
     stdin: bytes,
     *,
     capture: Callable[..., tuple[int | None, bytes, bytes, bool]] = _capture,
+    cgroup_root: str = CGROUP_ROOT,
 ) -> tuple[bytes, bytes]:
     """Run an accepted ``exec``: ``(stdout, stderr)`` to write, the status line
     of ``call.nonce`` last (``missing``: the container is not running)."""
@@ -2038,8 +2096,20 @@ def run_sandbox_exec(
     running, answer, _, _ = capture(
         call.inspect, call.env, b"", SANDBOX_CONTROL_TIMEOUT_S
     )
-    if running != 0 or answer.strip() != b"true":
+    words = answer.split()
+    if running != 0 or not words or words[0] != b"true":
         return b"", (status_prefix + "missing\n").encode("ascii")
+    if not call.oom and len(words) != 1:
+        return b"", (status_prefix + "missing\n").encode("ascii")
+    events = None
+    if call.oom and len(words) == 2:
+        # Read on the host, as the account (never inside the container, whose
+        # programs the model may have replaced).
+        try:
+            events = memory_events_path(words[1].decode("utf-8"), cgroup_root)
+        except UnicodeDecodeError:
+            events = None
+    before = read_oom_kills(events)
     argv = list(call.argv)
     if call.kind == "shell":
         try:
@@ -2059,8 +2129,15 @@ def run_sandbox_exec(
         raise SandboxTimeout()
     if code < 0:
         code = 128 - code  # a signal, as a shell reports it
-    status = f"exit={min(code, 255)} truncated={1 if truncated else 0}\n"
-    return out, err + (status_prefix + status).encode("ascii")
+    status = f"exit={min(code, 255)} truncated={1 if truncated else 0}"
+    if call.oom:
+        after = read_oom_kills(events)
+        if before is None or after is None:
+            oom = "-"
+        else:
+            oom = "1" if after > before else "0"
+        status += f" oom={oom}"
+    return out, err + (status_prefix + status + "\n").encode("ascii")
 
 
 def _syslog(message: str) -> None:
@@ -2093,7 +2170,9 @@ def main(
         config = parse_config(arguments)
         user = config.user
         original = environment.get("SSH_ORIGINAL_COMMAND")
-        if original is not None and original.startswith(f"{SANDBOX_TAG} "):
+        if original is not None and original.startswith(
+            (f"{SANDBOX_TAG} ", f"{SANDBOX_TAG_V2} ")
+        ):
             call = sandbox_plan(original, config)
             if call.op == "exec":
                 stdin = read_stdin(MAX_STDIN_BYTES)
