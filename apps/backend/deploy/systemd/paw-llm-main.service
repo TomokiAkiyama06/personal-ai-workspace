@@ -53,13 +53,25 @@ User=paw-llm
 Environment=MAX_JOBS=4
 Environment=FLASHINFER_NVCC_THREADS=1
 Environment=CUDA_HOME=/opt/paw/runtime-venv/lib/python3.12/site-packages/nvidia/cu13
+# The FlashInfer JIT runs ninja (in the venv) and nvcc (CUDA_HOME/bin); a unit
+# gets no venv on PATH, so without this the first sampling fails with
+# "No such file or directory: 'ninja'" (first deploy, 2026-10-16).
+Environment=PATH=/opt/paw/runtime-venv/bin:/opt/paw/runtime-venv/lib/python3.12/site-packages/nvidia/cu13/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 Environment=LIBRARY_PATH=/opt/paw/cudalib
 Environment=XDG_CACHE_HOME=/srv/paw-llm/cache
 Environment=VLLM_CACHE_ROOT=/srv/paw-llm/cache/vllm
 Environment=FLASHINFER_WORKSPACE_BASE=/srv/paw-llm/cache
-# Only when the pip nvcc is newer than the pip CUDA headers ("CUDA compiler and
-# CUDA toolkit headers are incompatible" from FlashInfer's bundled CCCL):
-# Environment=FLASHINFER_EXTRA_CUDAFLAGS=-DCCCL_DISABLE_CTK_COMPATIBILITY_CHECK
+# The pip nvcc of vLLM 0.30.0's wheels is newer than the pip CUDA headers
+# ("CUDA compiler and CUDA toolkit headers are incompatible" from FlashInfer's
+# bundled CCCL; first deploy, 2026-10-16), as in the benchmark:
+Environment=FLASHINFER_EXTRA_CUDAFLAGS=-DCCCL_DISABLE_CTK_COMPATIBILITY_CHECK
+# The rest of the environment the benchmark and the coexistence runs measured the
+# main model with (paw-smoke-2026-10-15/_code/serve_lib.sh): no DeepGEMM, the
+# PyTorch sampler instead of FlashInfer's, and no Hugging Face Hub access (the
+# weights are local).
+Environment=VLLM_USE_DEEP_GEMM=0
+Environment=VLLM_USE_FLASHINFER_SAMPLER=0
+Environment=HF_HUB_OFFLINE=1
 # 40 GiB = 41943040 kB; "$$" is a literal "$" for systemd.
 ExecStartPre=/usr/bin/awk '/^MemAvailable:/ { found = 1; exit !($$2 >= 41943040) } END { if (!found) exit 1 }' /proc/meminfo
 # The parsers the local agent needs (Decision 0083, 12; issue #208): tool calls
