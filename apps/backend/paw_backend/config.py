@@ -200,6 +200,15 @@ class Settings(BaseSettings):
     # never a setting. Unset: no store (a connection's handle cannot be
     # resolved, and the HTTP layer takes handles as given).
     secret_store_dir: Path | None = None
+    # The runtime configuration (Decision 0093, Approved; issue #208): the
+    # root-owned TOML file (``/etc/paw/runtime.toml``) that turns on the Compute
+    # Scheduler, the local model, the sandbox, the git runner over SSH and the
+    # orchestrator (``paw_backend/runtime_config.py``). ``server.main`` reads it
+    # once at start; it is checked then (owner root, not writable by its group
+    # or others, every command root's alone, ...) and anything wrong stops the
+    # start. Unset: none of them run (a warning says so); the default path is
+    # never looked for.
+    runtime_config_file: Path | None = None
     recovery_git_timeout_seconds: float = Field(default=300.0, gt=0, le=3_600)
 
     # Repository registration (PAW-027, Decision 0017). Where a user's checkouts
@@ -225,9 +234,11 @@ class Settings(BaseSettings):
     # the host list ``gh`` is asked about; there is no separate setting for it.
     repository_gh_timeout_seconds: float = Field(default=30.0, gt=0, le=7_200)
 
-    # Per-user git over SSH (Issue #105, Decision 0029, approved). Unused unless a
-    # deployment constructs ``SshGitRunner`` in place of ``SubprocessGitRunner``;
-    # ``SshGitRunnerPolicy.from_settings`` validates the values strictly.
+    # Per-user git over SSH (Issue #105, Decision 0029, approved). Unused unless
+    # the runtime configuration says ``[git] runner = "ssh"`` (or ``[sandbox]
+    # runner = "ssh"``; Decision 0093), which builds ``SshGitRunner`` in place of
+    # ``SubprocessGitRunner``; ``SshGitRunnerPolicy.from_settings`` validates the
+    # values strictly. The key's path template is the file's ``[ssh]``.
     repository_ssh_host: str = Field(default="127.0.0.1")
     repository_ssh_port: int = Field(default=22, ge=1, le=65_535)
     repository_ssh_connect_timeout_seconds: int = Field(default=10, ge=1, le=300)
@@ -308,6 +319,7 @@ class Settings(BaseSettings):
         "memory_projection_dir",
         "recovery_repository_dir",
         "secret_store_dir",
+        "runtime_config_file",
         mode="before",
     )
     @classmethod

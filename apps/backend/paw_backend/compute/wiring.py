@@ -2,8 +2,10 @@
 
 What ``paw_backend.app`` needs to run the Compute Resource Scheduler (PAW-036)
 and Kaggle / Full GPU Mode (PAW-037) in the backend process, only when the
-deployment gives it a :class:`ComputeSetup` (there is no environment setting;
-Decision 0058, 1):
+deployment gives it a :class:`ComputeSetup` (Decision 0058, 1). In production the
+runtime configuration file's ``[compute]`` builds it (``PAW_RUNTIME_CONFIG_FILE``,
+``paw_backend/runtime_config.py``; Decision 0093, which supersedes 0058, 1's "no
+configuration file"):
 
 * :func:`build_compute` builds the process's one :class:`ComputeScheduler` (Decision
   0037, 1) with :class:`RecentVramWarnings` as its ``VramWarningSink`` (Decision

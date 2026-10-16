@@ -2,7 +2,8 @@
 
 ``owner`` (PAW-021), ``retention`` (Issue #117), ``erasure`` (Issue #127),
 ``memory_projection`` (PAW-045), ``recovery`` (PAW-047), ``deploy`` (PAW-068) and
-``credentials`` (Decision 0087: ``connection-credential put``)
+``credentials`` (Decision 0087: ``connection-credential put``) and
+``runtime`` (Decision 0093: ``runtime-config-check``)
 keep their own parsers, exit codes and database URLs
 (``PAW_OPERATOR_DATABASE_URL`` vs. ``PAW_MIGRATION_DATABASE_URL`` vs.
 ``PAW_DATABASE_URL``); ``compute`` (PAW-036) reads the GPU and uses no
@@ -22,6 +23,7 @@ from paw_backend.cli import (
     owner,
     recovery,
     retention,
+    runtime,
 )
 
 
@@ -43,6 +45,8 @@ def command_module(argv: Sequence[str]) -> ModuleType:
         return deploy
     if argv and argv[0] in credentials.COMMANDS:
         return credentials
+    if argv and argv[0] in runtime.COMMANDS:
+        return runtime
     return owner
 
 
