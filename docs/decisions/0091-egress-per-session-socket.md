@@ -107,7 +107,7 @@ Container
 - Byte 数の上限は置かない（正しい長い Session を落とさないため）。代わりに、Proxy の Instance が止まるとき（Session の終わり）に **集計の 1 行**（`session=`・接続の数・拒否の数（理由ごと）・送った / 受けた Byte の合計）を書く。値・中身は書かない（0087 の 3 のまま）。
 - **Host 全体の上限も残す**（Session ごとの上限だけでは、Session の数だけ上限が増える）:
   - 外への接続の数: nftables で、`paw-egress` の Account の新しい TCP 443 の接続を **Host 全体で同時 64**（今の全体の上限と同じ値）に抑え、超えたものは TCP の Reset で拒む（`paw-egress.nft` に、`nft(8)` の例の形の `ct count over` の規則を足す。正確な規則は実装の PR で `nft -c` で確かめる）。Proxy はその失敗を `connect` の拒否として Log に残す。Kernel が数えるので、Session ごとの Proxy が何個あっても全体で効く。
-  - Proxy の Process の資源: すべての `paw-egress-session@<uuid>.service` を 1 つの Slice（`paw-egress.slice`）に入れ、Slice の `TasksMax=`・`MemoryMax=`（値は実装の PR で、暫定の目安は Process 32 個分）で Host 全体を抑える。超えると新しい Session の Proxy が起動できず、その Session の通信は拒否になる（外へは出ない）。
+  - Proxy の Process の資源: 各 `paw-egress-session@<uuid>.service` に自分の `MemoryMax=`・`TasksMax=`（値は実装の PR で。大きくなった Proxy は自分だけが OOM で止まり、他の Session の Proxy を巻き込まない）を付け、すべてを 1 つの Slice（`paw-egress.slice`）に入れる。Host 全体の数は Slice の `TasksMax=`（暫定の目安は Proxy 32 個分の Thread の数）で抑え、超えると新しい Session の Proxy が起動できずその Session の通信は拒否になる（外へは出ない）。Slice の `MemoryMax=` は「1 つの上限 × 個数」より大きくし、普段は効かない最後の守りとする（Slice の上限で OOM が起きると Slice の中のどの Process が止まるかは選べないため: Kernel の cgroup v2 の説明）。
   - CLI の Session の数そのものを Host 全体で抑える上限（Backend の側）は、この Decision では決めない（Egress だけの話ではないので、CLI を有効にする前の別の Issue にする）。
 
 ### 4. Backend の Log に Session の UUID と Node を残す
@@ -133,7 +133,7 @@ Container
 
 1. **Egress の Proxy への接続は、systemd の Template の Socket で作る Session ごとの Socket で Session に結び付け、Session ごとに Proxy を 1 つ動かす（A）。Header（`X-PAW-Session`）は使わない**（1）でよいか。推奨: はい。代わりの案: 共有の Proxy のまま Container の外で Header を付ける（B）、HMAC の Header（C）、`SO_PEERCRED` と cgroup（D）、変えない（E）。
 2. **共有の Socket（`paw-egress.socket` / `paw-egress.service`）を本番の配備から外し、Header の読み取りと `forward --session` を消す**（2）でよいか。推奨: はい。
-3. **Session ごとの同時接続の上限を 16（暫定）にし、Host 全体の上限（nftables で外への同時接続 64、Proxy の Slice の `TasksMax=`・`MemoryMax=`）も残す。Byte 数の上限は置かず、Session の終わりに集計の 1 行を Log に書く**（3）でよいか。推奨: はい。
+3. **Session ごとの同時接続の上限を 16（暫定）と Proxy ごとの Memory の上限にし、Host 全体の上限（nftables で外への同時接続 64、Proxy の Slice の `TasksMax=`）も残す。Byte 数の上限は置かず、Session の終わりに集計の 1 行を Log に書く**（3）でよいか。推奨: はい。
 4. **Backend は CLI の Session を起動するとき、Session の UUID と Task・Node・Connection・CLI の種類を 1 行の Log に書く。DB の列は後続**（4）でよいか。推奨: はい。
 5. **CLI の種類ごとの Allowlist は今は分けず、Codex の宛先が決まるときに決める**（5）でよいか。推奨: はい。
 6. **6 のとおり 1 つの PR で入れ、systemd と polkit の振る舞いは CLI を有効にする前の配備の確認で確かめる**（6）でよいか。推奨: はい。
@@ -155,5 +155,6 @@ Container
 ## 出典（2026-10-16 に確認）
 
 - systemd 259（`259.5-0ubuntu3.4`）の `systemd.socket(5)`（Socket と Service の名前の対応、`Accept=`、`Service=`、`RemoveOnStop=`）、`systemd.service(5)`（`Sockets=`: Socket の File Descriptor は Service の起動のときに渡す）、`systemd.unit(5)`（`BindsTo=`・`PartOf=`・`StopWhenUnneeded=`）、`/usr/lib/systemd/system/systemd-journald@.socket`（`ListenStream=` の `%i`）
+- Kernel: [Control Group v2](https://www.kernel.org/doc/html/latest/admin-guide/cgroup-v2.html#memory-interface-files)（`memory.max` を超えて縮められないと、その cgroup の中で OOM killer が動く）
 - Podman: [`podman run`](https://docs.podman.io/en/stable/markdown/podman-run.1.html)（`--userns=keep-id`: 今の User の UID:GID を Container の中で同じ値に Map する）、[`podman`](https://docs.podman.io/en/stable/markdown/podman.1.html)（`--cgroup-manager` の既定は systemd、Rootless の cgroupfs では Container の cgroup を使わない）
 - Codex の Review: #233 の `apps/backend/deploy/egress/paw_egress.py` への指摘（「Bind session identity in the forwarder」「Bind session identity at the Unix-socket boundary」）
