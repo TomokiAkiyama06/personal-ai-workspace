@@ -43,6 +43,7 @@ from paw_backend.sandbox.spec import (
     SandboxExecResult,
     SandboxGoneError,
     SandboxMount,
+    SandboxOutOfMemoryError,
     SandboxSpec,
     SandboxUnavailableError,
 )
@@ -82,6 +83,7 @@ __all__ = [
     "SandboxCommand",
     "SandboxExecResult",
     "SandboxGoneError",
+    "SandboxOutOfMemoryError",
     "SandboxKey",
     "SandboxMount",
     "SandboxPlan",

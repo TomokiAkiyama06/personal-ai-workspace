@@ -62,6 +62,7 @@ from paw_backend.sandbox.spec import (
     CommandKind,
     SandboxCommand,
     SandboxExecResult,
+    SandboxOutOfMemoryError,
     SandboxSpec,
     SandboxUnavailableError,
     checked_sandbox_path,
@@ -243,6 +244,7 @@ class RepoToolExecutor:
                 command,
                 shim=self._shim_handler(invocation.context, place.plan.spec),
             )
+            _check_memory(result)
             return {
                 "exit_code": result.exit_code,
                 "output": result.stdout + result.stderr,
@@ -269,6 +271,7 @@ class RepoToolExecutor:
             result = await self._pool.run(
                 place.key, place.account, place.plan.spec, command
             )
+            _check_memory(result)
             return _file_result(result)
         raise ValueError("not a repository tool")
 
@@ -515,6 +518,14 @@ def _host_word(word: str, spec: SandboxSpec) -> str:
     except Exception:
         return word
     return spec.to_host(path) or word
+
+
+def _check_memory(result: SandboxExecResult) -> None:
+    """A command whose container counted an OOM kill ends the node's attempt
+    (Decision 0092, 5; Decision 0083, 4): raised, so the runner reports only
+    its type and the toolkit turns it into ``AgentOutOfMemory``."""
+    if result.out_of_memory:
+        raise SandboxOutOfMemoryError()
 
 
 def _file_result(result: SandboxExecResult) -> dict[str, object]:

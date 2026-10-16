@@ -72,7 +72,9 @@ if args[0] == "run":
 elif args[:2] == ["container", "inspect"]:
     name = args[-1]
     if os.path.exists(state(name)):
-        print("true")
+        # ``v2`` (Decision 0092, 5) asks for the cgroup too: one that has no
+        # memory.events on this host.
+        print("true /paw-test-no-such-cgroup" if "CgroupPath" in args[3] else "true")
     else:
         sys.exit(125)
 elif args[0] == "rm":
@@ -701,6 +703,31 @@ class EndToEndTest(unittest.IsolatedAsyncioTestCase):
             await self.sandboxes.start(account, uuid.uuid4(), checkout)
         self.assertEqual(caught.exception.reason, "refused")
         self.assertEqual(len(self.calls()), 7)
+
+    async def test_a_v2_exec_through_the_wrapper(self):
+        # Decision 0092, 5: the real wrapper takes ``paw-sandbox/v2 exec`` and
+        # answers with ``oom=``; here the cgroup cannot be read (``oom=-``).
+        world = self.world
+        repository = repository_of(world.scope, world.root)
+        located = await GitReader(SubprocessGitRunner()).locate(
+            world.root, account=world.account, checkouts=world.scope.excluded_paths
+        )
+        spec = plan_sandbox(
+            world.scope, repository, located, writable=True, shim=False
+        ).spec
+        await self.sandboxes.start(world.account, SANDBOX, spec)
+        result = await self.sandboxes.exec(
+            world.account,
+            SANDBOX,
+            SandboxCommand(CommandKind.SHELL, "/workspace", "echo hi; exit 4"),
+            timeout_s=60,
+            oom_status=True,
+        )
+        self.assertEqual((result.exit_code, result.stdout), (4, "hi\n"))
+        self.assertFalse(result.out_of_memory)
+        inspect = [call for call in self.calls() if call[0] == "container"][-1]
+        self.assertEqual(inspect[3], "{{.State.Running}} {{.State.CgroupPath}}")
+        await self.sandboxes.stop(world.account, SANDBOX)
 
     async def test_the_shims_git_runs_through_the_wrapper(self):
         world = self.world

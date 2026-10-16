@@ -309,7 +309,10 @@ def build_task_execution(
                 database, policy=RepositoryPolicy.from_settings(settings)
             )
         executor, sandboxes = repository_tools(
-            sandbox, git_runner=git_runner, accounts=accounts
+            sandbox,
+            git_runner=git_runner,
+            accounts=accounts,
+            oom_status=settings.sandbox_oom_status,
         )
         working_set = WorkingSetExecutor(tasks)
         tools = ToolRunner(

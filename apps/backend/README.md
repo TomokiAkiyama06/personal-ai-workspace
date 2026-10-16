@@ -186,6 +186,7 @@ Database には pgvector が必要です（CI は `pgvector/pgvector:pg18` を�
 | `PAW_HEALTH_SAMPLE_INTERVAL_SECONDS` | `30` | System Health の数値を時系列に入れる間隔（秒、10〜30。要件の直近 24 時間の粒度なので止められない）。DB が未設定のときは動かない。[System Health](#system-health--observability) |
 | `PAW_HEALTH_RETENTION_DAYS` | `400` | 1 時間の集計と Severity の変化の Event を残す日数（366〜3650） |
 | `PAW_HEALTH_GPU_PROBE` | `false` | Compute Scheduler を Application に組み込んでいない構成で、読み取り専用の GPU の Probe（`nvidia-smi --query-*` だけ）で GPU と VRAM を見る |
+| `PAW_SANDBOX_OOM_STATUS` | `false` | Tool の Sandbox の `exec` を `paw-sandbox/v2` で送り、Command の間に Container の cgroup が OOM Kill を数えたか（`oom=1`）を Wrapper に尋ねる（[Decision 0092](../../docs/decisions/0092-runtime-oom-kill-detection.md) の 5、Issue #251）。`oom=1` の Tool の呼び出しは Node の試行を `AgentOutOfMemory` で終える。**すべての Account の Wrapper を `v2` を知るものに入れ替えてから** `true` にする（古い Wrapper は `v2` を `bad_protocol` で拒み、Sandbox が使えない失敗になる）。[`deploy/sandbox/README.md`](deploy/sandbox/README.md) |
 | `PAW_EVENT_HEARTBEAT_SECONDS` | `15` | `system.heartbeat` の間隔 |
 | `PAW_EVENT_QUEUE_SIZE` | `100` | 接続ごとの Event Queue。溢れた場合は古い Event を捨てる |
 | `PAW_EVENT_MAX_SUBSCRIBERS` | `100` | 同時に接続できる SSE / WebSocket の数。超えた接続は SSE が 503、WebSocket が Close Code 1013 |

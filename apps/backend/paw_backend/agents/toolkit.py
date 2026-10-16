@@ -241,6 +241,10 @@ class NodeToolkit:
         if outcome.status is ExecutionStatus.FAILED:
             if outcome.error_type in ("SandboxUnavailableError", "PermissionError"):
                 raise RuntimeFailure(Failure.SANDBOX_UNAVAILABLE)
+            if outcome.error_type == "SandboxOutOfMemoryError":
+                # The command's container counted an OOM kill (Decision 0092,
+                # 5): the attempt ends as ``AgentOutOfMemory``, no escalation.
+                raise RuntimeFailure(Failure.OUT_OF_MEMORY)
             raise ToolError(f"{outcome.error_type or 'Error'}: the tool failed")
         raise ToolError(
             f"PermissionError: the call was refused ({decision.reason.value})"
