@@ -245,6 +245,19 @@ class RouteByDestinationTest(unittest.TestCase):
         bundle(os.path.join(source, "plain.git.bundle"))
         with open(os.path.join(source, "link.bundle"), "w") as handle:
             handle.write(f"gitdir: {os.path.join(source, 'repo.bundle')}\n")
+        # A linked worktree's git directory: a HEAD, and objects and refs in
+        # the common directory it names (Codex review of #254, P2).
+        linked = os.path.join(source, "repo.bundle", "worktrees", "w")
+        os.makedirs(linked)
+        with open(os.path.join(linked, "HEAD"), "w") as handle:
+            handle.write("ref: refs/heads/w\n")
+        with open(os.path.join(linked, "commondir"), "w") as handle:
+            handle.write("../..\n")
+        with open(os.path.join(source, "worktree.bundle"), "w") as handle:
+            handle.write(f"gitdir: {linked}\n")
+        os.mkdir(os.path.join(source, "checkout.bundle"))
+        with open(os.path.join(source, "checkout.bundle", ".git"), "w") as handle:
+            handle.write("gitdir: ../repo.bundle/worktrees/w\n")
         expected = {
             "repo.bundle": "repo.bundle",
             "repo.bundle/": "repo.bundle",
@@ -255,6 +268,8 @@ class RouteByDestinationTest(unittest.TestCase):
             "named.git.bundle": "named.git",
             "plain.git": "plain.git",
             "link.bundle": "link.bundle",
+            "worktree.bundle": "worktree.bundle",
+            "checkout.bundle": "checkout.bundle",
         }
         for given, name in expected.items():
             os.symlink("/workspace/sub", os.path.join(work, name))

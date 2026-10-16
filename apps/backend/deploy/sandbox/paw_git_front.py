@@ -485,11 +485,21 @@ def _is_bundle(source: str, place: str) -> bool:
 
 
 def _is_git_directory(path: str) -> bool:
-    """git's ``is_git_directory``, nearly: objects, refs and a HEAD."""
-    return (
-        os.path.isdir(os.path.join(path, "objects"))
-        and os.path.isdir(os.path.join(path, "refs"))
-        and os.path.lexists(os.path.join(path, "HEAD"))
+    """git's ``is_git_directory``, nearly: a HEAD, and objects and refs in the
+    common directory (the one ``commondir`` names, as in a linked worktree's
+    git directory, or itself)."""
+    if not os.path.lexists(os.path.join(path, "HEAD")):
+        return False
+    common = path
+    try:
+        with open(os.path.join(path, "commondir"), "rb") as handle:
+            named = os.fsdecode(handle.read()).rstrip("\r\n")
+    except (OSError, ValueError):
+        named = ""
+    if named:
+        common = os.path.join(path, named)
+    return os.path.isdir(os.path.join(common, "objects")) and os.path.isdir(
+        os.path.join(common, "refs")
     )
 
 
