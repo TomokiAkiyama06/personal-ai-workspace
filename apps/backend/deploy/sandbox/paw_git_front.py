@@ -406,7 +406,7 @@ def _created(
         if len(positional) == 2:
             created.append(_resolve(place, positional[1]))
         else:
-            name = _clone_name(positional[0])
+            name = _clone_name(positional[0], place)
             # A bare clone (``--bare``, ``--mirror``) is made in ``<name>.git``.
             # --mirror implies it; --no-mirror does not undo --bare.
             bare = flags["--bare"] or flags["--mirror"]
@@ -425,16 +425,89 @@ def _long_name(given: str, options: dict[str, str]) -> str:
     return matches.pop()
 
 
-def _clone_name(source: str) -> str:
-    """The directory ``git clone <source>`` makes (git's "humanish" name)."""
-    name = source.rstrip("/")
-    name = name.removesuffix("/.git").rstrip("/")
-    name = re.split(r"[/:]", name)[-1]
-    for suffix in (".git", ".bundle"):
-        name = name.removesuffix(suffix)
+def _clone_name(source: str, place: str) -> str:
+    """The directory ``git clone <source>`` makes: git's "humanish" name
+    (``git_url_basename``). It strips ``.bundle`` when the source is a bundle
+    file and ``.git`` otherwise (only one of them)."""
+    start = source.find("://")
+    start = 0 if start < 0 else start + 3
+    # Authentication data: up to the last ``@`` before the first ``/``.
+    host_end = _find(source, "/", start)
+    at = source.rfind("@", start, host_end)
+    if at >= 0:
+        start = at + 1
+    end = len(source)
+    while start < end and (source[end - 1] == "/" or source[end - 1] in SPACES):
+        end -= 1
+    if end - start > 5 and source[end - 5 : end] == "/.git":
+        end -= 5
+        while start < end and source[end - 1] == "/":
+            end -= 1
+    # A port after a host alone (``host:2222``).
+    if "/" not in source[start:end] and ":" in source[start:end]:
+        port = end
+        while start < port and source[port - 1] in "0123456789":
+            port -= 1
+        if start < port and source[port - 1] == ":":
+            end = port - 1
+    # The last component; a ``:`` separates too.
+    last = end
+    while start < last and source[last - 1] not in "/:":
+        last -= 1
+    name = source[last:end]
+    name = name.removesuffix(".bundle" if _is_bundle(source, place) else ".git")
+    if not name or name == "/":
+        raise _Unreadable()
+    # Control characters and spaces: one space, none at the ends.
+    name = re.sub(r"[\x00-\x20]+", " ", name).strip(" ")
     if not name:
         raise _Unreadable()
     return name
+
+
+#: git's ``isspace``.
+SPACES = " \t\n\r"
+
+
+def _is_bundle(source: str, place: str) -> bool:
+    """Whether git clones ``source`` as a bundle (``get_repo_path``): no
+    repository is at ``source`` (as a directory or a ``gitdir:`` file, with
+    git's suffixes) and a regular file is at ``source.bundle`` or ``source``."""
+    path = os.path.join(place, source)
+    for suffix in ("/.git", "", ".git/.git", ".git"):
+        candidate = path + suffix
+        if os.path.isdir(candidate):
+            if _is_git_directory(candidate):
+                return False
+        elif os.path.isfile(candidate) and _gitfile_target(candidate):
+            return False
+    return any(os.path.isfile(path + suffix) for suffix in (".bundle", ""))
+
+
+def _is_git_directory(path: str) -> bool:
+    """git's ``is_git_directory``, nearly: objects, refs and a HEAD."""
+    return (
+        os.path.isdir(os.path.join(path, "objects"))
+        and os.path.isdir(os.path.join(path, "refs"))
+        and os.path.lexists(os.path.join(path, "HEAD"))
+    )
+
+
+def _gitfile_target(path: str) -> bool:
+    """Whether ``path`` is a ``gitdir: <repository>`` file (more than eight
+    bytes) that points at a git directory."""
+    try:
+        if os.path.getsize(path) <= 8:
+            return False
+        with open(path, "rb") as handle:
+            text = os.fsdecode(handle.read(65536))
+    except (OSError, ValueError):
+        return False
+    if not text.startswith("gitdir: "):
+        return False
+    target = text[len("gitdir: ") :].rstrip("\r\n")
+    target = os.path.join(os.path.dirname(path), target)
+    return os.path.isdir(target) and _is_git_directory(target)
 
 
 def main(argv: list[str]) -> int:
