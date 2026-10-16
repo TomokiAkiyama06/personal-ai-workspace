@@ -30,7 +30,7 @@
 | `[sandbox]` | `SandboxSetup(runner=..., shim_base=..., shim_group=..., idle_seconds=...)` | `runner`（`ssh` / `local_wrapper`）、`shim_base`、`shim_group`（Group の **名前**。起動時に `grp.getgrnam` で gid にする）、`idle_seconds`（既定 900）。`local_wrapper` のときだけ `wrapper`（絶対 Path）と `wrapper_options`（文字列の List） | `ssh` は `SshSandboxRunner(TemplateSshKeyDirectory([ssh] の identity_template), policy=SshGitRunnerPolicy.from_settings(settings))` |
 | `[git]` | `git_runner` | `runner`（`subprocess` / `ssh`。既定 `subprocess`） | `ssh` は `SshGitRunner(TemplateSshKeyDirectory(...), policy=SshGitRunnerPolicy.from_settings(settings))`。`[sandbox] runner = "ssh"` なら `ssh` でなければ拒否（Sandbox の git の Shim は Host 側で `git_runner` を使い、他の Account の Checkout を `subprocess` では読めない） |
 | `[ssh]` | `TemplateSshKeyDirectory(identity_template)` | `identity_template`（既定 `/etc/paw/ssh-keys/{user}.key`） | `[git]` と `[sandbox]` の `ssh` が共有する。SSH の接続先（Host・Port・Timeout・`known_hosts`）は今の `PAW_REPOSITORY_SSH_*` のまま（Decision 0029）。鍵の Path のひな型は Decision 0029 の 6 / 0056 の 3 が「設定にまだない」とした値 |
-| `[orchestrator]` | `OrchestratorConfig` | `max_parallel_nodes`（既定 4）・`node_timeout_seconds`（既定 1,800）、`[orchestrator.ladders]` に `planner`・`worker`・`researcher`・`reviewer` の 4 つ（それぞれ Label の List、全部必須） | Ladder の Label は **有効な Runtime の Label**（今は `[local_model].agent_label` だけ）でなければ拒否。`poll_seconds`・Retry の回数などは Code の既定 |
+| `[orchestrator]` | `OrchestratorConfig` | `[orchestrator.ladders]` だけ。 `planner`・`worker`・`researcher`・`reviewer` の 4 つ（それぞれ Label の List、全部必須） | Ladder の Label は **有効な Runtime の Label**（今は `[local_model].agent_label` だけ）でなければ拒否。並列数（4: Decision 0021 / 0076 の 4）・Node の Timeout（30 分: Decision 0021）・`poll_seconds`・Retry の回数などは Decision が値を決めたので File から変えない（Code の既定。Codex review #263） |
 | `[agents.codex]` / `[agents.claude]` | （予約） | — | 今は書けば拒否（`cli runtimes are not available yet`）。下の 3 |
 
 - **環境変数に残すもの**（`/etc/paw/backend.env`）: `Settings` がすでに持つ値はすべて今のまま。とくに `PAW_HOST`・`PAW_PORT`・`PAW_DATABASE_URL` などの DB の URL（Secret）・`PAW_SECRET_STORE_DIR`（Decision 0087）・`PAW_REPOSITORY_SSH_*`（Decision 0029）・`PAW_REPOSITORY_*` の Policy・`PAW_ORCHESTRATOR_WORKERS`（Decision 0086）・`PAW_SANDBOX_OOM_STATUS`（Decision 0092 の 5）・`PAW_HEALTH_GPU_PROBE`。新しく足すのは `PAW_RUNTIME_CONFIG_FILE` だけ。**この File には Secret を書かない**（Schema に Secret の Key が無く、不明な Key は拒否するので書けない）。同じ値を環境変数と File の両方に置かない（`PAW_REPOSITORY_SSH_*` を File に写さない）。
@@ -49,13 +49,13 @@
 - **上の Directory の検査**: File から `/` までの各 Directory が root の持ち物で、Group と Others が書けない（`/etc/paw` は `root:root 0755`）。Directory を書ける人は File を `rename` で差し替えられるため。
 - **Command の検査**（`gpu`・`unload`・`cpu`・`pids`。今の `DeploymentCommands._argv` の検査 — 1〜64 個の空でない文字列、NUL なし、4,096 文字まで — に足す）:
   - argv の List だけ（文字列 1 つは拒否。**Shell は使わない**: `CommandModelControl` はもともと `create_subprocess_exec` で Shell を通さない）。
-  - `argv[0]` は正規化した絶対 Path（`..`・`.`・二重の `/` なし）で、起動の時に存在する通常の File、所有者 root、Group と Others が書けない、実行できる。Symbolic Link（Debian / Ubuntu の `/usr/bin/python3` → `python3.12` など）は、**書いた Path の各 Directory と、`os.path.realpath` で解決した先の File とその各 Directory の両方**が下の規則を満たすときだけ受け付ける（Link を差し替えられるのは Link のある Directory を書ける人だけなので、両方の側を確かめれば足りる）。
-  - **`argv[0]` から `/` までの各 Directory も（Link なら解決した先の側も）root の持ち物で、Group と Others が書けない**（設定 File の上の Directory の検査と同じ規則）。File 自身が root の持ち物でも、Directory を Backend の User（またはその Group）が書ければ、起動の検査の後に `rename` で差し替えられ、`CommandModelControl` は Path 名で実行するので差し替えた File が動くため（Codex review #263）。Sticky の付いた Directory（`/tmp` など）も拒否する。
+  - `argv[0]` は正規化した絶対 Path（`..`・`.`・二重の `/` なし）で、起動の時に存在する通常の File、所有者 root、Group と Others が書けない、実行できる。Symbolic Link（Debian / Ubuntu の `/usr/bin/python3` → `python3.12` など）は、Path を 1 つの要素ずつ自分で解決し（`os.path.realpath` に任せない）、**途中で出会ったすべての Link（何段でも、各段）について、その Link のある Directory と `/` までの各 Directory**、さらに最後の File とその各 Directory が下の規則を満たすときだけ受け付ける（Link を差し替えられるのは Link のある Directory を書ける人だけなので、すべての段を確かめる。`/secure/cmd -> /paw-writable/hop -> /secure/tool` は `hop` の Directory で拒否される。Codex review #263）。Link の段は 8 までで、超えれば拒否する。
+  - **`argv[0]` から `/` までの各 Directory も（Link なら各段の側も）root の持ち物で、Group と Others が書けない**（設定 File の上の Directory の検査と同じ規則）。File 自身が root の持ち物でも、Directory を Backend の User（またはその Group）が書ければ、起動の検査の後に `rename` で差し替えられ、`CommandModelControl` は Path 名で実行するので差し替えた File が動くため（Codex review #263）。Sticky の付いた Directory（`/tmp` など）も拒否する。
   - `argv[0]` が Shell と汎用の起動役（`sh`・`bash`・`dash`・`zsh`・`env`・`sudo`・`su`・`python*`・`perl`・`busybox`）の名前なら拒否する。これは境界ではなく（境界は root だけが書ける File）、`/bin/sh -c '…'` の形で Shell を持ち込む書き間違いを防ぐためである。
-  - **Script の Interpreter も同じ規則で確かめる**（Codex review #263）: `argv[0]` の先頭が `#!` なら、その行の Interpreter（最初の語）も `argv[0]` と同じ規則（正規化した絶対 Path・root の持ち物・Group と Others が書けない・`/` までの各 Directory も同じ。Link なら解決した先の File とその Directory も）を満たさなければ拒否する。`#!/usr/bin/env …`（`PATH` で Interpreter を探す）と、Interpreter がさらに `#!` の Script である形は拒否する。Python の Script は `#!/usr/bin/python3 -I`（User の site と作業 Directory を `sys.path` に入れない）でなければ拒否する。Interpreter を Backend の User が差し替えられると、Script 自身を守っても差し替えた Interpreter が動くため。
+  - **Script の Interpreter も同じ規則で確かめる**（Codex review #263）: `argv[0]` の先頭が `#!` なら、その行の Interpreter（最初の語）も `argv[0]` と同じ規則（正規化した絶対 Path・root の持ち物・Group と Others が書けない・`/` までの各 Directory も同じ。Link なら各段の Directory と最後の File も）を満たさなければ拒否する。`#!/usr/bin/env …`（`PATH` で Interpreter を探す）と、Interpreter がさらに `#!` の Script である形は拒否する。Python の Script は `#!/usr/bin/python3 -I`（User の site と作業 Directory を `sys.path` に入れない）でなければ拒否する。Interpreter を Backend の User が差し替えられると、Script 自身を守っても差し替えた Interpreter が動くため。
   - 読み取りの Command（`pids`）も同じ規則。
 - **URL の検査**: `[local_model].base_url` と `metrics_url` は `http://127.0.0.1:<port>/…` か `http://[::1]:<port>/…` だけ（Loopback）。Host 名（`localhost` を含む）・外の Address は拒否する（Prompt と Metrics を Host の外へ送る設定を作らない）。
-- **Path の検査**: `shim_base`・`wrapper`・`nvidia_smi`・`identity_template` は絶対 Path（既存の Dataclass の検査に加えて）。`nvidia_smi` と `wrapper` は `argv[0]` と同じ所有者・権限の検査（File と、`/` までの各 Directory）。
+- **Path の検査**: `shim_base`・`wrapper`・`nvidia_smi`・`identity_template` は絶対 Path（既存の Dataclass の検査に加えて）。`nvidia_smi` と `wrapper` は `argv[0]` と同じ所有者・権限の検査（File と、`/` までの各 Directory、Link の各段）。`[sandbox] runner = "local_wrapper"` では、今の `LocalWrapperSandboxRunner` が Wrapper を Shebang ではなく `[sys.executable, "-I", wrapper, …]` で動かすので、**Backend 自身の `sys.executable`**（例 `/opt/paw/current/venv/bin/python` とその Link の先）も同じ規則で確かめ、満たさなければ拒否する（Codex review #263）。
 - **Fail closed**: 次のどれでも、Backend は起動しない（`server.main()` が `Invalid runtime configuration: <section>.<key>: <理由>` を標準 Error に出し、終了 Code 2。今の `Invalid configuration` と同じ扱い）。
   - `PAW_RUNTIME_CONFIG_FILE` が設定されているのに File が無い・読めない・上の保護を満たさない。
   - TOML として読めない、`version` が無い・違う。
@@ -154,9 +154,6 @@ shim_group = "paw-sandbox"
 idle_seconds = 900
 
 [orchestrator]
-max_parallel_nodes = 4               # Decision 0076（変えない）
-node_timeout_seconds = 1800
-
 [orchestrator.ladders]
 planner = ["local"]
 worker = ["local"]
@@ -212,7 +209,7 @@ reviewer = ["local"]
 1. **本番の組み立ては 1 つの TOML の File（`PAW_RUNTIME_CONFIG_FILE`、推奨の置き場所 `/etc/paw/runtime.toml`、`version = 1`）を `server.py` が起動の時に 1 回読んで `create_app` の引数にする。Section は `[compute]`（+ `[[compute.deployments]]` と `commands`）・`[local_model]`・`[ssh]`・`[git]`・`[sandbox]`・`[orchestrator]`（+ `ladders`）で、1 の表のとおり既存の Dataclass に写す。Secret と今の `PAW_*` の値は環境変数に残す**（1）でよいか。推奨: **はい**。Decision 0058 の 1 の「設定 File は作らない」だけをこの形で Supersede する。
 2. **File は root の持ち物・Group と Others が書けない（推奨 `root:paw 0640`）・Symbolic Link でない・上の Directory も root だけが書ける、を開いた Descriptor で確かめ、Command は argv の List で `argv[0]` は root の持ち物の絶対 Path・`argv[0]` から `/` までの Directory も root だけが書ける・Shell の名前は拒否、URL は Loopback だけ。どの誤りでも起動しない（一部だけの起動はしない）、Error に値を出さない**（2）でよいか。推奨: **はい**。
 3. **File が無ければ今と同じ（何も組み立てない。WARNING を 1 回）で、既定の Path を自動では探さない。Section は独立に有効にでき、依存は今の `create_app` の規則のとおり。`[sandbox] ssh` には `[git] ssh` を求める**（3）でよいか。推奨: **はい**。
-4. **Decision が値を決めた Scheduler の数値（Headroom・`kv_safety`・Class の上限・Timeout・`min_host_available_bytes` 40 GiB・`reasoning_history`）は File から変えられないようにし、Deployment ごとの値と `gpu_index`・`restore_margin_mib`・Ladder・並列数・Node の Timeout だけを書けるようにする**（1）でよいか。推奨: **はい**（値を変えるときは Decision と Code の既定を変える）。代替: すべての Field を File で上書きできるようにする（承認した値と本番の値がずれうる）。
+4. **Decision が値を決めた Scheduler の数値（Headroom・`kv_safety`・Class の上限・Timeout・`min_host_available_bytes` 40 GiB・`reasoning_history`）と Orchestrator の数値（並列数 4・Node の Timeout 30 分・Retry）は File から変えられないようにし、Deployment ごとの値と `gpu_index`・`restore_margin_mib`・Ladder だけを書けるようにする**（1）でよいか。推奨: **はい**（値を変えるときは Decision と Code の既定を変える）。代替: すべての Field を File で上書きできるようにする（承認した値と本番の値がずれうる）。
 5. **Byte の量は MiB の整数（`weights_mib` など）で書き、`kv_bytes_per_token` だけ Byte で書く**（1）でよいか。推奨: **はい**。代替: Dataclass と同じ Byte の Key（`weights_bytes`）。
 6. **SSH の鍵の Path のひな型 `identity_template` はこの File の `[ssh]` に置き、接続先は今の `PAW_REPOSITORY_SSH_*` のままにする**（1）でよいか。推奨: **はい**。代替: `PAW_REPOSITORY_SSH_IDENTITY_TEMPLATE` を環境変数に足す（SSH の設定が 1 か所にまとまるが、Runner を選ぶ設定は File にあるので、片方だけ書いて動かない組み合わせが生まれる）。
 7. **CLI の Runtime（`[agents.codex]` / `[agents.claude]`）は名前を予約して、今は書けば起動しない。`CloudPolicy` の Decision と CLI の Smoke の後に新しい Decision で Schema に足す**（3）でよいか。推奨: **はい**。
