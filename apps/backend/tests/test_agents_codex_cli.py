@@ -471,6 +471,74 @@ class StopTest(CodexCase):
         self.assertEqual(self.connections.turns, [(4, 4)])
 
 
+class OutOfMemoryTest(CodexCase):
+    """Decision 0092, 4: the CLI's unit ended with ``Result=oom-kill``
+    (``CliProcess.oom_killed``, read before the stop)."""
+
+    def oom_adapter(self, killed="app-server"):
+        class OomLauncher(InteractiveSubprocessLauncher):
+            async def start(self, launch):
+                process = await super().start(launch)
+                if killed in launch.argv:
+                    process.oom_killed = True
+                return process
+
+        return CodexSessionAdapter(
+            OomLauncher(),
+            drain_seconds=1.0,
+            credentials=self.credentials,
+            executable=(
+                sys.executable,
+                "-I",
+                str(FAKE),
+                "--scenario",
+                str(self.scenario),
+                "--report",
+                str(self.report),
+            ),
+            verified_versions=frozenset({VERSION}),
+        )
+
+    async def test_without_a_submit_it_is_agent_out_of_memory(self):
+        outcome = await self.run_node(
+            [{"usage": [7, 3]}, {"complete": "completed"}],
+            adapter=self.oom_adapter(),
+        )
+        self.assertEqual(outcome.error_class, "AgentOutOfMemory")
+        self.assertEqual(outcome.message, "out_of_memory")
+        self.assertFalse(outcome.escalate)
+        self.assertEqual(list(self.sessions.iterdir()), [])  # cleaned up
+
+    async def test_it_comes_before_the_other_failures(self):
+        outcome = await self.run_node(
+            [{"usage": [7, 3]}, {"complete": "failed"}],
+            adapter=self.oom_adapter(),
+        )
+        self.assertEqual(outcome.error_class, "AgentOutOfMemory")
+
+    async def test_a_result_submitted_before_stands(self):
+        outcome = await self.run_node(
+            [
+                {"usage": [100, 10]},
+                {"call": "submit", "arguments": {"summary": "It is in parse.py"}},
+                {"sleep": 30},
+            ],
+            adapter=self.oom_adapter(),
+        )
+        self.assertEqual(outcome.result.summary, "It is in parse.py")
+
+    async def test_an_oom_kill_of_the_version_probe(self):
+        # Codex review #258 (P2): the probe ended without a version it knows
+        # because it was killed: out of memory, not a malformed answer.
+        outcome = await self.run_node(
+            [{"usage": [1, 1]}],
+            adapter=self.oom_adapter(killed="--version"),
+            version="0.163.0",
+        )
+        self.assertFalse(self.report.exists())  # app-server never started
+        self.assertEqual(outcome.error_class, "AgentOutOfMemory")
+
+
 class UnstoppedTest(CodexCase):
     """A CLI whose stop failed (the unit's ``systemctl stop``) may still run
     with the session's files mounted: its directory stays for the operator

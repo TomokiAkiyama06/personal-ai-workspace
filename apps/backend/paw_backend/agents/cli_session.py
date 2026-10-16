@@ -18,6 +18,15 @@
   template unit (``start``: Claude, the prompt as stdin; ``start_interactive``:
   Codex, the stream socket as stdin too). The CLI rung stays disabled at
   assembly.
+
+Out of memory (Decision 0092, 4, Approved; issue #251): the session's unit has
+``OOMPolicy=stop`` and memory accounting, and its container's cgroup is below the
+unit's (``podman run --cgroups=split``), so an OOM kill in the container ends the
+unit with ``Result=oom-kill``. ``systemctl stop`` may erase that result, so the
+unit's :meth:`_UnitProcess.stop` reads it **before** it stops the unit: after the
+CLI ended by itself (its stream reached its end) it first waits up to 10 s for
+the unit to leave ``active``; a stop of a CLI still running does not wait. A
+process's ``oom_killed`` then says whether the OOM killer ended it.
 """
 
 import asyncio
@@ -42,6 +51,13 @@ logger = logging.getLogger(__name__)
 
 #: SIGTERM, then this long, then SIGKILL (Decision 0083, 8).
 STOP_GRACE_SECONDS = 5.0
+#: After the CLI ended by itself, how long a stop waits for its unit to leave
+#: ``active`` before it reads how the unit ended (Decision 0092, 4).
+UNIT_END_SECONDS = 10.0
+_UNIT_POLL_SECONDS = 0.2
+# A unit that ended or is ending: its ``Result`` is its run's.
+_ENDED_STATES = frozenset({"deactivating", "failed", "inactive"})
+OOM_KILL_RESULT = "oom-kill"
 SOCKET_NAME = "bridge.sock"
 TOKEN_NAME = "bridge.token"
 MCP_CONFIG_NAME = "mcp.json"
@@ -159,6 +175,8 @@ class CliLaunch:
 
 class CliProcess(Protocol):
     stdout: asyncio.StreamReader
+    # The OOM killer ended it (Decision 0092, 4); known once it was stopped.
+    oom_killed: bool
 
     async def wait(self) -> int: ...
 
@@ -206,6 +224,9 @@ async def stop_through_cancellation(
 
 
 class _Subprocess:
+    # A child process has no unit whose result says so.
+    oom_killed = False
+
     def __init__(self, process: asyncio.subprocess.Process) -> None:
         self._process = process
         assert process.stdout is not None
@@ -243,9 +264,20 @@ class _UnitProcess:
         self._unit = unit
         self.stdout = stdout
         self.stdin: asyncio.StreamWriter | None = None
+        # How the unit ended, read by ``stop`` before it stopped the unit.
+        self._result: str | None = None
+        self._status: int | None = None
+
+    @property
+    def oom_killed(self) -> bool:
+        """The unit ended with ``Result=oom-kill`` before it was stopped."""
+        return self._result == OOM_KILL_RESULT
 
     async def wait(self) -> int:
-        """The unit's exit status once it is no longer active."""
+        """The unit's exit status once it is no longer active (the one read
+        before the stop, when there is one)."""
+        if self._status is not None:
+            return self._status
         launcher = self._launcher
         for _ in range(int(launcher.settle_seconds / 0.2) + 1):
             state = await launcher.show(self._unit, "ActiveState")
@@ -262,8 +294,39 @@ class _UnitProcess:
         """``systemctl stop``: the unit sends SIGTERM, waits five seconds
         (``TimeoutStopSec``), then SIGKILL, and removes the container. A stop
         that systemd refuses is tried again, then raised (``OSError``): the
-        caller must not believe a unit with the credential has ended."""
+        caller must not believe a unit with the credential has ended.
+
+        Before it, how the unit ended (Decision 0092, 4): when the CLI ended
+        by itself (its stream is at its end) the unit is given up to
+        ``UNIT_END_SECONDS`` to leave ``active``; a unit that ended or is
+        ending then has its ``Result`` and ``ExecMainStatus`` kept. A unit
+        still ``active`` is the backend's to stop: nothing is kept."""
+        if self._result is None:
+            await self._read_end()
         await self._launcher.stop_unit(self._unit)
+
+    async def _read_end(self) -> None:
+        launcher = self._launcher
+        stdout = self.stdout
+        ended_itself = stdout is not None and stdout.at_eof()
+        polls = (
+            int(launcher.unit_end_seconds / _UNIT_POLL_SECONDS) if ended_itself else 0
+        )
+        for attempt in range(polls + 1):
+            state = await launcher.show(self._unit, "ActiveState")
+            if state in _ENDED_STATES:
+                break
+            if attempt < polls:
+                await asyncio.sleep(_UNIT_POLL_SECONDS)
+        else:
+            return
+        result = await launcher.show(self._unit, "Result")
+        status = await launcher.show(self._unit, "ExecMainStatus")
+        try:
+            self._status = int(status)
+        except ValueError:
+            self._status = None
+        self._result = result
 
 
 class SystemdLauncher:
@@ -289,12 +352,14 @@ class SystemdLauncher:
         connect_seconds: float = 120.0,
         settle_seconds: float = 30.0,
         systemctl_seconds: float = 30.0,
+        unit_end_seconds: float = UNIT_END_SECONDS,
     ) -> None:
         self._systemctl = tuple(systemctl)
         self._systemctl_seconds = systemctl_seconds
         self._prefix = unit_prefix
         self._connect = connect_seconds
         self.settle_seconds = settle_seconds
+        self.unit_end_seconds = unit_end_seconds
 
     async def systemctl(self, *arguments: str) -> tuple[int, str]:
         process = await asyncio.create_subprocess_exec(
@@ -466,6 +531,7 @@ class SubprocessLauncher:
 
 __all__ = [
     "STOP_GRACE_SECONDS",
+    "UNIT_END_SECONDS",
     "SystemdLauncher",
     "CliLaunch",
     "CliLauncher",

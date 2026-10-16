@@ -131,6 +131,10 @@ class ClaudeAttachment:
     # keeps the session's directory (the unit still has it mounted) for the
     # operator, instead of deleting it under a running session.
     unstopped: list[bool] = field(default_factory=list, repr=False)
+    # Set by the adapter when the CLI's unit was ended by the OOM killer
+    # (``Result=oom-kill``, Decision 0092, 4): without a submitted result the
+    # attempt is ``AgentOutOfMemory``, before any other failure.
+    out_of_memory: list[bool] = field(default_factory=list, repr=False)
 
 
 class ClaudeSessionAdapter:
@@ -290,6 +294,8 @@ class ClaudeSessionAdapter:
             if failed is not None:
                 raise failed
         code = await process.wait()
+        if getattr(process, "oom_killed", False):
+            attachment.out_of_memory.append(True)
         if failure is None and not stream.initialized:
             failure = FailureCode.INVALID_RESPONSE
         if (
@@ -423,6 +429,10 @@ class ClaudeCliRuntime:
                 remove_session(spec)
         if attachment is not None and attachment.unstopped:
             return ErrorClassifier.outcome(Failure.OTHER)
+        if attachment is not None and attachment.out_of_memory:
+            oom = _out_of_memory(bridge)
+            if oom is not None:
+                return oom
         if bridge.failure is not None:
             return _ended(bridge.failure)
         failure = getattr(result, "failure", None)
@@ -449,6 +459,18 @@ def _ended(error: BaseException) -> NodeOutcome:
     if isinstance(error, InvalidNodeResultError):
         return ErrorClassifier.outcome(Failure.INVALID_RESULT)
     return ErrorClassifier.from_error(error)
+
+
+def _out_of_memory(bridge: McpBridge) -> NodeOutcome | None:
+    """The CLI's unit was ended by the OOM killer (Decision 0092, 4): without
+    a submitted result the attempt ran out of memory, whatever else failed
+    meanwhile (the other failures follow from it); a stop on the budget still
+    passes. A result submitted before the kill stands (``None``)."""
+    if bridge.outcome is not None and bridge.outcome.ok:
+        return None
+    if isinstance(bridge.failure, NodeStopped):
+        raise bridge.failure
+    return ErrorClassifier.outcome(Failure.OUT_OF_MEMORY)
 
 
 __all__ = [
