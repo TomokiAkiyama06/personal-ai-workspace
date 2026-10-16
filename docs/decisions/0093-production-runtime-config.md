@@ -49,11 +49,12 @@
 - **上の Directory の検査**: File から `/` までの各 Directory が root の持ち物で、Group と Others が書けない（`/etc/paw` は `root:root 0755`）。Directory を書ける人は File を `rename` で差し替えられるため。
 - **Command の検査**（`gpu`・`unload`・`cpu`・`pids`。今の `DeploymentCommands._argv` の検査 — 1〜64 個の空でない文字列、NUL なし、4,096 文字まで — に足す）:
   - argv の List だけ（文字列 1 つは拒否。**Shell は使わない**: `CommandModelControl` はもともと `create_subprocess_exec` で Shell を通さない）。
-  - `argv[0]` は正規化した絶対 Path（`..`・`.`・二重の `/` なし）で、起動の時に存在する通常の File、所有者 root、Group と Others が書けない、実行できる。
+  - `argv[0]` は正規化した絶対 Path（`..`・`.`・二重の `/` なし）で、`os.path.realpath` が同じ Path（途中に Symbolic Link がない。`/usr/bin/systemctl` のように書く）、起動の時に存在する通常の File、所有者 root、Group と Others が書けない、実行できる。
+  - **`argv[0]` から `/` までの各 Directory も root の持ち物で、Group と Others が書けない**（設定 File の上の Directory の検査と同じ規則）。File 自身が root の持ち物でも、Directory を Backend の User（またはその Group）が書ければ、起動の検査の後に `rename` で差し替えられ、`CommandModelControl` は Path 名で実行するので差し替えた File が動くため（Codex review #263）。Sticky の付いた Directory（`/tmp` など）も拒否する。
   - `argv[0]` が Shell と汎用の起動役（`sh`・`bash`・`dash`・`zsh`・`env`・`sudo`・`su`・`python*`・`perl`・`busybox`）の名前なら拒否する。これは境界ではなく（境界は root だけが書ける File）、`/bin/sh -c '…'` の形で Shell を持ち込む書き間違いを防ぐためである。
   - 読み取りの Command（`pids`）も同じ規則。
 - **URL の検査**: `[local_model].base_url` と `metrics_url` は `http://127.0.0.1:<port>/…` か `http://[::1]:<port>/…` だけ（Loopback）。Host 名（`localhost` を含む）・外の Address は拒否する（Prompt と Metrics を Host の外へ送る設定を作らない）。
-- **Path の検査**: `shim_base`・`wrapper`・`nvidia_smi`・`identity_template` は絶対 Path（既存の Dataclass の検査に加えて）。`nvidia_smi` と `wrapper` は `argv[0]` と同じ所有者・権限の検査。
+- **Path の検査**: `shim_base`・`wrapper`・`nvidia_smi`・`identity_template` は絶対 Path（既存の Dataclass の検査に加えて）。`nvidia_smi` と `wrapper` は `argv[0]` と同じ所有者・権限の検査（File と、`/` までの各 Directory）。
 - **Fail closed**: 次のどれでも、Backend は起動しない（`server.main()` が `Invalid runtime configuration: <section>.<key>: <理由>` を標準 Error に出し、終了 Code 2。今の `Invalid configuration` と同じ扱い）。
   - `PAW_RUNTIME_CONFIG_FILE` が設定されているのに File が無い・読めない・上の保護を満たさない。
   - TOML として読めない、`version` が無い・違う。
@@ -126,7 +127,8 @@ initial = "gpu"
 [compute.deployments.commands]
 gpu = ["/usr/bin/systemctl", "start", "paw-llm-main.service"]
 unload = ["/usr/bin/systemctl", "stop", "paw-llm-main.service"]
-pids = ["/usr/bin/cat", "/sys/fs/cgroup/system.slice/paw-llm-main.service/cgroup.procs"]
+# 止まっている Unit には cgroup が無く、cat では失敗する（下の注）。
+pids = ["/usr/local/lib/paw/paw-unit-pids", "paw-llm-main.service"]
 metrics_url = "http://127.0.0.1:18080/metrics"
 unit = "paw-llm-main.service"        # Decision 0092 の 1
 
@@ -161,13 +163,15 @@ reviewer = ["local"]
 ```
 
 - Reviewer も `local` なので、Review は Worker と同じ Model で、REQUIREMENTS の「Review の独立性」は CLI の段が有効になるまで満たさない（`OrchestratorConfig` の説明のとおり Ladder の書き方の問題で、Orchestrator は強制しない）。これは今の状態の確認で、この Decision で変えない。
+- **`pids` に `cat …/cgroup.procs` を使わない**（Codex review #263）。Unit を Enable せず Scheduler が起動する形では、止まっている（または落ちた）Unit に cgroup の Directory が無いので `cat` が失敗し、`CommandModelControl.processes()` が `ModelControlError` になる。Scheduler は PID を「分からない」として扱い、`initial = "gpu"` を `unloaded` に直さないので、`always` の Main の `gpu` の Command が走らず、Model がいつまでも起動しない。そこで小さな読み取り専用の Helper `paw-unit-pids <unit>` を配備に足す（下の 8 の PR 3。root の持ち物 `0755` で `/usr/local/lib/paw/` に置く）。Helper は Unit の名前を `^[A-Za-z0-9@._-]+\.service$` で確かめ、`/usr/bin/systemctl show -p LoadState -p ControlGroup -- <unit>` を読み、`LoadState` が `loaded` でなければ失敗（名前の書き間違いを「止まっている」と取り違えない）、`ControlGroup` が空なら何も出さずに成功（止まっている）、あれば `/sys/fs/cgroup<ControlGroup>/cgroup.procs` と子の cgroup の `cgroup.procs` の PID を出す（読めなければ失敗）。Shell を使わず、Unit の `start` / `stop` はしない。
 - `paw-llm-main.service` の `--port 18080` と `base_url`・`metrics_url` の Port、`--served-model-name main` と `served_model` は一致させる（Parser は Unit の File を読まないので、一致は Human が確かめる）。
 
 ### 5. Human が配備で確かめること（Agent は他の Linux User・systemd・GPU を操作しない）
 
 - [ ] `ls -l /etc/paw/runtime.toml` が `root paw` で `-rw-r-----`、`/etc/paw` が `root root drwxr-xr-x`。
 - [ ] `paw` が `paw-llm-main.service` の `start` / `stop` だけを許される polkit の規則が入っている（`paw-llm-main.service` の注釈）。`sudo -u paw /usr/bin/systemctl show -p Result -p ActiveState -p InvocationID -- paw-llm-main.service` が読める（Decision 0092 の 1）。
-- [ ] `sudo -u paw /usr/bin/cat /sys/fs/cgroup/system.slice/paw-llm-main.service/cgroup.procs` が（動いている間）PID を返す。
+- [ ] `sudo -u paw /usr/local/lib/paw/paw-unit-pids paw-llm-main.service` が、Unit が動いている間は vLLM の全 Process の PID を返し、止まっている間は何も出さずに終了 Code 0、存在しない Unit の名前では 0 以外になる。
+- [ ] `namei -l /usr/bin/systemctl /usr/local/lib/paw/paw-unit-pids /usr/bin/nvidia-smi` のどの段も root の持ち物で、Group / Others が書けない。
 - [ ] `tomoki` の `authorized_keys` に Wrapper の `command=`（`--sandbox-image=…@sha256:…`・`--sandbox-shim-base=/run/paw-sandbox`・`--sandbox-keep-groups=yes`）と `from="127.0.0.1"`、`/etc/paw/ssh-keys/tomoki.key`（`paw` の持ち物、`0600`）、`/etc/paw/ssh_known_hosts`（Decision 0029、`deploy/ssh-git-wrapper/README.md`、`deploy/sandbox/README.md` のチェックリスト）。
 - [ ] `/run/paw-sandbox`（`paw:paw-sandbox 0711`、`tmpfiles.d`）と Group `paw-sandbox`（`paw`・`tomoki`）。
 - [ ] `python -m paw_backend.cli runtime-config-check /etc/paw/runtime.toml`（下の 8 の PR 2）が通り、有効な部分の一覧が期待どおり。
@@ -188,7 +192,7 @@ reviewer = ["local"]
 
 1. `paw_backend/runtime_config.py` の Parser と Unit Test（2 の検査・1 の対応・3 の依存の規則。`create_app` も `server.py` も変えない）。
 2. `Settings.runtime_config_file`（`PAW_RUNTIME_CONFIG_FILE`）、`server.main()` の配線、起動の Log（有効な部分と、無いときの WARNING）、`runtime-config-check` の Command、その Test。`sandbox/wiring.py`・`compute/wiring.py` の「環境変数の設定はない（Decision 0058 の 1）」の Docstring をこの Decision に合わせる。
-3. 文書: `apps/backend/deploy/runtime/runtime.example.toml`（4 の例）、`docs/DEPLOYMENT_UPDATE.md` の配備の手順（5 のチェックリスト）、`apps/backend/README.md`、`paw-backend.service` の注釈（`backend.env` の `PAW_RUNTIME_CONFIG_FILE`）。
+3. 配備と文書: `apps/backend/deploy/runtime/paw-unit-pids`（4 の注の Helper。Fake の `systemctl` と一時の cgroup の木で Unit Test）、`apps/backend/deploy/runtime/runtime.example.toml`（4 の例）、`docs/DEPLOYMENT_UPDATE.md` の配備の手順（5 のチェックリスト）、`apps/backend/README.md`、`paw-backend.service` の注釈（`backend.env` の `PAW_RUNTIME_CONFIG_FILE`）。
 4. （PR ではない）Human が 5 の順に本番で有効にし、結果を Issue #208 に記録する。
 
 ## リスク
@@ -196,20 +200,20 @@ reviewer = ["local"]
 - **File を書ける人は Backend の User として Command を実行できる**: root だけが書けるようにし（2）、起動の時に確かめる。root が誤った Command を書いた場合は防げない（root は Admin の側として受け入れる）。
 - **起動しない範囲が広がる**: File の 1 か所の誤りで Backend 全体が起動しない（Login もできない）。誤った部分だけ無効にして起動すると、Compute なしで Task が待ち続けるなど気付きにくい壊れ方になるので、起動しないほうを推奨する。`runtime-config-check`（7）で再起動の前に確かめ、`paw-release` の更新の Health Check（Decision 0079）が失敗を見つける。
 - **Unit と File の値のずれ**: Port・`served-model-name`・Footprint は `paw-llm-main.service` と File の 2 か所にある。Parser は Unit を読まないので、ずれは起動しても見つからない（Model に繋がらなければ `ConnectionError`、Footprint がずれれば Admission が誤る）。5 の確認で見る。
-- **`argv[0]` の存在の検査**: 起動の時だけ確かめるので、後で消された Command は実行の時に失敗する（今の `ModelControlError` のまま）。
+- **`argv[0]` の存在の検査**: 起動の時だけ確かめるので、後で消された Command は実行の時に失敗する（今の `ModelControlError` のまま）。root が後で Directory の権限を緩めた場合も、次の起動まで見つからない。
 - **Footprint の値の出どころ**: 4 の KV の Pool は 2026-10-15 の Smoke の 1 回の Log の値で、vLLM の版や引数が変われば変わる。Footprint の合計は Decision 0075 の値（Peak + 2 GiB）を守る。
 - **Orchestrator を有効にすると Worker がすぐ Queue の Task を取る**（Decision 0086、`PAW_ORCHESTRATOR_WORKERS=1`）。(3) の前に Queue に古い Task が残っていれば走り出す。有効にする前に Queue を確かめる（または `PAW_ORCHESTRATOR_WORKERS=0` で組み立てだけ確かめる）。
 
 ## 承認が要る点（決めてほしいこと）
 
 1. **本番の組み立ては 1 つの TOML の File（`PAW_RUNTIME_CONFIG_FILE`、推奨の置き場所 `/etc/paw/runtime.toml`、`version = 1`）を `server.py` が起動の時に 1 回読んで `create_app` の引数にする。Section は `[compute]`（+ `[[compute.deployments]]` と `commands`）・`[local_model]`・`[ssh]`・`[git]`・`[sandbox]`・`[orchestrator]`（+ `ladders`）で、1 の表のとおり既存の Dataclass に写す。Secret と今の `PAW_*` の値は環境変数に残す**（1）でよいか。推奨: **はい**。Decision 0058 の 1 の「設定 File は作らない」だけをこの形で Supersede する。
-2. **File は root の持ち物・Group と Others が書けない（推奨 `root:paw 0640`）・Symbolic Link でない・上の Directory も root だけが書ける、を開いた Descriptor で確かめ、Command は argv の List で `argv[0]` は root の持ち物の絶対 Path・Shell の名前は拒否、URL は Loopback だけ。どの誤りでも起動しない（一部だけの起動はしない）、Error に値を出さない**（2）でよいか。推奨: **はい**。
+2. **File は root の持ち物・Group と Others が書けない（推奨 `root:paw 0640`）・Symbolic Link でない・上の Directory も root だけが書ける、を開いた Descriptor で確かめ、Command は argv の List で `argv[0]` は root の持ち物の絶対 Path・`argv[0]` から `/` までの Directory も root だけが書ける・Shell の名前は拒否、URL は Loopback だけ。どの誤りでも起動しない（一部だけの起動はしない）、Error に値を出さない**（2）でよいか。推奨: **はい**。
 3. **File が無ければ今と同じ（何も組み立てない。WARNING を 1 回）で、既定の Path を自動では探さない。Section は独立に有効にでき、依存は今の `create_app` の規則のとおり。`[sandbox] ssh` には `[git] ssh` を求める**（3）でよいか。推奨: **はい**。
 4. **Decision が値を決めた Scheduler の数値（Headroom・`kv_safety`・Class の上限・Timeout・`min_host_available_bytes` 40 GiB・`reasoning_history`）は File から変えられないようにし、Deployment ごとの値と `gpu_index`・`restore_margin_mib`・Ladder・並列数・Node の Timeout だけを書けるようにする**（1）でよいか。推奨: **はい**（値を変えるときは Decision と Code の既定を変える）。代替: すべての Field を File で上書きできるようにする（承認した値と本番の値がずれうる）。
 5. **Byte の量は MiB の整数（`weights_mib` など）で書き、`kv_bytes_per_token` だけ Byte で書く**（1）でよいか。推奨: **はい**。代替: Dataclass と同じ Byte の Key（`weights_bytes`）。
 6. **SSH の鍵の Path のひな型 `identity_template` はこの File の `[ssh]` に置き、接続先は今の `PAW_REPOSITORY_SSH_*` のままにする**（1）でよいか。推奨: **はい**。代替: `PAW_REPOSITORY_SSH_IDENTITY_TEMPLATE` を環境変数に足す（SSH の設定が 1 か所にまとまるが、Runner を選ぶ設定は File にあるので、片方だけ書いて動かない組み合わせが生まれる）。
 7. **CLI の Runtime（`[agents.codex]` / `[agents.claude]`）は名前を予約して、今は書けば起動しない。`CloudPolicy` の Decision と CLI の Smoke の後に新しい Decision で Schema に足す**（3）でよいか。推奨: **はい**。
-8. **4 の値をこの Host の最初の配備の例として載せる（Main だけ、Ladder はすべて `local`、Port 8400、`tomoki`、SSH の Wrapper の Sandbox）。値そのものは配備のときに 5 で Human が確かめ、例は承認の対象に含めない**（4）でよいか。推奨: **はい**。
+8. **4 の値をこの Host の最初の配備の例として載せる（Main だけ、`pids` は止まった Unit でも成功する Helper `paw-unit-pids`、Ladder はすべて `local`、Port 8400、`tomoki`、SSH の Wrapper の Sandbox）。値そのものは配備のときに 5 で Human が確かめ、例は承認の対象に含めない**（4）でよいか。推奨: **はい**。
 9. **`runtime-config-check` の Command を足し、8 の 3 つの PR（Parser と Test → `server.py` の配線と Command → 文書）で実装する。本番での有効化は Human が 3 の順に行う**（7・8）でよいか。推奨: **はい**。
 
 ## 承認後の扱い
