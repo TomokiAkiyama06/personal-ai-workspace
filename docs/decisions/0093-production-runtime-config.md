@@ -1,6 +1,7 @@
 # 本番の起動で Compute Scheduler・Local の Model・Sandbox・Orchestrator・git の Runner を組み立てる設定（1 つの TOML の File `PAW_RUNTIME_CONFIG_FILE`、File の保護、無いときの既定、部分ごとの有効化、この Host の最初の配備の例）
 
-- Status: Proposed
+- Status: Approved
+- Approval: 2026-10-16、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで直接回答して承認（approved as recommended, all 9 points: 承認が要る点の 1〜9 をすべて推奨どおり承認。末尾の「承認時の決定」）
 - Date: 2026-10-16
 - Scope: Issue [#208](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/208) の残り（最初の本番の Install、2026-10-16 に見つかった問題）。この Decision は設計だけで、コードは承認の後の下の 8 の PR で書く。関係する既存の口: `apps/backend/paw_backend/server.py`（`main()` → `create_app(settings)`）、`paw_backend/app.py`（`create_app(compute=..., local_model=..., sandbox=..., orchestrator_config=..., agent_runtimes=..., local_runtimes=..., git_runner=...)`）、`paw_backend/config.py`（`Settings`、`PAW_*`）、`compute/wiring.py`（`ComputeSetup`）・`compute/config.py`（`ComputeConfig`・`DeploymentSpec`）・`compute/control.py`（`CommandModelControl`・`DeploymentCommands`）・`compute/probe.py`（`NvidiaSmiProbe`）、`agents/wiring.py`（`LocalModelSetup`）、`sandbox/wiring.py`（`SandboxSetup`）・`sandbox/runner.py`（`SshSandboxRunner`・`LocalWrapperSandboxRunner`）、`orchestrator/config.py`（`OrchestratorConfig`）・`orchestrator/composition.py`（`build_task_execution`）、`repositories/ssh.py`（`SshGitRunner`・`SshGitRunnerPolicy`・`TemplateSshKeyDirectory`）、`apps/backend/deploy/systemd/paw-backend.service`・`paw-llm-main.service`。Migration はない
 - Supersedes（一部）: [Decision 0058](0058-compute-scheduler-application-wiring.md)（Approved）の 1 のうち「環境変数・設定 File は作らない」の部分だけ。0058 の 1 は、`ModelControl` の Command を File から読む形式とその保護（所有者・権限の確認）を Runtime の Adapter の Issue（#208）で決めるとしていた。この Decision はそれを決め、`PAW_RUNTIME_CONFIG_FILE` の File を読んで同じ `create_app(compute=ComputeSetup(...))` などの注入を `server.py` が組み立てる形にする。0058 の 1 の「`ComputeSetup` を渡したときだけ有効になり、渡さなければ何も起動しない」と 2〜8 は変えない。次は書き換えず、その中で値を選ぶ: [Decision 0029](0029-per-user-git-runner-ssh.md) / [Decision 0056](0056-production-worktree-wiring.md) の 3（git の Runner は `create_app(git_runner=...)` で渡す、`SshGitRunner` への差し替え）、[Decision 0039](0039-compute-scheduler-calibration.md) / [Decision 0072](0072-runtime-jit-host-memory-guard.md)（Model の起動の上限・ホストの `MemAvailable` 40 GiB）、[Decision 0075](0075-coexistence-footprints-qwen38.md)（Footprint・`restore_margin_bytes` 4 GiB）、[Decision 0083](0083-agent-runtime-adapters.md)（Runtime の Adapter。CLI の段は `CloudPolicy` が注入されるまで組み立てが拒否する）、[Decision 0086](0086-orchestrator-worker-start.md)（`PAW_ORCHESTRATOR_WORKERS`）、[Decision 0087](0087-cli-secret-store-and-egress.md) / [Decision 0091](0091-egress-per-session-socket.md)（Secret Store と Egress）、[Decision 0092](0092-runtime-oom-kill-detection.md)（`DeploymentCommands.unit`・`PAW_SANDBOX_OOM_STATUS`）
@@ -220,3 +221,9 @@ reviewer = ["local"]
 
 承認されたら `Approval` に記録して Status を Approved にし、8 の PR（Refs #208）で実装する。方針を変えるときは、この Decision を書き換えず、新しい Decision から `Supersedes` する。
 [REQUIREMENTS.md](../../REQUIREMENTS.md) の原文は書き換えない。
+
+## 承認時の決定（2026-10-16）
+
+- 承認が要る点の 1〜9 を、すべて推奨どおり承認した（変更なし）。
+- この Host の値（8）は例であり、配備のときに Human がチェックリストで確かめる。
+- 実装は 3 つの PR（Parser → `server.py` の配線と `runtime-config-check` → 配備と文書）で行う。CI が通り、Codex の Review に P0 / P1 がなければ Merge してよい（2026-10-16、Human）。
