@@ -137,6 +137,9 @@ class RouteByPlaceTest(unittest.TestCase):
             '"/tmp/o":"/workspace/.git/objects"',
             '"/work\\163pace/.git/objects"',  # octal escape: s
             '"/tmp/o\\"x":/workspace/.git/objects',
+            # git reads the path as a C string: it ends at a NUL (Codex
+            # review of #254, P2).
+            '"/workspace/.git/objects\\000/tmp/o"',
         ):
             self.assertEqual(alternates(value), SHIM, value)
         for value in (
@@ -144,6 +147,7 @@ class RouteByPlaceTest(unittest.TestCase):
             "#/workspace/.git/objects",  # a comment
             '"/workspace/x',  # broken quoting: a relative path, as is
             '"/workspace\\q"',  # unknown escape: a relative path, as is
+            '"/tmp/o\\000/workspace/.git/objects"',
         ):
             self.assertEqual(alternates(value), REAL, value)
 

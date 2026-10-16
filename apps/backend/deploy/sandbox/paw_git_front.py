@@ -266,7 +266,8 @@ def _unquote(value: str, at: int) -> tuple[str, int] | None:
         character = value[i]
         i += 1
         if character == '"':
-            return os.fsdecode(bytes(out)), i
+            # git then uses the path as a C string: it ends at a NUL.
+            return os.fsdecode(bytes(out).split(b"\0")[0]), i
         if character != "\\":
             out += os.fsencode(character)
             continue
