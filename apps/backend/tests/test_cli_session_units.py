@@ -29,6 +29,7 @@ import uuid
 from pathlib import Path
 
 from paw_backend.agents.cli_session import (
+    UNIT_END_SECONDS,
     CliLaunch,
     SystemdLauncher,
     UnitNotStoppedError,
@@ -218,6 +219,8 @@ class RunnerTest(unittest.TestCase):
         argv = record["argv"]
         self.assertEqual(record["stdin"], "the task")
         self.assertEqual(argv[:2], ["run", "--rm"])
+        # The container's cgroup below the unit's (Decision 0092, 4).
+        self.assertIn("--cgroups=split", argv)
         for pair in (
             ["--network", "none"],
             ["--cap-drop", "all"],
@@ -380,7 +383,16 @@ class LauncherTest(unittest.IsolatedAsyncioTestCase):
                     "e = os.path.join(os.path.dirname(sys.argv[1]), 'echo');"
                     "os.path.exists(e) and s.sendall(s.makefile('rb').readline());"
                     "time.sleep(float(open(sys.argv[1]).read() or 0));"
-                    f"open({{state!r}}, 'w').write('inactive 0')"
+                    "s.close();"
+                    # The unit stays active this long after the stream ended
+                    # (systemd has not stopped it yet) ...
+                    f"l = os.path.join({{root!r}}, 'linger');"
+                    "os.path.exists(l) and time.sleep(float(open(l).read()));"
+                    # ... and ends as the 'end' file says (an OOM kill:
+                    # 'failed 137 oom-kill').
+                    f"n = os.path.join({{root!r}}, 'end');"
+                    "end = open(n).read() if os.path.exists(n) else 'inactive 0';"
+                    f"open({{state!r}}, 'w').write(end)"
                 )
                 hold = os.path.join(root, "hold")
                 child = subprocess.Popen(
@@ -397,8 +409,10 @@ class LauncherTest(unittest.IsolatedAsyncioTestCase):
                     text = open(state).read().split()
                 if "ActiveState" in args:
                     print(text[0])
+                elif "Result" in args:
+                    print(text[2] if len(text) > 2 else "success")
                 else:
-                    print(text[1] if text[0] == "inactive" else "")
+                    print(text[1] if text[0] in ("inactive", "failed") else "")
             elif args[0] == "stop":
                 if os.path.exists(os.path.join(root, "stop_fails")):
                     sys.exit(1)
@@ -414,12 +428,12 @@ class LauncherTest(unittest.IsolatedAsyncioTestCase):
         )
         (self.sessions / "hold").write_text("0")
 
-    def launcher(self):
+    def launcher(self, **options):
         return SystemdLauncher(
-            systemctl=(str(self.bin / "systemctl"),), settle_seconds=5
+            systemctl=(str(self.bin / "systemctl"),), settle_seconds=5, **options
         )
 
-    async def launch(self):
+    async def launch(self, **options):
         spec = create_session(self.sessions, ("python3", "relay.py"))
         launch = CliLaunch(
             ("/opt/paw/start-claude", "-p"),
@@ -429,7 +443,7 @@ class LauncherTest(unittest.IsolatedAsyncioTestCase):
             b"the task",
             spec,
         )
-        return spec, await self.launcher().start(launch)
+        return spec, await self.launcher(**options).start(launch)
 
     async def test_the_session_files_and_the_stream(self):
         spec, process = await self.launch()
@@ -512,6 +526,66 @@ class LauncherTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn(
             f"stop paw-cli-session@{spec.session_id}.service", self.calls.read_text()
         )
+
+    async def read_to_the_end(self, process):
+        while await process.stdout.readline():
+            pass
+
+    def state(self, spec):
+        return (self.sessions / f"{spec.session_id}.state").read_text().split()
+
+    async def test_an_oom_kill_is_read_before_the_unit_is_stopped(self):
+        # Decision 0092, 4: the stream ends while the unit is still active
+        # (systemd stops it a moment later, Result=oom-kill); the adapter
+        # stops it at once and only then asks for its exit status.
+        (self.sessions / "linger").write_text("1")
+        (self.sessions / "end").write_text("failed 137 oom-kill")
+        spec, process = await self.launch()
+        await self.read_to_the_end(process)
+        self.assertEqual(self.state(spec)[0], "active")
+        await process.stop()
+        # The stop erased the result (the fake stop says inactive 143) ...
+        self.assertEqual(self.state(spec), ["inactive", "143"])
+        # ... which was read before it.
+        self.assertTrue(process.oom_killed)
+        self.assertEqual(await process.wait(), 137)
+        calls = self.calls.read_text()
+        self.assertLess(
+            calls.rindex("show --property Result"),
+            calls.index(f"stop paw-cli-session@{spec.session_id}.service"),
+        )
+
+    async def test_a_normal_end_is_not_an_oom_kill(self):
+        spec, process = await self.launch()
+        await self.read_to_the_end(process)
+        await process.stop()
+        self.assertFalse(process.oom_killed)
+        self.assertEqual(await process.wait(), 0)  # its own, not the stop's
+
+    async def test_a_cli_still_running_is_stopped_without_waiting(self):
+        (self.sessions / "hold").write_text("30")
+        (self.sessions / "end").write_text("failed 137 oom-kill")
+        spec, process = await self.launch()
+        await process.stdout.readline()
+        started = asyncio.get_running_loop().time()
+        await process.stop()
+        self.assertLess(asyncio.get_running_loop().time() - started, 5)
+        self.assertFalse(process.oom_killed)
+        self.assertEqual(await process.wait(), 143)
+
+    async def test_a_unit_still_active_after_the_window_is_not_read(self):
+        # The backend stops what is still running: its result is not an OOM.
+        (self.sessions / "linger").write_text("30")
+        (self.sessions / "end").write_text("failed 137 oom-kill")
+        spec, process = await self.launch(unit_end_seconds=0.6)
+        await self.read_to_the_end(process)
+        await process.stop()
+        self.assertFalse(process.oom_killed)
+        self.assertEqual(await process.wait(), 143)
+
+    def test_the_window_is_ten_seconds(self):
+        self.assertEqual(UNIT_END_SECONDS, 10.0)
+        self.assertEqual(SystemdLauncher().unit_end_seconds, 10.0)
 
     async def test_a_refused_stop_is_raised(self):
         (self.sessions / "hold").write_text("30")
@@ -686,6 +760,9 @@ class DeployFilesTest(unittest.TestCase):
             "RuntimeDirectory=paw-cli-session/%i",
             "Delegate=yes",
             "Environment=XDG_RUNTIME_DIR=/run/paw-cli-session/%i",
+            # Decision 0092, 4: an OOM kill ends the unit as oom-kill.
+            "OOMPolicy=stop",
+            "MemoryAccounting=yes",
         ):
             with self.subTest(line=line):
                 self.assertIn(f"\n{line}\n", unit)

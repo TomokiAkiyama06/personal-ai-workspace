@@ -16,7 +16,7 @@ Backend（User paw）
   └─ systemctl start --no-block paw-cli-session@<uuid>.service（polkit がこの名前の start / stop だけを許す）
        ├─ Requires= / After= paw-egress-session@<uuid>.socket（/run/paw-egress/session/<uuid>.sock。Session の Unit と一緒に止まる: ../egress/README.md）
        └─ paw_cli_session_run.py <uuid>（User paw-agent-cli、硬くした Unit）
-            └─ podman run --rm --network none --read-only --cap-drop all --userns keep-id
+            └─ podman run --rm --cgroups=split --network none --read-only --cap-drop all --userns keep-id
                  -v /run/paw-cli/<uuid>（同じ Path）-v /run/paw-egress/session/<uuid>.sock:/run/paw-egress.sock --env-file credential.env
                  <Image@sha256:...> /opt/paw/start-claude <引数>   stdin = prompt、stdout = stream.sock
                    ├─ paw_egress.py forward（127.0.0.1:3128 → 自分の Session の Egress の Socket）
@@ -29,7 +29,9 @@ Egress（[Decision 0091](../../../../docs/decisions/0091-egress-per-session-sock
 
 `credential.env` は 0640・所有者 Backend・Group `paw-cli-bridge`（Decision 0088 で承認。Decision 0087 の「0400・所有者 `paw-agent-cli`」の代わり。Backend は別の Account に File を渡せないため）。
 
-止めるのは `systemctl stop`（Unit の `TimeoutStopSec=5s`: SIGTERM → 5 秒 → SIGKILL、`ExecStopPost` で Container を消す）。Session の Directory は終わりに Backend が消す（Token の File も一緒に消える）。
+止めるのは `systemctl stop`（Unit の `TimeoutStopSec=5s`: SIGTERM → 5 秒 → SIGKILL、`ExecStopPost` で Container を消す）。
+
+Memory 不足（[Decision 0092](../../../../docs/decisions/0092-runtime-oom-kill-detection.md) の 4、Issue #251）: Unit は `OOMPolicy=stop`・`MemoryAccounting=yes` で、Program は `podman run --cgroups=split` で Container の cgroup を Unit の cgroup の下に置く。Container の中の OOM Kill で Unit 全体が止まり、`Result=oom-kill` で終わる。`systemctl stop` でその `Result` は消えうるので、Backend（`_UnitProcess.stop()`）は止める**前に** `ActiveState`・`Result`・`ExecMainStatus` を読んで覚える（CLI が自分で終わった後なら、Unit が `active` から離れるのを最大 10 秒待つ）。`submit` の前に OOM で終わった Session は `AgentOutOfMemory`。Session の Directory は終わりに Backend が消す（Token の File も一緒に消える）。
 
 ## 配備（root）
 
@@ -42,6 +44,7 @@ Egress（[Decision 0091](../../../../docs/decisions/0091-egress-per-session-sock
 
 - **Rootless の Podman が、この硬くした Unit（`NoNewPrivileges`・空の `CapabilityBoundingSet`・`ProtectSystem=strict`・`ProtectHome`・`RestrictSUIDSGID`）の下で動くこと**（Decision 0083 の承認の条件 (1)）。`newuidmap` は Setuid なので動かないことがある。そのときは Subuid の Mapping を使わない形（`/etc/subuid` に `paw-agent-cli` の行を置かず、`storage.conf` の `ignore_chown_errors = "true"`）で、硬さはそのまま保つ。
 - Unit の `Delegate=yes` の下で、Podman の `--memory`・`--cpus`・`--pids-limit` が効くこと（cgroup v2 の Controller の委任）。
+- **`--cgroups=split` で Container の cgroup が Unit の cgroup の下にあること**（`podman inspect --format '{{.State.CgroupPath}}' paw-cli-<uuid>` が `/system.slice/system-paw\x2dcli\x2dsession.slice/paw-cli-session@<uuid>.service/` の下）。`--memory` を小さくした Session で Memory を食わせ、Unit が `systemctl show -p Result` で `oom-kill` になり、Node が `AgentOutOfMemory` になること（Decision 0092 の 7）。`split` が使えなければ、Decision 0092 の 4 の他の案 (a)（Wrapper が `OOMKilled` を読む）に新しい Decision で替える。
 - CLI の Unit が止められなかった（`systemctl stop` が 3 回とも失敗した）ときは、Runtime は Session の Directory を消さずに残す（Unit が Mount しているため）。Log の `A CLI session could not be stopped` を見たら、Unit を止めてから `/run/paw-cli/<uuid>` を消す。
 - Container の中から `127.0.0.1:3128` 経由で `api.anthropic.com` に届き、他の Host は拒否されること（Proxy の Log）。Egress の Session ごとの Socket と Proxy の確認（polkit の追加なしで Socket が作られる・Session の終わりで止まり File が消える・Container から見える Socket が自分の 1 つだけ・Log の `session=` と集計の 1 行）は [`../egress/README.md`](../egress/README.md) の「確かめること」。
 - `claude` の `system/init` に PAW の Tool と `EndConversation` だけが出ること（違えば Runtime が止める）。

@@ -28,6 +28,13 @@ ExecStopPost=-/usr/bin/podman rm --force --ignore paw-cli-%i
 # Rootless Podman creates the container's cgroup below the unit's (memory,
 # CPU and PID limits): the unit's cgroup is delegated to it.
 Delegate=yes
+# An OOM kill in the container (its cgroup is below the unit's: podman run
+# --cgroups=split) stops the whole unit with Result=oom-kill, which the backend
+# reads before it stops the unit (Decision 0092, 4; issue #251). Delegate=yes
+# alone would make it OOMPolicy=continue, and systemd sees the kill only with
+# memory accounting.
+OOMPolicy=stop
+MemoryAccounting=yes
 KillMode=mixed
 KillSignal=SIGTERM
 TimeoutStopSec=5s
