@@ -52,6 +52,7 @@
   - `argv[0]` は正規化した絶対 Path（`..`・`.`・二重の `/` なし）で、`os.path.realpath` が同じ Path（途中に Symbolic Link がない。`/usr/bin/systemctl` のように書く）、起動の時に存在する通常の File、所有者 root、Group と Others が書けない、実行できる。
   - **`argv[0]` から `/` までの各 Directory も root の持ち物で、Group と Others が書けない**（設定 File の上の Directory の検査と同じ規則）。File 自身が root の持ち物でも、Directory を Backend の User（またはその Group）が書ければ、起動の検査の後に `rename` で差し替えられ、`CommandModelControl` は Path 名で実行するので差し替えた File が動くため（Codex review #263）。Sticky の付いた Directory（`/tmp` など）も拒否する。
   - `argv[0]` が Shell と汎用の起動役（`sh`・`bash`・`dash`・`zsh`・`env`・`sudo`・`su`・`python*`・`perl`・`busybox`）の名前なら拒否する。これは境界ではなく（境界は root だけが書ける File）、`/bin/sh -c '…'` の形で Shell を持ち込む書き間違いを防ぐためである。
+  - **Script の Interpreter も同じ規則で確かめる**（Codex review #263）: `argv[0]` の先頭が `#!` なら、その行の Interpreter（最初の語）も正規化した絶対 Path・Link なし・root の持ち物・Group と Others が書けない・`/` までの各 Directory も同じ、を満たさなければ拒否する。`#!/usr/bin/env …`（`PATH` で Interpreter を探す）と、Interpreter がさらに `#!` の Script である形は拒否する。Python の Script は `#!/usr/bin/python3 -I`（User の site と作業 Directory を `sys.path` に入れない）でなければ拒否する。Interpreter を Backend の User が差し替えられると、Script 自身を守っても差し替えた Interpreter が動くため。
   - 読み取りの Command（`pids`）も同じ規則。
 - **URL の検査**: `[local_model].base_url` と `metrics_url` は `http://127.0.0.1:<port>/…` か `http://[::1]:<port>/…` だけ（Loopback）。Host 名（`localhost` を含む）・外の Address は拒否する（Prompt と Metrics を Host の外へ送る設定を作らない）。
 - **Path の検査**: `shim_base`・`wrapper`・`nvidia_smi`・`identity_template` は絶対 Path（既存の Dataclass の検査に加えて）。`nvidia_smi` と `wrapper` は `argv[0]` と同じ所有者・権限の検査（File と、`/` までの各 Directory）。
@@ -59,7 +60,7 @@
   - `PAW_RUNTIME_CONFIG_FILE` が設定されているのに File が無い・読めない・上の保護を満たさない。
   - TOML として読めない、`version` が無い・違う。
   - 不明な Section・不明な Key・型の違い・範囲外・必須の Key の欠け・重複した Deployment の名前。
-  - 相互参照の誤り: `[local_model]` が `[compute]` なしにある、`[local_model].deployment` が `[[compute.deployments]]` に無い、Ladder の Label が有効な Runtime に無い、`[orchestrator]` があるのに Runtime が 1 つも無い、`[sandbox] runner = "ssh"` で `[git] runner` が `ssh` でない、`shim_group` の Group が無い。
+  - 相互参照の誤り: `[local_model]` が `[compute]` なしにある、`[local_model].deployment` が `[[compute.deployments]]` に無い、Ladder の Label が有効な Runtime に無い（`[local_model].agent_label` が有効な Runtime になるのは `[sandbox]` もあるときだけ。`create_app` は `local_model`・`sandbox`・`orchestrator_config` がそろったときだけ Local の Agent の Runtime を作るので、`[sandbox]` なしの `[orchestrator]` は `build_task_execution` の `TypeError` になる。Codex review #263）、`[orchestrator]` があるのに Runtime が 1 つも無い（今は `[compute]`・`[local_model]`・`[sandbox]` の 3 つがそろわない `[orchestrator]` はすべてこれ）、`[sandbox] runner = "ssh"` で `[git] runner` が `ssh` でない、`shim_group` の Group が無い。
   - 既存の Dataclass の `__post_init__` と `create_app` / `build_task_execution` の `TypeError` / `ValueError`。
   - **一部だけ有効にして起動することはしない**（File 全体を受け入れるか、起動しないか）。誤りのある File を「無いもの」として扱って起動を続けることもしない。
 - Error の文は Section と Key の名前と固定の理由だけで、**値（Path・Command・URL）を含めない**（今の `Settings` の Error と同じ）。起動に成功したときは、有効にした部分（`compute: deployments=main control=yes`、`local_model: yes`、`sandbox: ssh`、`git: ssh`、`orchestrator: ladders=local`）を INFO の Log に 1 行出す。Command と Path は Log に出さない。
@@ -76,7 +77,7 @@
 | `[git] runner = "ssh"` だけ | Repository の登録・Worktree の git が `SshGitRunner`（他の Section なしでもよい） |
 | `[compute]` | Scheduler・Full GPU Mode の経路・System Health の `compute`（`control` があれば Model の起動・停止） |
 | `[compute]` + `[local_model]` | 上に加えて Inferred Preference の Interpreter（#38）が Main の Model を `INTERACTIVE` の Lease で使う |
-| `[compute]` + `[local_model]` + `[sandbox]` + `[git] ssh` + `[orchestrator]` | 上に加えて Local の Agent の Runtime（Label `local`）が Node を走らせる。Orchestrator が組み立てられ、`PAW_ORCHESTRATOR_WORKERS`（既定 1）の Worker が起動する（Decision 0086） |
+| `[compute]` + `[local_model]` + `[sandbox]` + `[git] ssh` + `[orchestrator]`（`[orchestrator]` は前の 3 つがそろわなければ拒否） | 上に加えて Local の Agent の Runtime（Label `local`）が Node を走らせる。Orchestrator が組み立てられ、`PAW_ORCHESTRATOR_WORKERS`（既定 1）の Worker が起動する（Decision 0086） |
 | `[sandbox]` だけ（`[orchestrator]` なし） | 受け付ける（Tool Broker に Repository の Tool が登録されるだけで、呼ぶ Runtime はない） |
 
 - **CLI の Runtime（Codex / Claude Code）はこの Decision では有効にできない。** Decision 0083 の 1 のとおり `CloudPolicy` が注入されるまで CLI の段は Ladder に置けず、本番の `CloudPolicy` はまだ無い（その Decision も、CLI の Smoke も、Provider の規約の確認もまだ）。`[agents.codex]` / `[agents.claude]` の名前は予約し、書けば起動しない。CLI を有効にするときは、`CloudPolicy` の Decision と CLI の Smoke の後に、この File の Schema に Section を足す新しい Decision を作る（`session_base`・`relay_command`・`model` など、`CodexCliRuntime` / `ClaudeCliRuntime` の引数）。
@@ -163,7 +164,7 @@ reviewer = ["local"]
 ```
 
 - Reviewer も `local` なので、Review は Worker と同じ Model で、REQUIREMENTS の「Review の独立性」は CLI の段が有効になるまで満たさない（`OrchestratorConfig` の説明のとおり Ladder の書き方の問題で、Orchestrator は強制しない）。これは今の状態の確認で、この Decision で変えない。
-- **`pids` に `cat …/cgroup.procs` を使わない**（Codex review #263）。Unit を Enable せず Scheduler が起動する形では、止まっている（または落ちた）Unit に cgroup の Directory が無いので `cat` が失敗し、`CommandModelControl.processes()` が `ModelControlError` になる。Scheduler は PID を「分からない」として扱い、`initial = "gpu"` を `unloaded` に直さないので、`always` の Main の `gpu` の Command が走らず、Model がいつまでも起動しない。そこで小さな読み取り専用の Helper `paw-unit-pids <unit>` を配備に足す（下の 8 の PR 3。root の持ち物 `0755` で `/usr/local/lib/paw/` に置く）。Helper は Unit の名前を `^[A-Za-z0-9@._-]+\.service$` で確かめ、`/usr/bin/systemctl show -p LoadState -p ControlGroup -- <unit>` を読み、`LoadState` が `loaded` でなければ失敗（名前の書き間違いを「止まっている」と取り違えない）、`ControlGroup` が空なら何も出さずに成功（止まっている）、あれば `/sys/fs/cgroup<ControlGroup>/cgroup.procs` と子の cgroup の `cgroup.procs` の PID を出す（読めなければ失敗）。Shell を使わず、Unit の `start` / `stop` はしない。
+- **`pids` に `cat …/cgroup.procs` を使わない**（Codex review #263）。Unit を Enable せず Scheduler が起動する形では、止まっている（または落ちた）Unit に cgroup の Directory が無いので `cat` が失敗し、`CommandModelControl.processes()` が `ModelControlError` になる。Scheduler は PID を「分からない」として扱い、`initial = "gpu"` を `unloaded` に直さないので、`always` の Main の `gpu` の Command が走らず、Model がいつまでも起動しない。そこで小さな読み取り専用の Helper `paw-unit-pids <unit>` を配備に足す（下の 8 の PR 3。root の持ち物 `0755` で `/usr/local/lib/paw/` に置く）。Helper は Python の Script（`#!/usr/bin/python3 -I`）で、Unit の名前を `^[A-Za-z0-9@._-]+\.service$` で確かめ、`/usr/bin/systemctl show -p LoadState -p ControlGroup -- <unit>` を読み、`LoadState` が `loaded` でなければ失敗（名前の書き間違いを「止まっている」と取り違えない）、`ControlGroup` が空なら何も出さずに成功（止まっている）、あれば `/sys/fs/cgroup<ControlGroup>/cgroup.procs` と子の cgroup の `cgroup.procs` の PID を出す（読めなければ失敗）。Shell を使わず、Unit の `start` / `stop` はしない。
 - `paw-llm-main.service` の `--port 18080` と `base_url`・`metrics_url` の Port、`--served-model-name main` と `served_model` は一致させる（Parser は Unit の File を読まないので、一致は Human が確かめる）。
 
 ### 5. Human が配備で確かめること（Agent は他の Linux User・systemd・GPU を操作しない）
