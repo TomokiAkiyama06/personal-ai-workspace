@@ -64,10 +64,16 @@ Environment=FLASHINFER_WORKSPACE_BASE=/srv/paw-llm/cache
 ExecStartPre=/usr/bin/awk '/^MemAvailable:/ { found = 1; exit !($$2 >= 41943040) } END { if (!found) exit 1 }' /proc/meminfo
 # The parsers the local agent needs (Decision 0083, 12; issue #208): tool calls
 # and reasoning come back as structured fields, the way the benchmark measured
-# the main model (Qwen3.8-27B-FP8, Decision 0074). --max-model-len and
-# --gpu-memory-utilization are the coexistence values of Decision 0073 / 0075 /
-# 0076 and are set at deployment.
-ExecStart=/opt/paw/runtime-venv/bin/vllm serve /srv/models/main --served-model-name main --host 127.0.0.1 --port 18080 --reasoning-parser qwen3 --enable-auto-tool-choice --tool-call-parser qwen3_coder
+# the main model (Qwen3.8-27B-FP8, Decision 0074).
+# The coexistence values (Decision 0073 2, 0075, 0076 4), as in the passing
+# coexistence runs (docs/benchmarks/paw-017-coexist-qwen38-2026-10.md,
+# paw-200-coexist-admission-2026-10.md) that measured the main model's
+# footprint: --gpu-memory-utilization 0.51 --max-model-len 131072
+# --max-num-seqs 8, and --language-model-only (the vision part is not loaded;
+# the coding agent does not use it). Without them vLLM 0.30.0 took the model's
+# maximum context (262,144) and 0.92 of the GPU (issue #208, GPU smoke
+# 2026-10-15), which does not fit next to the other deployments.
+ExecStart=/opt/paw/runtime-venv/bin/vllm serve /srv/models/main --served-model-name main --host 127.0.0.1 --port 18080 --gpu-memory-utilization 0.51 --max-model-len 131072 --max-num-seqs 8 --language-model-only --reasoning-parser qwen3 --enable-auto-tool-choice --tool-call-parser qwen3_coder
 # "systemctl start" returns when the server answers (the scheduler's load is
 # done then). 900 s: the longest measured first load from the HDD was 412 s
 # (Decision 0039 2), the same as the scheduler's load timeout.
