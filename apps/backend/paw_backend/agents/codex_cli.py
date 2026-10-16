@@ -54,7 +54,7 @@ from pathlib import Path
 from typing import Final, Protocol
 
 from paw_backend.agents.bridge import McpBridge
-from paw_backend.agents.claude_cli import NODE_MARGIN_SECONDS, _ended
+from paw_backend.agents.claude_cli import NODE_MARGIN_SECONDS, _ended, _out_of_memory
 from paw_backend.agents.cli_session import (
     CliSessionSpec,
     SystemdLauncher,
@@ -253,6 +253,10 @@ class CodexAttachment:
     # (the unit still has it mounted) for the operator, instead of deleting
     # it under a running session (as Claude's).
     unstopped: list[bool] = field(default_factory=list, repr=False)
+    # Set by the adapter when the CLI's unit was ended by the OOM killer
+    # (``Result=oom-kill``, Decision 0092, 4): without a submitted result the
+    # attempt is ``AgentOutOfMemory``, before any other failure.
+    out_of_memory: list[bool] = field(default_factory=list, repr=False)
 
 
 def session_config(spec: CliSessionSpec, tools: Iterable[str]) -> str:
@@ -489,6 +493,8 @@ class CodexSessionAdapter:
             bridge_ended.cancel()
             await _stop(process, attachment)
         code = await process.wait()
+        if getattr(process, "oom_killed", False):
+            attachment.out_of_memory.append(True)
         if failure is None and not stream.initialized:
             failure = FailureCode.INVALID_RESPONSE
         if (
@@ -712,6 +718,10 @@ class CodexCliRuntime:
                 remove_session(spec)
         if attachment is not None and attachment.unstopped:
             return ErrorClassifier.outcome(Failure.OTHER)
+        if attachment is not None and attachment.out_of_memory:
+            oom = _out_of_memory(bridge)
+            if oom is not None:
+                return oom
         if bridge.failure is not None:
             return _ended(bridge.failure)
         if attachment.refused:

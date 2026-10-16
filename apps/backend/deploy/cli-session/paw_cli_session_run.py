@@ -135,6 +135,9 @@ def podman_command(
         "podman",
         "run",
         "--rm",
+        # The container's cgroup below this unit's (Decision 0092, 4): an OOM
+        # kill in the container is then the unit's (``Result=oom-kill``).
+        "--cgroups=split",
         "--init",
         "-i",
         "--name",

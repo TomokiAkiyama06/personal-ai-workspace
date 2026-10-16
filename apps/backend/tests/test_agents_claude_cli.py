@@ -291,6 +291,56 @@ class LauncherTest(unittest.IsolatedAsyncioTestCase):
             os.kill(pid, 0)
 
 
+class OutOfMemoryTest(ClaudeCase):
+    """Decision 0092, 4: the CLI's unit ended with ``Result=oom-kill``
+    (``CliProcess.oom_killed``, read before the stop)."""
+
+    def adapter(self):
+        class OomLauncher(SubprocessLauncher):
+            async def start(self, launch):
+                process = await super().start(launch)
+                process.oom_killed = True
+                return process
+
+        return ClaudeSessionAdapter(
+            OomLauncher(),
+            executable=(
+                sys.executable,
+                "-I",
+                str(FAKE),
+                "--scenario",
+                str(self.scenario),
+                "--report",
+                str(self.report),
+            ),
+        )
+
+    async def test_without_a_submit_it_is_agent_out_of_memory(self):
+        outcome = await self.run_node([{"turn": [7, 3]}])
+        self.assertEqual(outcome.error_class, "AgentOutOfMemory")
+        self.assertEqual(outcome.message, "out_of_memory")
+        self.assertFalse(outcome.escalate)
+        self.assertEqual(list(self.sessions.iterdir()), [])  # cleaned up
+
+    async def test_it_comes_before_the_other_failures(self):
+        # The stream was refused as well (a consequence of the kill).
+        outcome = await self.run_node(
+            [{"turn": [1, 1]}, {"sleep": 30}],
+            init_tools=["mcp__paw__submit", "EndConversation", "Bash"],
+        )
+        self.assertEqual(outcome.error_class, "AgentOutOfMemory")
+
+    async def test_a_result_submitted_before_stands(self):
+        outcome = await self.run_node(
+            [
+                {"turn": [100, 10]},
+                {"call": "submit", "arguments": {"summary": "It is in parse.py"}},
+                {"sleep": 30},
+            ]
+        )
+        self.assertEqual(outcome.result.summary, "It is in parse.py")
+
+
 class UnstoppedTest(ClaudeCase):
     async def test_a_cli_that_cannot_be_stopped_keeps_its_directory(self):
         class StuckLauncher(SubprocessLauncher):
