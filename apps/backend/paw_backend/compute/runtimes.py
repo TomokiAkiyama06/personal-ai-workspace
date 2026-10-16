@@ -25,7 +25,13 @@
   it ran, the seconds charged as its GPU time and the tokens the local runtime
   reported to the budget while it ran; the late time of a call that outlived
   its node is recorded when it ends. A record that cannot be written is logged
-  and changes nothing else.
+  and changes nothing else. A local attempt that lost its model server
+  (``ConnectionError``, the adapters' ``SERVER_UNAVAILABLE``) is reported as
+  ``AgentOutOfMemory`` instead when the scheduler says the server's unit was
+  ended by the OOM killer at or after the node's lease began (Decision 0092, 3;
+  issue #251): the class only, with the fixed text, no escalation (Decision
+  0083, 4). The scheduler reads the unit for up to 10 s while systemd has not
+  noticed the kill yet; it cannot be read, or ended otherwise: unchanged.
 * :class:`ScheduledMemoryWorker` wraps a Memory Worker (PAW-041). A job runs only
   under a Background lease on the Memory Worker's model; when there is none (the
   model is unloaded, background work is stopped under pressure, an Exclusive job
@@ -86,6 +92,7 @@ from paw_backend.memory.preferences.interpretation import check_interpreter
 from paw_backend.orchestrator.config import Clock, SystemClock
 from paw_backend.orchestrator.domain import ExecutionPlacement
 from paw_backend.orchestrator.errors import (
+    AGENT_OUT_OF_MEMORY,
     InvalidOrchestratorArgumentError,
     NodeStopped,
     StopReason,
@@ -104,6 +111,11 @@ from paw_backend.tasks.queueing import BudgetKind
 from paw_backend.tools.interfaces import require_async_method
 
 COMPUTE_UNAVAILABLE = "ComputeUnavailable"
+# The adapters' rows (``agents/failures.py``, Decision 0083, 4) for a lost model
+# server and for an out-of-memory failure, as literals so that this module does
+# not import the agents; a test checks that both agree.
+SERVER_UNAVAILABLE_CLASS = ConnectionError.__name__
+OUT_OF_MEMORY_TEXT = "out_of_memory"
 _MAX_ESTIMATE = 1 << 24
 # How long a local runtime stopped on the GPU time left may take to end.
 CANCEL_GRACE_SECONDS = 10.0
@@ -377,7 +389,29 @@ class HybridRuntime:
             # The task's GPU time was spent and the local runtime was stopped:
             # the node stops on the budget (the charge may already have said so).
             raise NodeStopped(StopReason.BUDGET_EXCEEDED)
+        if (
+            isinstance(outcome, NodeOutcome)
+            and outcome.error_class == SERVER_UNAVAILABLE_CLASS
+            and await self._server_oom_killed(lease)
+        ):
+            # Its model server was killed by the OOM killer (Decision 0092, 3).
+            return NodeOutcome.failed(AGENT_OUT_OF_MEMORY, OUT_OF_MEMORY_TEXT)
         return outcome
+
+    async def _server_oom_killed(self, lease: ComputeLease) -> bool:
+        try:
+            return await self._scheduler.model_server_oom_killed(
+                self._deployment, since=lease.granted_at
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            logger.warning(
+                "Whether the model server was killed by the OOM killer could "
+                "not be asked (%s)",
+                type(error).__name__,
+            )
+            return False
 
     async def _place(
         self,
