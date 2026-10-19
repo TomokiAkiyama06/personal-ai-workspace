@@ -337,6 +337,48 @@ class KeptSlotTest(SlotCase):
         self.assertEqual(second.secrets, [])
 
 
+class StuckOnCancelSession(ExclusiveSession):
+    """An adapter whose CLI could not be stopped when it was cancelled."""
+
+    async def run_session(self, secret, request):
+        try:
+            return await super().run_session(secret, request)
+        except asyncio.CancelledError:
+            request.cli_running()
+            raise
+
+
+class KeptAfterLossTest(SlotCase):
+    async def test_a_lost_slot_whose_cli_could_not_be_stopped_is_taken_again(self):
+        adapter = StuckOnCancelSession(hold=asyncio.Event())
+        running = asyncio.ensure_future(self.start(self.slot_service(adapter)))
+        await asyncio.wait_for(adapter.started.wait(), 10)
+        (lease,) = self.leases()
+        mine = lease["holder"]
+        with self.engine.begin() as connection:
+            connection.execute(
+                text("UPDATE connection_session_leases SET holder = :other"),
+                {"other": uuid.uuid4()},
+            )
+        result = await asyncio.wait_for(running, 10)
+        self.assertEqual(result.failure, FailureCode.UNAVAILABLE)
+        # The other holder's lease expires: the stuck CLI's process takes the
+        # slot again and keeps it.
+        with self.engine.begin() as connection:
+            connection.execute(
+                text(
+                    "UPDATE connection_session_leases SET acquired_at = now()"
+                    " - interval '1 hour', heartbeat_at = now() - interval '1 hour',"
+                    " expires_at = now() - interval '1 minute'"
+                )
+            )
+        for _ in range(50):
+            await asyncio.sleep(0.1)
+            if [row["holder"] for row in self.leases()] == [mine]:
+                break
+        self.assertEqual([row["holder"] for row in self.leases()], [mine])
+
+
 class LostSlotTest(SlotCase):
     async def test_a_holder_that_cannot_renew_stops_its_session_in_time(self):
         adapter = ExclusiveSession(hold=asyncio.Event(), refresh=REFRESHED)

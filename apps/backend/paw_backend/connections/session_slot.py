@@ -170,6 +170,32 @@ class SessionSlot:
         )
         self.lost.set()
 
+    async def _hold(self) -> None:
+        """Keep the slot of a CLI that could not be stopped for as long as
+        this process lives: renew it, or take it again once it is free or
+        expired (only a lease that expired can be taken over). Errors are
+        logged and tried again."""
+        while True:
+            try:
+                held = await self._run(
+                    self._store.renew_session_slot(self._kind, self.holder, self._ttl)
+                ) or await self._run(
+                    self._store.acquire_session_slot(self._kind, self.holder, self._ttl)
+                )
+                if not held:
+                    logger.error(
+                        "connection session slot taken by another holder while"
+                        " a CLI that could not be stopped may run: kind=%s",
+                        self._kind.value,
+                    )
+            except Exception as error:
+                logger.warning(
+                    "connection session slot not renewed: kind=%s exception_type=%s",
+                    self._kind.value,
+                    log_type_name(error),
+                )
+            await asyncio.sleep(self._heartbeat)
+
     def keep(self) -> None:
         """The session's CLI could not be stopped (it may still run with the
         login): :meth:`release` will keep the slot held."""
@@ -186,6 +212,10 @@ class SessionSlot:
                 " runs): kind=%s",
                 self._kind.value,
             )
+            if self._task is None or self._task.done():
+                # The heartbeat gave up (the slot was being lost when the
+                # session was cancelled): hold it again from here on.
+                self._task = asyncio.ensure_future(self._hold())
             return
         if self._task is not None:
             self._task.cancel()

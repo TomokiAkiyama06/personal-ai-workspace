@@ -640,6 +640,8 @@ class UnstoppedTest(CodexCase):
         self.assertEqual(self.credentials.placed, [])
         self.assertEqual(len(list(self.sessions.iterdir())), 1)  # kept
         self.assertEqual(outcome.error_class, "AdapterError")
+        # No login was placed: the connection's slot is not kept for it.
+        self.assertEqual(self.connections.cli_running, [])
 
     async def test_a_stop_interrupted_by_cancellation_keeps_its_directory(self):
         stopping = asyncio.Event()

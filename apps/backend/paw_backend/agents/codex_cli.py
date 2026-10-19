@@ -267,6 +267,10 @@ class CodexAttachment:
     # (``Result=oom-kill``, Decision 0092, 4): without a submitted result the
     # attempt is ``AgentOutOfMemory``, before any other failure.
     out_of_memory: list[bool] = field(default_factory=list, repr=False)
+    # Set by the adapter as it places the login in ``CODEX_HOME``: from then
+    # on a CLI that could not be stopped may hold the login (the version
+    # probe before it never does).
+    placed: list[bool] = field(default_factory=list, repr=False)
 
 
 def session_config(spec: CliSessionSpec, tools: Iterable[str]) -> str:
@@ -389,9 +393,14 @@ class CodexSessionAdapter:
         try:
             return await self._session(secret, request, attachment)
         finally:
-            if attachment.unstopped and request.cli_running is not None:
+            if (
+                attachment.unstopped
+                and attachment.placed
+                and request.cli_running is not None
+            ):
                 # The CLI may still run with the login: the connection's
-                # slot stays held (Decision 0083, 6).
+                # slot stays held (Decision 0083, 6). A version probe that
+                # could not be stopped has no login: the slot goes back.
                 request.cli_running()
 
     async def _session(
@@ -414,6 +423,7 @@ class CodexSessionAdapter:
             codex_home / CONFIG_NAME, session_config(attachment.spec, attachment.tools)
         )
         try:
+            attachment.placed.append(True)
             await self._credentials.place(secret, codex_home)
             return await self._converse(request, attachment)
         finally:
