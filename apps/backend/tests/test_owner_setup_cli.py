@@ -13,6 +13,8 @@ import shlex
 import subprocess
 import sys
 import unittest
+import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -22,6 +24,8 @@ from paw_backend.authz import PostgresAuditSink
 from paw_backend.cli import owner as cli
 from paw_backend.db import Database
 from paw_backend.identity import SetupTokenRejectedError, TokenRedeemer
+from paw_backend.identity.models import TokenPurpose
+from paw_backend.identity.operator import IssuedToken
 
 from .identity_support import (
     ROLE_PASSWORD,
@@ -57,6 +61,37 @@ def run(
     with paw_environment(**environment), as_user:
         code = cli.main(argv, stdout=out, stderr=err)
     return code, out.getvalue(), err.getvalue()
+
+
+class SetupLinkTest(unittest.TestCase):
+    """stderr names the Web App's page for the token (issue #262), not the token."""
+
+    def show(self, command: str, purpose: TokenPurpose) -> tuple[int, str, str]:
+        issued = IssuedToken(
+            token=f"pawst1.{'a' * 32}.{'S' * 43}",
+            audit_ref=uuid.uuid4(),
+            user_id=uuid.uuid4(),
+            login_name="tomoki",
+            purpose=purpose,
+            expires_at=datetime(2026, 10, 19, 12, 0, tzinfo=UTC),
+            operator=None,
+        )
+        out, err = io.StringIO(), io.StringIO()
+        code = cli._show(issued, command, out, err)
+        return code, out.getvalue(), err.getvalue()
+
+    def test_both_commands_print_the_page_shape_on_stderr_only(self):
+        for command, purpose in (
+            ("owner-setup", TokenPurpose.SETUP),
+            ("owner-recover", TokenPurpose.RECOVERY),
+        ):
+            with self.subTest(command=command):
+                code, out, err = self.show(command, purpose)
+                self.assertEqual(code, cli.EXIT_OK)
+                self.assertEqual(out, f"pawst1.{'a' * 32}.{'S' * 43}\n")
+                self.assertIn("https://<this server>/setup#<token>", err)
+                self.assertNotIn("S" * 43, err)
+                self.assertNotIn("/setup", out)
 
 
 class ExitCodeTest(unittest.TestCase):
@@ -289,6 +324,7 @@ class OwnerSetupCommandTest(CliDatabaseTestCase):
         self.assertNotIn(token.split(".")[2], err)
         self.assertIn("login_name=tomoki", err)
         self.assertIn("works once", err)
+        self.assertIn(cli.SETUP_LINK, err)
         (user,) = self.rows("SELECT * FROM users")
         self.assertEqual(
             (user.login_name, user.system_role, user.status, user.passkey_required),

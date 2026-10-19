@@ -30,7 +30,11 @@ export type IconName =
   | "eye"
   | "laptop"
   | "phone"
-  | "key";
+  | "key"
+  | "check"
+  | "cross"
+  | "warning"
+  | "clock";
 
 const PATHS: Record<Exclude<IconName, "logo">, ReactNode> = {
   search: (
@@ -189,6 +193,26 @@ const PATHS: Record<Exclude<IconName, "logo">, ReactNode> = {
       <path d="M12 12h9" />
       <path d="M17 12v4" />
       <path d="M20.5 12v3" />
+    </>
+  ),
+  check: <path d="m5 12.5 4.5 4.5L19 7" />,
+  cross: (
+    <>
+      <path d="M6 6l12 12" />
+      <path d="M18 6 6 18" />
+    </>
+  ),
+  warning: (
+    <>
+      <path d="M12 3.5 21.5 20h-19Z" />
+      <path d="M12 10v4.5" />
+      <path d="M12 17.2v.3" />
+    </>
+  ),
+  clock: (
+    <>
+      <circle cx="12" cy="12" r="8" />
+      <path d="M12 8v4.5l3 2" />
     </>
   ),
 };

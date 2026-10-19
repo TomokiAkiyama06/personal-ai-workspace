@@ -239,6 +239,7 @@ export const en: Record<MessageKey, string> = {
   "error.confirmation_code_mismatch":
     "The confirmation code does not match. Enter the code shown on the new device.",
   "error.not_found": "Not found. It may have expired or been used already.",
+  "error.password_policy": "The password does not meet the policy.",
   "error.validation_error": "Check what you entered.",
   "error.service_unavailable": "The service is temporarily unavailable. Try again later.",
   "error.network_error": "Could not reach the server. Check your network.",
@@ -383,6 +384,80 @@ export const en: Record<MessageKey, string> = {
   "passkeys.revoke": "Remove",
   "passkeys.revokeConfirm": "Remove the passkey “{name}”?",
   "passkeys.revoked": "The passkey is removed.",
+
+  "redeem.headline1": "Set your password",
+  "redeem.headline2": "with a one-time token.",
+  "redeem.asideBody":
+    "The token comes from the Owner's server command, or from the Owner / Admin who reset your Passkeys. Setting the password does not sign you in: sign in with it afterwards.",
+  "redeem.forgot.title": "If you forgot your password",
+  "redeem.forgot.body": "This Workspace has no self-service reset by email or similar.",
+  "redeem.forgot.user":
+    "Ask an Admin or the Owner to reset your Passkeys and issue a one-time reset.",
+  "redeem.forgot.admin": "Ask the Owner.",
+  "redeem.forgot.owner": "Issue a recovery token on the server as an administrator (sudo).",
+  "redeem.forgot.lock":
+    "A lock after repeated failed password attempts ends after at most 1 hour by default. An Owner / Admin can lift it earlier.",
+  "redeem.backToSignIn": "Back to sign-in",
+  "redeem.kind": "Kind of token",
+  "redeem.kind.owner": "Owner setup / recovery",
+  "redeem.kind.reset": "Password reset",
+  "redeem.heading.owner": "Owner setup / recovery",
+  "redeem.heading.reset": "Password reset",
+  "redeem.ttl.owner": "Valid 30 min (default)",
+  "redeem.ttl.reset": "Valid 24 h (default)",
+  "redeem.intro.owner":
+    "Use the token that owner-setup / owner-recover of the server command (python -m paw_backend.cli) printed. The Owner cannot be created on the web.",
+  "redeem.intro.reset":
+    "Use the one-time reset token an Owner / Admin issued when they reset your Passkeys.",
+  "redeem.token": "Token",
+  "redeem.fromLink": "Filled in from the link",
+  "redeem.retype": "Enter another token",
+  "redeem.tokenHint.owner":
+    "It is shown once, when the command runs. If it expired, issue a new one.",
+  "redeem.tokenHint.reset":
+    "You received it by another channel from the Owner / Admin who did the reset. It is shown once, when issued.",
+  "redeem.password": "New password",
+  "redeem.confirm": "New password (again)",
+  "redeem.check.length": "10 to 256 characters (now {count})",
+  "redeem.check.distinct": "At least 4 different characters (not aaaaaaaaaa)",
+  "redeem.check.match": "Matches the confirmation",
+  "redeem.check.server":
+    "Whether it is a common password or contains your user name is checked by the server after sending. Full-width and half-width forms count as the same character (NFKC).",
+  "redeem.check.ok": "met",
+  "redeem.check.ng": "not met",
+  "redeem.check.idle": "not entered",
+  "redeem.recoveryWarning":
+    "With a recovery token, every session on every device, the previous password and every registered Passkey stop working at once.",
+  "redeem.submit": "Set the password",
+  "redeem.submitting": "Setting…",
+  "redeem.success.owner": "The Owner's password is set",
+  "redeem.success.reset": "Your password is set",
+  "redeem.success.code": "success",
+  "redeem.success.body": "You are not signed in yet. Sign in with the new password.",
+  "redeem.success.passkey":
+    "This account needs a Passkey. After you sign in, the Passkey registration opens.",
+  "redeem.toSignIn": "Go to sign-in",
+  "redeem.signOutFailed":
+    "Your password is set. But the other account signed in on this browser could not be signed out. Try signing out again, or sign out manually from that account's screens, then sign in with the new password.",
+  "redeem.signOutRetry": "Sign out again",
+  "redeem.invalid.title": "The token is not valid, has expired or was used",
+  "redeem.invalid.body":
+    "The reason is not shown. Check the token and enter it again, or ask whoever issued it for a new one. A token allows 5 attempts by default; after that it no longer works.",
+  "redeem.rate.title": "Too many attempts",
+  "redeem.rate.body":
+    "After repeated attempts, requests from this source (or from everyone) are paused for a while. Attempts during the pause do not use up the token's attempts.",
+  "redeem.rate.after": "until you can try again",
+  "redeem.rate.ready": "You can try again",
+  "redeem.policy.title": "This password cannot be used.",
+  "redeem.policy.too_short": "Use at least 10 characters.",
+  "redeem.policy.too_long": "Use at most 256 characters.",
+  "redeem.policy.invalid_character":
+    "It contains characters that are not allowed (control characters, for example).",
+  "redeem.policy.too_common":
+    "It is a common password, or repeats very few characters. Choose one that is hard to guess.",
+  "redeem.policy.contains_login_name": "A password that contains your user name cannot be used.",
+  "redeem.policy.same_as_current": "It cannot be the same as the current password.",
+  "redeem.policy.unknown": "The password does not meet the policy.",
 
   "pair.title": "Add this device",
   "pair.intro": "Add this device with a QR code or link issued on a trusted device.",

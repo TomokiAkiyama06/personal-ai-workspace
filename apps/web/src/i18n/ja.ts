@@ -241,6 +241,7 @@ export const ja = {
   "error.confirmation_code_mismatch":
     "確認コードが一致しません。新しい端末に表示されているコードを入力してください。",
   "error.not_found": "対象が見つかりません。期限切れか、すでに使われた可能性があります。",
+  "error.password_policy": "パスワードの規則を満たしていません。",
   "error.validation_error": "入力内容を確認してください。",
   "error.service_unavailable":
     "サービスが一時的に利用できません。しばらくしてからやり直してください。",
@@ -389,6 +390,79 @@ export const ja = {
   "passkeys.revoke": "削除",
   "passkeys.revokeConfirm": "Passkey「{name}」を削除しますか？",
   "passkeys.revoked": "Passkey を削除しました。",
+
+  "redeem.headline1": "1 回限りのトークンで",
+  "redeem.headline2": "パスワードを設定します。",
+  "redeem.asideBody":
+    "トークンは Owner のサーバー管理コマンド、または Passkey のリセットを行った Owner / Admin から受け取ります。設定が終わってもサインインはされません。設定したパスワードでサインインしてください。",
+  "redeem.forgot.title": "パスワードをお忘れの場合",
+  "redeem.forgot.body": "この Workspace には、メールなどで自分で再設定する仕組みはありません。",
+  "redeem.forgot.user":
+    "Admin または Owner に、Passkey のリセットと 1 回限りの再設定を依頼してください。",
+  "redeem.forgot.admin": "Owner に依頼してください。",
+  "redeem.forgot.owner": "サーバー上で管理者（sudo）として復旧用トークンを発行します。",
+  "redeem.forgot.lock":
+    "パスワードの試行を続けて失敗した場合のロックは、既定で最長 1 時間で解除されます。Owner / Admin が先に解除することもできます。",
+  "redeem.backToSignIn": "サインインへ戻る",
+  "redeem.kind": "トークンの種類",
+  "redeem.kind.owner": "Owner 初期設定 / 復旧",
+  "redeem.kind.reset": "パスワードの再設定",
+  "redeem.heading.owner": "Owner の初期設定 / 復旧",
+  "redeem.heading.reset": "パスワードの再設定",
+  "redeem.ttl.owner": "有効 30 分（既定）",
+  "redeem.ttl.reset": "有効 24 時間（既定）",
+  "redeem.intro.owner":
+    "サーバー管理コマンド（python -m paw_backend.cli）の owner-setup / owner-recover が表示したトークンを使います。Owner は Web から作成できません。",
+  "redeem.intro.reset":
+    "Owner / Admin が Passkey をリセットしたときに発行した、1 回限りの再設定トークンを使います。",
+  "redeem.token": "トークン",
+  "redeem.fromLink": "リンクから入力済み",
+  "redeem.retype": "別のトークンを入力する",
+  "redeem.tokenHint.owner":
+    "コマンドの実行時に 1 度だけ表示されます。期限切れの場合は発行し直してください。",
+  "redeem.tokenHint.reset":
+    "リセットを行った Owner / Admin から、別の手段で受け取ったトークンです。発行時に 1 度だけ表示されます。",
+  "redeem.password": "新しいパスワード",
+  "redeem.confirm": "新しいパスワード（確認）",
+  "redeem.check.length": "10〜256 文字（現在 {count} 文字）",
+  "redeem.check.distinct": "4 種類以上の文字を含む（aaaaaaaaaa などは不可）",
+  "redeem.check.match": "確認用と一致している",
+  "redeem.check.server":
+    "よく使われるパスワードやユーザー名を含むものは、送信後にサーバーが確認します。全角・半角は同じ文字として数えます（NFKC）。",
+  "redeem.check.ok": "満たしています",
+  "redeem.check.ng": "満たしていません",
+  "redeem.check.idle": "未入力",
+  "redeem.recoveryWarning":
+    "復旧用トークンの場合、設定と同時に、すべての端末のセッション・これまでのパスワード・登録済みのすべての Passkey が無効になります。",
+  "redeem.submit": "パスワードを設定する",
+  "redeem.submitting": "設定しています…",
+  "redeem.success.owner": "Owner のパスワードを設定しました",
+  "redeem.success.reset": "パスワードを設定しました",
+  "redeem.success.code": "成功",
+  "redeem.success.body": "まだサインインしていません。設定したパスワードでサインインしてください。",
+  "redeem.success.passkey":
+    "このアカウントは Passkey が必須です。サインインすると、Passkey の登録の画面が開きます。",
+  "redeem.toSignIn": "サインインへ進む",
+  "redeem.signOutFailed":
+    "パスワードは設定しました。ただし、このブラウザでサインイン中の別のアカウントからサインアウトできませんでした。もう一度サインアウトするか、そのアカウントの画面から手動でサインアウトしてから、新しいパスワードでサインインしてください。",
+  "redeem.signOutRetry": "もう一度サインアウトする",
+  "redeem.invalid.title": "トークンが無効か、期限切れか、使用済みです",
+  "redeem.invalid.body":
+    "理由は表示しません。トークンを確かめて入力し直すか、発行した人に新しいトークンを依頼してください。1 つのトークンで試せるのは既定で 5 回までで、超えるとそのトークンは使えなくなります。",
+  "redeem.rate.title": "試行が多すぎます",
+  "redeem.rate.body":
+    "試行が続いたため、この接続元（または全体）からの受け付けを一時的に止めています。止まっている間の試行は、トークンの試行回数を使いません。",
+  "redeem.rate.after": "後に再試行できます",
+  "redeem.rate.ready": "再試行できます",
+  "redeem.policy.title": "このパスワードは使えません。",
+  "redeem.policy.too_short": "10 文字以上にしてください。",
+  "redeem.policy.too_long": "256 文字以下にしてください。",
+  "redeem.policy.invalid_character": "使えない文字（制御文字など）が含まれています。",
+  "redeem.policy.too_common":
+    "よく使われるパスワードか、少ない種類の文字の繰り返しです。推測されにくいものにしてください。",
+  "redeem.policy.contains_login_name": "ユーザー名を含むパスワードは使えません。",
+  "redeem.policy.same_as_current": "今のパスワードと同じものは使えません。",
+  "redeem.policy.unknown": "パスワードの規則を満たしていません。",
 
   "pair.title": "この端末を追加",
   "pair.intro": "信頼済み端末で発行した QR コードかリンクから、この端末を追加します。",
