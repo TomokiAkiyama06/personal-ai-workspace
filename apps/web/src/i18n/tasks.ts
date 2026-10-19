@@ -99,7 +99,6 @@ export const tasksJa = {
   "tasks.create.budget": "予算",
   "tasks.create.budget.standard": "1 時間・50 ステップまで",
   "tasks.create.budget.long": "4 時間・200 ステップまで",
-  "tasks.create.budget.unlimited": "上限なし（Loop 検知と停止は効きます）",
   "tasks.create.submit": "作成してキューに入れる",
   "tasks.create.submitting": "作成中…",
   "tasks.create.created": "タスクを作成し、キューに入れました: {title}",
@@ -278,6 +277,8 @@ export const tasksJa = {
   "error.no_target_repository": "Target のリポジトリを 1 つ以上選んでください。",
   "error.duplicate_repository": "同じリポジトリが 2 回指定されています。",
   "error.repository_not_found": "このリポジトリは見つかりませんでした。",
+  "error.request_key_reused":
+    "この送信は別のプロジェクトでタスクを作りました。フォームを開き直してください。",
   "error.repository_write_forbidden":
     "このリポジトリへの書き込み権限がないため、Target にできません。",
   "error.tasks_not_configured": "このサーバーではタスクの実行が構成されていません。",
@@ -396,7 +397,6 @@ export const tasksEn: Record<keyof typeof tasksJa, string> = {
   "tasks.create.budget": "Budget",
   "tasks.create.budget.standard": "Up to 1 hour and 50 steps",
   "tasks.create.budget.long": "Up to 4 hours and 200 steps",
-  "tasks.create.budget.unlimited": "No limit (loop detection and stops still apply)",
   "tasks.create.submit": "Create and queue",
   "tasks.create.submitting": "Creating…",
   "tasks.create.created": "Created and queued: {title}",
@@ -571,6 +571,8 @@ export const tasksEn: Record<keyof typeof tasksJa, string> = {
   "error.no_target_repository": "Choose at least one target repository.",
   "error.duplicate_repository": "The same repository is listed twice.",
   "error.repository_not_found": "This repository was not found.",
+  "error.request_key_reused":
+    "This submission already created a task in another project. Open the form again.",
   "error.repository_write_forbidden":
     "You may not write to this repository, so it cannot be the target.",
   "error.tasks_not_configured": "Tasks are not configured on this server.",

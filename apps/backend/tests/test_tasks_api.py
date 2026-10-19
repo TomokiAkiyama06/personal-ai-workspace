@@ -7,6 +7,7 @@ the real Project state gate) and a real Authorizer on an in-memory audit sink. T
 principal is a static one with the memberships a session's provider would read.
 """
 
+import asyncio
 import uuid
 
 import httpx
@@ -1035,6 +1036,9 @@ class TasksApiTest(PostgresRepositoryTestCase):
             {"instruction": ""},
             {"instruction": "x" * 20_001},
             {"budget_preset": "huge"},
+            {"budget_preset": "unlimited"},  # waits for Decision 0094 (3)
+            {"request_key": ""},
+            {"request_key": "k" * 65},
             {"priority": "high"},  # not taken: a user task is normal
             {"repositories": [{"repository_id": "not-a-uuid", "role": "target"}]},
             {"repositories": [{"repository_id": str(self.repo), "role": "owner"}]},
@@ -1058,9 +1062,9 @@ class TasksApiTest(PostgresRepositoryTestCase):
         self.assertEqual(response.status_code, 403)
         self.assertEqual(self.task_count(), 0)
 
-    async def test_sending_it_again_creates_another_task(self):
-        # No idempotency key, like every other POST route (proposed: Decision
-        # 0094): a repeated request is a second task, each with its own entry.
+    async def test_without_a_request_key_sending_it_again_creates_another_task(
+        self,
+    ):
         self.as_creator()
         first = (await self.create()).json()["id"]
         second = (await self.create()).json()["id"]
@@ -1070,6 +1074,63 @@ class TasksApiTest(PostgresRepositoryTestCase):
                 self.queue_rows(uuid.UUID(task_id)),
                 [{"status": "queued", "priority": "normal"}],
             )
+
+    async def test_a_request_sent_again_with_its_key_answers_the_same_task(self):
+        self.as_creator()
+        first = await self.create(request_key="form-1")
+        again = await self.create(request_key="form-1")
+
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(again.status_code, 201)
+        self.assertEqual(again.json()["id"], first.json()["id"])
+        self.assertEqual(self.task_count(), 1)
+        self.assertEqual(
+            self.rows("SELECT count(*) AS n FROM queue_entries")[0]["n"], 1
+        )
+        # Another key, or another person with the same key, is another task.
+        self.assertNotEqual(
+            (await self.create(request_key="form-2")).json()["id"], first.json()["id"]
+        )
+        self.sign_in(self.contributor, {self.project: ProjectRole.CONTRIBUTOR})
+        self.assertNotEqual(
+            (await self.create(request_key="form-1")).json()["id"], first.json()["id"]
+        )
+        self.assertEqual(self.task_count(), 3)
+
+    async def test_two_requests_with_one_key_at_once_create_one_task(self):
+        self.as_creator()
+        answers = await asyncio.gather(
+            *(self.create(request_key="double-click") for _ in range(4))
+        )
+        self.assertEqual([answer.status_code for answer in answers], [201] * 4)
+        self.assertEqual(len({answer.json()["id"] for answer in answers}), 1)
+        self.assertEqual(self.task_count(), 1)
+        self.assertEqual(
+            self.rows("SELECT count(*) AS n FROM queue_entries")[0]["n"], 1
+        )
+
+    async def test_a_request_key_of_another_project_is_refused(self):
+        other_target = self.seed_repository(self.other_project, name="beta-2")
+        self.sign_in(
+            self.creator,
+            {
+                self.project: ProjectRole.CONTRIBUTOR,
+                self.other_project: ProjectRole.CONTRIBUTOR,
+            },
+        )
+        self.assertEqual((await self.create(request_key="k-1")).status_code, 201)
+
+        response = await self.create(
+            project=self.other_project,
+            request_key="k-1",
+            repositories=[{"repository_id": str(other_target), "role": "target"}],
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["error"]["code"], "request_key_reused")
+        self.assertEqual(self.task_count(), 1)
+        response = await self.create(request_key="not allowed!")
+        self.assertEqual(response.status_code, 422)
 
     async def test_there_is_no_merge_route(self):
         self.as_creator()

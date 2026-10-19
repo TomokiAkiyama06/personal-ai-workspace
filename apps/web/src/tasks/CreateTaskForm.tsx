@@ -57,6 +57,8 @@ export function CreateTaskForm({
   const [instruction, setInstruction] = useState("");
   const [preset, setPreset] = useState<BudgetPreset>("standard");
   const [busy, setBusy] = useState(false);
+  // One key per form: a retry after a lost answer gets the task already created.
+  const [requestKey] = useState(() => crypto.randomUUID());
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -119,6 +121,7 @@ export function CreateTaskForm({
         instruction: instruction.trim(),
         repositories: [{ repositoryId, role: "target" }],
         budgetPreset: preset,
+        requestKey,
       });
       onCreated(task);
     } catch (caught) {

@@ -103,8 +103,11 @@ export type Priority = "high" | "normal" | "low";
 /** Task budget preset (tasks/queueing/budget.py). */
 export type BudgetPreset = "standard" | "long" | "unlimited";
 
-/** The presets in the order the creation form offers them (Decision 0007). */
-export const BUDGET_PRESETS: readonly BudgetPreset[] = ["standard", "long", "unlimited"];
+/**
+ * The presets the creation form offers, in order (Decision 0007). Unlimited
+ * waits for Decision 0094 (3): who may choose it is not decided yet.
+ */
+export const BUDGET_PRESETS = ["standard", "long"] as const satisfies readonly BudgetPreset[];
 
 /**
  * A task to create (POST /projects/{id}/tasks, issue #274). The Backend decides
@@ -119,6 +122,11 @@ export interface NewTask {
   /** The Working Set the task starts with: at least one `target`. */
   repositories: readonly { repositoryId: string; role: RepoRole }[];
   budgetPreset: BudgetPreset;
+  /**
+   * The key of this creation (one per form): sent again, the Backend answers
+   * the task the first request created instead of creating another.
+   */
+  requestKey: string;
 }
 
 /** The Backend's limits (tasks/service.py MAX_TITLE_LENGTH, api/v1/tasks.py). */

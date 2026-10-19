@@ -418,6 +418,7 @@ export const apiTaskSource: TaskSource = {
         role: entry.role,
       })),
       budget_preset: task.budgetPreset,
+      request_key: task.requestKey,
     };
     return taskDetail(
       await apiRequest<TaskDetailWire>(

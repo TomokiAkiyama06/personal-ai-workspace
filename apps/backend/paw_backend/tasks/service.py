@@ -89,6 +89,7 @@ raises the same error and writes nothing.
 import json
 import logging
 import math
+import re
 import sys
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
@@ -291,6 +292,9 @@ _ATTEMPT_COLUMNS = TaskAttemptRepositoryRow.__table__.c
 # A Working Set holds at most this many repositories (what a task scope holds,
 # ``tools.scope.MAX_REPOSITORIES``), removed ones not counted.
 MAX_WORKING_SET_REPOSITORIES = 32
+# The caller's key of a creating request (``create_task(request_key=...)``).
+MAX_REQUEST_KEY_LENGTH = 64
+_REQUEST_KEY = re.compile(rf"[A-Za-z0-9._:-]{{1,{MAX_REQUEST_KEY_LENGTH}}}")
 # How long a change of the Working Set waits for a repository inspection while
 # it holds the task's row lock.
 DEFAULT_INSPECTION_TIMEOUT = 10.0
@@ -784,6 +788,7 @@ class TaskService:
         agent: str | None = None,
         model: str | None = None,
         in_transaction: InTransactionStep | None = None,
+        request_key: str | None = None,
     ) -> TaskEvent:
         """Create a queued task (attempt 1) and its ``create`` event.
 
@@ -817,6 +822,11 @@ class TaskService:
         entry point (``api/v1/tasks.py``, issue #274) puts the new task in the
         queue with its budget preset this way, so a task is never created without
         its queue entry and budget.
+
+        ``request_key`` (``None`` or 1 to ``MAX_REQUEST_KEY_LENGTH`` characters of
+        ``[A-Za-z0-9._:-]``) is the caller's key of the request that creates the
+        task, kept in the ``create`` event (``detail["request_key"]``) so that a
+        repeated request can find the task it already created (issue #274).
         """
         project_id = _uuid("project_id", project_id)
         created_by = _uuid("created_by", created_by)
@@ -827,6 +837,21 @@ class TaskService:
         model = _optional_text("model", model, MAX_NAME_LENGTH)
         if in_transaction is not None and not callable(in_transaction):
             raise InvalidCommandArgumentError("in_transaction must be callable")
+        if request_key is not None and (
+            type(request_key) is not str or not _REQUEST_KEY.fullmatch(request_key)
+        ):
+            raise InvalidCommandArgumentError(
+                f"request_key must be 1 to {MAX_REQUEST_KEY_LENGTH} characters of"
+                " letters, digits and . _ : -"
+            )
+        detail: dict[str, Any] = {}
+        if working_set:
+            detail["working_set"] = [
+                {"repository_id": str(entry.repository_id), "role": entry.role.value}
+                for entry in working_set
+            ]
+        if request_key is not None:
+            detail["request_key"] = request_key
         now = utcnow()
         task = TaskRow(
             id=uuid.uuid4(),
@@ -881,19 +906,7 @@ class TaskService:
                 actor=Actor.user(created_by),
                 reason=None,
                 step_name=None,
-                detail=(
-                    {
-                        "working_set": [
-                            {
-                                "repository_id": str(entry.repository_id),
-                                "role": entry.role.value,
-                            }
-                            for entry in working_set
-                        ]
-                    }
-                    if working_set
-                    else None
-                ),
+                detail=detail or None,
             )
             if in_transaction is not None:
                 await in_transaction(session, task.id, project_id)

@@ -240,12 +240,14 @@ describe("apiTaskSource", () => {
       instruction: "Summarise it. Change nothing.",
       repositories: [{ repositoryId: "r-1", role: "target" }],
       budgetPreset: "standard",
+      requestKey: "k-1",
     });
     expect(calls[0]?.body).toEqual({
       title: "Read the parser",
       instruction: "Summarise it. Change nothing.",
       repositories: [{ repository_id: "r-1", role: "target" }],
       budget_preset: "standard",
+      request_key: "k-1",
     });
     expect(task.state).toBe("queued");
     expect(task.id).toBe(TASK);

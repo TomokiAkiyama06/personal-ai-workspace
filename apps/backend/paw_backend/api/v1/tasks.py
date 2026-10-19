@@ -26,7 +26,8 @@ over HTTP (issue #185, Decision 0067 Approved; the screens of PAW-062, #48).
   task's title, the instruction (kept as the task input ``{"instruction": ...}``),
   its Working Set (each repository of the project once, with its role; at least
   one ``target``, else 422 ``no_target_repository``) and the budget preset
-  (``standard`` by default). Each repository is decided on its own ACL as
+  (``standard`` by default, or ``long``; ``unlimited`` waits for Decision 0094,
+  3). Each repository is decided on its own ACL as
   Decision 0035 (3) says: ``project.read`` for a ``referenced`` one,
   ``project.repo.write`` for a ``working`` / ``target`` one (a repository that is
   not the project's, or that the person may not read, is 404
@@ -39,8 +40,13 @@ over HTTP (issue #185, Decision 0067 Approved; the screens of PAW-062, #48).
   Archived or Pending deletion one with 403, and the service's gate one that
   changed meanwhile with 409 ``project_not_active``). Answers 201 with the task
   as ``GET /tasks/{task_id}`` reads it. Like the other POST routes it relies on
-  the Origin check and ``SameSite=Strict`` (Decision 0044) and takes no
-  idempotency key: sending it twice creates two tasks.
+  the Origin check and ``SameSite=Strict`` (Decision 0044) against CSRF. An
+  optional ``request_key`` (the Web App sends one per form) makes a repeated
+  request (a lost answer, a retry) answer the task the first one created, for
+  ``REQUEST_KEY_HOURS`` (the key is kept in the ``create`` event; an advisory
+  lock on the person and the key orders two requests with the same key). The
+  same key in another project is 409 ``request_key_reused``. Without a key,
+  sending it twice creates two tasks.
 * ``GET /pull-requests`` (``tasks.list``): the pull requests the tasks of those
   projects recorded, with Merge Ready as the backend judges it
   (``task_views.is_merge_ready``). There is no merge route: merging stays the
@@ -62,7 +68,7 @@ from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette import status
 from starlette.requests import HTTPConnection
@@ -95,7 +101,7 @@ from paw_backend.tasks import (
     WorkingSetEntry,
 )
 from paw_backend.tasks.domain import RepoRole
-from paw_backend.tasks.models import TaskRow
+from paw_backend.tasks.models import TaskEventRow, TaskRow
 from paw_backend.tasks.queueing import BudgetPreset, Priority
 from paw_backend.tasks.queueing.errors import (
     BudgetNotConfiguredError,
@@ -104,6 +110,7 @@ from paw_backend.tasks.queueing.errors import (
 from paw_backend.tasks.service import (
     MAX_NAME_LENGTH,
     MAX_REASON_LENGTH,
+    MAX_REQUEST_KEY_LENGTH,
     MAX_TITLE_LENGTH,
     MAX_WORKING_SET_REPOSITORIES,
 )
@@ -342,7 +349,14 @@ class CreateTaskRequest(BaseModel):
     repositories: list[WorkingSetEntryIn] = Field(
         min_length=1, max_length=MAX_WORKING_SET_REPOSITORIES
     )
-    budget_preset: Literal["standard", "long", "unlimited"] = "standard"
+    # ``unlimited`` is not offered here until Decision 0094 (3) decides who may
+    # choose it.
+    budget_preset: Literal["standard", "long"] = "standard"
+    # The caller's key of this request: sent again with the same key, the request
+    # answers the task the first one created instead of creating another.
+    request_key: StrictStr | None = Field(
+        default=None, min_length=1, max_length=MAX_REQUEST_KEY_LENGTH
+    )
 
 
 # -- helpers ----------------------------------------------------------------------
@@ -779,14 +793,68 @@ async def _authorize_working_set(
     return checked
 
 
-def _enqueue(execution: TaskExecution, preset: BudgetPreset) -> Callable:
-    """The step of the creation, in its transaction: the queue entry and the
-    budget preset, as ``Orchestrator.enqueue_task`` writes them (a task without a
-    budget is never run, Decision 0007)."""
+# How long a request key finds the task its first request created.
+REQUEST_KEY_HOURS = 24
+
+
+class _Replayed(Exception):
+    """The request key already created a task: the creation is rolled back and
+    the route answers that task."""
+
+    def __init__(self, task_id: uuid.UUID, project_id: uuid.UUID) -> None:
+        super().__init__()
+        self.task_id = task_id
+        self.project_id = project_id
+
+
+async def _created_before(
+    session: AsyncSession, user_id: uuid.UUID, key: str, task_id: uuid.UUID
+) -> _Replayed | None:
+    """The task the same person created with ``key`` in the last
+    ``REQUEST_KEY_HOURS`` hours (other than ``task_id``), if any. The caller
+    holds the key's advisory lock, so of two requests with the same key the
+    second one sees the first one's task once it committed."""
+    row = (
+        await session.execute(
+            select(TaskEventRow.task_id, TaskRow.project_id)
+            .join(TaskRow, TaskRow.id == TaskEventRow.task_id)
+            .where(
+                TaskEventRow.command == TaskCommand.CREATE,
+                TaskEventRow.actor_id == user_id,
+                TaskEventRow.detail["request_key"].astext == key,
+                TaskEventRow.task_id != task_id,
+                TaskEventRow.created_at
+                > func.now() - text(f"interval '{REQUEST_KEY_HOURS} hours'"),
+            )
+            .order_by(TaskEventRow.seq)
+            .limit(1)
+        )
+    ).one_or_none()
+    return None if row is None else _Replayed(row.task_id, row.project_id)
+
+
+def _enqueue(
+    execution: TaskExecution,
+    preset: BudgetPreset,
+    user_id: uuid.UUID,
+    request_key: str | None,
+) -> Callable:
+    """The step of the creation, in its transaction: a request key that already
+    created a task rolls the creation back (``_Replayed``); otherwise the queue
+    entry and the budget preset, as ``Orchestrator.enqueue_task`` writes them (a
+    task without a budget is never run, Decision 0007)."""
 
     async def enqueue(
         session: AsyncSession, task_id: uuid.UUID, project_id: uuid.UUID
     ) -> None:
+        if request_key is not None:
+            await session.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:lock, 274))"),
+                {"lock": f"task-create:{user_id}:{request_key}"},
+            )
+            replayed = await _created_before(session, user_id, request_key, task_id)
+            if replayed is not None:
+                raise replayed
         await execution.queue.enqueue_in(session, task_id, priority=Priority.NORMAL)
         await execution.budget.set_preset_in(session, task_id, preset)
 
@@ -812,15 +880,31 @@ async def create_task(
     working_set = await _authorize_working_set(
         request, principal, project_id, body.repositories
     )
-    with _task_errors():
-        event = await execution.tasks.create_task(
-            project_id=project_id,
-            created_by=principal.user_id,
-            title=body.title,
-            input={"instruction": body.instruction},
-            repositories=working_set,
-            in_transaction=_enqueue(execution, BudgetPreset(body.budget_preset)),
-        )
+    try:
+        with _task_errors():
+            event = await execution.tasks.create_task(
+                project_id=project_id,
+                created_by=principal.user_id,
+                title=body.title,
+                input={"instruction": body.instruction},
+                repositories=working_set,
+                in_transaction=_enqueue(
+                    execution,
+                    BudgetPreset(body.budget_preset),
+                    principal.user_id,
+                    body.request_key,
+                ),
+                request_key=body.request_key,
+            )
+    except _Replayed as replayed:
+        # The same request again (a lost answer, a retry): the task it created.
+        if replayed.project_id != project_id:
+            raise ApiError(
+                409,
+                "request_key_reused",
+                "This request key already created a task in another project",
+            ) from None
+        return await _detail(request, principal, replayed.task_id)
     return await _detail(request, principal, event.task_id)
 
 

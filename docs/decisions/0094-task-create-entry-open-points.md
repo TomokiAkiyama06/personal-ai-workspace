@@ -1,4 +1,4 @@
-# Task を作る正規の入口で決まっていないこと（読み取りだけの Task、二重送信、Priority と Budget の選び方）
+# Task を作る正規の入口で決まっていないこと（読み取りだけの Task、二重送信、Priority と Budget の選び方、target のない作成）
 
 - Status: Proposed
 - Date: 2026-10-20
@@ -13,12 +13,12 @@
 
 - 権限: Route の Guard が Project について `project.task.run`（監査する）。Working Set の各 Repository は、その Repository の ACL で、`referenced` は `project.read`、`working` / `target` は `project.repo.write`（[Decision 0035](0035-working-set-capability-grants-and-legacy-tasks.md) の 3）。Project の外の Repository と読めない Repository は同じ 404。
 - Project の状態: Guard が Archived / Pending deletion を 403 で拒み、`TaskService.create_task` の Gate（[Decision 0020](0020-project-state-gate.md)）がその間に変わった Project を 409 `project_not_active` で拒む。
-- `target` は必須（API が 422 `no_target_repository`）。0035 の 3 は `target` のない作成を認めるが、それは作成後に UI で `target` を足す経路のためで、Queue に入れる入口では `target` のない Task は始まらない（`NoTargetRepositoryError`）。
+- `target` は必須（API が 422 `no_target_repository`。#274 の「target Repository が必須なこと」）。0035 の 3 が認める `target` のない作成との関係は、下の 4 で確認を求める。
 - Queue と Budget: `create_task` の同じ Transaction で、`Orchestrator.enqueue_task` と同じく Queue の Entry と Budget の Preset を書く（[Decision 0007](0007-task-queue-budget-and-loop-policy.md): Budget のない Task は走らせない）。
 - 監査: 作成は他の作成の Route（`POST /projects` など）と同じく、Capability の判定の監査（`audit_events`）と、Task の `create` の Event（作成者と Working Set）で残る。
 - CSRF: 他の POST と同じく、`SameSite=Strict` と Origin の検査（[Decision 0044](0044-web-app-serving-and-session.md)）。
 
-次の 3 つは要件にも既存の Decision にもなく、この PR では決めずに今の振る舞いに留めた。
+次の 4 つは要件にも既存の Decision にもない（または #274 と既存の Decision の間で確認が要る）。この PR では、**取り消せる・狭い側** の振る舞いに留めた（Codex review、PR #275）。
 
 ## 提案
 
@@ -30,17 +30,27 @@
 - B: 指示文だけ（今のまま）。保証がなく、読むだけの Task が `evaluating` で止まる。
 - C: 読み取りだけの Plan の形（Planner を使わず Researcher 1 つの固定の DAG）を作成時に選べるようにする。A より小さいが、完了の扱い（上の (c)）は A と同じく要る。
 
-### 2. 二重送信（推奨: 今は A、Task の量が増えたら B）
+### 2. 二重送信（推奨: 今の実装 A のまま）
 
-`POST /projects/{id}/tasks` は、他の POST と同じく Idempotency Key を受けない。同じ Request を 2 回送ると Task が 2 つでき、どちらも Queue に入る（Test で固定した）。Web の画面は送信中にボタンを止める。
+作成は Commit の後に応答を組み立てるので、応答が失われた（または応答の読み取りが失敗した）とき、Client が送り直すと GPU を使う Task が 2 つできうる。
 
-- **A（推奨、今）: 今のまま。** Browser は POST を自動で再送しない。誤って作った Task はキャンセルできる。
-- B: `Idempotency-Key` Header を受け、User ごとに Key と Request の Hash を 24 時間保存し、同じ Key の再送には最初の Task を返す（違う Body なら 409）。Table と Migration が要る。CLI や Chat から作る経路が増え、再送が起きうるときに入れる。
+- **A（推奨。この PR の実装）: 任意の `request_key` を Body で受ける。** Web の画面はフォームごとに 1 つの Key（UUID）を作って送る。同じ人が同じ Key で 24 時間以内に送り直すと、新しく作らずに最初の Task を返す（201、同じ Task）。Key は Task の `create` の Event（`detail.request_key`）に残し、人と Key の Advisory Lock で同時の 2 つを順に並べるので、Table と Migration は要らない。別の Project で同じ Key は 409 `request_key_reused`。Key のない Request は今の他の POST と同じく毎回作る。最初と Body が違っても最初の Task を返す（Body の Hash は比べない）。
+- B: `Idempotency-Key` Header と、Key と Request の Hash を持つ専用の Table（違う Body は 409）。CLI や Chat から作る経路が増えたら検討する。
+- C: Key を受けない（他の POST と同じ）。
 
 ### 3. Priority と Budget の Preset を誰が選べるか（推奨: 今のまま）
 
 - Priority: REQUIREMENTS の「Task Queue / Priority / Preemption」は、通常の User の Task を `NORMAL` とし、「Owner / Admin は必要に応じて Task priority を引き上げ可能」とする。引き上げの Capability はまだない。この入口は Priority を受けず、常に `normal` で入れる。**推奨: 今のまま。** 引き上げは、Capability（`admin` の System の Capability など）を決める別の Decision で足す。
-- Budget の Preset: [Decision 0007](0007-task-queue-budget-and-loop-policy.md) は Standard / Long / Unlimited の数値を決め、Unlimited に別の上限を置かないことを承認したが、誰がどれを選べるかは決めていない。この入口は `project.task.run` を持つ人に 3 つとも選ばせる（既定は Standard）。**推奨: 今のまま。** User / Admin の Quota（REQUIREMENTS の「User Quota / Unlimited」）は Task の Budget とは別に効く。Unlimited を Owner / Admin に限るなら、それを決める。
+- Budget の Preset: [Decision 0007](0007-task-queue-budget-and-loop-policy.md) は Standard / Long / Unlimited の数値を決め、Unlimited に別の上限を置かないことを承認したが、誰がどれを選べるかは決めていない。**この入口は今、Standard と Long だけを受ける**（既定は Standard。`unlimited` は 422）。6 つの上限がすべて外れる Unlimited を、決める前に Contributor に開かないため。
+  - **推奨: Unlimited は Owner / Admin の System Role の人だけが選べるようにする**（Project の Role だけでは選べない）。User / Admin の Quota（REQUIREMENTS の「User Quota / Unlimited」）は Task の Budget とは別に効く。
+  - 代わりの案: `project.task.run` を持つ人なら誰でも 3 つとも選べる。
+
+### 4. `target` のない作成（推奨: この入口では `target` を必須のままにする）
+
+[Decision 0035](0035-working-set-capability-grants-and-legacy-tasks.md) の 3 は「`target` のない作成を認める（作成後に `change_working_set` で `target` を足す経路を残すため）」と承認した。`TaskService.create_task` はそのまま `target` のない作成を受ける。一方 #274 は、この入口に「target Repository が必須なこと（`NoTargetRepositoryError`）」を求めた。この入口は作った Task をすぐ Queue に入れるが、`target` のない Task は Start で `NoTargetRepositoryError` になり、HTTP にも画面にも `target` を後から足す経路（`change_working_set`）はまだない。
+
+- **A（推奨、この PR の実装）: この入口（作って Queue に入れる）では `target` を必須にする**（422 `no_target_repository`）。0035 の 3 は Service の層の規則として残り、`target` を後から足す画面・API ができたときに、「Queue に入れずに作る」入口として使う。
+- B: この入口でも `target` のない作成を受け、Queue には入れない（Budget も置かない）。今は `target` を足す経路がないので、作られた Task は何もできない。
 
 ## 0093 の手順について
 
@@ -49,15 +59,16 @@ Decision 0093 の 5 の確認（段 3 の後の小さな Task）は、この入�
 ## 決めてほしいこと
 
 1. 読み取りだけの Task を、A（`read_only` の印、Worker を拒む、`referenced` だけで始められる、DAG の成功で完了）で別 Issue にするか。推奨: はい。
-2. 二重送信は今は A（Idempotency Key なし）でよいか。推奨: はい。
-3. 作成の入口は Priority を受けずに常に `normal`、Budget の Preset は `project.task.run` を持つ人が 3 つとも選べる、でよいか。推奨: はい。
+2. 二重送信は A（任意の `request_key`、`create` の Event に残し、24 時間、同じ Key は最初の Task を返す）でよいか。推奨: はい。
+3. 作成の入口は Priority を受けずに常に `normal` でよいか。推奨: はい。Unlimited の Preset は Owner / Admin の System Role の人だけが選べる、でよいか（それまで入口は Standard / Long だけ）。推奨: はい。
+4. 作って Queue に入れるこの入口では `target` を必須にし（0035 の 3 の `target` のない作成は Service の規則として残す）、でよいか。推奨: はい。
 
 ## リスク
 
 - 1 を決めるまで、#208 の確認の Task は指示文だけで読み取りに留める。Worker の Node ができても書くのは `paw/` の branch と worktree だけで、PR は Integration Gate の後（[Decision 0052](0052-integration-push-and-pull-request.md)）。確認の後は Task をキャンセルする。
-- 2 の A のまま、二重に作られた Task は両方とも GPU を使う。確認の時は Queue が空なことを先に見る。
+- `request_key` を送らない Client（CLI の Script など）の再送は Task を 2 つ作る。確認の時は Queue が空なことを先に見る。
 
 ## 承認後の扱い
 
 - 1 が承認されたら、Issue を作って実装し、`docs/DEPLOYMENT_UPDATE.md` の手順を `read_only` に変える。
-- 2・3 は今の実装のままで、`apps/backend/README.md` の記述を「承認済み」に変える。
+- 2・4 は今の実装のままで、`apps/backend/README.md` の記述を「承認済み」に変える。3 の Unlimited が承認されたら、Owner / Admin にだけ `unlimited` を受け、画面にも Owner / Admin にだけ出す。

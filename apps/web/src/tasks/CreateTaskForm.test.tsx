@@ -78,6 +78,8 @@ describe("新しいタスク", () => {
     );
     const budget = within(form).getByRole("group", { name: "予算" });
     expect(within(budget).getByRole("radio", { name: /標準/ })).toBeChecked();
+    // Who may choose Unlimited waits for Decision 0094.
+    expect(within(budget).getAllByRole("radio")).toHaveLength(2);
     await user.click(within(budget).getByRole("radio", { name: /長時間/ }));
     await user.click(submit);
 
@@ -88,6 +90,7 @@ describe("新しいタスク", () => {
         instruction: "README の構成を読んでまとめてください。変更はしないでください。",
         repositories: [{ repositoryId: "r-backend", role: "target" }],
         budgetPreset: "long",
+        requestKey: expect.stringMatching(/^[0-9a-f-]{36}$/),
       },
     ]);
     // The form closes, the queued task is listed first and opened.
@@ -135,6 +138,12 @@ describe("新しいタスク", () => {
     expect(await within(form).findByRole("alert")).toHaveTextContent(
       "このリポジトリへの書き込み権限がないため、Target にできません。",
     );
+    // Sent again from the same form: the same request key (a lost answer
+    // gets the task already created, not a second one).
+    await user.click(within(form).getByRole("button", { name: "作成してキューに入れる" }));
+    const sent = vi.mocked(source.createTask).mock.calls.map(([task]) => task.requestKey);
+    expect(sent).toHaveLength(2);
+    expect(sent[0]).toBe(sent[1]);
     expect(within(form).getByRole("textbox", { name: "タイトル" })).toHaveValue("調べもの");
     expect(within(form).getByRole("button", { name: "作成してキューに入れる" })).toBeEnabled();
   });
