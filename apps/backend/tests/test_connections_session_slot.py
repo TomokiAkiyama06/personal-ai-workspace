@@ -35,6 +35,7 @@ from paw_backend.connections import (
     AgentSessionResult,
     ConnectionBusyError,
     ConnectionKind,
+    ConnectionNotFoundError,
     ConnectionUnavailableError,
     FailureCode,
     FileSecretStore,
@@ -336,6 +337,39 @@ class LostSlotTest(SlotCase):
 
 
 class WriteBackTest(SlotCase):
+    async def test_a_replacement_and_a_rotation_never_cross(self):
+        # The rotation's "still the connection's?" is checked under the old
+        # handle's lock, and a replacement holds that lock while it changes
+        # the row: a replacement that lands between the rotation's first read
+        # and its write makes it ``connection_not_found``, nothing written.
+        service = self.slot_service(ExclusiveSession())
+        replacement = await self.store.put(CODEX, LOGIN)
+        async with self.store.lock(self.handle):
+            rotating = asyncio.ensure_future(
+                service.rotate_credential(CODEX, self.handle, 1, REFRESHED)
+            )
+            replacing = asyncio.ensure_future(
+                service.replace_credential(
+                    self.principal(self.admin), CODEX, replacement
+                )
+            )
+            await asyncio.sleep(0.3)
+            # Both wait for the old handle's lock.
+            self.assertFalse(rotating.done())
+            self.assertFalse(replacing.done())
+            # The replacement's row change, as if it had won the lock first.
+            with self.engine.begin() as connection:
+                connection.execute(
+                    text("UPDATE shared_connections SET secret_handle = :h"),
+                    {"h": replacement},
+                )
+        with self.assertRaises(ConnectionNotFoundError):
+            await rotating
+        await replacing
+        self.assertEqual(
+            [e for e in self.sink.events if e.action == "connection.rotate"], []
+        )
+
     async def test_a_refreshed_login_becomes_the_next_version(self):
         adapter = ExclusiveSession(refresh=REFRESHED)
         result = await self.start(self.slot_service(adapter))

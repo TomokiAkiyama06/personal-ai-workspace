@@ -635,8 +635,7 @@ class ConnectionService:
             _connection_resource(),
             correlation_id,
         )
-        previous = await self._call_store(self._store.read_handle(kind))
-        async with self._credential_lock(handle):
+        async with self._current_handle_locked(kind, handle) as previous:
             await self._require_stored(handle, kind)
             info = await self._call_store(self._store.replace_handle(kind, handle))
         if info is None:
@@ -690,8 +689,9 @@ class ConnectionService:
         kind = validate_enum("kind", kind, ConnectionKind)
         correlation_id = uuid.uuid4()
         existing = await self._authorize_existing(principal, kind, correlation_id)
-        previous = await self._call_store(self._store.read_handle(kind))
-        if not await self._call_store(self._store.delete_connection(kind)):
+        async with self._current_handle_locked(kind) as previous:
+            deleted = await self._call_store(self._store.delete_connection(kind))
+        if not deleted:
             raise ConnectionNotFoundError()
         if previous is not None:
             await self._discard_credential(previous)
@@ -720,12 +720,19 @@ class ConnectionService:
         if self._credentials is None:
             raise ConnectionUnavailableError()
         current = await self._call_store(self._store.get_connection(kind))
-        if (
-            current is None
-            or (await self._call_store(self._store.read_handle(kind))) != handle
-        ):
+        if current is None:
             raise ConnectionNotFoundError()
-        version = await self._credentials.rotate(handle, kind, expected_version, value)
+
+        async def still_attached() -> None:
+            # Under the handle's lock: a replacement or a disconnection holds
+            # the same lock while it changes the row (``_current_handle_
+            # locked``), so a credential detached meanwhile is never rotated.
+            if (await self._call_store(self._store.read_handle(kind))) != handle:
+                raise ConnectionNotFoundError()
+
+        version = await self._credentials.rotate(
+            handle, kind, expected_version, value, check=still_attached
+        )
         await self._audit(
             ACTION_ROTATE, OUTCOME_SUCCEEDED, True, None, uuid.uuid4(),
             _RESOURCE_CONNECTION, current.id,
@@ -738,6 +745,26 @@ class ConnectionService:
         if self._credentials is None or not hasattr(self._credentials, "collect"):
             return 0
         return await self._credentials.collect(self._store.handle_referenced)
+
+    @contextlib.asynccontextmanager
+    async def _current_handle_locked(self, kind: ConnectionKind, *also: str):
+        """Hold the secret store's locks of the connection's current handle
+        (read again once they are held: the handle that is current under the
+        lock) and of ``also``, in a fixed order; yield the current handle
+        (``None``: no connection). A rotation of the current handle
+        (``rotate_credential``) checks under the same lock, so a replacement
+        or a disconnection and a write-back never cross. Without a store,
+        no lock."""
+        while True:
+            previous = await self._call_store(self._store.read_handle(kind))
+            handles = sorted({h for h in (previous, *also) if h is not None})
+            async with contextlib.AsyncExitStack() as stack:
+                for name in handles:
+                    await stack.enter_async_context(self._credential_lock(name))
+                again = await self._call_store(self._store.read_handle(kind))
+                if again == previous:
+                    yield previous
+                    return
 
     def _credential_lock(self, handle: str):
         """The secret store's lock of ``handle`` (none without a store)."""
