@@ -16,7 +16,9 @@ What is printed, and where:
 
 * the one-time token goes to **stdout**, once, as a line of its own, and
   nowhere else (not stderr, not a log, not a file);
-* everything else goes to **stderr**: ids, expiry and hints, never a secret;
+* everything else goes to **stderr**: ids, expiry and hints, never a secret --
+  among them the shape of the Web App's page that takes the token
+  (``SETUP_LINK``, issue #262), with a placeholder where the token goes;
 * no exception message is ever printed, only its type. The database URL is read
   from the settings and cannot be given as an argument: ``PAW_OPERATOR_DATABASE_URL``
   (a role that may create Owner tokens) or, when that is unset, ``PAW_DATABASE_URL``
@@ -55,6 +57,12 @@ EXIT_ENVIRONMENT = 2
 EXIT_TOKEN_NOT_DELIVERED = 3
 
 CONFIRM_FLAG = "--confirm-owner-recovery"
+
+# The Web App's page that takes the token and sets the password (issue #262). The
+# token goes in the URL fragment, which a browser never sends to the server; the
+# command does not know the public origin and never prints the token here.
+SETUP_PATH = "/setup"
+SETUP_LINK = f"https://<this server>{SETUP_PATH}#<token>"
 
 _LOGIN_NAME_RULE = (
     "a login name is 3 to 64 characters: lower-case letters, digits and . _ - "
@@ -312,7 +320,11 @@ def _show(
         f"{what}. owner_id={issued.user_id} login_name={issued.login_name}.{who}\n"
         f"The {issued.purpose.value} token printed on stdout is valid until "
         f"{issued.expires_at.isoformat(timespec='seconds')}, works once, and is "
-        "shown only now: it is not stored and cannot be displayed again.",
+        "shown only now: it is not stored and cannot be displayed again.\n"
+        f"Set the Owner's password in the Web App: open {SETUP_LINK} with the "
+        "token in place of <token> (a URL fragment is not sent to the server), "
+        f"or open {SETUP_PATH} and paste it. Nobody is signed in by it: sign in "
+        "with the new password afterwards.",
     )
     return EXIT_OK
 

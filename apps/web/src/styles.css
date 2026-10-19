@@ -1861,6 +1861,384 @@ a.nav-toggle:hover {
   font-size: 13px;
 }
 
+/* トークンでパスワードを設定 (the design's PTokenRedeem; issue #262). */
+
+.brand-panel-narrow {
+  width: 440px;
+  padding: 56px 40px 40px;
+}
+
+.redeem-headline {
+  font-size: 28px;
+  line-height: 1.45;
+}
+
+.redeem-forgot {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 18px 18px 16px;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: var(--nav);
+}
+
+.redeem-forgot-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--info);
+}
+
+.redeem-forgot-head h2 {
+  font-size: 14px;
+  color: var(--text);
+}
+
+.redeem-forgot-body {
+  font-size: 12.5px;
+  line-height: 1.85;
+  color: var(--text-2);
+}
+
+.redeem-forgot-row {
+  display: flex;
+  gap: 10px;
+}
+
+.redeem-role {
+  flex-shrink: 0;
+  width: 56px;
+  height: fit-content;
+  padding: 2px 0;
+  border-radius: var(--r-badge);
+  background: var(--input);
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--text-2);
+  text-align: center;
+}
+
+.redeem-role.owner {
+  background: var(--selected);
+  color: var(--link);
+}
+
+.redeem-forgot-text {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  font-size: 12.5px;
+  line-height: 1.75;
+}
+
+.redeem-command {
+  display: block;
+  padding: 7px 10px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+
+.redeem-aside-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.redeem-aside-footer a {
+  font-family: var(--font-sans);
+  font-size: 12px;
+}
+
+.redeem-kind {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}
+
+.redeem-kind .segments {
+  border-color: var(--border);
+  border-radius: var(--r-input);
+  max-width: 100%;
+}
+
+.redeem-kind .segments button {
+  min-height: 34px;
+  padding: 0 14px;
+  font-size: 12.5px;
+}
+
+.redeem-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+}
+
+.redeem-ttl {
+  padding: 2px 8px;
+  border-radius: var(--r-chip);
+  background: var(--input);
+  font-size: 11px;
+  color: var(--text-2);
+}
+
+.auth-card .redeem-intro {
+  line-height: 1.8;
+}
+
+.redeem-hint {
+  font-size: 11.5px;
+  font-weight: 400;
+  line-height: 1.7;
+  color: var(--text-3);
+}
+
+.redeem-token-filled {
+  background: var(--nav);
+  padding-right: 8px;
+}
+
+.redeem-token-filled input,
+.field input.mono {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+}
+
+.redeem-token-filled input {
+  color: var(--text-2);
+}
+
+.redeem-filled-chip {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: var(--r-chip);
+  background: var(--ok-bg);
+  font-size: 11px;
+  white-space: nowrap;
+  color: var(--ok);
+}
+
+.redeem-retype {
+  align-self: flex-start;
+  font-size: 12px;
+}
+
+.redeem-checks {
+  margin: 0;
+  padding: 12px 14px;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--nav);
+}
+
+.redeem-check {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 12.5px;
+  color: var(--text-2);
+}
+
+.redeem-check.ok {
+  color: var(--text);
+}
+
+.redeem-check.ng {
+  color: var(--error);
+}
+
+.redeem-check-mark {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: 1.5px dashed var(--border-strong);
+}
+
+.redeem-check.ok .redeem-check-mark {
+  border: 0;
+  background: var(--ok-bg);
+  color: var(--ok);
+}
+
+.redeem-check.ng .redeem-check-mark {
+  border: 0;
+  background: var(--error-bg);
+  color: var(--error);
+}
+
+.redeem-check .redeem-check-mark svg {
+  stroke-width: 3.4;
+}
+
+.redeem-checks-note {
+  padding-top: 8px;
+  border-top: 1px solid var(--border-soft);
+  font-size: 11.5px;
+  line-height: 1.7;
+  color: var(--text-3);
+}
+
+.redeem-warning {
+  display: flex;
+  gap: 10px;
+  padding: 11px 13px;
+  border-radius: 10px;
+  border: 1px solid var(--warning);
+  background: var(--warning-bg);
+  color: var(--warning);
+}
+
+.auth-card .redeem-warning svg,
+.auth-card .redeem-note svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.redeem-warning p,
+.redeem-note p {
+  font-size: 12px;
+  line-height: 1.75;
+  color: var(--text);
+}
+
+.redeem-result {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px 18px;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.redeem-result.ok {
+  border-color: var(--ok);
+}
+
+.redeem-result.error {
+  border-color: var(--danger-border);
+}
+
+.redeem-result.warning {
+  border-color: var(--warning);
+}
+
+.redeem-result-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.redeem-result-head h2 {
+  font-size: 14.5px;
+}
+
+.redeem-result-mark {
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+}
+
+.redeem-result .redeem-result-mark svg {
+  stroke-width: 3.2;
+}
+
+.redeem-result.ok .redeem-result-mark {
+  background: var(--ok-bg);
+  color: var(--ok);
+}
+
+.redeem-result.error .redeem-result-mark {
+  background: var(--error-bg);
+  color: var(--error);
+}
+
+.redeem-result.warning .redeem-result-mark {
+  background: var(--warning-bg);
+  color: var(--warning);
+}
+
+.redeem-result-code {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-3);
+  white-space: nowrap;
+}
+
+.auth-card .redeem-result-body {
+  font-size: 12.5px;
+  line-height: 1.8;
+  color: var(--text-2);
+}
+
+.redeem-note {
+  display: flex;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--nav);
+  color: var(--link);
+}
+
+.redeem-proceed {
+  align-self: flex-start;
+}
+
+.redeem-wait {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.redeem-wait p {
+  flex: 1;
+}
+
+.redeem-wait-time {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+}
+
+.redeem-back-narrow {
+  display: none;
+  align-self: center;
+  font-size: 13px;
+}
+
+.redeem-wait-time .mono {
+  font-size: 20px;
+  font-weight: 500;
+  color: var(--warning);
+}
+
 .center-page {
   min-height: 100vh;
   display: flex;
@@ -1964,6 +2342,10 @@ a.nav-toggle:hover {
 
   .auth-mobile-brand {
     display: flex;
+  }
+
+  .redeem-back-narrow {
+    display: inline;
   }
 }
 

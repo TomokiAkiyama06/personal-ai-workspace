@@ -15,7 +15,7 @@ Personal AI Workspace の Web UI です。
 | 受け入れ条件 | 実装 |
 | --- | --- |
 | 日本語 Default / i18n-ready | 文言はすべて Catalog（`src/i18n/ja.ts` がキーの正本で Design Canvas の文言、`en.ts` は同じ型）。V1 の表示言語は日本語に固定（Design の SettingsLanguage。English の Catalog は同梱するが画面に切り替えを出さない）。日時は `Intl`。Backend のエラーは `error.code` から文言へ変換 |
-| login / passkey / device management | サインイン（Brand Panel とシステム状態、ユーザー名・パスワード（表示切替）・この端末を信頼する。429 は待ち時間を表示）、Passkey の Gate（`enrollment_required` は登録、`assertion_required` は確認）、設定 › 端末とセッション（信頼済み端末・個別 / 他のすべての端末からサインアウト、新しい端末を追加の QR / リンクと残り時間、承認待ちの端末を確認コードの入力と Passkey の Step-up で承認・拒否、Passkey の一覧・この端末に追加・削除）、新しい端末の `/pair#<token>`（端末名を入れて続ける、承認待ちは確認コードを表示して完了を待つ。拒否・期限切れの `invalid_token` で終える） |
+| login / passkey / device management | サインイン（Brand Panel とシステム状態、ユーザー名・パスワード（表示切替）・この端末を信頼する。429 は待ち時間を表示）、Passkey の Gate（`enrollment_required` は登録、`assertion_required` は確認）、設定 › 端末とセッション（信頼済み端末・個別 / 他のすべての端末からサインアウト、新しい端末を追加の QR / リンクと残り時間、承認待ちの端末を確認コードの入力と Passkey の Step-up で承認・拒否、Passkey の一覧・この端末に追加・削除）、新しい端末の `/pair#<token>`（端末名を入れて続ける、承認待ちは確認コードを表示して完了を待つ。拒否・期限切れの `invalid_token` で終える）、1 回限りの Token でパスワードを設定する `/setup#<token>`（[Token の受け取り](#token-の受け取りsetupissue-262)） |
 | responsive layout | Design の 3 段階: 1280px 以上は Sidebar（252px）と Header の検索、768–1279px は Icon Rail（78px、短い Label）、768px 未満は Drawer（320px）と下部 Tab（チャット / タスク / メモリ / 通知 / 設定）、通知は全画面。Theme はシステム / ライト / ダーク（User Menu・言語と外観・サインイン画面。`localStorage` に保存）。Font は IBM Plex Sans JP / IBM Plex Mono を Build に同梱 |
 | Notification Center shell | Header の Bell（未読数）、Non-modal の Dropdown（未読 N・すべて既読・通知設定・すべて / 未読 / 重要 / タスクの絞り込み・同種の通知をまとめて件数表示・すべての通知を見る / 通知ルール）、スマートフォンでは `/notifications` の全画面、ERROR / CRITICAL の Non-modal Banner。通知の Data は `NotificationSource` で受ける（Decision 0044 の 11） |
 | Notification Center（[PAW-065](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/51)） | INFO / WARNING / ERROR / CRITICAL。重複排除（同じ `id` の通知は数えない。既読のままにする）と集約（同じ `key` の別の通知を 1 件にまとめ、件数と最初 / 最新の時刻を出し、最新の Severity へ昇格する）。通知ごとの操作（タスクを開く・対応するなど）は**画面への Link だけ**で、操作そのものは遷移先の画面の Permission / Step-up に従う（NOTIFICATION_POLICY §6）。今ある API から作る通知は、承認待ちの新しい端末（`GET /api/v1/auth/pairing/pending` を 30 秒ごとと画面へ戻ったときに読む。「確認する」は 端末とセッション を開き、そこで確認コードと Passkey の Step-up で承認する。承認待ちでなくなれば消える）。Backend に保存された通知（System Health の変化など）は [通知の API](#通知の-apiissue-188) で読み、既読を端末をまたいで保つ。承認待ちの端末の通知はこの Browser の Tab の中だけ。どちらもサインアウトと別のアカウントのサインインで画面から消える。スマートフォンの `/notifications` は MobileNotifications のとおり、Header に戻る / すべて既読、未読の件数つきの Chip、Card の一覧 |
@@ -25,7 +25,19 @@ Navigation は Design の Roles のとおりです: 新しいチャット、チ�
 
 Step-up が要る操作（Passkey の登録・削除、新しい端末の承認など）は、まず Request を送り、Backend が `step_up_required` / `step_up_method_insufficient` を返したときだけ、同じ画面の中に本人確認（Passkey、許されれば Password）を出して、確認後に再送します。新しい端末の承認は常に Passkey の Step-up が要るので Passkey だけを出し、Password の Step-up のあとの再送が `step_up_method_insufficient` なら Passkey だけでもう一度確認を求めます。
 
-含めていないもの（後続の Issue）: 招待の受け取り・Owner / Password Reset の Token の使用・Password の変更の画面、管理画面、Chat / Project / Agent / PR / Usage の中身（Placeholder）、PWA / Tauri、実 Browser と実 Authenticator の E2E Test。
+含めていないもの（後続の Issue）: 招待の受け取り・Password の変更の画面、管理画面、Chat / Project / Agent / PR / Usage の中身（Placeholder）、PWA / Tauri、実 Browser と実 Authenticator の E2E Test。
+
+## Token の受け取り（`/setup`、Issue #262）
+
+[Issue #262](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/262) で、1 回限りの Token を受け取ってパスワードを設定する画面（`src/pages/TokenRedeemPage.tsx`）を足しました。Design Canvas の 追加案（09-28）の **PTokenRedeem** に合わせています。
+受け取る Token は `POST /api/v1/auth/token/redeem`（`{token, new_password}`）が受け付けるもの、つまり `owner-setup` / `owner-recover` の Setup / Recovery Token と、Owner / Admin が Passkey の Reset で発行した Password の再設定 Token（#108）です。
+
+- **URL**: `/setup#<token>`。`/pair` と同じく Token は Fragment（Server の Log に残らない）で受け、読んだらすぐ Address Bar と履歴の Entry から消します。画面には `pawst1.<ID の先頭>…••••` だけを出し、Secret は表示しません。Fragment がなければ `/setup` で Token を貼り付けられます（前後の空白は除く）。Session は要らず、サインイン中でも開けます
+- **パスワード**: 2 回入力し、規則（NFKC で 10〜256 文字、4 種類以上の文字、確認と一致）を入力欄の下に先に出して、入力に合わせて満たした / 満たしていないを表示します。満たすまで送信できません。よく使われるパスワードとユーザー名を含むかは Server だけが判定します。Server の 422 `password_policy` は、応答の `message` の末尾の理由（`too_short` / `too_long` / `invalid_character` / `too_common` / `contains_login_name` / `same_as_current`）をその場の文に直して出します（API は理由を別の Field では返しません）
+- **失敗**: 400 `invalid_token` は理由を言わずに「無効か、期限切れか、使用済み」とし（Link の Token なら「別のトークンを入力する」）、429 は `Retry-After` の残り時間を数えて、その間は送信できません
+- **成功**: 誰もサインインしません（応答の `next` は `login`）。「サインインへ進む」でサインインに戻り、`passkey_required` なら、サインインの後に Passkey の登録（`PasskeyGatePage`）に進むことを先に伝えます。Gate は Session の状態から自動で開きます
+- 「トークンの種類」（Owner 初期設定 / 復旧・パスワードの再設定）は説明の文だけを切り替えます。種類は Server が Token から決め、成功の見出しは応答の `purpose` で決めます
+- Design との差分: 招待の受け取り（PTokenRedeem の 3 つ目の種類）は別の Endpoint（`POST /auth/invitations/redeem`）なので、この画面には入れていません。`invalid_token` の残りの試行回数は API が返さないので出しません。種類の切り替えは Top Bar ではなく Card の中に置き、Role の Tab ではなく押しボタンの組（`aria-pressed`）にしました。Owner の復旧のコマンドは、実際に必要な `--confirm-owner-recovery` を付けて表示します
 
 ## プロジェクト（PAW-061）
 

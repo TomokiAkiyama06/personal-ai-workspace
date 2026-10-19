@@ -11,6 +11,7 @@ import { PairPage } from "./pages/PairPage";
 import { PasskeyGatePage } from "./pages/PasskeyGatePage";
 import { PlaceholderPage } from "./pages/PlaceholderPage";
 import { SettingsPage } from "./pages/SettingsPage";
+import { SETUP_PATH, TokenRedeemPage } from "./pages/TokenRedeemPage";
 import { PreferenceProvider } from "./preferences/store";
 import { PROJECTS_PATH, ProjectsPage } from "./projects/ProjectsPage";
 import { useRouter } from "./router";
@@ -64,6 +65,9 @@ export function App() {
   // A device opened a pairing QR code / link. It normally has no session yet; if
   // it has one, completing the pairing replaces it (the Backend's replace_token).
   if (path === "/pair") return <PairPage />;
+  // A one-time token of owner-setup / owner-recover or of a password reset
+  // (issue #262): it needs no session, and setting the password signs nobody in.
+  if (path === SETUP_PATH) return <TokenRedeemPage />;
 
   switch (state.status) {
     case "loading":

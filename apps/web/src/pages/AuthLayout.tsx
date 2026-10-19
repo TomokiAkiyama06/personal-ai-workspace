@@ -61,12 +61,16 @@ function BrandPanel() {
   );
 }
 
-export function AuthLayout({ children }: { children: ReactNode }) {
+/**
+ * `aside` replaces the system state panel with a page's own (the design's
+ * PTokenRedeem: what the token is and what to do when the password is lost).
+ */
+export function AuthLayout({ children, aside }: { children: ReactNode; aside?: ReactNode }) {
   const { t } = useI18n();
   const footer = useFooterText();
   return (
     <div className="auth-screen">
-      <BrandPanel />
+      {aside ? <aside className="brand-panel brand-panel-narrow">{aside}</aside> : <BrandPanel />}
       <div className="auth-side">
         <div className="auth-topbar">
           <span className="brand auth-mobile-brand">

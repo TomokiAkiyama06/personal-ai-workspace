@@ -81,6 +81,13 @@ export interface PairingProgress {
   expires_at: string | null;
 }
 
+/** The answer of POST /auth/token/redeem: the password is set, nobody is signed in. */
+export interface RedeemResult {
+  purpose: "setup" | "recovery" | "password_reset" | string;
+  passkey_required: boolean;
+  next: "login" | string;
+}
+
 type Json = Record<string, unknown>;
 
 export const authApi = {
@@ -132,9 +139,21 @@ export const authApi = {
     apiRequest<PairingProgress>("POST", "/auth/pairing/claim", body),
   completePairing: (claim: string) =>
     apiRequest<PairingProgress>("POST", "/auth/pairing/complete", { claim }),
+
+  // Public (no session): an Owner setup / recovery token, or the one-time
+  // password reset token of an Admin / a User (#108), and the new password.
+  redeemToken: (body: { token: string; new_password: string }) =>
+    apiRequest<RedeemResult>("POST", "/auth/token/redeem", body),
 };
 
 // Input limits of the Backend (paw_backend/auth/limits.py, passkeys/models.py).
 export const LOGIN_NAME_MAX = 128;
 export const DEVICE_NAME_MAX = 64;
 export const PASSKEY_NAME_MAX = 64;
+// The password policy (REQUIREMENTS.md; paw_backend/auth/limits.py, passwords.py):
+// 10 to 256 characters after NFKC, more than three different characters. Whether
+// it is a common password or contains the login name only the Backend can tell.
+export const PASSWORD_MIN_LENGTH = 10;
+export const PASSWORD_MAX_LENGTH = 256;
+export const PASSWORD_MIN_DISTINCT = 4;
+export const TOKEN_MAX = 512;
