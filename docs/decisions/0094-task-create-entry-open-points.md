@@ -11,7 +11,7 @@
 
 #274 の PR は、**既存の Decision が決めている範囲だけ** で入口を作った。
 
-- 権限: Route の Guard が Project について `project.task.run`（監査する）。Working Set の各 Repository は、その Repository の ACL で、`referenced` は `project.read`、`working` / `target` は `project.repo.write`（[Decision 0035](0035-working-set-capability-grants-and-legacy-tasks.md) の 3）。Project の外の Repository と読めない Repository は同じ 404。
+- 権限: Route の Guard が Project について `project.task.run`（監査する）。Working Set の各 Repository は、その Repository の ACL で、`referenced` は `project.read`、`working` / `target` は `project.repo.write`（[Decision 0035](0035-working-set-capability-grants-and-legacy-tasks.md) の 3）、加えて Agent が使うので `project.task.run`（Repository では `agent` の権限。実行時の `decide_agent` と同じ規則）。Project の外の Repository と読めない Repository は同じ 404。
 - Project の状態: Guard が Archived / Pending deletion を 403 で拒み、`TaskService.create_task` の Gate（[Decision 0020](0020-project-state-gate.md)）がその間に変わった Project を 409 `project_not_active` で拒む。
 - `target` は必須（API が 422 `no_target_repository`。#274 の「target Repository が必須なこと」）。0035 の 3 が認める `target` のない作成との関係は、下の 4 で確認を求める。
 - Queue と Budget: `create_task` の同じ Transaction で、`Orchestrator.enqueue_task` と同じく Queue の Entry と Budget の Preset を書く（[Decision 0007](0007-task-queue-budget-and-loop-policy.md): Budget のない Task は走らせない）。
@@ -34,8 +34,8 @@
 
 作成は Commit の後に応答を組み立てるので、応答が失われた（または応答の読み取りが失敗した）とき、Client が送り直すと GPU を使う Task が 2 つできうる。
 
-- **A（推奨。この PR の実装）: 任意の `request_key` を Body で受ける。** Web の画面はフォームごとに 1 つの Key（UUID）を作って送る。同じ人が同じ Key で 24 時間以内に送り直すと、新しく作らずに最初の Task を返す（201、同じ Task）。Key は Task の `create` の Event（`detail.request_key`）に残し、人と Key の Advisory Lock で同時の 2 つを順に並べるので、Table と Migration は要らない。別の Project で同じ Key は 409 `request_key_reused`。Key のない Request は今の他の POST と同じく毎回作る。最初と Body が違っても最初の Task を返す（Body の Hash は比べない）。
-- B: `Idempotency-Key` Header と、Key と Request の Hash を持つ専用の Table（違う Body は 409）。CLI や Chat から作る経路が増えたら検討する。
+- **A（推奨。この PR の実装）: 任意の `request_key` を Body で受ける。** Web の画面はフォームごとに 1 つの Key（UUID）を作って送る。同じ人が同じ Project で同じ Key を 24 時間以内に送り直すと、新しく作らずに最初の Task を返す（201、同じ Task）。Key は Task の `create` の Event（`detail.request_key`）に残し、その Project の自分の最近の Task から探し（Project の Index から。履歴の全体は読まない）、Project・人・Key の Advisory Lock で同時の 2 つを順に並べるので、Table と Migration は要らない。Key のない Request は今の他の POST と同じく毎回作る。最初と Body が違っても最初の Task を返す（Body の Hash は比べない）。
+- B: `Idempotency-Key` Header と、Key と Request の Hash を持つ専用の Table と Index（違う Body は 409）。1 つの Project の Task が非常に多くなる、または CLI や Chat から作る経路が増えたら検討する。
 - C: Key を受けない（他の POST と同じ）。
 
 ### 3. Priority と Budget の Preset を誰が選べるか（推奨: 今のまま）

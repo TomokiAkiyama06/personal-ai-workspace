@@ -93,7 +93,7 @@ export const tasksJa = {
   "tasks.create.target": "Target のリポジトリ",
   "tasks.create.targetHint": "Target は書き込みと PR の作成まで行うリポジトリです。",
   "tasks.create.targetPickProject": "プロジェクトを選ぶと、リポジトリが表示されます。",
-  "tasks.create.targetReadOnly": "書き込み権限なし",
+  "tasks.create.targetReadOnly": "書き込み・エージェントの権限なし",
   "tasks.create.noRepository":
     "このプロジェクトにはリポジトリがありません。プロジェクトの画面で登録してください。",
   "tasks.create.budget": "予算",
@@ -277,8 +277,8 @@ export const tasksJa = {
   "error.no_target_repository": "Target のリポジトリを 1 つ以上選んでください。",
   "error.duplicate_repository": "同じリポジトリが 2 回指定されています。",
   "error.repository_not_found": "このリポジトリは見つかりませんでした。",
-  "error.request_key_reused":
-    "この送信は別のプロジェクトでタスクを作りました。フォームを開き直してください。",
+  "error.repository_agent_forbidden":
+    "このリポジトリはエージェントの利用を許していないため、タスクで使えません。",
   "error.repository_write_forbidden":
     "このリポジトリへの書き込み権限がないため、Target にできません。",
   "error.tasks_not_configured": "このサーバーではタスクの実行が構成されていません。",
@@ -391,7 +391,7 @@ export const tasksEn: Record<keyof typeof tasksJa, string> = {
   "tasks.create.target": "Target repository",
   "tasks.create.targetHint": "A target is written to and gets the pull request.",
   "tasks.create.targetPickProject": "Choose a project to see its repositories.",
-  "tasks.create.targetReadOnly": "No write permission",
+  "tasks.create.targetReadOnly": "No write or agent permission",
   "tasks.create.noRepository":
     "This project has no repository. Register one on the project's screen.",
   "tasks.create.budget": "Budget",
@@ -571,8 +571,8 @@ export const tasksEn: Record<keyof typeof tasksJa, string> = {
   "error.no_target_repository": "Choose at least one target repository.",
   "error.duplicate_repository": "The same repository is listed twice.",
   "error.repository_not_found": "This repository was not found.",
-  "error.request_key_reused":
-    "This submission already created a task in another project. Open the form again.",
+  "error.repository_agent_forbidden":
+    "This repository does not let agents work on it, so a task cannot use it.",
   "error.repository_write_forbidden":
     "You may not write to this repository, so it cannot be the target.",
   "error.tasks_not_configured": "Tasks are not configured on this server.",

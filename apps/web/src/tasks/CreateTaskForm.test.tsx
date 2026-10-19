@@ -67,7 +67,7 @@ describe("新しいタスク", () => {
     const ios = within(targets).getByRole("radio", { name: /ios/ });
     expect(backend).toBeChecked();
     expect(ios).toBeDisabled();
-    expect(within(targets).getByText("書き込み権限なし")).toBeInTheDocument();
+    expect(within(targets).getByText("書き込み・エージェントの権限なし")).toBeInTheDocument();
 
     const submit = within(form).getByRole("button", { name: "作成してキューに入れる" });
     expect(submit).toBeDisabled();

@@ -870,12 +870,15 @@ class TasksApiTest(PostgresRepositoryTestCase):
             for event in self.audit.events
             if event.decision == "allow"
         ]
-        # The guard's decision on the project, then the target's write.
+        # The guard's decision on the project, then for each repository its
+        # role's permission (an allowed read is not recorded) and its agent one.
         self.assertEqual(
             allowed,
             [
                 ("project.task.run", "project", None, self.creator),
                 ("project.repo.write", "repository", self.repo, self.creator),
+                ("project.task.run", "repository", self.repo, self.creator),
+                ("project.task.run", "repository", reader, self.creator),
             ],
         )
         history = await self.tasks.history(task_id)
@@ -1000,7 +1003,7 @@ class TasksApiTest(PostgresRepositoryTestCase):
 
     async def test_a_repository_the_person_may_only_read_cannot_be_a_target(self):
         read_only = self.seed_repository(
-            self.project, name="vendor", acl_allowed=["read"]
+            self.project, name="vendor", acl_allowed=["read", "agent"]
         )
         self.as_creator()
 
@@ -1109,7 +1112,7 @@ class TasksApiTest(PostgresRepositoryTestCase):
             self.rows("SELECT count(*) AS n FROM queue_entries")[0]["n"], 1
         )
 
-    async def test_a_request_key_of_another_project_is_refused(self):
+    async def test_a_request_key_is_a_key_of_its_project(self):
         other_target = self.seed_repository(self.other_project, name="beta-2")
         self.sign_in(
             self.creator,
@@ -1126,11 +1129,34 @@ class TasksApiTest(PostgresRepositoryTestCase):
             repositories=[{"repository_id": str(other_target), "role": "target"}],
         )
 
-        self.assertEqual(response.status_code, 409)
-        self.assertEqual(response.json()["error"]["code"], "request_key_reused")
-        self.assertEqual(self.task_count(), 1)
+        # Another project's task, not the first one.
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["project_id"], str(self.other_project))
+        self.assertEqual(self.task_count(), 2)
         response = await self.create(request_key="not allowed!")
         self.assertEqual(response.status_code, 422)
+
+    async def test_a_repository_that_lets_no_agent_in_cannot_be_used(self):
+        # Readable and writable, but its ACL keeps agents out: no task could
+        # ever use it (``decide_agent``), so it is refused at creation.
+        no_agent = self.seed_repository(
+            self.project, name="human-only", acl_allowed=["read", "write"]
+        )
+        self.as_creator()
+        for role in ("target", "referenced"):
+            with self.subTest(role=role):
+                repositories = [{"repository_id": str(no_agent), "role": role}]
+                if role != "target":
+                    repositories.insert(
+                        0, {"repository_id": str(self.repo), "role": "target"}
+                    )
+                response = await self.create(repositories=repositories)
+                self.assertEqual(response.status_code, 403)
+                self.assertEqual(
+                    response.json()["error"]["code"], "repository_agent_forbidden"
+                )
+        self.assertIn(("project.task.run", "repo_acl_forbids"), self.denials())
+        self.assertEqual(self.task_count(), 0)
 
     async def test_there_is_no_merge_route(self):
         self.as_creator()

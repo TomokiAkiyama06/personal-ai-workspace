@@ -43,10 +43,11 @@ over HTTP (issue #185, Decision 0067 Approved; the screens of PAW-062, #48).
   the Origin check and ``SameSite=Strict`` (Decision 0044) against CSRF. An
   optional ``request_key`` (the Web App sends one per form) makes a repeated
   request (a lost answer, a retry) answer the task the first one created, for
-  ``REQUEST_KEY_HOURS`` (the key is kept in the ``create`` event; an advisory
-  lock on the person and the key orders two requests with the same key). The
-  same key in another project is 409 ``request_key_reused``. Without a key,
-  sending it twice creates two tasks.
+  ``REQUEST_KEY_HOURS`` in the same project (the key is kept in the ``create``
+  event and looked up among the person's recent tasks of the project, through
+  the project's index; an advisory lock on the project, the person and the key
+  orders two requests with the same key). Without a key, sending it twice
+  creates two tasks.
 * ``GET /pull-requests`` (``tasks.list``): the pull requests the tasks of those
   projects recorded, with Merge Ready as the backend judges it
   (``task_views.is_merge_ready``). There is no merge route: merging stays the
@@ -777,6 +778,19 @@ async def _authorize_working_set(
         decision = await authorizer.authorize(
             principal, _ROLE_CAPABILITY[role], resource
         )
+        if decision.allowed:
+            # The task's agents work on it: its ACL must let an agent operate
+            # on it too (``project.task.run`` on a repository is its ``agent``
+            # permission), else the task could never use it (``decide_agent``).
+            decision = await authorizer.authorize(
+                principal, Capability.PROJECT_TASK_RUN, resource
+            )
+            if not decision.allowed and decision.reason is Reason.REPO_ACL_FORBIDS:
+                raise ApiError(
+                    403,
+                    "repository_agent_forbidden",
+                    "This repository does not let an agent work on it",
+                )
         if not decision.allowed:
             if decision.reason is Reason.AUDIT_UNAVAILABLE:
                 raise ApiError(
@@ -801,36 +815,43 @@ class _Replayed(Exception):
     """The request key already created a task: the creation is rolled back and
     the route answers that task."""
 
-    def __init__(self, task_id: uuid.UUID, project_id: uuid.UUID) -> None:
+    def __init__(self, task_id: uuid.UUID) -> None:
         super().__init__()
         self.task_id = task_id
-        self.project_id = project_id
 
 
 async def _created_before(
-    session: AsyncSession, user_id: uuid.UUID, key: str, task_id: uuid.UUID
+    session: AsyncSession,
+    project_id: uuid.UUID,
+    user_id: uuid.UUID,
+    key: str,
+    task_id: uuid.UUID,
 ) -> _Replayed | None:
-    """The task the same person created with ``key`` in the last
-    ``REQUEST_KEY_HOURS`` hours (other than ``task_id``), if any. The caller
-    holds the key's advisory lock, so of two requests with the same key the
-    second one sees the first one's task once it committed."""
-    row = (
+    """The task the same person created in the project with ``key`` in the last
+    ``REQUEST_KEY_HOURS`` hours (other than ``task_id``), if any. The tasks are
+    found through the project's index (``ix_tasks_project_id_state``) and their
+    ``create`` event through ``(task_id, seq)``: the cost grows with the
+    project's tasks, never with the whole history. The caller holds the key's
+    advisory lock, so of two requests with the same key the second one sees the
+    first one's task once it committed."""
+    found = (
         await session.execute(
-            select(TaskEventRow.task_id, TaskRow.project_id)
-            .join(TaskRow, TaskRow.id == TaskEventRow.task_id)
+            select(TaskRow.id)
+            .join(TaskEventRow, TaskEventRow.task_id == TaskRow.id)
             .where(
-                TaskEventRow.command == TaskCommand.CREATE,
-                TaskEventRow.actor_id == user_id,
-                TaskEventRow.detail["request_key"].astext == key,
-                TaskEventRow.task_id != task_id,
-                TaskEventRow.created_at
+                TaskRow.project_id == project_id,
+                TaskRow.created_by == user_id,
+                TaskRow.id != task_id,
+                TaskRow.created_at
                 > func.now() - text(f"interval '{REQUEST_KEY_HOURS} hours'"),
+                TaskEventRow.command == TaskCommand.CREATE,
+                TaskEventRow.detail["request_key"].astext == key,
             )
-            .order_by(TaskEventRow.seq)
+            .order_by(TaskRow.created_at)
             .limit(1)
         )
-    ).one_or_none()
-    return None if row is None else _Replayed(row.task_id, row.project_id)
+    ).scalar_one_or_none()
+    return None if found is None else _Replayed(found)
 
 
 def _enqueue(
@@ -850,9 +871,11 @@ def _enqueue(
         if request_key is not None:
             await session.execute(
                 text("SELECT pg_advisory_xact_lock(hashtextextended(:lock, 274))"),
-                {"lock": f"task-create:{user_id}:{request_key}"},
+                {"lock": f"task-create:{project_id}:{user_id}:{request_key}"},
             )
-            replayed = await _created_before(session, user_id, request_key, task_id)
+            replayed = await _created_before(
+                session, project_id, user_id, request_key, task_id
+            )
             if replayed is not None:
                 raise replayed
         await execution.queue.enqueue_in(session, task_id, priority=Priority.NORMAL)
@@ -898,12 +921,6 @@ async def create_task(
             )
     except _Replayed as replayed:
         # The same request again (a lost answer, a retry): the task it created.
-        if replayed.project_id != project_id:
-            raise ApiError(
-                409,
-                "request_key_reused",
-                "This request key already created a task in another project",
-            ) from None
         return await _detail(request, principal, replayed.task_id)
     return await _detail(request, principal, event.task_id)
 

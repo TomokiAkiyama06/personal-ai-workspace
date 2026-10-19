@@ -32,9 +32,15 @@ function mayCreateIn(project: ProjectSummary): boolean {
   return project.status === "active" && project.my_role !== null && project.my_role !== "viewer";
 }
 
-/** Whether the repository's ACL override lets a task write to it (`null`: inherit). */
+/**
+ * Whether the repository's ACL override lets a task's agents write to it
+ * (`null`: inherit): both `write` and `agent` (the Backend requires both).
+ */
 function writable(repository: ProjectRepository): boolean {
-  return repository.acl === null || repository.acl.includes("write");
+  return (
+    repository.acl === null ||
+    (repository.acl.includes("write") && repository.acl.includes("agent"))
+  );
 }
 
 export function CreateTaskForm({
