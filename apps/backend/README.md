@@ -4330,10 +4330,39 @@ Test は `tests/test_cli_session_units.py`（Fake の `podman` と Fake の `sys
 - Runtime は Claude と同じ（Session の Directory・`McpBridge`・`CloudGate`・`submit` の Outcome・`no_submission`・Planner には使わない・`run_as_fallback`）。Session の準備・起動の口の例外（CLI がない、Directory を作れないなど）は `ErrorClassifier.from_error` で分類する（`NodeStopped`・取り消し・`MemoryError` はそのまま上げる）。CLI（版の確認の Process も `app-server` も）を止められなかった（起動の後始末の止めの失敗を含む。取り消しが来ても止めは最後まで待つ）ときは Session の Directory を消さずに残し、試行は `adapter_error`（Claude と同じ）。
 - Adapter はまず Credential なしで `codex --version` を読み、一覧にない版は何も起動しない。次に Session の `$CODEX_HOME/config.toml`（Tool に関わる既定で有効な Feature をすべて `false`・`web_search = "disabled"`・`update_plan` と `request_user_input` を無効・Telemetry と履歴なし・MCP の Server は `paw` の Relay だけで `required`・`enabled_tools`・`default_tools_approval_mode = "approve"`）を書き、`codex app-server --listen stdio://` を起動して `initialize`（`experimentalApi`）→ `thread/start`（`environments: []`・`approvalPolicy: "never"`・`sandbox: "read-only"`・`ephemeral`・PAW の System Prompt）→ `turn/start`（Task）。
 - `thread/tokenUsage/updated` の `total` の増分を `on_usage` で報告（同じ値の再送は数えない、減ったら止める）。Item は閉じた対応（`userMessage`・`agentMessage`・`reasoning`・`contextCompaction` と `paw` の `mcpToolCall` だけを通す。実行できる Item・知らない `type`・Server からの Request は止める）。`unauthorized` は `expired`、`usageLimitExceeded` / `rateLimitExceeded` は `rate_limited`。
-- ChatGPT の Login の `auth.json` は `CodexCredentials`（`place` / `collect`）が Session の `CODEX_HOME` に置いて回収する。**実装はまだなく**、無ければ Session を始めない（`unavailable`）。Connection ごとに 1 Session の Lease と書き戻し・Egress の Allowlist は Smoke の後の ChatGPT の Login の PR（Decision 0087 の 5 の 4、0089 の 4）。
+- ChatGPT の Login の `auth.json` は `CodexCredentials`（`place` / `collect`）が Session の `CODEX_HOME` に置いて回収する。実装は下の「Codex の ChatGPT の Login」の `CodexAuthFile`（Issue #239）。Handler が無ければ Session を始めない（`unavailable`）。Egress の Allowlist の Codex の宛先は Smoke の拒否の Log から決める（Decision 0087 の 4 の表。この Repository にはまだ入れない）。
 - 起動の口は子 Process の `InteractiveSubprocessLauncher`（stdin を開いたまま。開発と Test）と、本番の `SystemdCodexLauncher`（#236 の `SystemdLauncher.start_interactive`: `stream.sock` が CLI の stdout だけでなく stdin も運ぶ。`credential.env` と `prompt` は書かず、`launch.json` の `cli` は `codex`。版の確認と `app-server` は同じ Session の Unit を順に起動する）。
 
 Test は `tests/test_agents_codex_cli.py`（本物の Runtime・Adapter・Bridge・Relay・起動の口、Fake の `codex` = `tests/fake_codex_cli.py`（`rust-v0.162.1` の stdio の形）、`execute_session` の代わりの Fake）。
+
+## Codex の ChatGPT の Login（Connection ごとに 1 Session の Lease と `auth.json` の書き戻し。Issue #239、Decision 0083 の 6、Decision 0087 の 4、Decision 0089 の 4）
+
+`agents/codex_credentials.py` の `CodexAuthFile`、`connections/session_slot.py` の `SessionSlot`、Migration `0239`（`connection_session_leases`）です。**CLI の段は組み立てで無効のまま**（`CloudPolicy` の Decision と CLI の Smoke まで。Decision 0093 の 3）で、確かめた版の一覧（`VERIFIED_VERSIONS`）も空のままです。Egress の Allowlist に ChatGPT の宛先は入れていません（Smoke の拒否の Log から決める）。**`auth.json` の File の持ち主と Mode は [Decision 0095](../../docs/decisions/0095-codex-auth-file-owner-and-mode.md)（Proposed）に依ります。**
+
+- **Connection ごとに 1 Session（`exclusive_sessions`）**: `CodexSessionAdapter` は `exclusive_sessions = True`。`execute_session` は確認（認可・Budget・Session の最低の枠・Queue の Lease）の後、**Admission の前に** Connection の Session の枠（DB の Lease の行。Connection ごとに 1 行 = 種類ごと: 持ち主・`acquired_at`・`heartbeat_at`・`expires_at`、DB の時計）を最大 60 秒（暫定）待ちます。空かなければ `SessionSlotBusyError`（`ConnectionBusyError` の Subclass、`connection_busy`）で、`connection.use` の Audit も使用量の行も作りません。`CloudGate` はこれを `connection_busy`（`ConnectionError`・`escalate=True`、`HybridRuntime` の振り替えの経路では `ComputeUnavailable`）にします。期限の切れた行は他の Process が取り直せます（Takeover）。
+- **Heartbeat と取れなくなったとき**: 持ち主は 10 秒ごとに期限を 60 秒先へ延ばします。延ばせない（行を失った・DB が答えない）まま「最後に確かめた延長を送った時刻 + 60 秒 − 20 秒」を過ぎたら、Lease が切れる前に自分の Session を取り消します（Decision 0083 の承認の条件 (2)。Adapter は CLI を止めて `auth.json` を書き戻してから終わる）。Session は `unavailable` で失敗し、使用量は分からないものとして見積もり（0083 の 5 (d)）。枠は精算の後に返します（成功・失敗・拒否・取り消しのどれでも。`asyncio` の取り消しの中でも最後まで）。時間は `ConnectionService(session_slot_wait_seconds=..., session_slot_ttl_seconds=..., session_slot_heartbeat_seconds=..., session_slot_margin_seconds=...)`（既定が本番の値。Test だけが縮める）。
+- **書き戻し（`write_back`）**: Exclusive の Session には、Secret Store（`credential_store` の `read`）から読んだ版の Credential と、その版に対する Compare-and-swap の書き戻し（`AgentSessionRequest.write_back`、`rotate_credential` を通す: Handle の Lock の中で、保存された版が渡した版のままのときだけ次の版を書き、System の `connection.rotate` の Audit）を渡します。結果は `WriteBack`（`written` / `stale`（誰かが先に書いた・Connection が別の Credential を指す）/ `failed`）。
+- **`CodexAuthFile.place`**: Credential（JSON の Object でなければ `ValueError`）を Session の `CODEX_HOME`（Session の Directory の `config/`）に新しい `auth.json` として書きます（0660、umask に関わらず `fchmod`。Group は Session の Directory の `paw-cli-bridge`）。Session の `config.toml` は `cli_auth_credentials_store = "file"`・`forced_login_method = "chatgpt"`。
+- **`CodexAuthFile.collect`**: CLI を止めた後（失敗・取り消しの後も。Adapter は取り消しの中でも最後まで走らせてから取り消しを上げる）に読み戻し（Link は辿らない、大きさの上限あり）、置いた値と JSON として違えば `write_back` に渡します。JSON の Object でない・読めない・消えていたら書き戻さず Log（種類だけ。値は出さない）。Codex（`rust-v0.162.1`）は Refresh した Login を `auth.json` の Truncate と書き直しで保存する（Rename しない）ので、File の持ち主と Mode が残り Backend が読めます。
+- 本番の Container（`deploy/cli-session/paw_cli_session_run.py`）: `CODEX_HOME` は Container の tmpfs（`tmpfs-mode=0700`、`chown=true`）で、その中に Session の `config.toml`（読み取り専用）と `auth.json`（読み書き）だけを Bind Mount します（書いてあるものだけ。版の確認の時はどちらもない）。Codex がそこに書くその他（Log・状態）は Container と一緒に消えます。`launch.json` の `CODEX_HOME` が Session の `config` でなければ起動しません。
+
+Test は `tests/test_connections_session_slot.py`（本物の PostgreSQL と `FileSecretStore`、Fake の Exclusive の Adapter: Lease の取得・待ち・Timeout・Takeover・Heartbeat、`connection_busy` で Audit と行がないこと、取れなくなった枠の取り消し、書き戻しと Compare-and-swap の衝突、取り消しの後の書き戻し）、`tests/test_agents_codex_credentials.py`（`CodexAuthFile` と Fake の `codex` の `refresh`）、`tests/test_connection_session_lease_migration.py`（Migration の Up / Down）、`tests/test_cli_session_units.py`（Container の `CODEX_HOME` の Mount）、`tests/test_connections_grants.py`（App の Role の権限）。
+
+Codex の ChatGPT の Login の運用の手順（Host の root と Owner / Admin。CLI の段を有効にする前に）:
+
+1. Image と同じ版の Codex で、使い捨ての `CODEX_HOME` に Device Code の Login をする（版の Flag は `podman run --rm <codex_image> codex login --help` で確かめる。`rust-v0.162.1` の Source と、この Host の `codex-cli 0.156.1` の Help はどちらも `--device-auth`）:
+
+   ```sh
+   umask 077
+   export CODEX_HOME="$(mktemp -d)"
+   printf 'cli_auth_credentials_store = "file"\nforced_login_method = "chatgpt"\n' > "$CODEX_HOME/config.toml"
+   codex login --device-auth      # 表示された URL と Code を Browser で入力する
+   codex login status             # "Logged in using ChatGPT" を確かめる
+   ```
+
+2. `auth.json` を Secret Store に入れる（表示されるのは新しい Handle だけ）: `sudo paw-connection-credential-put codex < "$CODEX_HOME/auth.json"`（[`deploy/secret-store/README.md`](deploy/secret-store/README.md)）。
+3. Owner / Admin がその Handle を Codex の Connection に登録する（初めては `ConnectionService.connect`、入れ替えは `replace_credential`。`admin.config.manage`）。**この操作の HTTP / 管理 Command の口はまだありません**（Claude の Token と同じ。別の Issue）。
+4. 使い捨ての Directory を消す（その Login をこの Host で二度と使わない。使えば Refresh Token が回り、PAW の版が失効する）: `shred -u "$CODEX_HOME/auth.json"; rm -rf "$CODEX_HOME"; unset CODEX_HOME`。
 
 ## Tool Broker のファイル・Shell・Git の Tool と Sandbox（Issue #208、Decision 0083 の段階 2）
 

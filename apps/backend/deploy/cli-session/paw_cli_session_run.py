@@ -30,6 +30,16 @@ with this unit: ``paw-egress-session@<uuid>.socket``, Decision 0091) at
 never falls back to a socket shared by the sessions. Nothing else of the host.
 Standard library only.
 
+Codex's ``CODEX_HOME`` (Decision 0083, 6: the CLI's tmpfs, 0700, its own
+account; issue #239) must be the session's ``config`` directory. Over it the
+container gets a tmpfs of its own (``tmpfs-mode=0700``, owned by the CLI's
+account: ``chown``), into which only the session's ``config.toml``
+(read-only) and ``auth.json`` (read-write: Codex rewrites it in place when it
+refreshes its login, and the backend reads it back from the session's
+directory) are mounted, each when the backend wrote it. Everything else Codex
+writes there (its logs, state, caches) stays in the container's tmpfs and
+goes with the container.
+
     paw_cli_session_run.py <uuid> [--config /etc/paw/cli-session.toml]
 """
 
@@ -64,6 +74,10 @@ ALLOWED_ENV = frozenset(
 #: Which image each CLI runs, and whether the stream socket is its stdin.
 CLIS = {"claude": ("image", False), "codex": ("codex_image", True)}
 ALLOWED_CREDENTIALS = frozenset({"CLAUDE_CODE_OAUTH_TOKEN"})
+#: Codex's ``CODEX_HOME``: the session's directory's ``config``; the files of
+#: it that are mounted into the container's own tmpfs there, and how.
+CODEX_HOME_NAME = "config"
+CODEX_HOME_FILES = (("config.toml", "ro"), ("auth.json", "rw"))
 EGRESS_IN_CONTAINER = "/run/paw-egress.sock"
 #: Where systemd makes each session's egress socket (Decision 0091, 1).
 DEFAULT_EGRESS_SESSION_DIR = "/run/paw-egress/session"
@@ -132,6 +146,28 @@ def check_credential(directory: Path, cli: str) -> Path | None:
     return path
 
 
+def codex_home_mounts(directory: Path, env: dict[str, str]) -> list[str]:
+    """The container's own ``CODEX_HOME`` (a tmpfs, 0700, the CLI's account)
+    and the session's files mounted into it (see the module)."""
+    home = directory / CODEX_HOME_NAME
+    if env.get("CODEX_HOME") != str(home):
+        raise Refused("launch.json: CODEX_HOME")
+    mounts = [
+        "--mount",
+        f"type=tmpfs,destination={home},tmpfs-mode=0700,chown=true",
+    ]
+    for name, mode in CODEX_HOME_FILES:
+        path = home / name
+        try:
+            info = os.lstat(path)
+        except FileNotFoundError:
+            continue  # not written (yet): the version probe has neither
+        if not stat.S_ISREG(info.st_mode):
+            raise Refused(f"{CODEX_HOME_NAME}/{name}")
+        mounts += ["--volume", f"{path}:{path}:{mode}"]
+    return mounts
+
+
 def egress_socket(config: dict, session_id: str) -> Path:
     """The session's own egress socket, which must exist (systemd made it
     before this unit started: ``Requires=``/``After=``)."""
@@ -154,6 +190,7 @@ def podman_command(
     env: dict[str, str],
     credential: Path | None,
     image: str,
+    extra_mounts: Sequence[str] = (),
 ) -> list[str]:
     command = [
         "podman",
@@ -187,6 +224,7 @@ def podman_command(
         f"{directory}:{directory}:rw",
         "--volume",
         f"{egress}:{EGRESS_IN_CONTAINER}",
+        *extra_mounts,
     ]
     if credential is not None:
         command += ["--env-file", str(credential)]
@@ -212,6 +250,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not isinstance(image, str):
             raise Refused(f"{image_key} must be pinned by its digest")
         credential = check_credential(directory, cli)
+        extra = codex_home_mounts(directory, env) if cli == "codex" else []
         egress = egress_socket(config, arguments.session_id)
         command = podman_command(
             arguments.session_id,
@@ -222,6 +261,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             env,
             credential,
             image,
+            extra,
         )
         stream = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         stream.connect(str(directory / "stream.sock"))

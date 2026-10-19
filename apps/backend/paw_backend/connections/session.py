@@ -52,6 +52,23 @@ UNKNOWN_SESSION_TOKENS = 200_000
 UsageCallback = Callable[[int, int], Awaitable[bool]]
 
 
+class WriteBack(StrEnum):
+    """What writing a refreshed credential back came to (Decision 0083, 6)."""
+
+    WRITTEN = "written"  # stored as the credential's next version
+    # Not written: the stored version is no longer the one the session was
+    # given (somebody wrote first), or the connection points elsewhere now.
+    STALE = "stale"
+    FAILED = "failed"  # not written: the store or the value refused it
+
+
+#: The service's write-back of the session's credential, given to the adapter
+#: of a CLI that refreshes its login in a file (``AgentSessionRequest.
+#: write_back``): the new value, written by compare-and-swap against the
+#: version the session was given.
+CredentialWriter = Callable[[str], Awaitable[WriteBack]]
+
+
 @dataclass(frozen=True, slots=True)
 class AgentSessionRequest:
     """What a session adapter is asked to run. ``prompt`` (the node's task) is
@@ -68,6 +85,10 @@ class AgentSessionRequest:
     # The shared connection the session was admitted on (Decision 0091, 4: a
     # CLI session's start is logged with it). ``None``: not told.
     connection_id: uuid.UUID | None = None
+    # The write-back of a refreshed credential (Decision 0083, 6), for an
+    # adapter that holds the connection's session slot (``exclusive_sessions``)
+    # and a service with a secret store; ``None``: nothing can be written back.
+    write_back: CredentialWriter | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "model", validate_model("model", self.model))
@@ -83,6 +104,8 @@ class AgentSessionRequest:
             raise TypeError("on_usage must be callable")
         if self.connection_id is not None and type(self.connection_id) is not uuid.UUID:
             raise TypeError("connection_id must be a UUID")
+        if self.write_back is not None and not callable(self.write_back):
+            raise TypeError("write_back must be callable")
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,7 +132,11 @@ class AgentSessionResult:
 
 
 class AgentSessionAdapter(Protocol):
-    """One session adapter per connection kind (see the module)."""
+    """One session adapter per connection kind (see the module). An adapter
+    whose class sets ``exclusive_sessions = True`` (a CLI that refreshes its
+    login in a file: Codex's ChatGPT login) runs one session per connection at
+    a time: the service takes the connection's session slot before the
+    admission (Decision 0083, 6) and offers ``write_back``."""
 
     kind: ConnectionKind
 

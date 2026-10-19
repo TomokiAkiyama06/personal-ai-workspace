@@ -281,6 +281,69 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(argv[image + 1 :], ["/opt/paw/start-codex", "app-server"])
         self.assertNotIn(DIGEST, argv)
 
+    def test_codex_home_is_the_containers_own_tmpfs_with_the_login_in_it(self):
+        # Decision 0083, 6 (issue #239): CODEX_HOME is a tmpfs of the
+        # container (0700, the CLI's account); only the session's
+        # config.toml (read-only) and auth.json (read-write: Codex rewrites
+        # it in place, the backend reads it back) are mounted into it.
+        self.codex_session()
+        home = self.directory / "config"
+        home.mkdir()
+        (home / "config.toml").write_text("")
+        (home / "auth.json").write_text("{}")
+        result, _ = self.run_interactive(b"")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        argv = json.loads(self.record.read_text())["argv"]
+        tmpfs = argv.index(f"type=tmpfs,destination={home},tmpfs-mode=0700,chown=true")
+        self.assertEqual(argv[tmpfs - 1], "--mount")
+        for name, mode in (("config.toml", "ro"), ("auth.json", "rw")):
+            with self.subTest(name):
+                mount = f"{home / name}:{home / name}:{mode}"
+                index = argv.index(mount)
+                self.assertEqual(argv[index - 1], "--volume")
+                # Mounted after the tmpfs it lands in.
+                self.assertGreater(index, tmpfs)
+        self.assertLess(argv.index(f"{self.directory}:{self.directory}:rw"), tmpfs)
+
+    def test_the_version_probe_has_no_login_to_mount(self):
+        self.codex_session()
+        (self.directory / "config").mkdir()
+        result, _ = self.run_interactive(b"")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        argv = json.loads(self.record.read_text())["argv"]
+        self.assertTrue(any(a.startswith("type=tmpfs,destination=") for a in argv))
+        self.assertFalse(any("auth.json" in a for a in argv))
+        self.assertFalse(any("config.toml" in a for a in argv))
+
+    def test_what_it_refuses_of_codex_home_starts_nothing(self):
+        def elsewhere():
+            launch = json.loads((self.directory / "launch.json").read_text())
+            launch["env"]["CODEX_HOME"] = str(self.base)
+            (self.directory / "launch.json").write_text(json.dumps(launch))
+
+        def no_home():
+            launch = json.loads((self.directory / "launch.json").read_text())
+            del launch["env"]["CODEX_HOME"]
+            (self.directory / "launch.json").write_text(json.dumps(launch))
+
+        def linked_login():
+            home = self.directory / "config"
+            home.mkdir()
+            (home / "auth.json").symlink_to(self.config)
+
+        for name, prepare in {
+            "CODEX_HOME elsewhere": elsewhere,
+            "no CODEX_HOME": no_home,
+            "a linked auth.json": linked_login,
+        }.items():
+            with self.subTest(name):
+                self.setUp()
+                self.codex_session()
+                prepare()
+                result, _ = self.run_interactive(b"")
+                self.assertEqual(result.returncode, 2)
+                self.assertFalse(self.record.exists())
+
     def test_what_it_refuses_of_a_codex_session_starts_nothing(self):
         cases = {
             "no codex image": lambda: self.write_config(DIGEST),

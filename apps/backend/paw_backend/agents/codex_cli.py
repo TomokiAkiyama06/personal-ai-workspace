@@ -27,11 +27,14 @@ talks to it (``codex_app_server.py``):
   limit.
 
 The credential (the ChatGPT login's ``auth.json``) is placed into the session's
-``CODEX_HOME`` and collected afterwards by a :class:`CodexCredentials` handler.
-None ships yet: the one-session-per-connection lease and the compare-and-swap
-write-back of a refreshed ``auth.json`` (Decision 0083, 6) come with the
-ChatGPT login after the smoke test (Decision 0087, 5's 4; Decision 0089, 4).
-Without a handler a session is refused before anything starts.
+``CODEX_HOME`` and collected afterwards by a :class:`CodexCredentials` handler
+(``codex_credentials.CodexAuthFile``, issue #239): collected once the CLI was
+stopped, also after a failure or a cancellation (run to its end), and a
+refreshed login is written back through the service's ``write_back``
+(compare-and-swap, Decision 0083, 6). The adapter is ``exclusive_sessions``:
+the service runs one session per connection at a time (its session slot, a
+database lease taken before the admission). Without a handler a session is
+refused before anything starts.
 
 The CLI rung stays disabled at assembly (Decision 0083, 11's 4: until the
 ``CloudPolicy`` Decision; the provider's terms are still being confirmed by the
@@ -94,6 +97,7 @@ from paw_backend.connections import (
     SessionRequest,
     UsagePurpose,
 )
+from paw_backend.connections.session import CredentialWriter
 from paw_backend.orchestrator.domain import NodeRole
 from paw_backend.orchestrator.runtime import NodeAssignment, NodeOutcome
 from paw_backend.tools.interfaces import require_async_method
@@ -161,12 +165,17 @@ _FAILURES = {
 
 class CodexCredentials(Protocol):
     """Places the connection's credential in a session's ``CODEX_HOME`` and
-    takes it back afterwards (the ChatGPT login's later change: the lease and
-    the write-back of a refreshed ``auth.json``, Decision 0083, 6)."""
+    takes it back afterwards, writing a refreshed ``auth.json`` back through
+    ``write_back`` (Decision 0083, 6; ``codex_credentials.CodexAuthFile``)."""
 
     async def place(self, secret: Secret, codex_home: Path) -> None: ...
 
-    async def collect(self, codex_home: Path) -> None: ...
+    async def collect(
+        self,
+        secret: Secret,
+        codex_home: Path,
+        write_back: CredentialWriter | None,
+    ) -> object: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -326,6 +335,9 @@ class CodexSessionAdapter:
     later verified release says otherwise)."""
 
     kind = ConnectionKind.CODEX
+    # One session per connection at a time (Decision 0083, 6): the ChatGPT
+    # login's refresh token is single-use.
+    exclusive_sessions = True
 
     def __init__(
         self,
@@ -340,7 +352,7 @@ class CodexSessionAdapter:
         require_async_method(launcher, "start", 1)
         if credentials is not None:
             require_async_method(credentials, "place", 2)
-            require_async_method(credentials, "collect", 1)
+            require_async_method(credentials, "collect", 3)
         if not executable or not all(isinstance(p, str) and p for p in executable):
             raise ValueError("executable")
         self._launcher = launcher
@@ -390,7 +402,14 @@ class CodexSessionAdapter:
             await self._credentials.place(secret, codex_home)
             return await self._converse(request, attachment)
         finally:
-            await asyncio.shield(self._collect(codex_home))
+            # After the CLI was stopped (``_converse``'s own ``finally``), run
+            # to its end even through a cancellation: the refreshed login must
+            # be written back while this session still holds the
+            # connection's slot (Decision 0083, 6).
+            if await _through_cancellation(
+                self._collect(secret, codex_home, request.write_back)
+            ):
+                raise asyncio.CancelledError
 
     async def _version(self, attachment: CodexAttachment) -> str | None:
         """``codex --version``'s version (``codex-cli 0.162.1``), or ``None``."""
@@ -427,10 +446,15 @@ class CodexSessionAdapter:
             attachment.unstopped.append(True)
             raise
 
-    async def _collect(self, codex_home: Path) -> None:
+    async def _collect(
+        self,
+        secret: Secret,
+        codex_home: Path,
+        write_back: CredentialWriter | None,
+    ) -> None:
         assert self._credentials is not None
         try:
-            await self._credentials.collect(codex_home)
+            await self._credentials.collect(secret, codex_home, write_back)
         except Exception as error:
             logger.error(
                 "Codex credential could not be collected: exception_type=%s",
@@ -594,6 +618,20 @@ class CodexSessionAdapter:
                 with contextlib.suppress(asyncio.CancelledError):
                     await reading
         return ended, stopped
+
+
+async def _through_cancellation(work) -> bool:
+    """Run ``work`` to its end even while being cancelled; whether a
+    cancellation came meanwhile (the caller raises it afterwards)."""
+    task = asyncio.ensure_future(work)
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.wait({task})
+        except asyncio.CancelledError:
+            cancelled = True
+    task.result()
+    return cancelled
 
 
 def _submit_counted(stream: CodexStream, attachment: CodexAttachment) -> bool:
