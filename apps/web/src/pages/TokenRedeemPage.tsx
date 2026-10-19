@@ -65,10 +65,18 @@ export function passwordProblem(error: unknown): PolicyProblem | null {
     : "unknown";
 }
 
-/** The rules the page can check before sending (the same as the Backend's). */
+/**
+ * The rules the page can check before sending, in the Backend's order
+ * (paw_backend/auth/passwords.py): NFKC of the whole string, its length in code
+ * points, then the whole string case-folded and its distinct code points. JS has
+ * no casefold(): toLowerCase() of the whole string matches it except for the few
+ * characters whose full case folding differs from lower-casing (ß → "ss", for
+ * example); the Backend still decides.
+ */
 export function passwordChecks(password: string, confirm: string) {
-  const characters = Array.from(password.normalize("NFKC"));
-  const distinct = new Set(characters.map((character) => character.toLowerCase())).size;
+  const normalized = password.normalize("NFKC");
+  const characters = Array.from(normalized);
+  const distinct = new Set(Array.from(normalized.toLowerCase())).size;
   return {
     count: characters.length,
     length: characters.length >= PASSWORD_MIN_LENGTH && characters.length <= PASSWORD_MAX_LENGTH,
@@ -210,7 +218,7 @@ function RedeemAside() {
 export function TokenRedeemPage() {
   const { t } = useI18n();
   const { navigate } = useRouter();
-  const { refresh } = useSession();
+  const { state: session, refresh, signOut } = useSession();
   const id = useId();
   const [linkToken, setLinkToken] = useState(tokenFromLocation);
   const [typedToken, setTypedToken] = useState("");
@@ -258,9 +266,18 @@ export function TokenRedeemPage() {
     }
   };
 
-  const toSignIn = () => {
-    // A recovery ends every session, this browser's too: ask again before going on.
-    void refresh().finally(() => navigate("/", { replace: true }));
+  const toSignIn = async () => {
+    // A recovery ends the Owner's sessions, but a reset token ends only its own
+    // account's: this browser may still be signed in as somebody else. End that
+    // session, so that "/" is the sign-in and not the other account's workspace.
+    if (session.status === "signed_in") {
+      try {
+        await signOut();
+      } catch {
+        await refresh();
+      }
+    }
+    navigate("/", { replace: true });
   };
 
   const owner = result ? result.purpose !== "password_reset" : kind === "owner";
@@ -283,7 +300,7 @@ export function TokenRedeemPage() {
               <p>{t("redeem.success.passkey")}</p>
             </div>
           )}
-          <button type="button" className="redeem-proceed" onClick={toSignIn}>
+          <button type="button" className="redeem-proceed" onClick={() => void toSignIn()}>
             {t("redeem.toSignIn")}
           </button>
         </ResultCard>

@@ -208,6 +208,28 @@ describe("TokenRedeemPage (/setup)", () => {
     expect(submitButton()).toBeEnabled();
   });
 
+  it("signs out another account's session before going to the sign-in", async () => {
+    // A password reset link opened in a browser signed in as someone else: the
+    // Backend ends only the token owner's sessions, so this one is still valid.
+    const { calls } = mockApi({
+      "GET /auth/session": reply(200, session({ role: "admin" })),
+      "POST /auth/token/redeem": reply(200, {
+        purpose: "password_reset",
+        passkey_required: false,
+        next: "login",
+      }),
+      "POST /auth/logout": reply(204),
+    });
+    renderApp(`/setup#${TOKEN}`);
+    await fillPasswords();
+    fireEvent.click(submitButton());
+    fireEvent.click(await screen.findByRole("button", { name: "サインインへ進む" }));
+    expect(await screen.findByRole("heading", { name: "サインイン" })).toBeInTheDocument();
+    expect(screen.queryByRole("navigation", { name: "メインナビゲーション" })).toBeNull();
+    expect(calls.filter((call) => call.path === "/auth/logout")).toHaveLength(1);
+    expect(window.location.pathname).toBe("/");
+  });
+
   it("is reachable while signed in (a recovery from a still-open session)", async () => {
     mockApi({ "GET /auth/session": reply(200, session({ role: "owner" })) });
     renderApp(`/setup#${TOKEN}`);
@@ -227,6 +249,9 @@ describe("password rules", () => {
       match: true,
     });
     expect(passwordChecks("AbAbAbAbAbAb", "").distinct).toBe(false);
+    // Lower-casing İ gives two code points (i + U+0307), as the Backend's
+    // casefold does: four different characters, which the Backend accepts.
+    expect(passwordChecks("İİİİİİİİab", "").distinct).toBe(true);
     expect(passwordChecks("x".repeat(257), "").length).toBe(false);
   });
 
