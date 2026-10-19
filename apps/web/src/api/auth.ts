@@ -99,7 +99,11 @@ export const authApi = {
     remember_me: boolean;
     device_name?: string | null;
   }) => apiRequest<SessionResponse>("POST", "/auth/login", body),
-  logout: () => apiRequest<void>("POST", "/auth/logout"),
+  /** `quiet`: a 401 (no session) does not announce a session end (SESSION_ENDED_EVENT). */
+  logout: (options: { quiet?: boolean } = {}) =>
+    apiRequest<void>("POST", "/auth/logout", undefined, {
+      announceSessionEnd: !options.quiet,
+    }),
   sessions: () => apiRequest<{ sessions: SessionInfo[] }>("GET", "/auth/sessions"),
   revokeSession: (id: string) =>
     apiRequest<void>("DELETE", `/auth/sessions/${encodeURIComponent(id)}`),

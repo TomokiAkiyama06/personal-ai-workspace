@@ -30,7 +30,11 @@ interface SessionValue {
   state: SessionState;
   /** Take a session the Backend just returned (login, step-up, rotation). */
   accept: (data: SessionResponse) => void;
-  refresh: () => Promise<void>;
+  /**
+   * Ask the server again. Resolves with the state it set, or `null` when a newer
+   * change (a sign-in, a sign-out) superseded this answer.
+   */
+  refresh: () => Promise<SessionState | null>;
   /**
    * End this session on the server. Rejects (and stays signed in) when the server
    * could not be told: the HttpOnly cookie is only revoked and cleared by a
@@ -51,7 +55,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const stateRef = useRef(state);
   stateRef.current = state;
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (): Promise<SessionState | null> => {
     const mine = ++generation.current;
     let next: SessionState;
     try {
@@ -59,7 +63,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     } catch (error) {
       next = isApiError(error, "unauthorized") ? { status: "signed_out" } : { status: "error" };
     }
-    if (mine === generation.current) setState(next);
+    if (mine !== generation.current) return null;
+    setState(next);
+    return next;
   }, []);
 
   const accept = useCallback(

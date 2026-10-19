@@ -213,7 +213,8 @@ describe("TokenRedeemPage (/setup)", () => {
     // A password reset link opened in a browser signed in as someone else: the
     // Backend ends only the token owner's sessions, so this one is still valid.
     const { calls } = mockApi({
-      "GET /auth/session": reply(200, session({ role: "admin" })),
+      // The probe finds the other account; after the sign-out, nobody.
+      "GET /auth/session": [reply(200, session({ role: "admin" })), apiError(401, "unauthorized")],
       "POST /auth/token/redeem": reply(200, {
         purpose: "password_reset",
         passkey_required: false,
@@ -233,7 +234,8 @@ describe("TokenRedeemPage (/setup)", () => {
 
   it("stays on the page when the other account's sign-out fails, and lets it be retried", async () => {
     const { calls } = mockApi({
-      "GET /auth/session": reply(200, session({ role: "admin" })),
+      // The probe finds the other account; after the sign-out, nobody.
+      "GET /auth/session": [reply(200, session({ role: "admin" })), apiError(401, "unauthorized")],
       "POST /auth/token/redeem": reply(200, {
         purpose: "password_reset",
         passkey_required: false,
@@ -255,6 +257,76 @@ describe("TokenRedeemPage (/setup)", () => {
     expect(await screen.findByRole("heading", { name: "サインイン" })).toBeInTheDocument();
     expect(window.location.pathname).toBe("/");
     expect(calls.filter((call) => call.path === "/auth/logout")).toHaveLength(2);
+  });
+
+  it("takes the side panel's link to the sign-in through the same sign-out", async () => {
+    const { calls } = mockApi({
+      "GET /auth/session": [reply(200, session({ role: "admin" })), apiError(401, "unauthorized")],
+      "POST /auth/token/redeem": reply(200, {
+        purpose: "password_reset",
+        passkey_required: false,
+        next: "login",
+      }),
+      "POST /auth/logout": reply(204),
+    });
+    renderApp(`/setup#${TOKEN}`);
+    await fillPasswords();
+    fireEvent.click(submitButton());
+    await screen.findByRole("button", { name: "サインインへ進む" });
+    fireEvent.click(screen.getByRole("link", { name: "サインインへ戻る" }));
+    expect(await screen.findByRole("heading", { name: "サインイン" })).toBeInTheDocument();
+    expect(screen.queryByRole("navigation", { name: "メインナビゲーション" })).toBeNull();
+    expect(calls.filter((call) => call.path === "/auth/logout")).toHaveLength(1);
+  });
+
+  it("signs out even when the startup session check has not answered yet", async () => {
+    const { calls, fetchMock } = mockApi({
+      "GET /auth/session": apiError(401, "unauthorized"),
+      "POST /auth/token/redeem": reply(200, {
+        purpose: "password_reset",
+        passkey_required: false,
+        next: "login",
+      }),
+      "POST /auth/logout": reply(204),
+    });
+    // The first GET /auth/session never answers: the state stays "loading".
+    const answer = fetchMock.getMockImplementation();
+    let first = true;
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      if (first && String(input).endsWith("/auth/session")) {
+        first = false;
+        return new Promise<Response>(() => {});
+      }
+      return (answer as NonNullable<typeof answer>)(input, init);
+    });
+    renderApp(`/setup#${TOKEN}`);
+    await fillPasswords();
+    fireEvent.click(submitButton());
+    fireEvent.click(await screen.findByRole("button", { name: "サインインへ進む" }));
+    expect(await screen.findByRole("heading", { name: "サインイン" })).toBeInTheDocument();
+    expect(calls.filter((call) => call.path === "/auth/logout")).toHaveLength(1);
+    expect(window.location.pathname).toBe("/");
+  });
+
+  it("signs out after a failed session check, and takes no session as signed out", async () => {
+    const { calls } = mockApi({
+      "GET /auth/session": [apiError(503, "service_unavailable"), apiError(401, "unauthorized")],
+      "POST /auth/token/redeem": reply(200, {
+        purpose: "password_reset",
+        passkey_required: false,
+        next: "login",
+      }),
+      // POST /auth/logout without a session: 401 unauthorized.
+      "POST /auth/logout": apiError(401, "unauthorized"),
+    });
+    renderApp(`/setup#${TOKEN}`);
+    await fillPasswords();
+    fireEvent.click(submitButton());
+    fireEvent.click(await screen.findByRole("button", { name: "サインインへ進む" }));
+    expect(await screen.findByRole("heading", { name: "サインイン" })).toBeInTheDocument();
+    expect(calls.filter((call) => call.path === "/auth/logout")).toHaveLength(1);
+    // Not the "session expired" message of an ended session.
+    expect(screen.queryByText(/有効期限が切れました/)).toBeNull();
   });
 
   it("only advises on the different characters: the server decides (casefold)", async () => {

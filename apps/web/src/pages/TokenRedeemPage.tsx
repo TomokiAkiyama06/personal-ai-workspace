@@ -16,7 +16,7 @@ import {
   type RedeemResult,
   TOKEN_MAX,
 } from "../api/auth";
-import { isApiError } from "../api/client";
+import { isApiError, nextSessionEpoch } from "../api/client";
 import { useSession } from "../auth/session";
 import { type MessageKey, useI18n } from "../i18n";
 import { errorMessage } from "../i18n/errors";
@@ -161,7 +161,7 @@ function ResultCard({
 }
 
 /** The left panel: what the token is, and what to do when the password is lost. */
-function RedeemAside() {
+function RedeemAside({ onSignIn }: { onSignIn?: () => void }) {
   const { t } = useI18n();
   const footer = useFooterText();
   const rows: { role: string; text: MessageKey; owner?: boolean }[] = [
@@ -208,7 +208,17 @@ function RedeemAside() {
       </section>
       <div className="brand-footer redeem-aside-footer">
         <span className="mono">{footer}</span>
-        <Link to="/">{t("redeem.backToSignIn")}</Link>
+        <Link
+          to="/"
+          onClick={(event) => {
+            // After a redeem, the way to the sign-in is the guarded one (toSignIn).
+            if (!onSignIn) return;
+            event.preventDefault();
+            onSignIn();
+          }}
+        >
+          {t("redeem.backToSignIn")}
+        </Link>
       </div>
     </>
   );
@@ -218,7 +228,7 @@ function RedeemAside() {
 export function TokenRedeemPage() {
   const { t } = useI18n();
   const { navigate } = useRouter();
-  const { state: session, signOut } = useSession();
+  const { state: session, refresh } = useSession();
   const id = useId();
   const [linkToken, setLinkToken] = useState(tokenFromLocation);
   const [typedToken, setTypedToken] = useState("");
@@ -271,21 +281,33 @@ export function TokenRedeemPage() {
     }
   };
 
+  // Every way from a redeemed token to the sign-in comes here. A recovery ends
+  // the Owner's sessions, but a reset token ends only its own account's: this
+  // browser may still be signed in as somebody else, or its session may be
+  // unknown (the startup check still loading, or failed). Unless the session is
+  // known to be signed out, end it on the server (401: there was none) and ask
+  // again; "/" opens only once nobody is signed in. Otherwise the page stays,
+  // because "/" would open the other account's workspace.
   const toSignIn = async () => {
-    // A recovery ends the Owner's sessions, but a reset token ends only its own
-    // account's: this browser may still be signed in as somebody else. End that
-    // session, so that "/" is the sign-in and not the other account's workspace.
-    // If that sign-out fails, stay here: going on would open that workspace.
-    if (session.status === "signed_in") {
-      setLeaving(true);
-      setSignOutFailed(false);
+    if (leaving) return;
+    setLeaving(true);
+    setSignOutFailed(false);
+    let signedOut = session.status === "signed_out";
+    if (!signedOut) {
+      let ended = false;
       try {
-        await signOut();
-      } catch {
-        setSignOutFailed(true);
-        setLeaving(false);
-        return;
+        await authApi.logout({ quiet: true });
+        nextSessionEpoch();
+        ended = true;
+      } catch (caught) {
+        ended = isApiError(caught, "unauthorized");
       }
+      if (ended) signedOut = (await refresh())?.status === "signed_out";
+    }
+    if (!signedOut) {
+      setSignOutFailed(true);
+      setLeaving(false);
+      return;
     }
     navigate("/", { replace: true });
   };
@@ -294,7 +316,7 @@ export function TokenRedeemPage() {
   const state = (filled: boolean, ok: boolean) => (!filled ? "idle" : ok ? "ok" : "ng");
 
   return (
-    <AuthLayout aside={<RedeemAside />}>
+    <AuthLayout aside={<RedeemAside onSignIn={result ? () => void toSignIn() : undefined} />}>
       {result ? (
         <ResultCard
           tone="ok"
