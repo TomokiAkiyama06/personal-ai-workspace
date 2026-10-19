@@ -218,7 +218,7 @@ function RedeemAside() {
 export function TokenRedeemPage() {
   const { t } = useI18n();
   const { navigate } = useRouter();
-  const { state: session, refresh, signOut } = useSession();
+  const { state: session, signOut } = useSession();
   const id = useId();
   const [linkToken, setLinkToken] = useState(tokenFromLocation);
   const [typedToken, setTypedToken] = useState("");
@@ -229,6 +229,8 @@ export function TokenRedeemPage() {
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<Failure | null>(null);
   const [result, setResult] = useState<RedeemResult | null>(null);
+  const [leaving, setLeaving] = useState(false);
+  const [signOutFailed, setSignOutFailed] = useState(false);
 
   // Once read, the one-time token leaves the address bar and the history entry.
   useEffect(() => {
@@ -239,7 +241,10 @@ export function TokenRedeemPage() {
 
   const token = (linkToken ?? typedToken).trim();
   const checks = passwordChecks(password, confirm);
-  const ready = token !== "" && checks.length && checks.distinct && checks.match;
+  // Hard gates only where the page computes exactly what the Backend does (the
+  // NFKC length, the two entries). The different characters depend on Python's
+  // casefold(), which JS does not have: advice only, the Backend's 422 decides.
+  const ready = token !== "" && checks.length && checks.match;
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -270,11 +275,16 @@ export function TokenRedeemPage() {
     // A recovery ends the Owner's sessions, but a reset token ends only its own
     // account's: this browser may still be signed in as somebody else. End that
     // session, so that "/" is the sign-in and not the other account's workspace.
+    // If that sign-out fails, stay here: going on would open that workspace.
     if (session.status === "signed_in") {
+      setLeaving(true);
+      setSignOutFailed(false);
       try {
         await signOut();
       } catch {
-        await refresh();
+        setSignOutFailed(true);
+        setLeaving(false);
+        return;
       }
     }
     navigate("/", { replace: true });
@@ -300,8 +310,18 @@ export function TokenRedeemPage() {
               <p>{t("redeem.success.passkey")}</p>
             </div>
           )}
-          <button type="button" className="redeem-proceed" onClick={() => void toSignIn()}>
-            {t("redeem.toSignIn")}
+          {signOutFailed && (
+            <p className="form-error" role="alert">
+              {t("redeem.signOutFailed")}
+            </p>
+          )}
+          <button
+            type="button"
+            className="redeem-proceed"
+            onClick={() => void toSignIn()}
+            disabled={leaving}
+          >
+            {signOutFailed ? t("redeem.signOutRetry") : t("redeem.toSignIn")}
           </button>
         </ResultCard>
       ) : (

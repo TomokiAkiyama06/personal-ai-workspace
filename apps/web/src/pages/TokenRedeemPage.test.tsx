@@ -83,9 +83,10 @@ describe("TokenRedeemPage (/setup)", () => {
     expect(screen.getByText("10〜256 文字（現在 5 文字）").closest("li")).toHaveClass("ng");
     expect(submitButton()).toBeDisabled();
 
+    // Advice only: the Backend's casefold decides (see the test below).
     await fillPasswords("aaaaaaaaaaaa");
     expect(screen.getByText(/4 種類以上の文字/).closest("li")).toHaveClass("ng");
-    expect(submitButton()).toBeDisabled();
+    expect(submitButton()).toBeEnabled();
 
     await fillPasswords(GOOD, `${GOOD}x`);
     expect(screen.getByText("確認用と一致している").closest("li")).toHaveClass("ng");
@@ -228,6 +229,41 @@ describe("TokenRedeemPage (/setup)", () => {
     expect(screen.queryByRole("navigation", { name: "メインナビゲーション" })).toBeNull();
     expect(calls.filter((call) => call.path === "/auth/logout")).toHaveLength(1);
     expect(window.location.pathname).toBe("/");
+  });
+
+  it("stays on the page when the other account's sign-out fails, and lets it be retried", async () => {
+    const { calls } = mockApi({
+      "GET /auth/session": reply(200, session({ role: "admin" })),
+      "POST /auth/token/redeem": reply(200, {
+        purpose: "password_reset",
+        passkey_required: false,
+        next: "login",
+      }),
+      "POST /auth/logout": [apiError(503, "service_unavailable"), reply(204)],
+    });
+    renderApp(`/setup#${TOKEN}`);
+    await fillPasswords();
+    fireEvent.click(submitButton());
+    fireEvent.click(await screen.findByRole("button", { name: "サインインへ進む" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("パスワードは設定しました");
+    expect(alert).toHaveTextContent("サインアウト");
+    expect(window.location.pathname).toBe("/setup");
+    expect(screen.queryByRole("navigation", { name: "メインナビゲーション" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "もう一度サインアウトする" }));
+    expect(await screen.findByRole("heading", { name: "サインイン" })).toBeInTheDocument();
+    expect(window.location.pathname).toBe("/");
+    expect(calls.filter((call) => call.path === "/auth/logout")).toHaveLength(2);
+  });
+
+  it("only advises on the different characters: the server decides (casefold)", async () => {
+    // JS lower-casing sees 2 different characters here, Python's casefold 4.
+    mockApi({ "GET /auth/session": apiError(401, "unauthorized") });
+    renderApp(`/setup#${TOKEN}`);
+    await fillPasswords("ΐΐΐΐΐΐΐΐaa");
+    expect(screen.getByText(/4 種類以上の文字/).closest("li")).toHaveClass("ng");
+    expect(submitButton()).toBeEnabled();
   });
 
   it("is reachable while signed in (a recovery from a still-open session)", async () => {

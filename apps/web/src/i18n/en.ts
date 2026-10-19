@@ -437,6 +437,9 @@ export const en: Record<MessageKey, string> = {
   "redeem.success.passkey":
     "This account needs a Passkey. After you sign in, the Passkey registration opens.",
   "redeem.toSignIn": "Go to sign-in",
+  "redeem.signOutFailed":
+    "Your password is set. But the other account signed in on this browser could not be signed out. Try signing out again, or sign out manually from that account's screens, then sign in with the new password.",
+  "redeem.signOutRetry": "Sign out again",
   "redeem.invalid.title": "The token is not valid, has expired or was used",
   "redeem.invalid.body":
     "The reason is not shown. Check the token and enter it again, or ask whoever issued it for a new one. A token allows 5 attempts by default; after that it no longer works.",
