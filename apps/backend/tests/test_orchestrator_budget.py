@@ -10,6 +10,7 @@ from paw_backend.tasks import TaskCommand, TaskNotRunningError, TaskState, WaitR
 from paw_backend.tasks.queueing import (
     BudgetKind,
     BudgetPreset,
+    BudgetTracker,
     InvalidQueueingArgumentError,
 )
 
@@ -27,6 +28,7 @@ from .orchestrator_support import (
     requires_postgres,
     until,
 )
+from .queueing_support import FakeClock
 
 Out = RunOutcome
 
@@ -44,6 +46,18 @@ class BudgetTest(PostgresOrchestratorTestCase):
 
     async def consumed(self, harness, task_id) -> dict[str, int]:
         return {u.kind.value: u.consumed for u in await harness.budget.usage(task_id)}
+
+    def stopped_clock_budget(self) -> BudgetTracker:
+        """A tracker whose clock (its test seam) does not move.
+
+        The runtime timer of a run accrues wall time whatever its nodes do, and
+        the run settles it when it ends: a test that compares the whole budget
+        before and after a node's refused charge would see ``runtime_seconds``
+        grow by 1 whenever the run crossed a second boundary in between (Issue
+        #271). With the clock stopped, any change the test sees is a charge."""
+        return BudgetTracker(
+            self.new_database(), clock=FakeClock(), allow_explicit_clock=True
+        )
 
     async def test_the_steps_budget_stops_new_nodes_and_the_run_can_resume(self):
         rt = {"local": FakeRuntime("local")}
@@ -120,7 +134,11 @@ class BudgetTest(PostgresOrchestratorTestCase):
             return ok("charged")
 
         rt = {"local": FakeRuntime("local", script={"spend": late_spender})}
-        h = self.harness(runtimes=rt, config={"poll_seconds": 3600.0})
+        h = self.harness(
+            runtimes=rt,
+            budget=self.stopped_clock_budget(),
+            config={"poll_seconds": 3600.0},
+        )
         task_id = await self.prepare(h, make_plan(node("spend")))
         run = asyncio.create_task(h.orchestrator.run_once("w1"))
         await until(lambda: len(rt["local"].assignments) == 1, message="the node")
@@ -158,7 +176,11 @@ class BudgetTest(PostgresOrchestratorTestCase):
             return ok("charged")
 
         rt = {"local": FakeRuntime("local", script={"spend": late_spender})}
-        h = self.harness(runtimes=rt, config={"poll_seconds": 3600.0})
+        h = self.harness(
+            runtimes=rt,
+            budget=self.stopped_clock_budget(),
+            config={"poll_seconds": 3600.0},
+        )
         task_id = await self.prepare(h, make_plan(node("spend")))
         run = asyncio.create_task(h.orchestrator.run_once("w1"))
         await until(lambda: len(rt["local"].assignments) == 1, message="the node")
