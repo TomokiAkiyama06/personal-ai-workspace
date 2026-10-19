@@ -228,7 +228,7 @@ function RedeemAside({ onSignIn }: { onSignIn?: () => void }) {
 export function TokenRedeemPage() {
   const { t } = useI18n();
   const { navigate } = useRouter();
-  const { state: session, refresh } = useSession();
+  const { refresh } = useSession();
   const id = useId();
   const [linkToken, setLinkToken] = useState(tokenFromLocation);
   const [typedToken, setTypedToken] = useState("");
@@ -283,27 +283,25 @@ export function TokenRedeemPage() {
 
   // Every way from a redeemed token to the sign-in comes here. A recovery ends
   // the Owner's sessions, but a reset token ends only its own account's: this
-  // browser may still be signed in as somebody else, or its session may be
-  // unknown (the startup check still loading, or failed). Unless the session is
-  // known to be signed out, end it on the server (401: there was none) and ask
-  // again; "/" opens only once nobody is signed in. Otherwise the page stays,
-  // because "/" would open the other account's workspace.
+  // browser may be signed in as somebody else. This tab's session state cannot
+  // tell: the startup check may still be loading or have failed, and another tab
+  // may have signed in since it said "signed out" (the cookie is shared). So
+  // always end the session on the server (401: there was none) and ask again;
+  // "/" opens only once that fresh check says nobody is signed in. Otherwise
+  // the page stays, because "/" would open the other account's workspace.
   const toSignIn = async () => {
     if (leaving) return;
     setLeaving(true);
     setSignOutFailed(false);
-    let signedOut = session.status === "signed_out";
-    if (!signedOut) {
-      let ended = false;
-      try {
-        await authApi.logout({ quiet: true });
-        nextSessionEpoch();
-        ended = true;
-      } catch (caught) {
-        ended = isApiError(caught, "unauthorized");
-      }
-      if (ended) signedOut = (await refresh())?.status === "signed_out";
+    let ended = false;
+    try {
+      await authApi.logout({ quiet: true });
+      nextSessionEpoch();
+      ended = true;
+    } catch (caught) {
+      ended = isApiError(caught, "unauthorized");
     }
+    const signedOut = ended && (await refresh())?.status === "signed_out";
     if (!signedOut) {
       setSignOutFailed(true);
       setLeaving(false);

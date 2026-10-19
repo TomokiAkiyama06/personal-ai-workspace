@@ -44,6 +44,8 @@ describe("TokenRedeemPage (/setup)", () => {
         passkey_required: false,
         next: "login",
       }),
+      // No session: the guarded way to the sign-in still asks (401 = none).
+      "POST /auth/logout": apiError(401, "unauthorized"),
     });
     renderApp(`/setup#${TOKEN}`);
     expect(
@@ -139,6 +141,7 @@ describe("TokenRedeemPage (/setup)", () => {
         next: "login",
       }),
       "POST /auth/login": reply(200, session({ role: "owner", gate: "enrollment_required" })),
+      "POST /auth/logout": apiError(401, "unauthorized"),
     });
     renderApp(`/setup#${TOKEN}`);
     await fillPasswords();
@@ -327,6 +330,30 @@ describe("TokenRedeemPage (/setup)", () => {
     expect(calls.filter((call) => call.path === "/auth/logout")).toHaveLength(1);
     // Not the "session expired" message of an ended session.
     expect(screen.queryByText(/有効期限が切れました/)).toBeNull();
+  });
+
+  it("does not trust a signed-out state cached before another tab signed in", async () => {
+    // The startup check found no session; another tab of this origin then signed
+    // in (the shared cookie), which this tab's state does not know.
+    const { calls } = mockApi({
+      "GET /auth/session": apiError(401, "unauthorized"),
+      "POST /auth/token/redeem": reply(200, {
+        purpose: "password_reset",
+        passkey_required: false,
+        next: "login",
+      }),
+      "POST /auth/logout": reply(204),
+    });
+    renderApp(`/setup#${TOKEN}`);
+    await fillPasswords();
+    fireEvent.click(submitButton());
+    fireEvent.click(await screen.findByRole("button", { name: "サインインへ進む" }));
+    expect(await screen.findByRole("heading", { name: "サインイン" })).toBeInTheDocument();
+    const paths = calls.map((call) => `${call.method} ${call.path}`);
+    const logout = paths.indexOf("POST /auth/logout");
+    expect(logout).toBeGreaterThan(-1);
+    // A fresh session check after the logout decides the way to "/".
+    expect(paths.slice(logout + 1)).toContain("GET /auth/session");
   });
 
   it("only advises on the different characters: the server decides (casefold)", async () => {
