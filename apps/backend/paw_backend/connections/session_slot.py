@@ -19,7 +19,20 @@ revision ``0239``), not a lock of one process:
   set and the service cancels the session (the adapter stops the CLI and
   writes its credential back first); another process can take the slot over
   only once the lease has expired, ``margin`` seconds later at the earliest;
-* :meth:`release` stops the heartbeat and deletes the holder's row.
+* :meth:`release` stops the heartbeat and deletes the holder's row, unless
+  the adapter said its CLI could not be stopped (:meth:`keep`): then the slot
+  stays held, its heartbeat running, as long as this process lives (the
+  operator stops the unit; a process that ends lets the lease expire).
+
+The margin is the stop's worst case on production's launcher
+(``cli_session.SystemdLauncher``, each ``systemctl`` call bounded by 30 s):
+reading how the unit ended (at most 10 s of polls, then up to three calls:
+about 100 s), ``systemctl stop`` three times with a second between (about
+92 s), then the write-back (a few database statements and the store's file):
+about 200 s, inside the 240 s margin. A lease lasts 300 s after its last
+renewal, so a holder that cannot renew gives its session up 60 s after the
+last renewal it sent and has 240 s to finish before another process can take
+the slot over.
 
 The instants of the row are the database's; the holder's own deadline is its
 monotonic clock, measured from before each renewal was sent (so it is never
@@ -42,13 +55,13 @@ logger = logging.getLogger(__name__)
 #: Decision 0083, 6: how long a second session waits for the slot (provisional).
 SLOT_WAIT_SECONDS: Final = 60.0
 #: How long a lease lasts after its last heartbeat.
-SLOT_TTL_SECONDS: Final = 60.0
+SLOT_TTL_SECONDS: Final = 300.0
 #: How often the holder renews it.
 SLOT_HEARTBEAT_SECONDS: Final = 10.0
 #: How long before the lease could expire the holder gives its session up
-#: when it could not renew: time to stop the CLI (SIGTERM, five seconds,
-#: SIGKILL, the container's removal) and to write its credential back.
-SLOT_STOP_MARGIN_SECONDS: Final = 20.0
+#: when it could not renew: the worst case of stopping the CLI and writing
+#: its credential back (see the module).
+SLOT_STOP_MARGIN_SECONDS: Final = 240.0
 _FIRST_RETRY_SECONDS: Final = 0.25
 _MAX_RETRY_SECONDS: Final = 2.0
 
@@ -95,6 +108,7 @@ class SessionSlot:
         self.lost = asyncio.Event()
         self._confirmed = 0.0
         self._task: asyncio.Task | None = None
+        self._keep = False
 
     def __repr__(self) -> str:
         return f"SessionSlot(kind={self._kind.value})"
@@ -156,9 +170,23 @@ class SessionSlot:
         )
         self.lost.set()
 
+    def keep(self) -> None:
+        """The session's CLI could not be stopped (it may still run with the
+        login): :meth:`release` will keep the slot held."""
+        self._keep = True
+
     async def release(self) -> None:
         """Stop the heartbeat and delete the holder's row (best effort: a row
-        left behind expires by itself). Never raises."""
+        left behind expires by itself). After :meth:`keep`, neither: the slot
+        stays held while this process lives. Never raises."""
+        if self._keep:
+            logger.error(
+                "connection session slot kept: its CLI could not be stopped;"
+                " stop the session's unit (the slot is held while this process"
+                " runs): kind=%s",
+                self._kind.value,
+            )
+            return
         if self._task is not None:
             self._task.cancel()
             with contextlib.suppress(asyncio.CancelledError):

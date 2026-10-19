@@ -1389,6 +1389,7 @@ class ConnectionService:
                         attachment=request.attachment,
                         connection_id=admission.connection_id,
                         write_back=write_back,
+                        cli_running=None if slot is None else slot.keep,
                     ),
                 )
         except TimeoutError:

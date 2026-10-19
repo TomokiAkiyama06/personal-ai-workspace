@@ -89,6 +89,10 @@ class AgentSessionRequest:
     # adapter that holds the connection's session slot (``exclusive_sessions``)
     # and a service with a secret store; ``None``: nothing can be written back.
     write_back: CredentialWriter | None = field(default=None, repr=False)
+    # Called by the adapter when its CLI could not be stopped (it may still
+    # run with the login): the service then keeps the connection's session
+    # slot held (``session_slot.SessionSlot.keep``). ``None``: no slot.
+    cli_running: Callable[[], None] | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "model", validate_model("model", self.model))
@@ -106,6 +110,8 @@ class AgentSessionRequest:
             raise TypeError("connection_id must be a UUID")
         if self.write_back is not None and not callable(self.write_back):
             raise TypeError("write_back must be callable")
+        if self.cli_running is not None and not callable(self.cli_running):
+            raise TypeError("cli_running must be callable")
 
 
 @dataclass(frozen=True, slots=True)

@@ -90,6 +90,7 @@ class Connections:
     def __init__(self, adapter, *, budget=10_000_000, write_back=None):
         self.adapter = adapter
         self.write_back = write_back
+        self.cli_running = []  # the adapter said its CLI could not be stopped
         self.turns = []
         self.budget = budget
         self.connection_id = uuid.uuid4()
@@ -114,6 +115,7 @@ class Connections:
                 attachment=request.attachment,
                 connection_id=self.connection_id,
                 write_back=self.write_back,
+                cli_running=lambda: self.cli_running.append(True),
             ),
         )
         self.raw = raw
@@ -612,6 +614,8 @@ class UnstoppedTest(CodexCase):
             adapter=self.stuck_adapter(StuckLauncher()),
         )
         self.assertEqual(len(list(self.sessions.iterdir())), 1)  # kept
+        # The service is told: the connection's session slot stays held.
+        self.assertEqual(self.connections.cli_running, [True])
         self.assertIsNone(outcome.result)
         self.assertEqual(outcome.error_class, "AdapterError")
         self.assertEqual(len(self.credentials.collected), 1)

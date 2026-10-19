@@ -313,6 +313,30 @@ class WaitTest(SlotCase):
                 self.slot_service(ExclusiveSession(), **options)
 
 
+class StuckSession(ExclusiveSession):
+    """An adapter whose CLI could not be stopped."""
+
+    async def run_session(self, secret, request):
+        request.cli_running()
+        return await super().run_session(secret, request)
+
+
+class KeptSlotTest(SlotCase):
+    async def test_a_cli_that_could_not_be_stopped_keeps_the_slot(self):
+        service = self.slot_service(StuckSession())
+        await self.start(service)
+        (lease,) = self.leases()
+        # Still renewed while this process lives.
+        before = self.scalar("SELECT expires_at FROM connection_session_leases")
+        await asyncio.sleep(0.4)
+        after = self.scalar("SELECT expires_at FROM connection_session_leases")
+        self.assertGreater(after, before)
+        second = ExclusiveSession()
+        with self.assertRaises(SessionSlotBusyError):
+            await self.start(self.slot_service(second))
+        self.assertEqual(second.secrets, [])
+
+
 class LostSlotTest(SlotCase):
     async def test_a_holder_that_cannot_renew_stops_its_session_in_time(self):
         adapter = ExclusiveSession(hold=asyncio.Event(), refresh=REFRESHED)

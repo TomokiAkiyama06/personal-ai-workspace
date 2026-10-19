@@ -384,8 +384,23 @@ class CodexSessionAdapter:
         if not isinstance(attachment, CodexAttachment):
             raise TypeError("a Codex session needs its attachment")
         if self._credentials is None:
-            # No way to hand the login over yet (Decision 0089, 4).
+            # No way to hand the login over (Decision 0089, 4).
             return AgentSessionResult(failure=FailureCode.UNAVAILABLE)
+        try:
+            return await self._session(secret, request, attachment)
+        finally:
+            if attachment.unstopped and request.cli_running is not None:
+                # The CLI may still run with the login: the connection's
+                # slot stays held (Decision 0083, 6).
+                request.cli_running()
+
+    async def _session(
+        self,
+        secret: Secret,
+        request: AgentSessionRequest,
+        attachment: CodexAttachment,
+    ) -> AgentSessionResult:
+        assert self._credentials is not None
         log_session_start(attachment.spec, "codex", request.connection_id)
         # The version first, without any credential: ``app-server`` may reach
         # the provider as it starts with a login (Decision 0089, 2: an
