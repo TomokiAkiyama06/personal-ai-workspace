@@ -171,6 +171,20 @@ def _project(row) -> ProjectInfo | None:
     return ProjectInfo(row.id, row.name, _AUTHZ_STATE[status])
 
 
+async def project_info(
+    session: AsyncSession, project_id: uuid.UUID
+) -> ProjectInfo | None:
+    """The project, or ``None``: it is not stored (any more) or it is Deleted."""
+    row = (
+        await session.execute(
+            select(ProjectRow.id, ProjectRow.name, ProjectRow.status).where(
+                ProjectRow.id == project_id
+            )
+        )
+    ).one_or_none()
+    return None if row is None else _project(row)
+
+
 async def repositories(
     session: AsyncSession, ids: Collection[uuid.UUID]
 ) -> dict[uuid.UUID, RepositoryInfo]:

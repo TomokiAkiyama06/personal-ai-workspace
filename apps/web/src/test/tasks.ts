@@ -8,6 +8,7 @@ import type {
   ControlCommand,
   ControlOptions,
   FileDiff,
+  NewTask,
   PullRequestRecord,
   ReviewSummary,
   TaskDetail,
@@ -381,6 +382,7 @@ export function fakeTaskSource(
   pullRequests: PullRequestRecord[] = samplePullRequests(),
 ) {
   const calls: { id: string; command: ControlCommand; options: ControlOptions }[] = [];
+  const created: NewTask[] = [];
   const decisions: { id: string; decision: string }[] = [];
   const revoked: string[] = [];
   let approvals = sampleApprovals();
@@ -401,6 +403,41 @@ export function fakeTaskSource(
       // A copy, as a response would be: a test changing the stored task later
       // does not change what the screen already holds.
       return { ...find(id) };
+    },
+    async createTask(task) {
+      created.push(task);
+      // The Backend answers with the queued task (POST /projects/{id}/tasks).
+      const queued: TaskDetail = {
+        id: `00000000-0000-4000-8000-${String(created.length).padStart(12, "0")}`,
+        title: task.title,
+        state: "queued",
+        waitReason: null,
+        priority: "normal",
+        repository: "backend",
+        updatedAt: "2026-10-20T03:00:00Z",
+        version: 1,
+        project: "ExampleProject",
+        agent: null,
+        model: null,
+        attempt: 1,
+        retryCount: 0,
+        currentStep: null,
+        budget: { preset: task.budgetPreset, remainingPercent: 100 },
+        repositories: [
+          {
+            name: "backend",
+            role: "target",
+            branch: null,
+            worktree: null,
+            review: "not_started",
+            evaluation: "not_run",
+            pullRequest: null,
+          },
+        ],
+        dag: null,
+      };
+      state.unshift(queued);
+      return { ...queued };
     },
     async control(id, command, options) {
       calls.push({ id, command, options });
@@ -484,5 +521,5 @@ export function fakeTaskSource(
       grants = grants.filter((grant) => grant.id !== id);
     },
   };
-  return { source, calls, decisions, revoked };
+  return { source, calls, decisions, revoked, created };
 }

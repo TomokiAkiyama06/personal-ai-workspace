@@ -103,6 +103,28 @@ export type Priority = "high" | "normal" | "low";
 /** Task budget preset (tasks/queueing/budget.py). */
 export type BudgetPreset = "standard" | "long" | "unlimited";
 
+/** The presets in the order the creation form offers them (Decision 0007). */
+export const BUDGET_PRESETS: readonly BudgetPreset[] = ["standard", "long", "unlimited"];
+
+/**
+ * A task to create (POST /projects/{id}/tasks, issue #274). The Backend decides
+ * the permission (`project.task.run`, each repository's ACL for its role), the
+ * project's state and the target rule, and answers with the queued task.
+ */
+export interface NewTask {
+  projectId: string;
+  title: string;
+  /** What the task is to do, in the person's words. */
+  instruction: string;
+  /** The Working Set the task starts with: at least one `target`. */
+  repositories: readonly { repositoryId: string; role: RepoRole }[];
+  budgetPreset: BudgetPreset;
+}
+
+/** The Backend's limits (tasks/service.py MAX_TITLE_LENGTH, api/v1/tasks.py). */
+export const MAX_TITLE_LENGTH = 200;
+export const MAX_INSTRUCTION_LENGTH = 20_000;
+
 export interface PullRequestRef {
   /** The id of the pull request's record (the PR screen's path). */
   id: string;

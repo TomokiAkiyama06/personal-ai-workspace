@@ -233,7 +233,8 @@ TransitionListener = Callable[[TaskEvent], Awaitable[None]]
 
 
 class InTransactionStep(Protocol):
-    """A coroutine that ``TaskService.execute`` runs in the command's transaction.
+    """A coroutine that ``TaskService.execute`` (and ``create_task``) runs in the
+    command's transaction.
 
     Called with the command's session, the task id and the id of the task's project,
     after the task row was locked and the command's writes (the task row and the
@@ -782,6 +783,7 @@ class TaskService:
         repositories: Sequence[WorkingSetEntry] = (),
         agent: str | None = None,
         model: str | None = None,
+        in_transaction: InTransactionStep | None = None,
     ) -> TaskEvent:
         """Create a queued task (attempt 1) and its ``create`` event.
 
@@ -807,6 +809,14 @@ class TaskService:
         The project is locked ``FOR SHARE`` (``project_gate``) in the
         transaction of the insert and must be Active, otherwise
         ``ProjectNotActiveError`` is raised and nothing is written.
+
+        ``in_transaction`` (``None`` or a coroutine function, see
+        ``InTransactionStep``) runs in the same transaction, after the task, its
+        Working Set and its ``create`` event were flushed and before the commit;
+        an exception it raises aborts the creation (nothing is written). The HTTP
+        entry point (``api/v1/tasks.py``, issue #274) puts the new task in the
+        queue with its budget preset this way, so a task is never created without
+        its queue entry and budget.
         """
         project_id = _uuid("project_id", project_id)
         created_by = _uuid("created_by", created_by)
@@ -815,6 +825,8 @@ class TaskService:
         working_set = _working_set(repositories)
         agent = _optional_text("agent", agent, MAX_NAME_LENGTH)
         model = _optional_text("model", model, MAX_NAME_LENGTH)
+        if in_transaction is not None and not callable(in_transaction):
+            raise InvalidCommandArgumentError("in_transaction must be callable")
         now = utcnow()
         task = TaskRow(
             id=uuid.uuid4(),
@@ -883,6 +895,8 @@ class TaskService:
                     else None
                 ),
             )
+            if in_transaction is not None:
+                await in_transaction(session, task.id, project_id)
         await self._notify(event)
         return event
 

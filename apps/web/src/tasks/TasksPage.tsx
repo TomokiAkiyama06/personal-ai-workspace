@@ -10,6 +10,7 @@ import { type MessageKey, useI18n } from "../i18n";
 import { errorMessage } from "../i18n/errors";
 import { Link, useRouter } from "../router";
 import { Icon } from "../shell/icons";
+import { CreateTaskForm } from "./CreateTaskForm";
 import { DagGraph, NodeDetail } from "./DagGraph";
 import {
   ACCEPTED_CONTROLS,
@@ -94,10 +95,12 @@ type Load<T> =
 
 function TasksView({ source }: { source: TaskSource }) {
   const { t } = useI18n();
-  const { path } = useRouter();
+  const { path, navigate } = useRouter();
   const selectedId = selectedTaskId(path);
   const [list, setList] = useState<Load<TaskList>>({ status: "loading" });
   const [filter, setFilter] = useState<Filter>("all");
+  const [creating, setCreating] = useState(false);
+  const [createdTitle, setCreatedTitle] = useState<string | null>(null);
 
   const reload = useCallback(() => {
     source
@@ -150,6 +153,31 @@ function TasksView({ source }: { source: TaskSource }) {
     [refreshList],
   );
 
+  // A created task is shown at once at the top of the list and opened (the
+  // list's own read may fail), then the list is read again.
+  const applyCreated = useCallback(
+    (created: TaskDetail) => {
+      controls.current += 1;
+      setList((current) =>
+        current.status === "ready"
+          ? {
+              ...current,
+              data: {
+                ...current.data,
+                tasks: [created, ...current.data.tasks.filter((task) => task.id !== created.id)],
+              },
+            }
+          : current,
+      );
+      setCreating(false);
+      setCreatedTitle(created.title);
+      setFilter("all");
+      navigate(`${TASKS_PATH}/${encodeURIComponent(created.id)}`);
+      refreshList();
+    },
+    [navigate, refreshList],
+  );
+
   const tasks = list.status === "ready" ? list.data.tasks : [];
   // No push channel yet: the list is read again while it is shown (a task
   // changes, or a new one appears).
@@ -163,11 +191,12 @@ function TasksView({ source }: { source: TaskSource }) {
   const now = useNow(tasks.some(isLive));
   // On a wide screen the first task is open until one is chosen; on a phone the
   // list stays alone (the layout hides the detail without a selection).
-  const shownId = selectedId ?? visible[0]?.id ?? null;
+  const shownId = creating ? null : (selectedId ?? visible[0]?.id ?? null);
   const capacity = list.status === "ready" ? list.data.capacity : undefined;
 
   return (
-    <div className={selectedId ? "tasks-screen has-selection" : "tasks-screen"}>
+    // The form takes the task's place (on a phone, its own screen).
+    <div className={selectedId || creating ? "tasks-screen has-selection" : "tasks-screen"}>
       <div className="screen-head">
         <h1>{t("tasks.title")}</h1>
         <fieldset className="filter-chips">
@@ -188,17 +217,32 @@ function TasksView({ source }: { source: TaskSource }) {
             );
           })}
         </fieldset>
-        {capacity && (
-          <span className="mono muted push-right capacity">
-            {capacity.vramUsedGb !== undefined && capacity.vramTotalGb !== undefined
-              ? t("tasks.capacityVram", {
-                  limit: capacity.parallelLimit,
-                  used: capacity.vramUsedGb,
-                  total: capacity.vramTotalGb,
-                })
-              : t("tasks.capacity", { limit: capacity.parallelLimit })}
-          </span>
-        )}
+        <div className="push-right screen-head-tail">
+          {capacity && (
+            <span className="mono muted capacity">
+              {capacity.vramUsedGb !== undefined && capacity.vramTotalGb !== undefined
+                ? t("tasks.capacityVram", {
+                    limit: capacity.parallelLimit,
+                    used: capacity.vramUsedGb,
+                    total: capacity.vramTotalGb,
+                  })
+                : t("tasks.capacity", { limit: capacity.parallelLimit })}
+            </span>
+          )}
+          {!creating && (
+            <button
+              type="button"
+              className="small-button"
+              onClick={() => {
+                setCreatedTitle(null);
+                setCreating(true);
+              }}
+            >
+              <Icon name="plus" size={14} />
+              {t("tasks.new")}
+            </button>
+          )}
+        </div>
       </div>
       <div className="tasks-body">
         <nav className="task-list-pane" aria-label={t("tasks.list")}>
@@ -233,10 +277,30 @@ function TasksView({ source }: { source: TaskSource }) {
           <QueueNote tasks={tasks} />
         </nav>
         <div className="task-detail-pane">
-          {shownId ? (
-            <TaskDetailView key={shownId} source={source} id={shownId} onChanged={applyControl} />
+          {creating ? (
+            <CreateTaskForm
+              source={source}
+              onCreated={applyCreated}
+              onCancel={() => setCreating(false)}
+            />
           ) : (
-            list.status === "ready" && <p className="muted small">{t("tasks.select")}</p>
+            <>
+              {createdTitle && (
+                <p className="task-create-done small" role="status">
+                  {t("tasks.create.created", { title: createdTitle })}
+                </p>
+              )}
+              {shownId ? (
+                <TaskDetailView
+                  key={shownId}
+                  source={source}
+                  id={shownId}
+                  onChanged={applyControl}
+                />
+              ) : (
+                list.status === "ready" && <p className="muted small">{t("tasks.select")}</p>
+              )}
+            </>
           )}
         </div>
       </div>

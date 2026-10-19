@@ -21,6 +21,26 @@ over HTTP (issue #185, Decision 0067 Approved; the screens of PAW-062, #48).
   send them (403 ``task_creator_only``: the work runs with the creator's identity
   and rights), and they put the task in the queue in the command's own
   transaction. Answers the task as the command left it.
+* ``POST /projects/{project_id}/tasks`` (``project.task.run`` on the project,
+  audited; issue #274): create a task and put it in the queue. The body has the
+  task's title, the instruction (kept as the task input ``{"instruction": ...}``),
+  its Working Set (each repository of the project once, with its role; at least
+  one ``target``, else 422 ``no_target_repository``) and the budget preset
+  (``standard`` by default). Each repository is decided on its own ACL as
+  Decision 0035 (3) says: ``project.read`` for a ``referenced`` one,
+  ``project.repo.write`` for a ``working`` / ``target`` one (a repository that is
+  not the project's, or that the person may not read, is 404
+  ``repository_not_found`` alike; one the person may read but not write is 403
+  ``repository_write_forbidden``). ``TaskService.create_task`` then writes the
+  task, its Working Set and its ``create`` event, and in the same transaction the
+  queue entry (``normal``: a user task, REQUIREMENTS "Task Queue") and the budget
+  preset, as ``Orchestrator.enqueue_task`` does: a task never exists without its
+  queue entry and budget. The project must be Active (the guard refuses an
+  Archived or Pending deletion one with 403, and the service's gate one that
+  changed meanwhile with 409 ``project_not_active``). Answers 201 with the task
+  as ``GET /tasks/{task_id}`` reads it. Like the other POST routes it relies on
+  the Origin check and ``SameSite=Strict`` (Decision 0044) and takes no
+  idempotency key: sending it twice creates two tasks.
 * ``GET /pull-requests`` (``tasks.list``): the pull requests the tasks of those
   projects recorded, with Merge Ready as the backend judges it
   (``task_views.is_merge_ready``). There is no merge route: merging stays the
@@ -41,13 +61,20 @@ from datetime import datetime
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Query, Request
-from pydantic import BaseModel, ConfigDict, Field, StrictInt
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette import status
 from starlette.requests import HTTPConnection
 
 from paw_backend.api.v1 import task_views as views
-from paw_backend.authz import Capability, Principal, Resource, require_capability
+from paw_backend.authz import (
+    Capability,
+    Principal,
+    Reason,
+    Resource,
+    require_capability,
+)
 from paw_backend.authz.policy import Policy, decide
 from paw_backend.compute.wiring import ComputeServices
 from paw_backend.db import Database
@@ -65,14 +92,21 @@ from paw_backend.tasks import (
     TaskError,
     TaskNotFoundError,
     TaskSnapshot,
+    WorkingSetEntry,
 )
+from paw_backend.tasks.domain import RepoRole
 from paw_backend.tasks.models import TaskRow
-from paw_backend.tasks.queueing import Priority
+from paw_backend.tasks.queueing import BudgetPreset, Priority
 from paw_backend.tasks.queueing.errors import (
     BudgetNotConfiguredError,
     TaskAlreadyQueuedError,
 )
-from paw_backend.tasks.service import MAX_NAME_LENGTH, MAX_REASON_LENGTH
+from paw_backend.tasks.service import (
+    MAX_NAME_LENGTH,
+    MAX_REASON_LENGTH,
+    MAX_TITLE_LENGTH,
+    MAX_WORKING_SET_REPOSITORIES,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +120,10 @@ _DEFAULT_LIMIT = 100
 _RESTARTING = frozenset({TaskCommand.RESUME, TaskCommand.RETRY, TaskCommand.RESTART})
 
 ControlName = Literal["pause", "resume", "cancel", "retry", "restart", "stop_now"]
+
+# The longest instruction a task is created with (characters). Far below the
+# task input's own bound (``MAX_INPUT_BYTES``, 256 KiB) even in 4-byte UTF-8.
+MAX_INSTRUCTION_LENGTH = 20_000
 
 
 async def _task_resource(connection: HTTPConnection) -> Resource:
@@ -101,12 +139,29 @@ async def _task_resource(connection: HTTPConnection) -> Resource:
     return Resource.project(project.id, project.state)
 
 
+async def _project_resource(connection: HTTPConnection) -> Resource:
+    """The project of the URL as stored (its state from the projects table); one
+    that does not exist or is Deleted is a resource no capability applies to, so
+    the guard refuses it like a project the person is not a member of."""
+    project_id = uuid.UUID(connection.path_params["project_id"])
+    database: Database = connection.app.state.database
+    async with database.session() as session, session.begin():
+        project = await views.project_info(session, project_id)
+    if project is None:
+        return Resource(kind="project", id=project_id)
+    return Resource.project(project.id, project.state)
+
+
 _LIST = Annotated[Principal, Depends(require_capability(Capability.TASKS_LIST))]
 _READ = Annotated[
     Principal, Depends(require_capability(Capability.PROJECT_READ, _task_resource))
 ]
 _RUN = Annotated[
     Principal, Depends(require_capability(Capability.PROJECT_TASK_RUN, _task_resource))
+]
+_CREATE = Annotated[
+    Principal,
+    Depends(require_capability(Capability.PROJECT_TASK_RUN, _project_resource)),
 ]
 
 
@@ -268,6 +323,26 @@ class ControlRequest(BaseModel):
     # Retry and Restart only: another agent / model for the next run.
     agent: str | None = Field(default=None, max_length=MAX_NAME_LENGTH)
     model: str | None = Field(default=None, max_length=MAX_NAME_LENGTH)
+
+
+class WorkingSetEntryIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    repository_id: uuid.UUID
+    role: Literal["target", "working", "referenced"]
+
+
+class CreateTaskRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: StrictStr = Field(min_length=1, max_length=MAX_TITLE_LENGTH)
+    # What the task is to do, in the person's words: the planner's input.
+    instruction: StrictStr = Field(min_length=1, max_length=MAX_INSTRUCTION_LENGTH)
+    # The Working Set the task starts with (Decision 0030): at least one target.
+    repositories: list[WorkingSetEntryIn] = Field(
+        min_length=1, max_length=MAX_WORKING_SET_REPOSITORIES
+    )
+    budget_preset: Literal["standard", "long", "unlimited"] = "standard"
 
 
 # -- helpers ----------------------------------------------------------------------
@@ -630,6 +705,123 @@ async def control_task(
             in_transaction=in_transaction,
         )
     return await _detail(request, principal, task_id)
+
+
+# The repository permission each role of the Working Set needs at creation
+# (Decision 0035, 3): reading for ``referenced``, writing for the others.
+_ROLE_CAPABILITY = {
+    RepoRole.REFERENCED: Capability.PROJECT_READ,
+    RepoRole.WORKING: Capability.PROJECT_REPO_WRITE,
+    RepoRole.TARGET: Capability.PROJECT_REPO_WRITE,
+}
+
+
+async def _authorize_working_set(
+    request: Request,
+    principal: Principal,
+    project_id: uuid.UUID,
+    entries: list[WorkingSetEntryIn],
+) -> list[WorkingSetEntry]:
+    """Decide every repository of the Working Set for its role, on its own ACL
+    (audited as every decision is; an allowed read is not recorded, its
+    capability being ``DENIED_ONLY``), and return the entries ``create_task``
+    takes. Raises the route's answer for the first one that is refused."""
+    if len({entry.repository_id for entry in entries}) != len(entries):
+        raise ApiError(
+            422, "duplicate_repository", "A repository is listed more than once"
+        )
+    roles = [RepoRole(entry.role) for entry in entries]
+    if RepoRole.TARGET not in roles:
+        raise ApiError(
+            422,
+            "no_target_repository",
+            "A task needs at least one target repository",
+        )
+    database: Database = request.app.state.database
+    async with database.session() as session, session.begin():
+        await _read_only(session)
+        project = await views.project_info(session, project_id)
+        found = await views.repositories(
+            session, [entry.repository_id for entry in entries]
+        )
+    if project is None:  # Deleted since the guard read it
+        raise ApiError(403, "forbidden", "Permission denied")
+    authorizer = request.app.state.authorizer
+    policy = _policy(request)
+    checked = []
+    for entry, role in zip(entries, roles, strict=True):
+        repository = found.get(entry.repository_id)
+        # A repository of another project, or one the person may not read, is
+        # not found alike (its existence is not disclosed).
+        if (
+            repository is None
+            or repository.project_id != project.id
+            or not views.may_read_repository(principal, project, repository, policy)
+        ):
+            raise ApiError(404, "repository_not_found", "Repository not found")
+        resource = Resource.repository(project.id, project.state, repository.acl)
+        decision = await authorizer.authorize(
+            principal, _ROLE_CAPABILITY[role], resource
+        )
+        if not decision.allowed:
+            if decision.reason is Reason.AUDIT_UNAVAILABLE:
+                raise ApiError(
+                    503, "service_unavailable", "Service temporarily unavailable"
+                )
+            if decision.reason is Reason.PROJECT_STATE_FORBIDS:
+                raise ApiError(409, "project_not_active", "The project is not active")
+            raise ApiError(
+                403,
+                "repository_write_forbidden",
+                "You may not let a task write to this repository",
+            )
+        checked.append(WorkingSetEntry(repository_id=entry.repository_id, role=role))
+    return checked
+
+
+def _enqueue(execution: TaskExecution, preset: BudgetPreset) -> Callable:
+    """The step of the creation, in its transaction: the queue entry and the
+    budget preset, as ``Orchestrator.enqueue_task`` writes them (a task without a
+    budget is never run, Decision 0007)."""
+
+    async def enqueue(
+        session: AsyncSession, task_id: uuid.UUID, project_id: uuid.UUID
+    ) -> None:
+        await execution.queue.enqueue_in(session, task_id, priority=Priority.NORMAL)
+        await execution.budget.set_preset_in(session, task_id, preset)
+
+    return enqueue
+
+
+@router.post(
+    "/projects/{project_id}/tasks",
+    status_code=status.HTTP_201_CREATED,
+    response_model=TaskDetailOut,
+    summary=(
+        "Create a task in the project with its Working Set and budget preset, and "
+        "put it in the queue"
+    ),
+)
+async def create_task(
+    request: Request,
+    project_id: uuid.UUID,
+    body: CreateTaskRequest,
+    principal: _CREATE,
+) -> TaskDetailOut:
+    execution = _execution(request)
+    working_set = await _authorize_working_set(
+        request, principal, project_id, body.repositories
+    )
+    with _task_errors():
+        event = await execution.tasks.create_task(
+            project_id=project_id,
+            created_by=principal.user_id,
+            title=body.title,
+            input={"instruction": body.instruction},
+            repositories=working_set,
+            in_transaction=_enqueue(execution, BudgetPreset(body.budget_preset)),
+        )
+    return await _detail(request, principal, event.task_id)
 
 
 @router.get(

@@ -227,6 +227,30 @@ describe("apiTaskSource", () => {
     expect(task.dag).toBeNull();
   });
 
+  it("creates a task in the project and answers with the queued task", async () => {
+    const { calls } = mockApi({
+      "POST /projects/p%201/tasks": reply(
+        201,
+        wire({ state: "queued", priority: "normal", current_step: null, dag: null }),
+      ),
+    });
+    const task = await apiTaskSource.createTask({
+      projectId: "p 1",
+      title: "Read the parser",
+      instruction: "Summarise it. Change nothing.",
+      repositories: [{ repositoryId: "r-1", role: "target" }],
+      budgetPreset: "standard",
+    });
+    expect(calls[0]?.body).toEqual({
+      title: "Read the parser",
+      instruction: "Summarise it. Change nothing.",
+      repositories: [{ repository_id: "r-1", role: "target" }],
+      budget_preset: "standard",
+    });
+    expect(task.state).toBe("queued");
+    expect(task.id).toBe(TASK);
+  });
+
   it("sends a control with the expected version and only the given options", async () => {
     const { calls } = mockApi({
       [`POST /tasks/${TASK}/controls`]: reply(200, wire({ state: "cancelled", version: 4 })),

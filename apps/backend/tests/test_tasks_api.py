@@ -800,6 +800,277 @@ class TasksApiTest(PostgresRepositoryTestCase):
         items = (await self.client.get("/api/v1/pull-requests")).json()["pull_requests"]
         self.assertEqual([item["merge_ready"] for item in items], [False])
 
+    # -- creating a task (issue #274) ------------------------------------------------
+
+    def create_body(self, **overrides) -> dict:
+        body = {
+            "title": "Read the parser",
+            "instruction": "Read web-app's parser and summarise it. Change nothing.",
+            "repositories": [{"repository_id": str(self.repo), "role": "target"}],
+        }
+        body.update(overrides)
+        return body
+
+    async def create(self, project: uuid.UUID | None = None, **body) -> httpx.Response:
+        return await self.client.post(
+            f"/api/v1/projects/{project or self.project}/tasks",
+            json=self.create_body(**body),
+        )
+
+    def task_count(self) -> int:
+        return self.rows("SELECT count(*) AS n FROM tasks")[0]["n"]
+
+    async def test_a_contributor_creates_a_queued_task_with_its_budget(self):
+        self.as_creator()
+
+        response = await self.create(budget_preset="long")
+
+        self.assertEqual(response.status_code, 201)
+        body = response.json()
+        task_id = uuid.UUID(body["id"])
+        self.assertEqual(body["state"], "queued")
+        self.assertEqual(body["title"], "Read the parser")
+        self.assertEqual(body["priority"], "normal")
+        self.assertEqual(body["created_by"], str(self.creator))
+        self.assertEqual(body["project_id"], str(self.project))
+        self.assertEqual(body["repository"], "web-app")
+        self.assertEqual(
+            [(repo["name"], repo["role"]) for repo in body["repositories"]],
+            [("web-app", "target")],
+        )
+        self.assertEqual(body["budget"]["preset"], "long")
+        # In the queue, with its budget: what a worker claims and runs.
+        self.assertEqual(
+            self.queue_rows(task_id), [{"status": "queued", "priority": "normal"}]
+        )
+        snapshot = await self.tasks.restore(task_id, log_limit=0)
+        self.assertEqual(
+            snapshot.input,
+            {"instruction": "Read web-app's parser and summarise it. Change nothing."},
+        )
+        entry = await self.queue.claim_next("worker-1")
+        self.assertEqual(entry.task_id, task_id)
+
+    async def test_the_creation_is_audited_and_recorded_in_the_task_history(self):
+        self.as_creator()
+        reader = self.seed_repository(self.project, name="docs")
+
+        response = await self.create(
+            repositories=[
+                {"repository_id": str(self.repo), "role": "target"},
+                {"repository_id": str(reader), "role": "referenced"},
+            ]
+        )
+
+        self.assertEqual(response.status_code, 201)
+        task_id = uuid.UUID(response.json()["id"])
+        allowed = [
+            (event.action, event.resource_kind, event.repo_id, event.actor_id)
+            for event in self.audit.events
+            if event.decision == "allow"
+        ]
+        # The guard's decision on the project, then the target's write.
+        self.assertEqual(
+            allowed,
+            [
+                ("project.task.run", "project", None, self.creator),
+                ("project.repo.write", "repository", self.repo, self.creator),
+            ],
+        )
+        history = await self.tasks.history(task_id)
+        self.assertEqual([event.command.value for event in history], ["create"])
+        self.assertEqual(history[0].actor, Actor.user(self.creator))
+        self.assertEqual(
+            history[0].detail,
+            {
+                "working_set": [
+                    {"repository_id": str(self.repo), "role": "target"},
+                    {"repository_id": str(reader), "role": "referenced"},
+                ]
+            },
+        )
+
+    async def test_the_budget_preset_is_standard_by_default(self):
+        self.as_creator()
+        response = await self.create()
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["budget"]["preset"], "standard")
+
+    async def test_a_viewer_or_a_non_member_may_not_create_a_task(self):
+        for who in (
+            {self.project: ProjectRole.VIEWER},
+            {self.other_project: ProjectRole.MANAGER},
+            {},
+        ):
+            with self.subTest(roles=who):
+                self.sign_in(uuid.uuid4(), who)
+                response = await self.create()
+                self.assertEqual(response.status_code, 403)
+                self.assertEqual(response.json()["error"]["code"], "forbidden")
+        self.sign_in(uuid.uuid4(), {}, SystemRole.OWNER)  # no member by its role
+        self.assertEqual((await self.create()).status_code, 403)
+        self.assertIn(("project.task.run", "capability_not_granted"), self.denials())
+        self.assertIn(("project.task.run", "not_project_member"), self.denials())
+        self.assertEqual(self.task_count(), 0)
+
+    async def test_nobody_signed_in_is_401(self):
+        response = await self.create()
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(self.task_count(), 0)
+
+    async def test_a_task_needs_a_target_repository(self):
+        self.as_creator()
+        for repositories in (
+            [{"repository_id": str(self.repo), "role": "referenced"}],
+            [{"repository_id": str(self.repo), "role": "working"}],
+        ):
+            with self.subTest(repositories=repositories):
+                response = await self.create(repositories=repositories)
+                self.assertEqual(response.status_code, 422)
+                self.assertEqual(
+                    response.json()["error"]["code"], "no_target_repository"
+                )
+        response = await self.create(repositories=[])
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(self.task_count(), 0)
+
+    async def test_a_stopped_project_takes_no_new_task(self):
+        self.as_creator()
+        self.set_project(self.project, status=ProjectStatus.ARCHIVED.value)
+        self.assertEqual((await self.create()).status_code, 403)
+        self.set_project(
+            self.project,
+            status=ProjectStatus.PENDING_DELETION.value,
+            deletion_started_at=T0,
+            deletion_scheduled_at=T0 + DELETION_RETENTION,
+        )
+        self.assertEqual((await self.create()).status_code, 403)
+        self.assertIn(("project.task.run", "project_state_forbids"), self.denials())
+        self.set_project(
+            self.project,
+            status=ProjectStatus.DELETED.value,
+            name="Deleted Project",
+            deletion_started_at=T0,
+            deletion_scheduled_at=T0 + DELETION_RETENTION,
+            deleted_at=T0 + DELETION_RETENTION,
+        )
+        self.assertEqual((await self.create()).status_code, 403)
+        self.assertEqual(
+            (await self.create(project=uuid.uuid4())).status_code, 403
+        )  # a project that does not exist is answered alike
+        self.assertEqual(self.task_count(), 0)
+
+    async def test_a_project_archived_after_the_guard_is_refused_by_the_gate(self):
+        self.as_creator()
+        real = self.tasks.create_task
+
+        async def archive_first(**arguments):
+            self.set_project(self.project, status=ProjectStatus.ARCHIVED.value)
+            return await real(**arguments)
+
+        self.tasks.create_task = archive_first
+        try:
+            response = await self.create()
+        finally:
+            self.tasks.create_task = real
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["error"]["code"], "project_not_active")
+        self.assertEqual(self.task_count(), 0)
+        self.assertEqual(
+            self.rows("SELECT count(*) AS n FROM queue_entries")[0]["n"], 0
+        )
+
+    async def test_a_repository_outside_the_project_or_unreadable_is_not_found(self):
+        self.as_creator()
+        for repository in (self.other_repo, self.hidden_repo, uuid.uuid4()):
+            with self.subTest(repository=repository):
+                response = await self.create(
+                    repositories=[
+                        {"repository_id": str(self.repo), "role": "target"},
+                        {"repository_id": str(repository), "role": "referenced"},
+                    ]
+                )
+                self.assertEqual(response.status_code, 404)
+                self.assertEqual(
+                    response.json()["error"]["code"], "repository_not_found"
+                )
+        self.assertEqual(self.task_count(), 0)
+
+    async def test_a_repository_the_person_may_only_read_cannot_be_a_target(self):
+        read_only = self.seed_repository(
+            self.project, name="vendor", acl_allowed=["read"]
+        )
+        self.as_creator()
+
+        response = await self.create(
+            repositories=[{"repository_id": str(read_only), "role": "target"}]
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "repository_write_forbidden")
+        self.assertIn(("project.repo.write", "repo_acl_forbids"), self.denials())
+        self.assertEqual(self.task_count(), 0)
+        # Referenced (read only) it may be.
+        response = await self.create(
+            repositories=[
+                {"repository_id": str(self.repo), "role": "target"},
+                {"repository_id": str(read_only), "role": "referenced"},
+            ]
+        )
+        self.assertEqual(response.status_code, 201)
+
+    async def test_the_body_is_checked(self):
+        self.as_creator()
+        twice = [
+            {"repository_id": str(self.repo), "role": "target"},
+            {"repository_id": str(self.repo), "role": "referenced"},
+        ]
+        response = await self.create(repositories=twice)
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.json()["error"]["code"], "duplicate_repository")
+        for override in (
+            {"title": ""},
+            {"title": "x" * 201},
+            {"instruction": ""},
+            {"instruction": "x" * 20_001},
+            {"budget_preset": "huge"},
+            {"priority": "high"},  # not taken: a user task is normal
+            {"repositories": [{"repository_id": "not-a-uuid", "role": "target"}]},
+            {"repositories": [{"repository_id": str(self.repo), "role": "owner"}]},
+        ):
+            with self.subTest(override=override):
+                response = await self.create(**override)
+                self.assertEqual(response.status_code, 422)
+        # Blank text is refused by the service's own rule.
+        response = await self.create(title="   ")
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.json()["error"]["code"], "invalid_command_argument")
+        self.assertEqual(self.task_count(), 0)
+
+    async def test_a_cross_site_request_is_refused(self):
+        self.as_creator()
+        response = await self.client.post(
+            f"/api/v1/projects/{self.project}/tasks",
+            json=self.create_body(),
+            headers={"Origin": "https://evil.example"},
+        )
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(self.task_count(), 0)
+
+    async def test_sending_it_again_creates_another_task(self):
+        # No idempotency key, like every other POST route (proposed: Decision
+        # 0094): a repeated request is a second task, each with its own entry.
+        self.as_creator()
+        first = (await self.create()).json()["id"]
+        second = (await self.create()).json()["id"]
+        self.assertNotEqual(first, second)
+        for task_id in (first, second):
+            self.assertEqual(
+                self.queue_rows(uuid.UUID(task_id)),
+                [{"status": "queued", "priority": "normal"}],
+            )
+
     async def test_there_is_no_merge_route(self):
         self.as_creator()
         for path in ("/api/v1/pull-requests/1/merge", "/api/v1/tasks/x/merge"):
