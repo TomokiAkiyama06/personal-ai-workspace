@@ -257,7 +257,9 @@ mechanism. Operator steps are in the
   Decision 0031), the last Recovery backup completed within 90 minutes, the Recovery
   Repository configured, disk space, the schema compatibility, and configured commands
   (for example that `paw-audit-retention.timer` and `paw-recovery-backup.timer` are enabled).
-  The Recovery projection is refreshed (`recovery-backup-run`) before the writers stop.
+  The Recovery projection is refreshed before the writers stop: the configured
+  `recovery_backup` commands (the backup unit, which runs as the owner of the checkout and its
+  deploy key), else `recovery-backup-run` as the `backend_prefix` user.
 - **Backward-compatible migration**: a migration declares `paw_compatibility = "expand"` when
   the release before it runs on the new schema; a rollback over expand-only migrations keeps
   the database. Anything else (or no declaration) needs a restore point to roll back.

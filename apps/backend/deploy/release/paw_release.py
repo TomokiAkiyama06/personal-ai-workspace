@@ -82,10 +82,14 @@ EXPAND = "expand"
 COMPATIBILITIES = frozenset({EXPAND, "contract", "data"})
 # The files the source digest leaves out: what the build adds.
 _DIGEST_SKIP = (MANIFEST, "venv/", "apps/web/dist/", "apps/web/node_modules/")
+# Nor what Python writes next to the sources when root runs a release's CLI
+# (``__pycache__``; it made the release look changed, deploy 2026-10-19).
+_DIGEST_SKIP_DIR = "__pycache__"
 
 COMMAND_KEYS = (
     "build",
     "precheck",
+    "recovery_backup",
     "stop",
     "start",
     "health",
@@ -387,6 +391,8 @@ def source_digest(directory: Path) -> str:
     for path in directory.rglob("*"):
         relative = path.relative_to(directory).as_posix()
         if relative.startswith(_DIGEST_SKIP) or relative == MANIFEST:
+            continue
+        if _DIGEST_SKIP_DIR in path.relative_to(directory).parts:
             continue
         if path.is_symlink() or path.is_file():
             files.append((relative, path))
@@ -1174,8 +1180,15 @@ class _Update(_Operation):
             return self.abort(running=True)
         if not drained:
             self.say("  --stop-now: going on; the nodes still running are cut off")
-        # 2. The Recovery Repository is brought up to date.
-        if not self.step("recovery_backup", tool.cli(current, "recovery-backup-run")):
+        # 2. The Recovery Repository is brought up to date: by the configured
+        # commands (the backup unit, which runs as the user that owns the
+        # checkout and its deploy key), else by the release's backend command.
+        backup = (
+            tool.configured("recovery_backup", release=current)
+            if tool.config.commands.get("recovery_backup")
+            else tool.cli(current, "recovery-backup-run")
+        )
+        if not self.step("recovery_backup", backup):
             return self.abort(running=True)
         # 3. Every writer stops (the backend, its timers).
         if not self.step("stop", tool.configured("stop", release=current)):

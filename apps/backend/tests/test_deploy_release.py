@@ -316,6 +316,17 @@ class BuildTest(ReleaseToolTestCase):
         self.assertIn("source digest", out)
         self.assertFalse((self.root / "current").exists())
 
+    def test_python_bytecode_written_next_to_the_sources_is_not_a_change(self):
+        # Deploy 2026-10-19: root ran a release's CLI, which wrote __pycache__
+        # into it, and the next update refused the running release.
+        self.build("r1", "0001", None)
+        migration = next((self.root / "releases/r1").rglob("0001_m.py"))
+        cache = migration.parent / "__pycache__"
+        cache.mkdir()
+        (cache / "0001_m.cpython-313.pyc").write_bytes(b"\0bytecode")
+        code, out = self.run_tool("install", "r1")
+        self.assertEqual(code, 0, out)
+
     def test_the_default_version_is_the_commit_date_and_sha(self):
         commit = self.commit_migration("0001", None)
         code, out = self.run_tool("build", "--repo", str(self.repo), "--commit", commit)
@@ -489,6 +500,39 @@ class UpdateTest(ReleaseToolTestCase):
         code, out = self.run_tool("update", "r2", "--stop-now")
         self.assertEqual(code, 0, out)
         self.assertEqual(self.current(), "r2")
+
+    def test_a_configured_recovery_backup_runs_instead_of_the_backend_command(self):
+        # Deploy 2026-10-19: recovery-backup-run as paw-maint could not read the
+        # checkout (paw, 0700); the backup unit runs as its owner.
+        self.config.write_text(
+            self.config.read_text().replace(
+                "[commands]\n", '[commands]\nrecovery_backup = [["backup-unit"]]\n'
+            )
+        )
+        self.installed()
+        code, out = self.run_tool("update", "r2")
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("r1:recovery-backup-run", self.world.calls)
+        drain = self.world.calls.index("r1:deploy-drain")
+        self.assertEqual(
+            self.world.calls[drain + 1 : drain + 3], ["backup-unit", "svc-stop"]
+        )
+
+    def test_a_failed_configured_recovery_backup_aborts_with_the_release_running(self):
+        self.config.write_text(
+            self.config.read_text().replace(
+                "[commands]\n", '[commands]\nrecovery_backup = [["backup-unit"]]\n'
+            )
+        )
+        self.installed()
+        self.world.fail.add("backup-unit")
+        code, out = self.run_tool("update", "r2")
+        self.assertEqual(code, paw_release.EXIT_ABORTED, out)
+        self.assertIn("recovery_backup: FAILED", out)
+        self.assertEqual(self.current(), "r1")
+        self.assertNotIn("svc-stop", self.world.calls)
+        self.assertFalse(self.world.maintenance)
+        self.assertIsNone(self.state()["in_progress"])
 
     def test_a_failed_restore_point_aborts_before_the_migration(self):
         self.installed()
