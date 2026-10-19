@@ -837,6 +837,20 @@ class RepositoryTest(unittest.TestCase):
         self.assertEqual(config.root, Path("/opt/paw"))
         self.assertEqual(config.commands["post_restore"], (("user-erasure-run",),))
 
+    def test_the_wheel_does_not_take_the_repository_gitignore(self):
+        # Issue #269: hatchling applied the root .gitignore's "recovery/" to
+        # apps/backend, so the releases' venvs had no paw_backend.recovery.
+        import tomllib
+
+        backend = Path(__file__).resolve().parents[1]
+        project = tomllib.loads((backend / "pyproject.toml").read_text())
+        wheel = project["tool"]["hatch"]["build"]["targets"]["wheel"]
+        self.assertIs(wheel.get("ignore-vcs"), True)
+        self.assertEqual(wheel["packages"], ["paw_backend"])
+        self.assertTrue(
+            (backend / "paw_backend" / "recovery" / "__init__.py").is_file()
+        )
+
     def test_the_migrations_of_this_repository_form_one_chain(self):
         versions = Path(__file__).resolve().parents[1] / "migrations" / "versions"
         migrations = paw_release.read_migrations(versions)

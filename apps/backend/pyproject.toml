@@ -41,6 +41,12 @@ dev = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["paw_backend"]
+# Not the repository's .gitignore: hatchling applies its patterns relative to
+# apps/backend, so "recovery/" dropped paw_backend/recovery (its negation names
+# the path from the repository root), and only where the build path itself
+# matched no pattern (e.g. /opt/paw/releases; Issue #269). *.pyc stay out
+# (hatchling's global exclude).
+ignore-vcs = true
 
 [tool.ruff]
 target-version = "py313"
