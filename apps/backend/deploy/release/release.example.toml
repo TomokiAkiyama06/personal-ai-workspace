@@ -62,6 +62,14 @@ precheck = [
   ["/usr/bin/systemctl", "is-enabled", "--quiet", "paw-audit-retention.timer"],
   ["/usr/bin/systemctl", "is-enabled", "--quiet", "paw-recovery-backup.timer"],
 ]
+# The Recovery Repository refresh before the writers stop. The backup unit runs
+# as the user that owns the checkout and its deploy key (paw, 0700), which
+# paw-maint (backend_prefix) cannot read; systemctl start waits for the oneshot
+# and fails when it fails. Leave it out to run recovery-backup-run with
+# backend_prefix instead.
+recovery_backup = [
+  ["/usr/bin/systemctl", "start", "paw-recovery-backup.service"],
+]
 # Every database writer: the backend, the timers that write and the jobs they
 # may be running right now (stopping a timer does not stop its service;
 # systemctl stop waits until they are inactive). A run cut off this way records

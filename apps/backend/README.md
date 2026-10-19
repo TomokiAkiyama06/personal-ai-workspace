@@ -3898,7 +3898,7 @@ python -m paw_backend.cli recovery-restore --apply  # 1 Transaction で書く
 
 [Issue #54](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/54)。方式は [Decision 0079](../../docs/decisions/0079-deploy-update-rollback.md)（2026-10-08 Approved）。要件は [DEPLOYMENT_UPDATE.md](../../docs/DEPLOYMENT_UPDATE.md)。
 
-- **Release Tool** [`deploy/release/paw_release.py`](deploy/release/paw_release.py)（標準 Library だけ。Host の `python3` 3.12 以上で動く）: Commit ごとの不変の Release（`/opt/paw/releases/<YYYYMMDD-sha12>/`、`release.json` に Schema の Head と Migration の鎖・互換性・Source の Digest）、`/opt/paw/current` の Symlink の切り替え、更新前の確認、Update、Rollback、最初の Install、古い復旧点の削除。Service の停止・起動・Health・通知は設定（[`release.example.toml`](deploy/release/release.example.toml)）の Command だけで行い、Tool 自身は `systemctl` / `sudo` を呼ばない。
+- **Release Tool** [`deploy/release/paw_release.py`](deploy/release/paw_release.py)（標準 Library だけ。Host の `python3` 3.12 以上で動く）: Commit ごとの不変の Release（`/opt/paw/releases/<YYYYMMDD-sha12>/`、`release.json` に Schema の Head と Migration の鎖・互換性・Source の Digest）（Digest は `venv/`・Web の Build・`__pycache__` を数えない。root が Release の CLI を動かすと `.pyc` が書かれるため）、`/opt/paw/current` の Symlink の切り替え、更新前の確認、Update、Rollback、最初の Install、古い復旧点の削除。Service の停止・起動・Health・通知は設定（[`release.example.toml`](deploy/release/release.example.toml)）の Command だけで行い、Tool 自身は `systemctl` / `sudo` を呼ばない。
 - **DB 側の Command** `python -m paw_backend.cli deploy-*`（`paw_backend/cli/deploy.py`、`paw_backend/deploy/`。`PAW_MIGRATION_DATABASE_URL` で接続）: `deploy-status` / `deploy-precheck`（JSON）、`deploy-maintenance-begin` / `deploy-drain` / `deploy-maintenance-end`、`deploy-restore-point-create` / `-verify` / `-restore`。終了コードは 0（成功）・1（拒否）・2（環境）・3（失敗）。
 - **保守**（Migration `0191`、`deploy_maintenance`、Application の Role は SELECT だけ）: 行がある間 `TaskQueue.claim_next` は何も渡さない（Task の作成と Queue への追加は受け付ける）。Running の Task は Full GPU Mode と同じ Policy の Hold（理由 `Deploy / Update maintenance`）で Node の終わりまで Drain し、終わりに自分が Hold した Task だけを同じ Priority で Queue に戻す。
 - **復旧点**（Migration があるときだけ）: `pg_dump --format=custom`（0700 の `restore_point_dir`、Recovery Repository の外）、`PAW_DEPLOY_ADMIN_DATABASE_URL` で作る Scratch の DB への `pg_restore` で検証、戻すときは新しい DB に戻して名前を入れ替え（置き換えた DB は `<db>_replaced_<時刻>` として残る）。取得した後に User が削除されていれば Restore を拒否。Credential は `PG*` 環境変数で渡し、Command 行・出力・Audit に出さない。
@@ -3909,7 +3909,7 @@ python -m paw_backend.cli recovery-restore --apply  # 1 Transaction で書く
 1. 更新前の確認（1 つでも失敗すれば何も変えずに終了コード 1）: Release の Digest、進行中の操作がない、Disk の空き、`deploy-precheck`（DB、保守中でない、**`audit_events` の Partition が翌月末まで**（`audit-retention-check` と同じ）、Recovery Backup が 90 分以内に成功、`PAW_RECOVERY_REPOSITORY_DIR`）、Schema の互換性、設定の `precheck`（例: `paw-audit-retention.timer` と `paw-recovery-backup.timer` が有効）。
 2. 保守の開始（新しい Task は始まらない）と Running の Task の Hold。
 3. Drain（既定 900 秒）。終わらなければ中止して再開（終了コード 3）。`--stop-now` は待たずに進む。
-4. `recovery-backup-run`（Recovery Projection の最新化）。
+4. Recovery Projection の最新化: 設定の `recovery_backup`（例は `systemctl start paw-recovery-backup.service`。Clone と Deploy Key を持つ `paw` で Timer と同じ Unit が動く。`paw-maint` は 0700 の Clone を読めない）。設定がなければ `backend_prefix` の User で `recovery-backup-run`。
 5. 設定の `stop`（Backend と、DB に書く Timer）。
 6. Migration があれば復旧点の作成と検証（失敗すれば元の Release を起動し直して中止）、`python -m alembic upgrade head`（新しい Release）。
 7. `current` の切り替え、設定の `start`、Health（`deploy-status` の Revision と設定の `health`。既定 300 秒まで再試行）。
