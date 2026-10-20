@@ -1,6 +1,7 @@
 # Task を作る正規の入口で決まっていないこと（読み取りだけの Task、二重送信、Priority と Budget の選び方、target のない作成）
 
-- Status: Proposed
+- Status: Approved
+- Approval: 2026-10-20、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで承認（approved as recommended, all 4 points: 1 は別 Issue で A（`read_only` の印を Backend が保証）、2 は `request_key` の再送の扱いをこのまま、3 は Priority は常に `normal`・Unlimited は Owner / Admin だけ、4 はこの入口では `target` を必須）
 - Date: 2026-10-20
 - Scope: Issue [#274](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/274)（#208 の段 3 の最後の確認の前提）の `POST /api/v1/projects/{project_id}/tasks`（`apps/backend/paw_backend/api/v1/tasks.py`）と Web の `エージェント / タスク` › `新しいタスク`（`apps/web/src/tasks/CreateTaskForm.tsx`）
 - Supersedes: なし。[Decision 0093](0093-production-runtime-config.md)（Approved）の 5 の「小さな Task（読むだけの Repository の調べもの）」の確認の手順を、書き換えずにこの入口で行うことを記録する（下の「0093 の手順について」）
