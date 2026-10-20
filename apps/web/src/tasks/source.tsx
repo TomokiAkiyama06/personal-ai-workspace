@@ -10,6 +10,7 @@ import type {
   ControlCommand,
   ControlOptions,
   FileDiff,
+  NewTask,
   PullRequestRecord,
   ReviewSummary,
   TaskDetail,
@@ -21,6 +22,8 @@ import type {
 export interface TaskSource {
   listTasks(): Promise<TaskList>;
   getTask(id: string): Promise<TaskDetail>;
+  /** Create a task and put it in the queue; resolves with the queued task. */
+  createTask(task: NewTask): Promise<TaskDetail>;
   /** Send an operator control; resolves with the task as the Backend left it. */
   control(id: string, command: ControlCommand, options: ControlOptions): Promise<TaskDetail>;
   listPullRequests(): Promise<readonly PullRequestRecord[]>;

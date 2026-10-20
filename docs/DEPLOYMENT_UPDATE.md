@@ -227,7 +227,26 @@ Checklist (Decision 0093 5; the human, not an agent):
   After step 2 the preference confirmation answers with the model. After step 3 a small
   task (a read-only look at a repository) runs on a local node and
   `agent_dag_node_attempts` records `local_gpu` — run it on the GPU only with the
-  human's go-ahead, as for the GPU smoke (Decision 0083 9).
+  human's go-ahead, as for the GPU smoke (Decision 0083 9). Create that task through the
+  product's entry point (issue #274), never by calling `TaskService` from a script (that
+  skips the `project.task.run` check and its audit):
+  1. With the human's go-ahead, set `PAW_ORCHESTRATOR_WORKERS=1` (step 3 runs with `0`)
+     and restart the backend, with nothing else in the queue
+     (`SELECT count(*) FROM queue_entries WHERE status IN ('queued', 'claimed')` is 0).
+  2. Signed in as a Manager / Contributor of the project, open `エージェント / タスク` ›
+     `新しいタスク` (`/agents`): the project, a title, an instruction that asks to only
+     read and report (for example "README と docs/ の構成を読み、5 行でまとめてください。
+     ファイルは変更しないでください。"), the repository as the target, the budget
+     `標準`. The same is `POST /api/v1/projects/{project_id}/tasks` with
+     `{"title", "instruction", "repositories": [{"repository_id", "role": "target"}],
+     "budget_preset": "standard"}`. There is no setting that makes a task read-only yet
+     (Decision 0094, Proposed): the instruction is the only guard, and a Worker node
+     would write only to its own `paw/` branch and worktree.
+  3. The task goes from `キュー待ち` to running; then
+     `SELECT placement, placement_agent, placement_model FROM agent_dag_node_attempts a
+     JOIN agent_dags d ON d.id = a.dag_id WHERE d.task_id = '<task id>'` shows `local_gpu`.
+     The task then waits in `evaluating` (a target needs a pull request to complete):
+     cancel it on the task's screen.
 
 The CLI runtimes (`[agents.codex]` / `[agents.claude]`) cannot be enabled yet: the names
 are reserved and refused until a `CloudPolicy` Decision and the CLI smoke (Decision

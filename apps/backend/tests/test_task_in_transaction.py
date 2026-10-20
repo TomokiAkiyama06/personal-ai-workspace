@@ -16,6 +16,7 @@ from sqlalchemy import text
 from paw_backend.tasks import (
     Actor,
     IllegalTransitionError,
+    InvalidCommandArgumentError,
     TaskCommand,
     TaskConflictError,
     TaskNotFoundError,
@@ -200,6 +201,61 @@ class InTransactionStepTest(PostgresTaskTestCase):
             )
 
         self.assertEqual(calls, [str(task_id)] * 3)
+
+    # -- create_task (issue #274: the HTTP entry point queues the new task) -------
+
+    async def test_create_task_runs_the_step_before_its_commit(self):
+        seen: dict = {}
+
+        async def step(session, step_task, step_project):
+            seen["project"] = step_project
+            seen["in own session"] = (
+                await session.execute(
+                    text("SELECT state FROM tasks WHERE id = :id"), {"id": step_task}
+                )
+            ).scalar_one()
+            async with self.database.engine.connect() as other:
+                seen["committed elsewhere"] = (
+                    await other.execute(
+                        text("SELECT count(*) FROM tasks WHERE id = :id"),
+                        {"id": step_task},
+                    )
+                ).scalar_one()
+
+        task_id = await self.create_task(in_transaction=step)
+
+        self.assertEqual(seen["project"], self.project_id)
+        self.assertEqual(seen["in own session"], "queued")
+        self.assertEqual(seen["committed elsewhere"], 0)
+        self.assertEqual(await self.scalar_count(task_id), 1)
+
+    async def test_a_create_step_that_raises_leaves_nothing(self):
+        created: list[uuid.UUID] = []
+
+        async def step(session, step_task, step_project):
+            created.append(step_task)
+            raise Boom()
+
+        with self.assertRaises(Boom):
+            await self.create_task(in_transaction=step)
+
+        self.assertEqual(len(created), 1)
+        self.assertEqual(await self.scalar_count(created[0]), 0)
+        self.assertEqual(
+            await self.scalar(
+                "SELECT count(*) FROM task_events WHERE task_id = :id", id=created[0]
+            ),
+            0,
+        )
+
+    async def test_create_task_refuses_a_step_that_is_not_callable(self):
+        with self.assertRaises(InvalidCommandArgumentError):
+            await self.create_task(in_transaction="not a step")
+
+    async def scalar_count(self, task_id: uuid.UUID) -> int:
+        return await self.scalar(
+            "SELECT count(*) FROM tasks WHERE id = :id", id=task_id
+        )
 
 
 if __name__ == "__main__":

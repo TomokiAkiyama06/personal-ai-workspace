@@ -1444,8 +1444,92 @@
   }
 }
 
+/* 新しいタスク (issue #274): the projects screen's inline form (PProjectCreate)
+   with the Working Set dialog's role options (PTaskWorkingSet). */
+.screen-head-tail {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+}
+
+.task-create {
+  max-width: 720px;
+}
+
+.task-create h2 {
+  font-size: 15px;
+}
+
+.task-create textarea {
+  font: inherit;
+  font-size: 14px;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-input);
+  padding: 10px 12px;
+  width: 100%;
+  resize: vertical;
+}
+
+.task-create textarea:focus {
+  outline: none;
+  border-color: var(--selected-border);
+  box-shadow: 0 0 0 3px rgba(155, 135, 245, 0.18);
+}
+
+.task-create-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+
+.task-create-group legend {
+  padding: 0;
+  margin-bottom: 2px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-2);
+}
+
+.task-create-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.task-create-option {
+  min-width: 180px;
+  padding: 8px 14px;
+}
+
+.task-create-option:has(input:disabled) {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.task-create-option-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.task-create-done {
+  margin: 0 0 12px;
+  color: var(--ok);
+}
+
 /* < 768px (MobileTask): the list, then the task on its own screen. */
 @media (max-width: 767px) {
+  .task-create-option {
+    flex: 1 1 100%;
+  }
+
   .screen-head {
     padding: 10px 16px;
   }

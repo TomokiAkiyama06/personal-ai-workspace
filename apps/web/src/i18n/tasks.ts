@@ -14,7 +14,7 @@ export const tasksJa = {
   "tasks.unavailable": "タスクの状態はまだ表示できません",
   "tasks.unavailableBody":
     "Backend がタスク・依存グラフ・PR の状態を取得する API をまだ提供していません。提供されると、この画面に表示されます。",
-  "tasks.empty": "タスクはまだありません。チャットから依頼すると、ここに表示されます。",
+  "tasks.empty": "タスクはまだありません。「新しいタスク」から作ると、ここに表示されます。",
   "tasks.emptyFilter": "条件に合うタスクはありません。",
   "tasks.select": "タスクを選ぶと、状態と依存グラフが表示されます。",
   "tasks.notFound": "このタスクは見つかりませんでした。",
@@ -74,6 +74,34 @@ export const tasksJa = {
   "tasks.budget.long": "長時間",
   "tasks.budget.unlimited": "無制限",
   "tasks.budgetRemaining": "{preset} · 残 {percent}%",
+
+  "tasks.new": "新しいタスク",
+  "tasks.create.title": "新しいタスク",
+  "tasks.create.hint":
+    "指示・Target のリポジトリ・予算を選ぶと、タスクを作ってキューに入れます。リソースが空くと実行が始まります。",
+  "tasks.create.project": "プロジェクト",
+  "tasks.create.projectPick": "プロジェクトを選ぶ",
+  "tasks.create.noProjects": "プロジェクトを読み込めないため、タスクを作れません。",
+  "tasks.create.noActiveProject":
+    "タスクを作れるプロジェクトがありません（Active で、役割が Manager か Contributor のプロジェクト）。",
+  "tasks.create.taskTitle": "タイトル",
+  "tasks.create.taskTitlePlaceholder": "例: README の構成を調べる",
+  "tasks.create.instruction": "指示",
+  "tasks.create.instructionPlaceholder": "このタスクでしてほしいことを書きます。",
+  "tasks.create.readOnlyNote":
+    "読み取りだけにしたいときは、指示にそう書いてください。書き込みを止める設定はまだありません。",
+  "tasks.create.target": "Target のリポジトリ",
+  "tasks.create.targetHint": "Target は書き込みと PR の作成まで行うリポジトリです。",
+  "tasks.create.targetPickProject": "プロジェクトを選ぶと、リポジトリが表示されます。",
+  "tasks.create.targetReadOnly": "書き込み・エージェントの権限なし",
+  "tasks.create.noRepository":
+    "このプロジェクトにはリポジトリがありません。プロジェクトの画面で登録してください。",
+  "tasks.create.budget": "予算",
+  "tasks.create.budget.standard": "1 時間・50 ステップまで",
+  "tasks.create.budget.long": "4 時間・200 ステップまで",
+  "tasks.create.submit": "作成してキューに入れる",
+  "tasks.create.submitting": "作成中…",
+  "tasks.create.created": "タスクを作成し、キューに入れました: {title}",
   "tasks.attemptValue": "{attempt} · 再試行 {retries}",
   "tasks.openPr": "PR #{number} を開く",
 
@@ -246,6 +274,13 @@ export const tasksJa = {
   "error.invalid_command_argument": "入力を確認してください（今すぐ停止には理由が必要です）。",
   "error.task_creator_only": "タスクを再開・再試行・やり直しできるのは、タスクを作った人だけです。",
   "error.project_not_active": "プロジェクトが有効ではないため、タスクを動かせません。",
+  "error.no_target_repository": "Target のリポジトリを 1 つ以上選んでください。",
+  "error.duplicate_repository": "同じリポジトリが 2 回指定されています。",
+  "error.repository_not_found": "このリポジトリは見つかりませんでした。",
+  "error.repository_agent_forbidden":
+    "このリポジトリはエージェントの利用を許していないため、タスクで使えません。",
+  "error.repository_write_forbidden":
+    "このリポジトリへの書き込み権限がないため、Target にできません。",
   "error.tasks_not_configured": "このサーバーではタスクの実行が構成されていません。",
   "error.pull_request_not_found": "このプルリクエストは見つかりませんでした。",
   "error.file_not_found": "このファイルの差分は見つかりませんでした。",
@@ -279,7 +314,7 @@ export const tasksEn: Record<keyof typeof tasksJa, string> = {
   "tasks.unavailable": "Task status is not available yet",
   "tasks.unavailableBody":
     "The Backend does not provide an API for tasks, dependency graphs and pull requests yet. Once it does, they appear here.",
-  "tasks.empty": "No tasks yet. Ask for something in a chat and it appears here.",
+  "tasks.empty": "No tasks yet. Create one with New task and it appears here.",
   "tasks.emptyFilter": "No task matches this filter.",
   "tasks.select": "Select a task to see its status and dependency graph.",
   "tasks.notFound": "This task was not found.",
@@ -337,6 +372,34 @@ export const tasksEn: Record<keyof typeof tasksJa, string> = {
   "tasks.budget.long": "Long",
   "tasks.budget.unlimited": "Unlimited",
   "tasks.budgetRemaining": "{preset} · {percent}% left",
+
+  "tasks.new": "New task",
+  "tasks.create.title": "New task",
+  "tasks.create.hint":
+    "Choose the instruction, the target repository and the budget: the task is created and put in the queue. It starts when resources are free.",
+  "tasks.create.project": "Project",
+  "tasks.create.projectPick": "Choose a project",
+  "tasks.create.noProjects": "Projects cannot be read, so no task can be created.",
+  "tasks.create.noActiveProject":
+    "No project takes a task from you (an Active project where you are a Manager or Contributor).",
+  "tasks.create.taskTitle": "Title",
+  "tasks.create.taskTitlePlaceholder": "e.g. Look into how the README is organised",
+  "tasks.create.instruction": "Instruction",
+  "tasks.create.instructionPlaceholder": "What should this task do?",
+  "tasks.create.readOnlyNote":
+    "To keep it read-only, say so in the instruction. There is no setting that stops writes yet.",
+  "tasks.create.target": "Target repository",
+  "tasks.create.targetHint": "A target is written to and gets the pull request.",
+  "tasks.create.targetPickProject": "Choose a project to see its repositories.",
+  "tasks.create.targetReadOnly": "No write or agent permission",
+  "tasks.create.noRepository":
+    "This project has no repository. Register one on the project's screen.",
+  "tasks.create.budget": "Budget",
+  "tasks.create.budget.standard": "Up to 1 hour and 50 steps",
+  "tasks.create.budget.long": "Up to 4 hours and 200 steps",
+  "tasks.create.submit": "Create and queue",
+  "tasks.create.submitting": "Creating…",
+  "tasks.create.created": "Created and queued: {title}",
   "tasks.attemptValue": "{attempt} · retries {retries}",
   "tasks.openPr": "Open PR #{number}",
 
@@ -505,6 +568,13 @@ export const tasksEn: Record<keyof typeof tasksJa, string> = {
   "error.task_creator_only":
     "Only the person who created the task can resume, retry or restart it.",
   "error.project_not_active": "The project is not active, so the task cannot run.",
+  "error.no_target_repository": "Choose at least one target repository.",
+  "error.duplicate_repository": "The same repository is listed twice.",
+  "error.repository_not_found": "This repository was not found.",
+  "error.repository_agent_forbidden":
+    "This repository does not let agents work on it, so a task cannot use it.",
+  "error.repository_write_forbidden":
+    "You may not write to this repository, so it cannot be the target.",
   "error.tasks_not_configured": "Tasks are not configured on this server.",
   "error.pull_request_not_found": "This pull request was not found.",
   "error.file_not_found": "The diff of this file was not found.",
