@@ -4844,7 +4844,7 @@ Task を作って Queue に入れる正規の入口です（Web の `エージ�
 
 - Working Set は 1〜32 件、同じ Repository は 1 回（422 `duplicate_repository`）、`target` が 1 つ以上（422 `no_target_repository`）。各 Repository はその ACL で、`referenced` は `project.read`、`working` / `target` は `project.repo.write` を判定します（[Decision 0035](../../docs/decisions/0035-working-set-capability-grants-and-legacy-tasks.md) の 3。`project.repo.write` は Audit 必須）。Project の外・ない・読めない Repository は同じ 404 `repository_not_found`、読めるが書けない Repository を `working` / `target` にすると 403 `repository_write_forbidden`。どの役割の Repository も、Task の Agent が使うので、その ACL で `project.task.run`（Repository では `agent` の権限）も判定し、`agent` を許さない Repository は 403 `repository_agent_forbidden`（`decide_agent` が実行時に拒むため、作成の時点で断る）。
 - Project が Archived / Pending deletion / Deleted / 所属しない Project は Guard が 403（Audit の理由 `project_state_forbids` など）。Guard の後で Active でなくなった Project は、`create_task` の Gate が 409 `project_not_active` で拒み、何も書きません。
-- 指示文（1〜20,000 文字）は Task の入力 `{"instruction": ...}` として保存し、Planner に渡ります。タイトルは 1〜200 文字（空白だけは 422 `invalid_command_argument`）。
+- 指示文（1〜20,000 文字）は Task の入力 `{"instruction": ...}` として保存し、Planner に渡ります。タイトルは 1〜200 文字。タイトルも指示文も、空白・改行だけなら 422 `invalid_command_argument`（指示文は #278）。
 - `create_task(..., in_transaction=...)` の同じ Transaction で、Queue の Entry（`normal`）と Budget の Preset（`standard` / `long`、既定 `standard`。`unlimited` は誰が選べるかが決まるまで 422）を、`Orchestrator.enqueue_task` と同じ順に書きます。Queue に入らない Task・Budget のない Task は残りません。
 - 作成の監査は、他の作成の Route と同じく Capability の判定の行（`audit_events`）と、Task の `create` の Event（作成者と Working Set）です。
 - CSRF は他の POST と同じ（`SameSite=Strict` と Origin の検査）。

@@ -148,6 +148,40 @@ describe("新しいタスク", () => {
     expect(within(form).getByRole("button", { name: "作成してキューに入れる" })).toBeEnabled();
   });
 
+  it("does not send an instruction that is only spaces or line breaks", async () => {
+    // Issue #278: the Backend refuses a blank instruction (422) as it does a
+    // blank title; the form does not offer to send one.
+    const { source, created } = fakeTaskSource();
+    renderTasks(source, fakeProjectsSource({ details: { "p-example": exampleDetail() } }));
+    const { user, form } = await openForm();
+    await user.selectOptions(
+      within(form).getByRole("combobox", { name: "プロジェクト" }),
+      "p-example",
+    );
+    const targets = within(form).getByRole("group", { name: "Target のリポジトリ" });
+    expect(await within(targets).findByRole("radio", { name: /backend/ })).toBeChecked();
+    await user.type(within(form).getByRole("textbox", { name: "タイトル" }), "README を調べる");
+    const instruction = within(form).getByRole("textbox", { name: "指示" });
+    const submit = within(form).getByRole("button", { name: "作成してキューに入れる" });
+
+    for (const blank of ["   ", "{Enter}{Enter}", " {Enter} {Enter} ", "\u3000"]) {
+      await user.clear(instruction);
+      await user.type(instruction, blank);
+      expect(submit).toBeDisabled();
+      // Nor by the keyboard: Enter in the title submits the form.
+      await user.type(within(form).getByRole("textbox", { name: "タイトル" }), "{Enter}");
+    }
+    expect(created).toEqual([]);
+
+    await user.clear(instruction);
+    await user.type(instruction, "{Enter}README を読んでまとめてください。{Enter}");
+    expect(submit).toBeEnabled();
+    await user.click(submit);
+    expect(created).toEqual([
+      expect.objectContaining({ instruction: "README を読んでまとめてください。" }),
+    ]);
+  });
+
   it("leaves out projects the person only views or that are not active", async () => {
     const { source } = fakeTaskSource();
     renderTasks(
