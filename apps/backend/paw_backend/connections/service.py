@@ -837,6 +837,22 @@ class ConnectionService:
             )
         return tuple(found)
 
+    async def committed_status(
+        self, info: ConnectionInfo, secret_handle: str
+    ) -> ConnectionCredentialStatus:
+        """The status of a connection this caller just made or pointed at
+        ``secret_handle`` (``connect`` / ``replace_credential`` returned
+        ``info``): built from that result, with no database read (a read after
+        the commit could fail or show a later change). Only the store is
+        asked for the version; its failure is ``stored`` ``False``."""
+        if type(info) is not ConnectionInfo:
+            raise fail("info", InputProblem.WRONG_TYPE)
+        handle = validate_handle("secret_handle", secret_handle)
+        stored, version = await self._stored_version(handle, info.kind)
+        return ConnectionCredentialStatus(
+            info, stored, version, credential_revision(info.id, handle)
+        )
+
     async def _stored_version(
         self, handle: str, kind: ConnectionKind
     ) -> tuple[bool | None, int | None]:

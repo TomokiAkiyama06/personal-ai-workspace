@@ -14,6 +14,7 @@ import shutil
 import tempfile
 from pathlib import Path
 
+import psycopg
 from sqlalchemy import text
 
 from paw_backend.connections import ConnectionKind, FileSecretStore
@@ -309,3 +310,47 @@ class AttachTest(ConnectionsHttpCase):
             "available": None, "checked_at": None, "created_at": None,
             "updated_at": None, "credential": None, "revision": None,
         })  # fmt: skip
+
+
+@requires_postgres
+class CommittedAnswerTest(ConnectionsHttpCase):
+    """Codex review (P2): a change that committed is answered from what it
+    committed, never turned into an error by a read afterwards; a driver
+    failure is the routes' 503, not a 500."""
+
+    def failing_status(self, error: BaseException):
+        async def fail(principal):
+            raise error
+
+        self.app.state.connections.credential_status = fail
+
+    def test_a_committed_attach_and_replace_answer_without_a_later_read(self):
+        self.fake_passkey_step_up(self.admin)
+        first, second = self.put(CODEX), self.put(CODEX, OTHER)
+        self.failing_status(psycopg.OperationalError("the read after the commit"))
+
+        created = self.attach("codex", first)
+
+        self.assertEqual(created.status_code, 201, created.text)
+        body = created.json()
+        self.assertEqual(
+            (body["kind"], body["configured"], body["status"]),
+            ("codex", True, "unavailable"),
+        )
+        self.assertEqual(body["credential"], {"stored": True, "version": 1})
+        replaced = self.replace("codex", second, body["revision"])
+        self.assertEqual(replaced.status_code, 200, replaced.text)
+        self.assertEqual(self.attached(), [("codex", second)])
+        del self.app.state.connections.credential_status  # the real one again
+        self.assertEqual(
+            self.status_of("codex")["revision"], replaced.json()["revision"]
+        )
+
+    def test_a_driver_failure_is_service_unavailable(self):
+        self.failing_status(psycopg.OperationalError("connection lost"))
+
+        response = self.call("GET", LIST, token=self.admin)
+
+        self.assertEqual(
+            (response.status_code, error_code(response)), (503, "service_unavailable")
+        )

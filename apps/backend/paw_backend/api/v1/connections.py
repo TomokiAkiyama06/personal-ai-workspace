@@ -38,6 +38,7 @@ from collections.abc import Iterator
 from datetime import UTC, datetime
 from typing import Annotated, Literal
 
+import psycopg
 from fastapi import APIRouter, Depends, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, StrictStr
 from starlette import status
@@ -177,7 +178,14 @@ def _errors() -> Iterator[None]:
         ) from None
     except InvalidConnectionInputError:
         raise ApiError(422, "validation_error", "Invalid request") from None
-    except (ConnectionBusyError, TimeoutError, OSError, DatabaseDisposedError):
+    except (
+        ConnectionBusyError,
+        TimeoutError,
+        # A dropped connection or another driver failure (as ``usage._errors``).
+        psycopg.Error,
+        OSError,
+        DatabaseDisposedError,
+    ):
         raise ApiError(
             503, "service_unavailable", "Service temporarily unavailable"
         ) from None
@@ -295,8 +303,10 @@ async def attach(
     _require_store(request)
     await _require_step_up(request, principal, ACTION_CONNECT)
     with _errors():
-        await service.connect(principal, kind, body.secret_handle)
-    return _out(kind, (await _status_of(service, principal)).get(kind))
+        info = await service.connect(principal, kind, body.secret_handle)
+    # Answered from what was committed: no read afterwards can turn it into an
+    # error or show somebody else's later change.
+    return _out(kind, await service.committed_status(info, body.secret_handle))
 
 
 @router.put(
@@ -314,13 +324,13 @@ async def replace(
     _require_store(request)
     await _require_step_up(request, principal, ACTION_REPLACE)
     with _errors():
-        await service.replace_credential(
+        info = await service.replace_credential(
             principal,
             kind,
             body.secret_handle,
             expected_revision=body.expected_revision,
         )
-    return _out(kind, (await _status_of(service, principal)).get(kind))
+    return _out(kind, await service.committed_status(info, body.secret_handle))
 
 
 @router.delete(
