@@ -27,11 +27,12 @@ over HTTP (issue #185, Decision 0067 Approved; the screens of PAW-062, #48).
   its Working Set (each repository of the project once, with its role; at least
   one ``target``, else 422 ``no_target_repository``) and the budget preset
   (``standard`` by default, or ``long``; ``unlimited`` waits for Decision 0094,
-  3). Each repository is decided on its own ACL as
-  Decision 0035 (3) says: ``project.read`` for a ``referenced`` one,
-  ``project.repo.write`` for a ``working`` / ``target`` one (a repository that is
-  not the project's, or that the person may not read, is 404
-  ``repository_not_found`` alike; one the person may read but not write is 403
+  3). A title or an instruction that is only whitespace (spaces, line breaks) is
+  422 ``invalid_command_argument`` alike (issue #278). Each repository is
+  decided on its own ACL as Decision 0035 (3) says: ``project.read`` for a
+  ``referenced`` one, ``project.repo.write`` for a ``working`` / ``target`` one
+  (a repository that is not the project's, or that the person may not read, is
+  404 ``repository_not_found`` alike; one the person may read but not write is 403
   ``repository_write_forbidden``). ``TaskService.create_task`` then writes the
   task, its Working Set and its ``create`` event, and in the same transaction the
   queue entry (``normal``: a user task, REQUIREMENTS "Task Queue") and the budget
@@ -372,6 +373,13 @@ class CreateTaskRequest(BaseModel):
 
 
 # -- helpers ----------------------------------------------------------------------
+
+
+def _blank(text: str) -> bool:
+    """Nothing but whitespace: what ``str.strip`` removes, and U+FEFF (ZERO WIDTH
+    NO-BREAK SPACE), which JavaScript's ``trim()`` removes but ``str.strip`` keeps
+    (issue #278)."""
+    return not text.replace("\ufeff", "").strip()
 
 
 def _execution(request: Request) -> TaskExecution:
@@ -924,6 +932,21 @@ async def create_task(
     working_set = await _authorize_working_set(
         request, principal, project_id, body.repositories, body.read_only
     )
+    # The service refuses a blank title (``_text``); the instruction is part of
+    # the task input it keeps as given, so its blank check is here (issue #278).
+    # Both are checked as the Web form's ``trim()`` does (U+FEFF too).
+    if _blank(body.title):
+        raise ApiError(
+            422,
+            "invalid_command_argument",
+            f"title must be 1 to {MAX_TITLE_LENGTH} characters",
+        )
+    if _blank(body.instruction):
+        raise ApiError(
+            422,
+            "invalid_command_argument",
+            f"instruction must be 1 to {MAX_INSTRUCTION_LENGTH} characters",
+        )
     try:
         with _task_errors():
             event = await execution.tasks.create_task(
