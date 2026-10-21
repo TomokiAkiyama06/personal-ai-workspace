@@ -4863,6 +4863,25 @@ PAW-062 の画面（`/agents`、`/pulls`、Web の `src/tasks/apiSource.ts`）�
 
 Test: `tests/test_tasks_api.py`（PostgreSQL。見える範囲、ACL、操作の権限、Version、遷移表、Queue、Merge Ready、並列の上限と VRAM の見える範囲）、`tests/test_compute_scheduler.py` の `CodingCapacityTest`（並列の上限の計算）。
 
+### Task の作成（Issue #274）
+
+Task を作って Queue に入れる正規の入口です（Web の `エージェント / タスク` › `新しいタスク`）。運用者の Script から `TaskService.create_task` を呼ぶと、権限の判定と作成の監査が飛ばされるので、本番の Task はこの入口から入れます。
+
+| Endpoint | Capability | 内容 |
+| --- | --- | --- |
+| `POST /api/v1/projects/{project_id}/tasks` | Project の `project.task.run`（Audit 必須）と、Working Set の各 Repository の ACL | `{"title", "instruction", "repositories": [{"repository_id", "role"}], "budget_preset"?, "request_key"?}`。201 で `GET /tasks/{id}` と同じ形の Task（`queued`、Priority `normal`） |
+
+- Working Set は 1〜32 件、同じ Repository は 1 回（422 `duplicate_repository`）、`target` が 1 つ以上（422 `no_target_repository`）。各 Repository はその ACL で、`referenced` は `project.read`、`working` / `target` は `project.repo.write` を判定します（[Decision 0035](../../docs/decisions/0035-working-set-capability-grants-and-legacy-tasks.md) の 3。`project.repo.write` は Audit 必須）。Project の外・ない・読めない Repository は同じ 404 `repository_not_found`、読めるが書けない Repository を `working` / `target` にすると 403 `repository_write_forbidden`。どの役割の Repository も、Task の Agent が使うので、その ACL で `project.task.run`（Repository では `agent` の権限）も判定し、`agent` を許さない Repository は 403 `repository_agent_forbidden`（`decide_agent` が実行時に拒むため、作成の時点で断る）。
+- Project が Archived / Pending deletion / Deleted / 所属しない Project は Guard が 403（Audit の理由 `project_state_forbids` など）。Guard の後で Active でなくなった Project は、`create_task` の Gate が 409 `project_not_active` で拒み、何も書きません。
+- 指示文（1〜20,000 文字）は Task の入力 `{"instruction": ...}` として保存し、Planner に渡ります。タイトルは 1〜200 文字（空白だけは 422 `invalid_command_argument`）。
+- `create_task(..., in_transaction=...)` の同じ Transaction で、Queue の Entry（`normal`）と Budget の Preset（`standard` / `long`、既定 `standard`。`unlimited` は誰が選べるかが決まるまで 422）を、`Orchestrator.enqueue_task` と同じ順に書きます。Queue に入らない Task・Budget のない Task は残りません。
+- 作成の監査は、他の作成の Route と同じく Capability の判定の行（`audit_events`）と、Task の `create` の Event（作成者と Working Set）です。
+- CSRF は他の POST と同じ（`SameSite=Strict` と Origin の検査）。
+- 再送: 任意の `request_key`（1〜64 文字の英数字と `. _ : -`。Web はフォームごとに UUID）を送ると、同じ人が同じ Project で同じ Key を 24 時間以内に送り直したとき、作らずに最初の Task を返します（応答が失われたときの再送で Task が 2 つにならない）。Key は `create` の Event の `detail.request_key` に残し、その Project の自分の最近の Task から（Project の Index と `(task_id, seq)` で）探し、Project・人・Key の Advisory Lock で同時の Request を順に並べます。Key がなければ毎回作ります。
+- Priority は受けず、常に `normal` です。読み取りだけの Task の指定はまだなく、指示文で頼むだけです。この入口では `target` が必須です（Service の `create_task` は Decision 0035 の 3 のとおり `target` なしも受けます）。Unlimited・再送・Priority・`target` の 4 点は [Decision 0094](../../docs/decisions/0094-task-create-entry-open-points.md)（**Proposed**）で人間の判断を待っています。
+
+Test: `tests/test_tasks_api.py` の「creating a task」（権限なし・`target` なし・停止中の Project・Gate の 409・ACL・Body・Origin・監査と `create` の Event・Queue と Budget・`request_key` の再送と同時送信、`agent` を許さない Repository）、`tests/test_task_in_transaction.py`（`create_task` の `in_transaction`）。
+
 ### PR 画面とモバイルの Board（Issue #185 の 6、Decision 0078）
 
 PR 画面の「変更されたファイル」「レビューの要点」「監査」と、MobileDiff（差分）・MobileApproval（Tool の承認）の Board の接続先です。`paw_backend/api/v1/boards.py` が経路、`paw_backend/api/v1/board_views.py` が読み取りです。方針は [Decision 0078](../../docs/decisions/0078-pr-screen-and-mobile-board-api.md)（推奨どおりに実装）です。

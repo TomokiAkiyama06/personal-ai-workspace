@@ -68,6 +68,7 @@ from paw_backend.tasks.service import (
     MAX_LOG_MESSAGE_LENGTH,
     MAX_NAME_LENGTH,
     MAX_REASON_LENGTH,
+    MAX_REQUEST_KEY_LENGTH,
     MAX_TITLE_LENGTH,
 )
 
@@ -567,6 +568,23 @@ CASES = [
     case("create_task", "repositories", not_a_working_set()),
     case("create_task", "agent", not_text(MAX_NAME_LENGTH, allow_none=True)),
     case("create_task", "model", not_text(MAX_NAME_LENGTH, allow_none=True)),
+    case(
+        "create_task",
+        "in_transaction",
+        [0, 1, True, False, "step", b"step", CANARY, object(), ["step"], {"a": 1}, ()],
+    ),
+    # The key of the creating request (issue #274): letters, digits and . _ : -.
+    case(
+        "create_task",
+        "request_key",
+        [
+            *not_text(MAX_REQUEST_KEY_LENGTH, allow_none=True),
+            "has space",
+            "slash/key",
+            "ünïcode",
+            CANARY + "!",
+        ],
+    ),
     # -- execute
     case("execute (wait)", "task_id", not_a_uuid()),
     case("execute (wait)", "command", not_an_enum(TaskCommand)),

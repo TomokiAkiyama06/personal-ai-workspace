@@ -16,6 +16,7 @@ import type {
   DagNode,
   EvaluationResult,
   FileDiff,
+  NewTask,
   NodeAttempt,
   NodeRole,
   NodeState,
@@ -407,6 +408,25 @@ export const apiTaskSource: TaskSource = {
   },
   async getTask(id: string): Promise<TaskDetail> {
     return taskDetail(await apiRequest<TaskDetailWire>("GET", taskPath(id)));
+  },
+  async createTask(task: NewTask): Promise<TaskDetail> {
+    const body = {
+      title: task.title,
+      instruction: task.instruction,
+      repositories: task.repositories.map((entry) => ({
+        repository_id: entry.repositoryId,
+        role: entry.role,
+      })),
+      budget_preset: task.budgetPreset,
+      request_key: task.requestKey,
+    };
+    return taskDetail(
+      await apiRequest<TaskDetailWire>(
+        "POST",
+        `/projects/${encodeURIComponent(task.projectId)}/tasks`,
+        body,
+      ),
+    );
   },
   async control(id: string, command: ControlCommand, options: ControlOptions): Promise<TaskDetail> {
     const body = {
