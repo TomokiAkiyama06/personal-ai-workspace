@@ -488,16 +488,26 @@ class ConnectionStore:
         return _info(rows[0]) if rows else None
 
     async def replace_handle(
-        self, kind: ConnectionKind, handle: str
+        self,
+        kind: ConnectionKind,
+        handle: str,
+        *,
+        expected: tuple[uuid.UUID, str] | None = None,
     ) -> ConnectionInfo | None:
         """Point the connection at a new credential. Its status goes back to
         ``unavailable`` and the last check is forgotten: the new credential has not
-        been verified. ``None`` if there is no connection."""
+        been verified. ``None`` if there is no connection, or (``expected``, the
+        compare-and-swap of issue #277: the connection's id and handle) if it is
+        not that connection with that handle any more."""
         clock, params = self._clock_cte()
+        guard = ""
+        if expected is not None:
+            guard = " AND id = %(expected_id)s AND secret_handle = %(expected)s"
+            params = {**params, "expected_id": expected[0], "expected": expected[1]}
         rows = await self._write(
             f"WITH {clock} UPDATE shared_connections SET secret_handle = %(handle)s,"
             " status = 'unavailable', checked_at = NULL,"
-            " updated_at = (SELECT ts FROM clock) WHERE kind = %(kind)s"
+            f" updated_at = (SELECT ts FROM clock) WHERE kind = %(kind)s{guard}"
             f" RETURNING {_CONNECTION_COLUMNS}",
             {**params, "kind": kind.value, "handle": handle},
         )
@@ -548,6 +558,19 @@ class ConnectionStore:
             {"handle": handle},
         )
         return bool(rows[0][0])
+
+    async def list_credentials(self) -> tuple[tuple[ConnectionInfo, str], ...]:
+        """Every connection with its credential handle, from one read (the
+        credential status of issue #277; the handles never leave the
+        service), in ``ConnectionKind`` order."""
+        rows = await self._fetch(
+            f"SELECT {_CONNECTION_COLUMNS}, secret_handle FROM shared_connections",
+            {},
+        )
+        by_kind = {row[1]: (_info(row[:-1]), row[-1]) for row in rows}
+        return tuple(
+            by_kind[kind.value] for kind in ConnectionKind if kind.value in by_kind
+        )
 
     async def read_handle(self, kind: ConnectionKind) -> str | None:
         """The credential handle of ``kind`` (for the health check), or ``None``."""

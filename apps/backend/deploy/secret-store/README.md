@@ -1,6 +1,6 @@
 # Secret Store（共有の Codex / Claude の Connection の Credential）の配備
 
-更新日: 2026-10-13
+更新日: 2026-10-21
 
 [Decision 0087](../../../../docs/decisions/0087-cli-secret-store-and-egress.md)（Approved）の 1・2。
 実装は [`paw_backend/connections/secret_store.py`](../../paw_backend/connections/secret_store.py)（`FileSecretStore`）と
@@ -40,8 +40,52 @@ sudo paw-connection-credential-put claude < token.txt   # claude setup-token の
 
 Wrapper は `systemd-run` で一時の oneshot の Unit（Backend の User、同じ暗号化した鍵、`backend.env`）を作り、標準入力をそのまま渡す。
 表示されるのは新しい Handle（`cred_` と 32 桁の 16 進）だけ。平文は引数・環境変数・履歴・Log に出ない。
-Owner / Admin はその Handle を Connection に登録する（`ConnectionService.connect` / `replace_credential`。Handle の Lock の中で、Store がその種類の Credential として持っていることを確かめてから DB に書く）。
+Owner / Admin はその Handle を Connection に結び付ける（次の節。`ConnectionService.connect` / `replace_credential`。Handle の Lock の中で、Store がその種類の Credential として持っていることを確かめてから DB に書く）。
 置き換え・切断で参照されなくなった Credential は、その場で（Lock の中で参照を確かめてから）消える。登録されなかった Handle と、置き換えから 1 日たった古い版は、Backend の Reaper（`connection_reaper.py`）の周期で消える。
+
+## Handle を Connection に結び付ける（Owner / Admin、Issue #277）
+
+入口は Backend の HTTP API（[`/api/v1/admin/connections`](../../README.md#connection-の-credential-の-http-apiissue-277)、`admin.config.manage`）。Web の画面はまだない。
+変更（結び付け・差し替え・切断）には、その Session の 30 分以内（認証 Policy の時間）の **Passkey の Step-up** が要る。
+Cookie の Session の API なので、Owner / Admin で Web の App に Sign in した Tab の開発者 Tool の Console から、同じ Origin の `fetch` で呼ぶ。Handle は秘密の値ではないが、Log や Chat に貼らない。
+
+```js
+// 0. Passkey の Step-up（PublicKeyCredential.parseRequestOptionsFromJSON に対応した Browser）
+const {options} = await (await fetch("/api/v1/auth/passkeys/authenticate/begin", {method: "POST"})).json()
+const passkey = await navigator.credentials.get({publicKey: PublicKeyCredential.parseRequestOptionsFromJSON(options)})
+await fetch("/api/v1/auth/passkeys/authenticate/finish", {
+  method: "POST", headers: {"Content-Type": "application/json"},
+  body: JSON.stringify({credential: passkey.toJSON()}),
+})
+
+// 1. 状態を見る（種類・状態・版・revision。値も Handle も出ない）
+await (await fetch("/api/v1/admin/connections")).json()
+
+// 2a. 初めて: Handle を結び付ける（201。状態は unavailable から始まる）
+await fetch("/api/v1/admin/connections/claude", {
+  method: "POST", headers: {"Content-Type": "application/json"},
+  body: JSON.stringify({secret_handle: "cred_..."}),
+})
+
+// 2b. 入れ替え: 1 で見た revision を添えて差し替える（他の人が先に変えていたら 409 stale_connection_credential。1 からやり直す）
+await fetch("/api/v1/admin/connections/claude/credential", {
+  method: "PUT", headers: {"Content-Type": "application/json"},
+  body: JSON.stringify({secret_handle: "cred_...", expected_revision: "<revision>"}),
+})
+
+// 3. 外す（Connection を消す。参照されなくなった Credential はその場で消える）
+await fetch("/api/v1/admin/connections/claude", {method: "DELETE"})
+```
+
+答えの読み方:
+
+- `credential.stored` が `true`、`credential.version` が版（Session の中の Refresh の書き戻しで上がる）。`false` は Store から消えた・読めない（入れ直して差し替える）。`null` は Backend に Store が設定されていない。
+- `status` は `unavailable`（まだ確かめていない・使えない）、`connected`、`expired`（Provider が Credential を拒んだ。入れ直して差し替える）。結び付けた直後と差し替えた直後は `unavailable` で、Health Check が `connected` にする。
+- 422 `credential_not_stored`: その種類の Credential として Store にない Handle（打ち間違い、別の種類の Handle、Reaper が消した未登録の古い Handle）。`put` からやり直す。
+- 503 `secret_store_not_configured`: Backend に `PAW_SECRET_STORE_DIR` がない（上の「初めの準備」）。
+- 403 `step_up_required` / `step_up_method_insufficient`: Passkey の Step-up をしてから。
+
+登録しなかった Handle は Reaper が 1 日で消す。差し替えの前の Credential は、参照されなくなればその場で消える。
 
 ## 鍵の入れ替え・Host の入れ替え
 

@@ -455,6 +455,9 @@ def create_app(
         if database.configured
         else None
     )
+    # Whether a handle can be checked against the secret store (issue #277:
+    # without one, ``/admin/connections`` attaches and replaces nothing).
+    app.state.secret_store_configured = secret_store is not None
     app.state.compute = compute_services
     # The model of the Inferred Preference interpreter (#38), or ``None``: the
     # rule interpreter answers.
