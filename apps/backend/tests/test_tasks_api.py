@@ -1058,13 +1058,17 @@ class TasksApiTest(PostgresRepositoryTestCase):
     async def test_a_blank_instruction_is_refused_like_a_blank_title(self):
         # Issue #278: only spaces, only line breaks, or both, is no instruction.
         self.as_creator()
-        for blank in ("   ", "\n", "\n\n", " \t\r\n ", "\u3000"):
-            with self.subTest(instruction=blank):
-                response = await self.create(instruction=blank)
-                self.assertEqual(response.status_code, 422)
-                self.assertEqual(
-                    response.json()["error"]["code"], "invalid_command_argument"
-                )
+        blanks = ("   ", "\n", "\n\n", " \t\r\n ", "\u3000", "\ufeff", " \ufeff\n")
+        for blank in blanks:
+            # U+FEFF, which ``str.strip`` keeps but the Web form's ``trim()``
+            # removes, is blank too; a title is checked alike.
+            for field in ("instruction", "title"):
+                with self.subTest(field=field, blank=blank):
+                    response = await self.create(**{field: blank})
+                    self.assertEqual(response.status_code, 422)
+                    self.assertEqual(
+                        response.json()["error"]["code"], "invalid_command_argument"
+                    )
         self.assertEqual(self.task_count(), 0)
         # Text around blank lines is an instruction, and is kept as it was sent.
         response = await self.create(instruction="\n  Read the parser.\n")

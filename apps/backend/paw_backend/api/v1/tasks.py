@@ -364,6 +364,13 @@ class CreateTaskRequest(BaseModel):
 # -- helpers ----------------------------------------------------------------------
 
 
+def _blank(text: str) -> bool:
+    """Nothing but whitespace: what ``str.strip`` removes, and U+FEFF (ZERO WIDTH
+    NO-BREAK SPACE), which JavaScript's ``trim()`` removes but ``str.strip`` keeps
+    (issue #278)."""
+    return not text.replace("\ufeff", "").strip()
+
+
 def _execution(request: Request) -> TaskExecution:
     execution: TaskExecution | None = getattr(request.app.state, "task_execution", None)
     if execution is None:
@@ -906,7 +913,14 @@ async def create_task(
     )
     # The service refuses a blank title (``_text``); the instruction is part of
     # the task input it keeps as given, so its blank check is here (issue #278).
-    if not body.instruction.strip():
+    # Both are checked as the Web form's ``trim()`` does (U+FEFF too).
+    if _blank(body.title):
+        raise ApiError(
+            422,
+            "invalid_command_argument",
+            f"title must be 1 to {MAX_TITLE_LENGTH} characters",
+        )
+    if _blank(body.instruction):
         raise ApiError(
             422,
             "invalid_command_argument",

@@ -164,7 +164,7 @@ describe("新しいタスク", () => {
     const instruction = within(form).getByRole("textbox", { name: "指示" });
     const submit = within(form).getByRole("button", { name: "作成してキューに入れる" });
 
-    for (const blank of ["   ", "{Enter}{Enter}", " {Enter} {Enter} ", "\u3000"]) {
+    for (const blank of ["   ", "{Enter}{Enter}", " {Enter} {Enter} ", "\u3000", "\ufeff"]) {
       await user.clear(instruction);
       await user.type(instruction, blank);
       expect(submit).toBeDisabled();
