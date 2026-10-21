@@ -585,6 +585,12 @@ CASES = [
             CANARY + "!",
         ],
     ),
+    # A read-only task (issue #279): a bool, nothing that only looks like one.
+    case(
+        "create_task",
+        "read_only",
+        [None, 0, 1, "true", b"true", CANARY, object(), [True], {"a": 1}],
+    ),
     # -- execute
     case("execute (wait)", "task_id", not_a_uuid()),
     case("execute (wait)", "command", not_an_enum(TaskCommand)),
@@ -598,6 +604,8 @@ CASES = [
     case("execute (wait)", "wait_reason", not_an_enum(WaitReason, allow_none=True)),
     case("execute (retry)", "agent", not_text(MAX_NAME_LENGTH, allow_none=True)),
     case("execute (retry)", "model", not_text(MAX_NAME_LENGTH, allow_none=True)),
+    # What a read-only task's Complete keeps (issue #279): a JSON object.
+    case("execute (wait)", "result", not_a_json_object()),
     # The step that runs in the command's transaction (Issue #83): a coroutine
     # function or ``None``; anything else, falsy values included, is refused.
     case(

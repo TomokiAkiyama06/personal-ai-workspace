@@ -134,6 +134,7 @@ from paw_backend.tasks.errors import (
     LastTargetRemovalRefusedError,
     ModifiedRepositoryDowngradeRefusedError,
     NoTargetRepositoryError,
+    ReadOnlyTaskError,
     RepositoryNotInAttemptError,
     RepositoryRoleInsufficientError,
     RepositoryRoleUnresolvedError,
@@ -300,6 +301,11 @@ _REQUEST_KEY = re.compile(rf"[A-Za-z0-9._:-]{{1,{MAX_REQUEST_KEY_LENGTH}}}")
 DEFAULT_INSPECTION_TIMEOUT = 10.0
 
 _INPUT_TOO_LARGE = f"input must be a JSON object of at most {MAX_INPUT_BYTES} bytes"
+# The result a read-only task completes with (``execute(..., result=...)``, issue
+# #279): the summary of each node of its DAG, at most ``MAX_RESULT_BYTES`` of JSON
+# (32 nodes of 2 000 characters each fit even when every character is escaped).
+MAX_RESULT_BYTES = 512 * 1024
+_RESULT_TOO_LARGE = f"result must be a JSON object of at most {MAX_RESULT_BYTES} bytes"
 _INPUT_NOT_JSON = (
     "input must contain only JSON values "
     "(objects with text keys, lists, text, numbers, booleans and null)"
@@ -338,8 +344,11 @@ class _JsonInputCheck:
     state the rule that was broken and never the offending value.
     """
 
-    def __init__(self) -> None:
-        self._budget = MAX_INPUT_BYTES
+    def __init__(
+        self, budget: int = MAX_INPUT_BYTES, too_large: str = _INPUT_TOO_LARGE
+    ) -> None:
+        self._budget = budget
+        self._too_large = too_large
         interpreter_limit = sys.get_int_max_str_digits()  # 0 means no limit
         self._digit_limit = (
             min(MAX_INPUT_INTEGER_DIGITS, interpreter_limit)
@@ -360,7 +369,7 @@ class _JsonInputCheck:
     def _spend(self, cost: int) -> None:
         self._budget -= cost
         if self._budget < 0:
-            raise InvalidCommandArgumentError(_INPUT_TOO_LARGE)
+            raise InvalidCommandArgumentError(self._too_large)
 
     def _check(self, value: Any, depth: int) -> Any:
         """Check one value and return its copy (scalars are immutable: as is)."""
@@ -682,8 +691,12 @@ def _commit(name: str, value: object) -> str | None:
     return _optional_text(name, value, 64)
 
 
-def _working_set(value: object) -> tuple[WorkingSetEntry, ...]:
-    """The checked Working Set a task is created with (read once, copied)."""
+def _working_set(
+    value: object, *, read_only: bool = False
+) -> tuple[WorkingSetEntry, ...]:
+    """The checked Working Set a task is created with (read once, copied). A
+    read-only task's (issue #279) holds at least one repository, every one of
+    them ``referenced``; any other's holds a ``target`` when it holds any."""
     if isinstance(value, str | bytes | dict) or not isinstance(value, Sequence):
         raise InvalidCommandArgumentError(
             "repositories must be a sequence of WorkingSetEntry"
@@ -708,7 +721,14 @@ def _working_set(value: object) -> tuple[WorkingSetEntry, ...]:
         )
     if len({entry.repository_id for entry in checked}) != len(checked):
         raise InvalidCommandArgumentError("a repository is listed twice")
-    if checked and not any(entry.role is RepoRole.TARGET for entry in checked):
+    if read_only:
+        if not checked or any(
+            entry.role is not RepoRole.REFERENCED for entry in checked
+        ):
+            raise InvalidCommandArgumentError(
+                "a read-only task needs referenced repositories only, at least one"
+            )
+    elif checked and not any(entry.role is RepoRole.TARGET for entry in checked):
         raise InvalidCommandArgumentError(
             "a working set needs at least one target repository"
         )
@@ -789,6 +809,7 @@ class TaskService:
         model: str | None = None,
         in_transaction: InTransactionStep | None = None,
         request_key: str | None = None,
+        read_only: bool = False,
     ) -> TaskEvent:
         """Create a queued task (attempt 1) and its ``create`` event.
 
@@ -827,12 +848,23 @@ class TaskService:
         ``[A-Za-z0-9._:-]``) is the caller's key of the request that creates the
         task, kept in the ``create`` event (``detail["request_key"]``) so that a
         repeated request can find the task it already created (issue #274).
+
+        ``read_only`` (a ``bool``; issue #279, Decision 0094, 1 A) creates a task
+        that only reads: its Working Set is ``referenced`` repositories only (at
+        least one, no ``target`` needed) and stays so (``change_working_set``
+        refuses to make one ``working`` / ``target``: ``ReadOnlyTaskError``); it
+        is never evaluated and completes from ``running``
+        (``domain.READ_ONLY_TRANSITIONS``). The ``create`` event says so
+        (``detail["read_only"]``). The orchestrator refuses a plan with a Worker
+        node for it and gives its nodes no capability that writes.
         """
         project_id = _uuid("project_id", project_id)
         created_by = _uuid("created_by", created_by)
         title = _text("title", title, MAX_TITLE_LENGTH)
         input = self._checked_input(input)
-        working_set = _working_set(repositories)
+        if type(read_only) is not bool:
+            raise InvalidCommandArgumentError("read_only must be a bool")
+        working_set = _working_set(repositories, read_only=read_only)
         agent = _optional_text("agent", agent, MAX_NAME_LENGTH)
         model = _optional_text("model", model, MAX_NAME_LENGTH)
         if in_transaction is not None and not callable(in_transaction):
@@ -852,6 +884,8 @@ class TaskService:
             ]
         if request_key is not None:
             detail["request_key"] = request_key
+        if read_only:
+            detail["read_only"] = True
         now = utcnow()
         task = TaskRow(
             id=uuid.uuid4(),
@@ -865,6 +899,7 @@ class TaskService:
             model=model,
             attempt=1,
             retry_count=0,
+            read_only=read_only,
             created_at=now,
             updated_at=now,
         )
@@ -925,8 +960,16 @@ class TaskService:
         agent: str | None = None,
         model: str | None = None,
         in_transaction: InTransactionStep | None = None,
+        result: dict[str, Any] | None = None,
     ) -> TaskEvent:
         """Apply ``command`` to the task and return the history event it wrote.
+
+        A read-only task (issue #279, ``create_task(read_only=True)``) follows
+        ``domain.READ_ONLY_TRANSITIONS``: no Begin evaluation, Complete from
+        ``running``, and its Start needs no ``target``. ``result`` (a JSON object
+        of at most ``MAX_RESULT_BYTES``, checked like the task input) is what the
+        task found, the summary of each node of its DAG: only its Complete takes
+        one, kept in the ``complete`` event (``detail["result"]``).
 
         ``agent`` / ``model`` (Retry and Restart only) switch the agent or model
         for the next run. Raises ``TaskNotFoundError``,
@@ -990,6 +1033,10 @@ class TaskService:
             )
         if in_transaction is not None and not callable(in_transaction):
             raise InvalidCommandArgumentError("in_transaction must be callable")
+        if result is not None:
+            result = self._checked_json(result, MAX_RESULT_BYTES, _RESULT_TOO_LARGE)
+            if command is not TaskCommand.COMPLETE:
+                raise InvalidCommandArgumentError("Only Complete accepts a result")
 
         async with self._database.session() as session, session.begin():
             # Lock first, then read: whatever a concurrent begin_step commits is
@@ -999,7 +1046,14 @@ class TaskService:
             # A stale caller is told so before its command is judged.
             if expected_version is not None and task.version != expected_version:
                 raise TaskConflictError()
-            plan = plan_transition(task.state, command, wait_reason=wait_reason)
+            plan = plan_transition(
+                task.state, command, wait_reason=wait_reason, read_only=task.read_only
+            )
+            if result is not None and not task.read_only:
+                # Any other task's result is its pull request and evaluation.
+                raise InvalidCommandArgumentError(
+                    "Only the completion of a read-only task takes a result"
+                )
             if command in _GATED_COMMANDS:
                 # Retry and Restart put a finished task back to work, and Start
                 # begins the work of a task that was queued: none may happen in a
@@ -1020,12 +1074,15 @@ class TaskService:
                 if command is TaskCommand.RESTART or plan.target is TaskState.RUNNING
                 else []
             )
-            if plan.target is TaskState.RUNNING and not any(
-                member.role is RepoRole.TARGET for member in members
+            if (
+                plan.target is TaskState.RUNNING
+                and not task.read_only
+                and not any(member.role is RepoRole.TARGET for member in members)
             ):
                 # A task always has a target (Decision 0030, section 2): it does
                 # not run without one. Start, and Resume / Unblock too: a task of
-                # before revision 0085 has an empty Working Set.
+                # before revision 0085 has an empty Working Set. A read-only task
+                # (issue #279) reads its ``referenced`` repositories only.
                 raise NoTargetRepositoryError()
             # Under the task's row lock, which every admission takes too.
             in_flight = await self._live_writes(session, task.id)
@@ -1048,6 +1105,8 @@ class TaskService:
                     }
                     for row in in_flight
                 ]
+            if result is not None:
+                detail["result"] = result
 
             task.state = plan.target
             task.wait_reason = plan.wait_reason
@@ -1512,6 +1571,12 @@ class TaskService:
                 raise IllegalTransitionError(
                     task.state.value, TaskCommand.CHANGE_WORKING_SET.value
                 )
+            if task.read_only and role_after(operation) in (
+                RepoRole.WORKING,
+                RepoRole.TARGET,
+            ):
+                # A read-only task (issue #279) reads its repositories only.
+                raise ReadOnlyTaskError()
             rows = await self._repository_rows(session, task.id)
             row = next((r for r in rows if r.repository_id == repository_id), None)
             member = row if row is not None and row.removed_at is None else None
@@ -2078,6 +2143,7 @@ class TaskService:
                 ),
                 tool_invocations=tuple(_tool(row) for row in invocations),
                 working_set=tuple(_working_set_repository(row) for row in members),
+                read_only=task.read_only,
             )
 
     @staticmethod
@@ -2158,8 +2224,15 @@ class TaskService:
 
     # -- internals ---------------------------------------------------------
 
+    @classmethod
+    def _checked_input(cls, value: dict[str, Any] | None) -> dict[str, Any]:
+        """The task input: ``_checked_json`` within ``MAX_INPUT_BYTES``."""
+        return cls._checked_json(value, MAX_INPUT_BYTES, _INPUT_TOO_LARGE)
+
     @staticmethod
-    def _checked_input(value: dict[str, Any] | None) -> dict[str, Any]:
+    def _checked_json(
+        value: dict[str, Any] | None, limit: int, too_large: str
+    ) -> dict[str, Any]:
         """Return a detached copy of ``value`` if JSONB can hold it, else raise.
 
         The caller's object is read ONCE (``_JsonInputCheck``: plain JSON types
@@ -2174,16 +2247,16 @@ class TaskService:
         """
         value = {} if value is None else value
         try:
-            copy = _JsonInputCheck().check_object(value)
+            copy = _JsonInputCheck(limit, too_large).check_object(value)
         except RuntimeError:
             # A dict of the caller changed size while it was being read.
-            raise InvalidCommandArgumentError(_INPUT_TOO_LARGE) from None
+            raise InvalidCommandArgumentError(too_large) from None
         try:
             encoded = json.dumps(copy, allow_nan=False)
         except (RuntimeError, ValueError, TypeError):
-            raise InvalidCommandArgumentError(_INPUT_TOO_LARGE) from None
-        if len(encoded) > MAX_INPUT_BYTES:
-            raise InvalidCommandArgumentError(_INPUT_TOO_LARGE)
+            raise InvalidCommandArgumentError(too_large) from None
+        if len(encoded) > limit:
+            raise InvalidCommandArgumentError(too_large)
         return copy
 
     @staticmethod
@@ -2325,9 +2398,12 @@ class TaskService:
             .scalars()
             .all()
         )
-        if not any(
+        if not task.read_only and not any(
             row.removed_at is None and row.role is RepoRole.TARGET for row in rows
         ):
+            # A read-only task (issue #279) has no target: it delivers no pull
+            # request. A repository it changed all the same still has to meet
+            # the requirements below.
             raise CompletionRequirementsNotMetError()
         facts = []
         for state in states:

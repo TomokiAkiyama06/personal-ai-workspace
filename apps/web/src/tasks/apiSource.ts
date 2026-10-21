@@ -419,6 +419,7 @@ export const apiTaskSource: TaskSource = {
       })),
       budget_preset: task.budgetPreset,
       request_key: task.requestKey,
+      read_only: task.readOnly,
     };
     return taskDetail(
       await apiRequest<TaskDetailWire>(

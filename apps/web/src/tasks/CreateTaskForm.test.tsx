@@ -91,6 +91,7 @@ describe("新しいタスク", () => {
         repositories: [{ repositoryId: "r-backend", role: "target" }],
         budgetPreset: "long",
         requestKey: expect.stringMatching(/^[0-9a-f-]{36}$/),
+        readOnly: false,
       },
     ]);
     // The form closes, the queued task is listed first and opened.
@@ -146,6 +147,112 @@ describe("新しいタスク", () => {
     expect(sent[0]).toBe(sent[1]);
     expect(within(form).getByRole("textbox", { name: "タイトル" })).toHaveValue("調べもの");
     expect(within(form).getByRole("button", { name: "作成してキューに入れる" })).toBeEnabled();
+  });
+
+  it("creates a read-only task that references the repository it reads", async () => {
+    const { source, created } = fakeTaskSource();
+    const detail = exampleDetail();
+    renderTasks(
+      source,
+      fakeProjectsSource({
+        details: {
+          "p-example": {
+            ...detail,
+            repositories: [
+              ...detail.repositories,
+              // Read only for this person, but agents may work on it.
+              {
+                id: "r-vendor",
+                name: "vendor",
+                default_branch: "main",
+                source: "existing_path",
+                acl: ["read", "agent"],
+                updated_at: "2026-09-30T04:00:00Z",
+              },
+            ],
+          },
+          "p-tools": exampleDetail({ id: "p-tools", name: "InternalTools" }),
+        },
+      }),
+    );
+    const { user, form } = await openForm();
+    await user.selectOptions(
+      within(form).getByRole("combobox", { name: "プロジェクト" }),
+      "p-example",
+    );
+    const targets = within(form).getByRole("group", { name: "Target のリポジトリ" });
+    expect(await within(targets).findByRole("radio", { name: /backend/ })).toBeChecked();
+    expect(within(targets).getByRole("radio", { name: /vendor/ })).toBeDisabled();
+
+    await user.click(within(form).getByRole("checkbox", { name: "読み取りだけ" }));
+
+    // The repository is now one to read: vendor may be read, ios lets no agent in.
+    const reads = within(form).getByRole("group", { name: "読むリポジトリ" });
+    expect(
+      within(reads).getByText("このリポジトリを読むだけで、書き込みはしません。"),
+    ).toBeVisible();
+    expect(within(reads).getByRole("radio", { name: /backend/ })).toBeChecked();
+    const vendor = within(reads).getByRole("radio", { name: /vendor/ });
+    expect(vendor).toBeEnabled();
+    expect(within(reads).getByRole("radio", { name: /ios/ })).toBeDisabled();
+    expect(within(reads).getByText("読み取り・エージェントの権限なし")).toBeInTheDocument();
+    await user.click(vendor);
+    await user.type(within(form).getByRole("textbox", { name: "タイトル" }), "vendor を調べる");
+    await user.type(
+      within(form).getByRole("textbox", { name: "指示" }),
+      "構成をまとめてください。",
+    );
+    await user.click(within(form).getByRole("button", { name: "作成してキューに入れる" }));
+
+    expect(created).toEqual([
+      expect.objectContaining({
+        repositories: [{ repositoryId: "r-vendor", role: "referenced" }],
+        readOnly: true,
+      }),
+    ]);
+  });
+
+  it("unchooses a repository the task cannot use when 読み取りだけ is turned off", async () => {
+    const { source } = fakeTaskSource();
+    const detail = exampleDetail();
+    renderTasks(
+      source,
+      fakeProjectsSource({
+        details: {
+          "p-example": {
+            ...detail,
+            repositories: [
+              ...detail.repositories,
+              {
+                id: "r-vendor",
+                name: "vendor",
+                default_branch: "main",
+                source: "existing_path",
+                acl: ["read", "agent"],
+                updated_at: "2026-09-30T04:00:00Z",
+              },
+            ],
+          },
+          "p-tools": exampleDetail({ id: "p-tools", name: "InternalTools" }),
+        },
+      }),
+    );
+    const { user, form } = await openForm();
+    const readOnly = within(form).getByRole("checkbox", { name: "読み取りだけ" });
+    await user.click(readOnly);
+    await user.selectOptions(
+      within(form).getByRole("combobox", { name: "プロジェクト" }),
+      "p-example",
+    );
+    const reads = within(form).getByRole("group", { name: "読むリポジトリ" });
+    await user.click(await within(reads).findByRole("radio", { name: /vendor/ }));
+
+    await user.click(readOnly);
+
+    // vendor cannot be written to: backend, the only target, is chosen instead.
+    const targets = within(form).getByRole("group", { name: "Target のリポジトリ" });
+    expect(within(targets).getByRole("radio", { name: /vendor/ })).not.toBeChecked();
+    expect(within(targets).getByRole("radio", { name: /backend/ })).toBeChecked();
   });
 
   it("leaves out projects the person only views or that are not active", async () => {

@@ -47,7 +47,13 @@ over HTTP (issue #185, Decision 0067 Approved; the screens of PAW-062, #48).
   event and looked up among the person's recent tasks of the project, through
   the project's index; an advisory lock on the project, the person and the key
   orders two requests with the same key). Without a key, sending it twice
-  creates two tasks.
+  creates two tasks. With ``read_only: true`` (issue #279, Decision 0094, 1 A)
+  the task only reads: every repository of its Working Set is ``referenced``
+  (anything else is 422 ``read_only_repository_role``; no ``target`` is
+  needed), the orchestrator refuses a plan with a ``worker`` node and gives no
+  node a capability that writes, and the task is ``completed`` when its DAG
+  succeeded (no evaluation, no pull request), the summary of each node kept in
+  its ``complete`` event. The answer's ``read_only`` says which a task is.
 * ``GET /pull-requests`` (``tasks.list``): the pull requests the tasks of those
   projects recorded, with Merge Ready as the backend judges it
   (``task_views.is_merge_ready``). There is no merge route: merging stays the
@@ -68,7 +74,7 @@ from datetime import datetime
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Query, Request
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette import status
@@ -285,6 +291,8 @@ class DagNodeOut(BaseModel):
 class TaskDetailOut(TaskSummaryOut):
     version: int
     created_by: uuid.UUID
+    # A task that only reads (issue #279): never evaluated, no pull request.
+    read_only: bool
     agent: str | None
     model: str | None
     attempt: int
@@ -358,6 +366,9 @@ class CreateTaskRequest(BaseModel):
     request_key: StrictStr | None = Field(
         default=None, min_length=1, max_length=MAX_REQUEST_KEY_LENGTH
     )
+    # A task that only reads (issue #279, Decision 0094, 1 A): every repository
+    # ``referenced``, no ``target`` needed; completed when its DAG succeeded.
+    read_only: StrictBool = False
 
 
 # -- helpers ----------------------------------------------------------------------
@@ -590,6 +601,7 @@ async def _detail(
         updated_at=snapshot.updated_at,
         version=snapshot.version,
         created_by=snapshot.created_by,
+        read_only=snapshot.read_only,
         agent=snapshot.agent,
         model=snapshot.model,
         attempt=snapshot.attempt.number,
@@ -736,17 +748,26 @@ async def _authorize_working_set(
     principal: Principal,
     project_id: uuid.UUID,
     entries: list[WorkingSetEntryIn],
+    read_only: bool,
 ) -> list[WorkingSetEntry]:
     """Decide every repository of the Working Set for its role, on its own ACL
     (audited as every decision is; an allowed read is not recorded, its
     capability being ``DENIED_ONLY``), and return the entries ``create_task``
-    takes. Raises the route's answer for the first one that is refused."""
+    takes. Raises the route's answer for the first one that is refused. A
+    read-only task's repositories are all ``referenced`` (issue #279)."""
     if len({entry.repository_id for entry in entries}) != len(entries):
         raise ApiError(
             422, "duplicate_repository", "A repository is listed more than once"
         )
     roles = [RepoRole(entry.role) for entry in entries]
-    if RepoRole.TARGET not in roles:
+    if read_only:
+        if any(role is not RepoRole.REFERENCED for role in roles):
+            raise ApiError(
+                422,
+                "read_only_repository_role",
+                "A read-only task only references its repositories",
+            )
+    elif RepoRole.TARGET not in roles:
         raise ApiError(
             422,
             "no_target_repository",
@@ -901,7 +922,7 @@ async def create_task(
 ) -> TaskDetailOut:
     execution = _execution(request)
     working_set = await _authorize_working_set(
-        request, principal, project_id, body.repositories
+        request, principal, project_id, body.repositories, body.read_only
     )
     try:
         with _task_errors():
@@ -918,6 +939,7 @@ async def create_task(
                     body.request_key,
                 ),
                 request_key=body.request_key,
+                read_only=body.read_only,
             )
     except _Replayed as replayed:
         # The same request again (a lost answer, a retry): the task it created.

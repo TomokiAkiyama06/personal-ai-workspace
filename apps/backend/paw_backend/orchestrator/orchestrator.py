@@ -5,7 +5,8 @@ of what the orchestrator can do for it: decompose it into a dependency DAG (the
 planner role proposes, ``plan.py`` accepts), run the independent nodes in parallel
 (``scheduling.py``), retry, change approach or escalate a failing node, pass the
 structured results of finished nodes to the nodes that depend on them, and report
-the outcome to the task (``evaluating``, ``failed`` or ``waiting``). What the
+the outcome to the task (``evaluating``, ``failed`` or ``waiting``; a read-only
+task, issue #279, is ``completed`` when its DAG succeeded). What the
 orchestrator does **not** do: run an agent (an ``AgentRuntime`` does), run git
 (a ``NodeWorkspaces``, PAW-035, prepares the worktrees of the Worker nodes and
 integrates their branches: ``workspaces.py``), evaluate or complete the task (the
@@ -64,6 +65,7 @@ from paw_backend.authz import AgentGrant, Capability, GrantEscalationError
 from paw_backend.authz.principals import PrincipalDirectory
 from paw_backend.orchestrator.config import Clock, OrchestratorConfig, SystemClock
 from paw_backend.orchestrator.domain import (
+    READ_ONLY_TASK_CAPABILITIES,
     DagState,
     IncidentKind,
     NextStep,
@@ -99,7 +101,7 @@ from paw_backend.orchestrator.gateway import (
 )
 from paw_backend.orchestrator.limits import MAX_ERROR_CLASS_CHARS
 from paw_backend.orchestrator.placement import NodePlacementHandle, content_digest
-from paw_backend.orchestrator.plan import Plan
+from paw_backend.orchestrator.plan import Plan, refuse_writers
 from paw_backend.orchestrator.records import AttemptRecord, DagRecord, NodeRecord
 from paw_backend.orchestrator.runtime import (
     AgentRuntime,
@@ -553,6 +555,8 @@ class Orchestrator:
             TaskState.CANCELLED,
         ):
             raise DagStateError()
+        if snapshot.read_only:
+            refuse_writers(plan)  # issue #279: no Worker in a read-only task
         # Fenced by the run that was read: a Retry or Restart that commits in
         # between refuses the plan (``StaleRunError``) instead of giving it to
         # the new run unseen.
@@ -1321,6 +1325,21 @@ class Orchestrator:
             if dag.state is DagState.ACTIVE
             else dag
         )
+        if final.state is DagState.SUCCEEDED and run.task.read_only:
+            # Issue #279 (c): nothing to integrate, evaluate or deliver; the task
+            # is completed and keeps what each node found.
+            ended = await self._end_task(
+                run,
+                TaskCommand.COMPLETE,
+                Actor.system(),
+                REASON_DAG_SUCCEEDED,
+                result=_read_only_result(final),
+            )
+            return RunReport(
+                RunOutcome.DAG_SUCCEEDED if ended else RunOutcome.TASK_ENDED,
+                task_id,
+                final.state,
+            )
         if final.state is DagState.SUCCEEDED:
             integrated = await self._integrate(run, final)
             if integrated is not None:
@@ -1486,8 +1505,10 @@ class Orchestrator:
         actor: Actor,
         reason: str,
         wait_reason: WaitReason | None = None,
+        result: dict | None = None,
     ) -> bool:
-        """Issue a task command **for this run only**.
+        """Issue a task command **for this run only** (``result``: what a
+        read-only task's Complete keeps, ``TaskService.execute``).
 
         The task is read afresh and the command is applied with the version that
         was read (``expected_version``), so the comparison and the transition are one
@@ -1519,6 +1540,7 @@ class Orchestrator:
                     reason=reason,
                     wait_reason=wait_reason,
                     expected_version=snapshot.version,
+                    result=result,
                 )
             except IllegalTransitionError:
                 return False
@@ -1695,6 +1717,14 @@ class Orchestrator:
         grant and scope derived from the parent's (with the node's own worktrees,
         PAW-035, when it has them)."""
         parent_grant = await self._authority.parent_grant(run.task)
+        if run.task.read_only:
+            # Issue #279: a read-only task's nodes never hold a capability that
+            # writes, whatever the authority grants (its plan has no Worker).
+            parent_grant = AgentGrant(
+                parent_grant.agent_id,
+                parent_grant.capabilities & READ_ONLY_TASK_CAPABILITIES,
+                parent_grant.project_ids,
+            )
         parent_scope = await self._authority.parent_scope(run.task)
         grant = node_grant(
             parent_grant,
@@ -1789,6 +1819,7 @@ class Orchestrator:
                 ),
                 placement=self._placement(run, spec, fence),
                 connections=self._node_connections(run, spec, worktrees, fence),
+                read_only_task=run.task.read_only,
             )
             outcome = await self._with_timeout(
                 self._runtimes[spec.agent].run_node(assignment)
@@ -2256,6 +2287,10 @@ class Orchestrator:
                         if isinstance(outcome.plan, Plan)
                         else Plan.from_mapping(outcome.plan)
                     )
+                    if run.task.read_only:
+                        # Issue #279 (a): a Worker node is refused like any
+                        # other unacceptable plan; the next planner is asked.
+                        refuse_writers(accepted)
                     dag = await self._store.create(
                         task_id, run.run.attempt, accepted, run=run.run
                     )
@@ -2322,6 +2357,24 @@ def _integration_line(repository: RepositoryIntegration) -> tuple[LogLevel, str]
         else f"the worktree of node {repository.blocking_node}"
     )
     return LogLevel.WARNING, f"{name}: {where} has uncommitted changes"
+
+
+def _read_only_result(dag: DagRecord) -> dict:
+    """What a read-only task keeps when its DAG succeeded (issue #279, Decision
+    0094, 1 (c)): the key, role, title and summary of each node that succeeded,
+    in the plan's order. The full results stay in the DAG's nodes."""
+    return {
+        "nodes": [
+            {
+                "key": node.key,
+                "role": node.role.value,
+                "title": node.title,
+                "summary": node.result.summary,
+            }
+            for node in dag.nodes
+            if node.state is NodeState.SUCCEEDED and node.result is not None
+        ]
+    }
 
 
 def _ended_for_good(dag: DagRecord, run: TaskRun) -> bool:
