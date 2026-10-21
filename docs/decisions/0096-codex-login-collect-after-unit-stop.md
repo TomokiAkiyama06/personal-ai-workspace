@@ -4,7 +4,7 @@
 - Date: 2026-10-21
 - Scope: Issue [#280](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/280)（[#239](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/239) の後続。PR [#276](https://github.com/TomokiAkiyama06/personal-ai-workspace/pull/276) の Codex の P2 の指摘）。この Decision は設計だけで、コードは承認の後の PR で書く。関係する既存の口（PR #276 の Branch `claude/codex-credentials-239`）: `apps/backend/paw_backend/agents/codex_cli.py`（`CodexSessionAdapter.run_session` / `_session` の `finally`、`CodexAttachment.unstopped`）、`agents/codex_credentials.py`（`CodexAuthFile.collect`）、`connections/session_slot.py`（`SessionSlot.keep` / `_hold`）、`connections/service.py`（`rotate_credential` の Compare-and-swap）、`agents/cli_session.py`（`SystemdLauncher.stop_unit` / `show`、`remove_session`）、Migration `0239_connection_session_leases`。
 - 具体化: [Decision 0083](0083-agent-runtime-adapters.md)（Approved）の 6 の「Session が終わったとき … File の Credential が渡したものから変わっていれば … Compare-and-swap で書き戻す」と、[Decision 0088](0088-cli-token-file-mode.md)（Approved）・Decision 0095（Proposed、PR [#276](https://github.com/TomokiAkiyama06/personal-ai-workspace/pull/276) の `docs/decisions/0095-codex-auth-file-owner-and-mode.md`）の 4 の「止められなかった Unit の Directory は残し、Unit を止めてから消す」の、**止められなかった Codex の Session** の場合の手順。
-- Supersedes（一部、下の 2 が推奨どおりなら）: 0083 の 6 の「期限切れは他の Process が取り直せる」のうち、**止められなかった Session のために保たれた枠** だけ（期限が切れても他の Process が取り直さない）。0083 の 6 の他（Connection ごとに 1 Session、60 秒の待ち、`connection_busy`、Compare-and-swap、`rotate_credential`）と 0091 は変えない。
+- Supersedes（一部、下の 2 が推奨どおりなら）: 0083 の 6 の「期限切れは他の Process が取り直せる」のうち、**Codex の Session の UUID が記された枠の行** だけ（期限が切れても普通の取り直しはせず、Unit の停止を確かめてから回収の Loop が扱う）。0083 の 6 の他（Connection ごとに 1 Session、60 秒の待ち、`connection_busy`、Compare-and-swap、`rotate_credential`）と 0091 は変えない。
 
 ## 背景
 
@@ -35,14 +35,16 @@
 ## 提案（推奨の全体）
 
 ```text
+Login を置く前（どの Codex の Session でも。2）
+  └─ 枠の行に Session の UUID と渡した Credential の版を書く（Unit を起動する前に Commit）
 Session の終わり（CLI を止められなかった）
   ├─ すぐ読み戻して書き戻す（今のまま。6）
-  ├─ 枠の行を「保たれた」にする: 行に Session の UUID と、その時点の Credential の版を書く（2）
+  ├─ 枠の行を「保たれた」にする（`kept`）。すぐの書き戻しの後なら期待の版をその新しい版に改める（2）
   ├─ Directory は残す。MCP の Bridge は閉じる（今のまま）
   └─ System Health の connections を WARNING、Audit connection.session_kept（4）
 Unit の停止の確認（1）
   ├─ 枠を保つ Process が 60 秒ごとに systemctl show（読むだけ）
-  └─ どの Backend の Process でも動く回収の Loop（60 秒ごと）: 期限の切れた保たれた行を引き継ぐ
+  └─ どの Backend の Process でも動く回収の Loop（60 秒ごと）: 期限の切れた Session つきの行を引き継ぐ
 停止を確かめたら（3 の条件）
   ├─ auth.json を読み戻し、変わっていれば rotate_credential（期待の版は行の版）
   ├─ Directory を消す
@@ -60,12 +62,12 @@ Unit の停止の確認（1）
 - A: Operator の Command だけ（例 `paw-cli-session-collect <uuid>`。`paw-connection-credential-put` と同じく root の Wrapper が `systemd-run` で Backend の User・暗号化した主鍵の一時の Unit を作り、Unit を止め、停止を確かめ、回収し、Directory を消す）。良い点: 人が見て行う。悪い点: Operator が忘れる・Directory を手で消すと Login が失われる。Command と主鍵の扱いが 1 つ増える。
 - B: Backend の起動の時の走査だけ。悪い点: 再起動するまで回収されない（再起動しない限り、Operator が Unit を止めても Connection は塞がったまま）。
 - C: A と B の両方（#280 の素案）。
-- **D（推奨）: 枠を保つ Process が Unit の状態を周期的に読み（60 秒ごと、暫定）、加えてどの Backend の Process でも、起動の時から周期的に（60 秒ごと、暫定）DB の保たれた行を走査する回収の Loop を動かす。** Operator は今の手順のとおり Unit を止める（`systemctl stop paw-cli-session@<uuid>.service`、root）だけで、Directory は消さない（手順を変える）。読むのは `systemctl show`（読むだけ。polkit の規則は変えない）。保つ Process は自分でも `stop` を試み続ける（polkit が許す `stop`。1 分ごと、暫定）。回収の Loop は保たれた行（2）だけを見る（`/run/paw-cli` の Directory を総なめにしない: 他の Process の動いている Session の Directory を触らないため）。起動の時の 1 回だけにしないのは、再起動が前の持ち主の最後の Heartbeat の直後だと、その時点では行の期限がまだ切れておらず引き継げず、その後に見に来る者がいなくなるため（Codex review）。持ち主が生きている間は行の期限が切れないので、Loop は何もしない。A の Command は、D で足りないと分かったら後から足せる（D の回収の関数をそのまま呼ぶ）。
+- **D（推奨）: 枠を保つ Process が Unit の状態を周期的に読み（60 秒ごと、暫定）、加えてどの Backend の Process でも、起動の時から周期的に（60 秒ごと、暫定）DB の保たれた行を走査する回収の Loop を動かす。** Operator は今の手順のとおり Unit を止める（`systemctl stop paw-cli-session@<uuid>.service`、root）だけで、Directory は消さない（手順を変える）。読むのは `systemctl show`（読むだけ。polkit の規則は変えない）。保つ Process は自分でも `stop` を試み続ける（polkit が許す `stop`。1 分ごと、暫定）。回収の Loop は `session` のある期限の切れた行（2）だけを見る（`/run/paw-cli` の Directory を総なめにしない: 他の Process の動いている Session の Directory を触らないため）。起動の時の 1 回だけにしないのは、再起動が前の持ち主の最後の Heartbeat の直後だと、その時点では行の期限がまだ切れておらず引き継げず、その後に見に来る者がいなくなるため（Codex review）。持ち主が生きている間は行の期限が切れないので、Loop は何もしない。A の Command は、D で足りないと分かったら後から足せる（D の回収の関数をそのまま呼ぶ）。
 
 ### 2. 保たれた枠がいつまで続くか（Backend の再起動を越えるか）
 
 - A: 今のまま Process の間だけ。悪い点: 再起動の後 300 秒で期限が切れ、CLI がまだ動いているかもしれないのに次の Session が同じ Login で動く（0083 の 6 が防ごうとした「並列の Session が互いの Token を失効させる」そのもの）。
-- **B（推奨）: 回収が終わるまで、Backend の再起動を越えて保つ。** `connection_session_leases` の行に `kept_session`（Session の UUID）と `kept_version`（その時点の Credential の版。すぐの書き戻しの後ならその新しい版）を足す（Migration。Credential の値は書かない）。`kept_session` のある行は、期限が切れても `acquire_session_slot` が取り直さない（ここが 0083 の 6 の一部の Supersede）。持ち主の Process が生きている間は今の `_hold` が更新し、Process が終わると、1 の D の回収の Loop（どの Process でも 60 秒ごと）が、行の期限が切れた後の最初の周期で「`kept_session` があり、期限が切れている」行を持ち主を替えて引き継ぎ（行の持ち主の Compare-and-swap。同時に 2 つの Process が試しても 1 つだけが取る）、引き継いだ Process が `_hold` と 1 の確認を続ける。その間、同じ Connection の新しい Session は今と同じく 60 秒待って `connection_busy`（fail-closed）。上限の時間は置かない（自然に切れると A と同じ危険になる）。代わりに 4 の知らせで Operator に止めてもらう。
+- **B（推奨）: 回収が終わるまで、Backend の再起動を越えて保つ。** `connection_session_leases` の行に `session`（Session の UUID）・`expected_version`（Compare-and-swap の期待の版）・`kept`（止められなかった印）を足す（Migration。Credential の値は書かない）。**`session` と `expected_version` は、止められなかったときではなく、Login を `auth.json` に置く前（Unit を起動する前）に Commit する。** 止められなかったと分かった時に初めて書くと、その前に Backend が落ちた（OOM・Kill。すぐの書き戻しと印の書き込みの間も含む）とき、Unit は動いたまま行は普通の行で、300 秒後に次の Session が同じ Login で動けてしまう（Codex review）。すぐの書き戻しで版が進んだら、同じ Transaction で `expected_version` を改める。**`session` のある行は、期限が切れても `acquire_session_slot` が取り直さない**（ここが 0083 の 6 の一部の Supersede）。普通に終わった Session は今のとおり自分の行を消すので、`session` のある行の期限が切れているのは「持ち主の Process が Session の途中か終わりで消えた」ときだけで、そのときは止められなかったときと同じく回収の Loop が扱う（`kept` でなくても Unit がまだ動いているかもしれない）。持ち主の Process が生きている間は今の `_hold` が更新し、Process が終わると、1 の D の回収の Loop（どの Process でも 60 秒ごと）が、行の期限が切れた後の最初の周期で「`session` があり、期限が切れている」行を持ち主を替えて引き継ぎ（行の持ち主の Compare-and-swap。同時に 2 つの Process が試しても 1 つだけが取る）、引き継いだ Process が `_hold` と 1 の確認を続ける（Unit を止められていなければ `stop` も試みる。`kept` でない行は引き継いだ時に `kept` にする）。その間、同じ Connection の新しい Session は今と同じく 60 秒待って `connection_busy`（fail-closed）。上限の時間は置かない（自然に切れると A と同じ危険になる）。代わりに 4 の知らせで Operator に止めてもらう。
 - C: B と同じだが上限（例 24 時間）を置き、過ぎたら ERROR を残して枠を返す。悪い点: 上限が来たときに CLI がまだ動いていれば A と同じ危険。推奨しない。
 - 期待の版を Session の Directory の File（`/run` の tmpfs）に書く案は採らず、DB の行にする。枠と同じ行なら、保たれていることと期待の版が 1 つの Transaction で変わり、回収の Loop は行だけを見ればよい（1 の D）。Host の再起動で `/run` が消えても、行が残るので 5 の「`auth.json` が無い」として記録して終えられる。
 
@@ -85,9 +87,9 @@ Unit の停止の確認（1）
 ### 5. 回収できなかったとき
 
 - **推奨: 一時の失敗と確かな失敗を分ける。**
-  - 一時の失敗（DB・Secret Store の I/O の誤り、Lock の Timeout）: 枠を保ち、Directory も残し、次の確認（1 の 60 秒ごと・次の起動）でやり直す。Health は `WARNING` のまま。
+  - 一時の失敗（DB・Secret Store の I/O の誤り、Lock の Timeout）: 枠を保ち、Directory も残し、次の確認（1 の 60 秒ごとの周期）でやり直す。Health は `WARNING` のまま。
   - 確かな結果（もう一度やっても変わらない）: 記録して終える（Directory を消し、枠を返す）。
-    - `auth.json` が無い（Host の再起動で `/run` が消えた・手で消された）、正しい JSON の Object でない: Login が古いかもしれない。Health を `ERROR`（`collect_failed`）にし、次の Health Check で `expired` なら Admin が入れ直す（0083 の 6 の「リスク」のとおり）。Health の `ERROR` は Health Check が `active` を返すまで残す。
+    - `auth.json` が無い（Host の再起動で `/run` が消えた・手で消された）、正しい JSON の Object でない: Login が古いかもしれない。**枠の行を消す前に、同じ Transaction で Connection の行に残る印（例 `credential_suspect_at` と理由の Code。Migration）を書く**（枠の行は消えるので、Health はそれだけでは `collect_failed` を知れない: Codex review）。System Health の `connections` はこの印がある間 `ERROR`（`collect_failed`）。印は、Provider への Health Check が `connected` を返したとき、または Admin が Credential を置き換えたときに消す。`expired` なら Admin が入れ直す（0083 の 6 の「リスク」のとおり）。代わりの案: Connection の `status` を `unavailable` にして次の Health Check に任せる（新しい列は要らないが、その間 Session も使えない）。
     - 値が変わっていない: 正常（`unchanged`）。
     - Compare-and-swap で書けない（版が進んでいた・Connection が置き換え・切断された）: 書かない（今と同じ）。`stale_version` / `detached` を Audit に残す。置き換え・切断なら古い Login はもう使われないので正常として終える。版が進んでいた（別の Session が書いた）は、2 の B では起こらないはずの状態なので ERROR の Log を残す。
   - Host の再起動で `/run/paw-cli/<uuid>` が無く、Unit も `inactive` のときは、上の「`auth.json` が無い」と同じに扱う。
@@ -95,19 +97,21 @@ Unit の停止の確認（1）
 
 ### 6. 止められなかった Session の終わりの、すぐの読み戻しを続けるか
 
-- **推奨: 続ける（今のまま）。** CLI が止まらないまま Process が落ちても、それまでの Refresh は保存されている。遅れての回収は、すぐの書き戻しの後の版（2 の `kept_version`）を期待の版にして、その後の Refresh だけを書き足す。
+- **推奨: 続ける（今のまま）。** CLI が止まらないまま Process が落ちても、それまでの Refresh は保存されている。遅れての回収は、すぐの書き戻しの後の版（2 の `expected_version`）を期待の版にして、その後の Refresh だけを書き足す。
 - 代わりの案: すぐの読み戻しをやめ、遅れての回収だけにする。悪い点: Unit が止まるまで（または Host の再起動で `/run` が消えれば永久に）Refresh が保存されない。推奨しない（#280 の背景のとおり）。
 
 ## Test（実装の PR）
 
 Fake の Launcher（`stop` が失敗し、`show` が `active` → `inactive` と変わり、cgroup の `populated` を別に変えられる）と Fake の Store で:
 
-1. 止められなかった Session → すぐの読み戻し（版 1 → 2）→ 行に `kept_session` と `kept_version = 2` → 新しい Session は `connection_busy`。
+1. Login を置く前に行に `session` と `expected_version = 1` → 止められなかった Session → すぐの読み戻し（版 1 → 2）→ 行が `kept` で `expected_version = 2` → 新しい Session は `connection_busy`。
 2. その後に CLI が `auth.json` を書き換える → `show` が `active` の間は回収しない（Directory も消えない）→ `inactive` になると回収して版 3 を書く → Directory を消す → 行を消す → 新しい Session が動く。
-3. Backend の再起動（保つ Process を捨てる）→ 行の期限が切れても他の Session は取れない → 回収の Loop が引き継いで 2 と同じ結果。再起動が最後の Heartbeat の直後（起動の時にはまだ期限が切れていない）でも、期限が切れた後の周期で引き継ぐこと。2 つの Process の Loop が同時に試しても 1 つだけが取ること。
-4. `ActiveState` が `inactive` でも cgroup が `populated 1` の間は回収しないこと。
-5. 5 の各場合（一時の失敗の再試行、`auth.json` が無い、JSON でない、Compare-and-swap の失敗、Egress の Unit の残り）と、Health・Audit・Log に Credential の値が出ないこと。
-6. 回収の Loop が、`kept_session` のない行と他の Process の動いている Session の Directory を触らないこと。
+3. Login を置いた後・止める前に Backend が落ちる（`kept` の印が書かれない）→ 行は `session` つきで期限が切れても次の Session に取られず、回収の Loop が Unit の停止を確かめてから回収すること。
+4. Backend の再起動（保つ Process を捨てる）→ 行の期限が切れても他の Session は取れない → 回収の Loop が引き継いで 2 と同じ結果。再起動が最後の Heartbeat の直後（起動の時にはまだ期限が切れていない）でも、期限が切れた後の周期で引き継ぐこと。2 つの Process の Loop が同時に試しても 1 つだけが取ること。
+5. `ActiveState` が `inactive` でも cgroup が `populated 1` の間は回収しないこと。
+6. 5 の各場合（一時の失敗の再試行、`auth.json` が無い、JSON でない、Compare-and-swap の失敗、Egress の Unit の残り）と、Health・Audit・Log に Credential の値が出ないこと。
+7. 確かな失敗の後、枠の行が消えても Health が Connection の印から `collect_failed` の `ERROR` を出し続け、`connected` の Health Check で消えること。
+8. 回収の Loop が、`session` のない行・期限の切れていない行と他の Process の動いている Session の Directory を触らないこと。
 
 ## リスク
 
@@ -117,5 +121,5 @@ Fake の Launcher（`stop` が失敗し、`show` が `active` → `inactive` と
 
 ## 承認後の扱い
 
-承認されたら `Approval` に記録し、Status を Approved に改める。実装の PR で Migration（`connection_session_leases` の 2 列）、回収の関数、回収の Loop、Health・Audit、`deploy/cli-session/README.md` の Operator の手順（Directory を手で消さない）を変える。
+承認されたら `Approval` に記録し、Status を Approved に改める。実装の PR で Migration（`connection_session_leases` の 3 列と Connection の印）、回収の関数、回収の Loop、Health・Audit、`deploy/cli-session/README.md` の Operator の手順（Directory を手で消さない）を変える。
 方針を変えるときは、この Decision を書き換えず、新しい Decision から `Supersedes` する。
