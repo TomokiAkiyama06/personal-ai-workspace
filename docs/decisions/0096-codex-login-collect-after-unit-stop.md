@@ -75,7 +75,7 @@ Unit の停止の確認（1）
     2. その後で 3 の停止の確認（`inactive` / `failed`・Job なし・cgroup が空）。Fence の前に Program が `launch.json` を読んで起動していれば、Unit は `active` か cgroup が空でないので、ここで待つ（回収しない）。
     3. 回収（読み戻しと書き戻し）。
     4. **もう一度 3 の停止の確認**。崩れていたら（起こらないはず）枠を返さず、ERROR と 4 の知らせで止める。
-    5. Directory を一時だけ 0700 にして中身（`auth.json`・Token など）を消し、すぐ 0550 に戻して空の Tombstone として残し、枠を返す（その一瞬に何かが作られても Login はもう無く、`launch.json` を見つけた次の周期で消す）。
+    5. Directory を一時だけ 0700 にして中身（`auth.json`・Token など）を消し、0550 に戻す。**戻した後に、Directory（と `config`）が空であることと、3 の停止の確認をもう一度満たすことを確かめてから** 枠を返す（Codex review: 0700 の一瞬に前の持ち主が `launch.json`・Login を作り直して `start` しうるため）。空でない・止まっていないときは枠を返さず、次の周期で 1 からやり直す（枠の行が残るので回収の Loop がまた見る）。
   枠を保っている持ち主の Process 自身が回収するとき（1 の D の周期的な確認）も、同じ 1〜5 の順にする（回収の手順を 1 つにする）。
   Tombstone は空の Directory で、`/run` の tmpfs なので Host の再起動で消える（それまで残しても数は回収した Session の数だけ）。代わりの案: Unit の Program が起動の時に変わらない Fencing の Token（行の世代）を確かめる（Program は DB を読めないので、Token の置き場所がまた Directory の File になり、上の Fence と同じことになる）。
 - C: B と同じだが上限（例 24 時間）を置き、過ぎたら ERROR を残して枠を返す。悪い点: 上限が来たときに CLI がまだ動いていれば A と同じ危険。推奨しない。
