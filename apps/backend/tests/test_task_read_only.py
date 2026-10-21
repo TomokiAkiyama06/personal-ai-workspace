@@ -9,6 +9,12 @@ completes real tasks.
 import unittest
 import uuid
 
+from paw_backend.orchestrator.limits import (
+    MAX_KEY_LENGTH,
+    MAX_NODES,
+    MAX_SUMMARY_CHARS,
+    MAX_TITLE_CHARS,
+)
 from paw_backend.tasks import (
     IllegalTransitionError,
     InvalidCommandArgumentError,
@@ -151,6 +157,29 @@ class ReadOnlyTaskServiceTest(PostgresTaskTestCase):
         snapshot = await self.service.restore(task_id, log_limit=0)
         self.assertEqual(snapshot.state, S.COMPLETED)
         self.assertEqual(snapshot.last_event.detail["result"], result)
+
+    async def test_the_largest_result_a_dag_can_give_fits(self):
+        # Codex review of #284: 32 nodes, each with the longest title and
+        # summary a node may have, in characters that JSON escapes to 12 bytes.
+        task_id = await self.read_only_task()
+        await self.service.execute(task_id, C.START, actor=self.system)
+        result = {
+            "nodes": [
+                {
+                    "key": f"n{index:02d}" + "x" * (MAX_KEY_LENGTH - 3),
+                    "role": "researcher",
+                    "title": "\U0001f600" * MAX_TITLE_CHARS,
+                    "summary": "\U0001f600" * MAX_SUMMARY_CHARS,
+                }
+                for index in range(MAX_NODES)
+            ]
+        }
+
+        event = await self.service.execute(
+            task_id, C.COMPLETE, actor=self.system, result=result
+        )
+
+        self.assertEqual(event.detail["result"], result)
 
     async def test_it_is_never_evaluated(self):
         task_id = await self.read_only_task()

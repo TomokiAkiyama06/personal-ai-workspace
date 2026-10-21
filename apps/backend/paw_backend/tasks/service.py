@@ -303,8 +303,11 @@ DEFAULT_INSPECTION_TIMEOUT = 10.0
 _INPUT_TOO_LARGE = f"input must be a JSON object of at most {MAX_INPUT_BYTES} bytes"
 # The result a read-only task completes with (``execute(..., result=...)``, issue
 # #279): the summary of each node of its DAG, at most ``MAX_RESULT_BYTES`` of JSON
-# (32 nodes of 2 000 characters each fit even when every character is escaped).
-MAX_RESULT_BYTES = 512 * 1024
+# as measured here (``json.dumps``, ASCII: a character outside the BMP is 12
+# bytes). The largest a DAG can give, 32 nodes with a 100-character title and a
+# 2 000-character summary of such characters, is about 810 KiB (Codex review of
+# #284): it must fit, or a successful task would fail at its completion.
+MAX_RESULT_BYTES = 1024 * 1024
 _RESULT_TOO_LARGE = f"result must be a JSON object of at most {MAX_RESULT_BYTES} bytes"
 _INPUT_NOT_JSON = (
     "input must contain only JSON values "
