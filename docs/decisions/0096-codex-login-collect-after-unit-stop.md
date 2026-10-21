@@ -47,7 +47,7 @@ Unit の停止の確認（1）
   └─ どの Backend の Process でも動く回収の Loop（60 秒ごと）: 期限の切れた Session つきの行を引き継ぐ
 停止を確かめたら（3 の条件）
   ├─ auth.json を読み戻し、変わっていれば rotate_credential（期待の版は行の版）
-  ├─ Directory を消す
+  ├─ Directory の中身を消し、空の Directory を Tombstone として残す（2 の Fencing）
   └─ 枠を返す（行を消す）、Health を戻す、Audit connection.session_collected
 回収できなかったら（5）
   └─ 一時の失敗は保ったまま次の確認で再試行、確かな失敗は記録して枠を返す
@@ -67,13 +67,16 @@ Unit の停止の確認（1）
 ### 2. 保たれた枠がいつまで続くか（Backend の再起動を越えるか）
 
 - A: 今のまま Process の間だけ。悪い点: 再起動の後 300 秒で期限が切れ、CLI がまだ動いているかもしれないのに次の Session が同じ Login で動く（0083 の 6 が防ごうとした「並列の Session が互いの Token を失効させる」そのもの）。
-- **B（推奨）: 回収が終わるまで、Backend の再起動を越えて保つ。** `connection_session_leases` の行に `session`（Session の UUID）・`expected_version`（Compare-and-swap の期待の版）・`kept`（止められなかった印）を足す（Migration。Credential の値は書かない）。**`session` と `expected_version` は、止められなかったときではなく、Login を `auth.json` に置く前（Unit を起動する前）に Commit する。** 止められなかったと分かった時に初めて書くと、その前に Backend が落ちた（OOM・Kill。すぐの書き戻しと印の書き込みの間も含む）とき、Unit は動いたまま行は普通の行で、300 秒後に次の Session が同じ Login で動けてしまう（Codex review）。すぐの書き戻しで版が進んだら、同じ Transaction で `expected_version` を改める。**`session` のある行は、期限が切れても `acquire_session_slot` が取り直さない**（ここが 0083 の 6 の一部の Supersede）。普通に終わった Session は今のとおり自分の行を消すので、`session` のある行の期限が切れているのは「持ち主の Process が Session の途中か終わりで消えた」ときだけで、そのときは止められなかったときと同じく回収の Loop が扱う（`kept` でなくても Unit がまだ動いているかもしれない）。持ち主の Process が生きている間は今の `_hold` が更新し、Process が終わると、1 の D の回収の Loop（どの Process でも 60 秒ごと）が、行の期限が切れた後の最初の周期で「`session` があり、期限が切れている」行を持ち主を替えて引き継ぎ（行の持ち主の Compare-and-swap。同時に 2 つの Process が試しても 1 つだけが取る）、引き継いだ Process が `_hold` と 1 の確認を続ける（Unit を止められていなければ `stop` も試みる。`kept` でない行は引き継いだ時に `kept` にする）。その間、同じ Connection の新しい Session は今と同じく 60 秒待って `connection_busy`（fail-closed）。上限の時間は置かない（自然に切れると A と同じ危険になる）。代わりに 4 の知らせで Operator に止めてもらう。
+- **B（推奨）: 回収が終わるまで、Backend の再起動を越えて保つ。** `connection_session_leases` の行に `session`（Session の UUID）・`credential_handle`（Session に渡した Credential の Handle。値ではない不透明な ID）・`expected_version`（渡した版）・`kept`（止められなかった印）を足す（Migration。Credential の値は書かない）。**`session`・`credential_handle`・`expected_version` は、止められなかったときではなく、Login を `auth.json` に置く前（Unit を起動する前）に Commit する。** 止められなかったと分かった時に初めて書くと、その前に Backend が落ちた（OOM・Kill。すぐの書き戻しと印の書き込みの間も含む）とき、Unit は動いたまま行は普通の行で、300 秒後に次の Session が同じ Login で動けてしまう（Codex review）。すぐの書き戻しで版が進んだら `expected_version` を改めるが、Secret Store（File）と DB の行は 1 つの Transaction にできないので、改める前に落ちても困らないようにする（下の「版の突き合わせ」）。**`session` のある行は、期限が切れても `acquire_session_slot` が取り直さない**（ここが 0083 の 6 の一部の Supersede）。普通に終わった Session は今のとおり自分の行を消すので、`session` のある行の期限が切れているのは「持ち主の Process が Session の途中か終わりで消えた」ときだけで、そのときは止められなかったときと同じく回収の Loop が扱う（`kept` でなくても Unit がまだ動いているかもしれない）。持ち主の Process が生きている間は今の `_hold` が更新し、Process が終わると、1 の D の回収の Loop（どの Process でも 60 秒ごと）が、行の期限が切れた後の最初の周期で「`session` があり、期限が切れている」行を持ち主を替えて引き継ぎ（行の持ち主の Compare-and-swap。同時に 2 つの Process が試しても 1 つだけが取る）、引き継いだ Process が `_hold` と 1 の確認を続ける（Unit を止められていなければ `stop` も試みる。`kept` でない行は引き継いだ時に `kept` にする）。その間、同じ Connection の新しい Session は今と同じく 60 秒待って `connection_busy`（fail-closed）。上限の時間は置かない（自然に切れると A と同じ危険になる）。代わりに 4 の知らせで Operator に止めてもらう。
+  - **Handle の突き合わせ**: 遅れての回収は行の `credential_handle` で `rotate_credential` を呼ぶ（今の Connection の Handle ではない）。`rotate_credential` は Handle の Lock の中で、Connection がまだその Handle を指していることを確かめる（`still_attached`）ので、Admin が置き換えた後は `detached` になり、新しい Credential を古い Session の Login で上書きしない（Codex review）。
+  - **版の突き合わせ**: すぐの書き戻しが Secret Store に版 2 を書いた後、行の `expected_version` を 1 から 2 に改める前に Backend が落ちると、行は 1 のまま残る。遅れての回収が行の版で Compare-and-swap をすると `stale_version` になり、CLI がその後に Refresh した唯一の使える Login を捨ててしまう（Codex review）。そこで遅れての回収の期待の版は、**行の `expected_version` 以上の、その Handle の今の版** とする（Handle の Lock の中で読む）。理由: `session` のある行がある間、その Connection の枠は他の Session に取られず、同じ Handle に `rotate_credential` を呼ぶのはこの Session の書き戻しだけ（Admin の置き換えは別の Handle を作る）なので、行の版より進んだ版はこの Session 自身が書いたもの。比べる相手も今の版の値にする（同じなら `unchanged`）。行の `expected_version` は監査と、今の版がそれより小さいとき（起こらないはず）に ERROR として止めるためだけに使う。
+  - **前の持ち主の Fencing**: 前の持ち主の Process は、死んだのではなく止まっていた（SIGSTOP・長い GC・Host の負荷）だけかもしれない。引き継いだ後に前の持ち主が再開して、同じ UUID の Login を置く・Unit を起動すると、2 つの CLI が同じ Login で動く（Codex review）。そこで (a) 持ち主は外への副作用（Login を置く・Unit を起動する・書き戻す）の直前に、自分の期限（今の `SessionSlot` の `ttl - margin`、単調時計）がまだ来ていないことと、行の `holder` がまだ自分であること（Renew の成功）を確かめ、どちらかが崩れたら Session を永久にやめる（その UUID を二度と起動しない）。(b) 加えて回収の Loop は、回収の後に Session の Directory を消し切らず、中身（`launch.json`・`auth.json`・Token など）を消した空の Directory を、書けない Mode（0500）にして印（Tombstone）として残す。`create_session` の `mkdir` は既にある名前で失敗し、Backend は書けない Directory に `launch.json` も Login も作れず、Unit の Program は `launch.json` がなければ起動を拒むので、(a) の確認と起動の間で止まった前の持ち主が後から `start` しても、CLI は Login なしで動かない。Tombstone は空の Directory で、`/run` の tmpfs なので Host の再起動で消える（それまで残しても数は回収した Session の数だけ）。
 - C: B と同じだが上限（例 24 時間）を置き、過ぎたら ERROR を残して枠を返す。悪い点: 上限が来たときに CLI がまだ動いていれば A と同じ危険。推奨しない。
-- 期待の版を Session の Directory の File（`/run` の tmpfs）に書く案は採らず、DB の行にする。枠と同じ行なら、保たれていることと期待の版が 1 つの Transaction で変わり、回収の Loop は行だけを見ればよい（1 の D）。Host の再起動で `/run` が消えても、行が残るので 5 の「`auth.json` が無い」として記録して終えられる。
+- 期待の版を Session の Directory の File（`/run` の tmpfs）に書く案は採らず、DB の行にする。枠と同じ行なら、Session・Handle・期待の版・保たれていることが枠と一緒に引き継がれ、回収の Loop は行だけを見ればよい（1 の D）。Host の再起動で `/run` が消えても、行が残るので 5 の「`auth.json` が無い」として記録して終えられる。
 
 ### 3. 「止まった」と見なす条件（0091 の Session ごとの Egress・Bridge を含む）
 
-- **推奨: 回収の条件は、(a) `paw-cli-session@<uuid>.service` の `ActiveState` が `inactive` または `failed` で Job がなく、かつ (b) その Unit の cgroup が空であること**（決まった Path `/sys/fs/cgroup/system.slice/system-paw\x2dcli\x2dsession.slice/paw-cli-session@<uuid>.service` が無いか、その `cgroup.events` が `populated 0`。`populated` は子孫の cgroup も含むので、`Delegate=yes` の下の Container の cgroup も数える。読むだけで、Backend の User に読める）。この Unit は `--cgroups=split` で Container（と `conmon`）の cgroup を Unit の cgroup の下に置く（0092 の 4）ので、cgroup が空なら `auth.json` を書ける Process（Container の中の CLI）は残っていない。(a) だけでは足りない: Unit は `Type=exec` で `ExitType=` を指定していない（既定の `main`）ので、systemd は主の Process（`paw_cli_session_run.py`）が終わった時点で Unit を止まったと見なし、`KillMode=mixed` の SIGKILL の後に残った Process の終わりを待たないことがある（Codex review。`systemd.service(5)` の `ExitType=`）。(b) が満たされないときは回収せず、次の周期で見直す。代わりの案: Unit に `ExitType=cgroup` を足して (a) だけにする（Unit の変更と配備の確認が要る。(b) と併せてもよい）。同じ UUID の Unit を Backend がもう一度 `start` することはない（UUID は Session ごとに新しく、polkit が許すのは Backend の `start` だけ）ので、`inactive` を見た後に同じ Unit が動き出すことはない。
+- **推奨: 回収の条件は、(a) `paw-cli-session@<uuid>.service` の `ActiveState` が `inactive` または `failed` で Job がなく、かつ (b) その Unit の cgroup が空であること**（決まった Path `/sys/fs/cgroup/system.slice/system-paw\x2dcli\x2dsession.slice/paw-cli-session@<uuid>.service` が無いか、その `cgroup.events` が `populated 0`。`populated` は子孫の cgroup も含むので、`Delegate=yes` の下の Container の cgroup も数える。読むだけで、Backend の User に読める）。この Unit は `--cgroups=split` で Container（と `conmon`）の cgroup を Unit の cgroup の下に置く（0092 の 4）ので、cgroup が空なら `auth.json` を書ける Process（Container の中の CLI）は残っていない。(a) だけでは足りない: Unit は `Type=exec` で `ExitType=` を指定していない（既定の `main`）ので、systemd は主の Process（`paw_cli_session_run.py`）が終わった時点で Unit を止まったと見なし、`KillMode=mixed` の SIGKILL の後に残った Process の終わりを待たないことがある（Codex review。`systemd.service(5)` の `ExitType=`）。(b) が満たされないときは回収せず、次の周期で見直す。代わりの案: Unit に `ExitType=cgroup` を足して (a) だけにする（Unit の変更と配備の確認が要る。(b) と併せてもよい）。同じ UUID の Unit を Backend がもう一度 `start` することは、2 の Fencing（持ち主の確認と Tombstone）で防ぐ（UUID は Session ごとに新しく、polkit が許すのは Backend の `start` だけ）。
 - **0091 の Egress（`paw-egress-session@<uuid>.socket` / `.service`）は、同時に読んで確かめるが、回収の条件にはしない。** 両方は `BindsTo=` で Session の Unit と一緒に止まるはず。Proxy の Account（`paw-egress`）は `paw-cli-bridge` に入らない（0088・0091）ので `auth.json` を書けず、Socket は止まった Container にしか Mount されていないので、残っても Login の古さの原因にならない。残っていたら ERROR の Log と 4 の知らせ（`egress_unit_left`）を出し、Operator に止めてもらう（Backend の polkit は Egress の Unit を止められない）。`/run/paw-egress/session/<uuid>.sock` が残っているかも同じく記録する（`RemoveOnStop=yes`）。
 - **MCP の Bridge** は Backend の中の Server で、Session の `finally` で既に閉じている（再起動の後は存在しない）。回収の前に、その Session の Bridge が同じ Process で閉じていることを確かめる（閉じていなければ閉じる）だけにする。
 - 代わりの案: Egress の Unit も止まっていることを回収の条件にする（より厳しいが、Backend からは止められないので、Egress だけが残ると Connection が塞がったままになる）。
@@ -88,7 +91,7 @@ Unit の停止の確認（1）
 
 - **推奨: 一時の失敗と確かな失敗を分ける。**
   - 一時の失敗（DB・Secret Store の I/O の誤り、Lock の Timeout）: 枠を保ち、Directory も残し、次の確認（1 の 60 秒ごとの周期）でやり直す。Health は `WARNING` のまま。
-  - 確かな結果（もう一度やっても変わらない）: 記録して終える（Directory を消し、枠を返す）。
+  - 確かな結果（もう一度やっても変わらない）: 記録して終える（Directory の中身を消して Tombstone にし、枠を返す）。
     - `auth.json` が無い（Host の再起動で `/run` が消えた・手で消された）、正しい JSON の Object でない: Login が古いかもしれない。**枠の行を消す前に、同じ Transaction で Connection の行に残る印（例 `credential_suspect_at` と理由の Code。Migration）を書く**（枠の行は消えるので、Health はそれだけでは `collect_failed` を知れない: Codex review）。System Health の `connections` はこの印がある間 `ERROR`（`collect_failed`）。印は、Provider への Health Check が `connected` を返したとき、または Admin が Credential を置き換えたときに消す。`expired` なら Admin が入れ直す（0083 の 6 の「リスク」のとおり）。代わりの案: Connection の `status` を `unavailable` にして次の Health Check に任せる（新しい列は要らないが、その間 Session も使えない）。
     - 値が変わっていない: 正常（`unchanged`）。
     - Compare-and-swap で書けない（版が進んでいた・Connection が置き換え・切断された）: 書かない（今と同じ）。`stale_version` / `detached` を Audit に残す。置き換え・切断なら古い Login はもう使われないので正常として終える。版が進んでいた（別の Session が書いた）は、2 の B では起こらないはずの状態なので ERROR の Log を残す。
@@ -105,13 +108,15 @@ Unit の停止の確認（1）
 Fake の Launcher（`stop` が失敗し、`show` が `active` → `inactive` と変わり、cgroup の `populated` を別に変えられる）と Fake の Store で:
 
 1. Login を置く前に行に `session` と `expected_version = 1` → 止められなかった Session → すぐの読み戻し（版 1 → 2）→ 行が `kept` で `expected_version = 2` → 新しい Session は `connection_busy`。
-2. その後に CLI が `auth.json` を書き換える → `show` が `active` の間は回収しない（Directory も消えない）→ `inactive` になると回収して版 3 を書く → Directory を消す → 行を消す → 新しい Session が動く。
+2. その後に CLI が `auth.json` を書き換える → `show` が `active` の間は回収しない（Directory も消えない）→ `inactive` になると回収して版 3 を書く → Directory を Tombstone にする → 行を消す → 新しい Session が動く。
 3. Login を置いた後・止める前に Backend が落ちる（`kept` の印が書かれない）→ 行は `session` つきで期限が切れても次の Session に取られず、回収の Loop が Unit の停止を確かめてから回収すること。
 4. Backend の再起動（保つ Process を捨てる）→ 行の期限が切れても他の Session は取れない → 回収の Loop が引き継いで 2 と同じ結果。再起動が最後の Heartbeat の直後（起動の時にはまだ期限が切れていない）でも、期限が切れた後の周期で引き継ぐこと。2 つの Process の Loop が同時に試しても 1 つだけが取ること。
 5. `ActiveState` が `inactive` でも cgroup が `populated 1` の間は回収しないこと。
 6. 5 の各場合（一時の失敗の再試行、`auth.json` が無い、JSON でない、Compare-and-swap の失敗、Egress の Unit の残り）と、Health・Audit・Log に Credential の値が出ないこと。
 7. 確かな失敗の後、枠の行が消えても Health が Connection の印から `collect_failed` の `ERROR` を出し続け、`connected` の Health Check で消えること。
-8. 回収の Loop が、`session` のない行・期限の切れていない行と他の Process の動いている Session の Directory を触らないこと。
+8. 行の `expected_version` が 1 のまま Secret Store が版 2（すぐの書き戻しの後に落ちた）でも、遅れての回収が版 2 を期待の版にして版 3 を書くこと。Admin が Credential を置き換えた後は、行の Handle で `detached` になり、新しい Credential を書き換えないこと。
+9. 前の持ち主が引き継がれた後に再開しても、Login を置かず Unit を起動しないこと、Tombstone の Directory で `create_session` と Unit の Program が拒むこと。
+10. 回収の Loop が、`session` のない行・期限の切れていない行と他の Process の動いている Session の Directory を触らないこと。
 
 ## リスク
 
@@ -121,5 +126,5 @@ Fake の Launcher（`stop` が失敗し、`show` が `active` → `inactive` と
 
 ## 承認後の扱い
 
-承認されたら `Approval` に記録し、Status を Approved に改める。実装の PR で Migration（`connection_session_leases` の 3 列と Connection の印）、回収の関数、回収の Loop、Health・Audit、`deploy/cli-session/README.md` の Operator の手順（Directory を手で消さない）を変える。
+承認されたら `Approval` に記録し、Status を Approved に改める。実装の PR で Migration（`connection_session_leases` の 4 列と Connection の印）、回収の関数、回収の Loop、Health・Audit、`deploy/cli-session/README.md` の Operator の手順（Directory を手で消さない）を変える。
 方針を変えるときは、この Decision を書き換えず、新しい Decision から `Supersedes` する。
