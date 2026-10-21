@@ -36,18 +36,22 @@
 
 ```text
 Login を置く前（どの Codex の Session でも。2）
-  └─ 枠の行に Session の UUID と渡した Credential の版を書く（Unit を起動する前に Commit）
+  └─ 枠の行に Session の UUID・渡した Credential の Handle と版を書く（Unit を起動する前に Commit）
 Session の終わり（CLI を止められなかった）
   ├─ すぐ読み戻して書き戻す（今のまま。6）
-  ├─ 枠の行を「保たれた」にする（`kept`）。すぐの書き戻しの後なら期待の版をその新しい版に改める（2）
+  ├─ 枠の行を「保たれた」にする（`kept`）。すぐの書き戻しの後なら行の版をその新しい版に改める（改める前に落ちても 2 の「版の突き合わせ」で困らない）
   ├─ Directory は残す。MCP の Bridge は閉じる（今のまま）
   └─ System Health の connections を WARNING、Audit connection.session_kept（4）
 Unit の停止の確認（1）
   ├─ 枠を保つ Process が 60 秒ごとに systemctl show（読むだけ）
   └─ どの Backend の Process でも動く回収の Loop（60 秒ごと）: 期限の切れた Session つきの行を引き継ぐ
-停止を確かめたら（3 の条件）
-  ├─ auth.json を読み戻し、変わっていれば rotate_credential（期待の版は行の版）
-  ├─ Directory の中身を消し、空の Directory を Tombstone として残す（2 の Fencing）
+回収（2 の Fencing の 1〜5 の順）
+  ├─ 起動を塞ぐ Fence を置く（launch.json を消し、Directory と config を 0550）
+  ├─ 停止を確かめる（3 の条件）
+  ├─ auth.json を読み戻し、変わっていれば行の Handle で rotate_credential
+  │   （期待の版は、行の版以上の、その Handle の今の版。2 の「版の突き合わせ」）
+  ├─ もう一度停止を確かめる
+  ├─ Directory の中身を消し、空の Tombstone（0550）として残し、空なことと停止をもう一度確かめる
   └─ 枠を返す（行を消す）、Health を戻す、Audit connection.session_collected
 回収できなかったら（5）
   └─ 一時の失敗は保ったまま次の確認で再試行、確かな失敗は記録して枠を返す
@@ -107,7 +111,7 @@ Unit の停止の確認（1）
 
 ### 6. 止められなかった Session の終わりの、すぐの読み戻しを続けるか
 
-- **推奨: 続ける（今のまま）。** CLI が止まらないまま Process が落ちても、それまでの Refresh は保存されている。遅れての回収は、すぐの書き戻しの後の版（2 の `expected_version`）を期待の版にして、その後の Refresh だけを書き足す。
+- **推奨: 続ける（今のまま）。** CLI が止まらないまま Process が落ちても、それまでの Refresh は保存されている。遅れての回収は、すぐの書き戻しの後の版（2 の「版の突き合わせ」: 行の `expected_version` 以上の、その Handle の今の版）を期待の版にして、その後の Refresh だけを書き足す。
 - 代わりの案: すぐの読み戻しをやめ、遅れての回収だけにする。悪い点: Unit が止まるまで（または Host の再起動で `/run` が消えれば永久に）Refresh が保存されない。推奨しない（#280 の背景のとおり）。
 
 ## Test（実装の PR）
