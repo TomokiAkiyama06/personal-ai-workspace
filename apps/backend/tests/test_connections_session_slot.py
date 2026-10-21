@@ -336,6 +336,26 @@ class KeptSlotTest(SlotCase):
             await self.start(self.slot_service(second))
         self.assertEqual(second.secrets, [])
 
+    async def test_a_kept_slot_is_taken_again_after_its_heartbeat_would_end(self):
+        # The heartbeat was healthy when the session ended (the slot was kept
+        # without being lost); later its row disappears (a deleted lease, as
+        # after an outage): the process takes the slot again and keeps it,
+        # instead of a heartbeat that stops and lets another session in.
+        service = self.slot_service(StuckSession())
+        await self.start(service)
+        (lease,) = self.leases()
+        mine = lease["holder"]
+        self.clean_leases()
+        for _ in range(50):
+            await asyncio.sleep(0.1)
+            if [row["holder"] for row in self.leases()] == [mine]:
+                break
+        self.assertEqual([row["holder"] for row in self.leases()], [mine])
+        second = ExclusiveSession()
+        with self.assertRaises(SessionSlotBusyError):
+            await self.start(self.slot_service(second))
+        self.assertEqual(second.secrets, [])
+
 
 class StuckOnCancelSession(ExclusiveSession):
     """An adapter whose CLI could not be stopped when it was cancelled."""

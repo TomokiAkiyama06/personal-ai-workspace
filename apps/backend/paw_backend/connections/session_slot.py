@@ -21,8 +21,9 @@ revision ``0239``), not a lock of one process:
   only once the lease has expired, ``margin`` seconds later at the earliest;
 * :meth:`release` stops the heartbeat and deletes the holder's row, unless
   the adapter said its CLI could not be stopped (:meth:`keep`): then the slot
-  stays held, its heartbeat running, as long as this process lives (the
-  operator stops the unit; a process that ends lets the lease expire).
+  stays held as long as this process lives, the heartbeat replaced by a
+  holder that renews it or takes it again after any failure (the operator
+  stops the unit; a process that ends lets the lease expire).
 
 The margin is the stop's worst case on production's launcher
 (``cli_session.SystemdLauncher``, each ``systemctl`` call bounded by 30 s):
@@ -201,6 +202,13 @@ class SessionSlot:
         login): :meth:`release` will keep the slot held."""
         self._keep = True
 
+    async def _stop_heartbeat(self) -> None:
+        if self._task is not None:
+            self._task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._task
+            self._task = None
+
     async def release(self) -> None:
         """Stop the heartbeat and delete the holder's row (best effort: a row
         left behind expires by itself). After :meth:`keep`, neither: the slot
@@ -212,16 +220,14 @@ class SessionSlot:
                 " runs): kind=%s",
                 self._kind.value,
             )
-            if self._task is None or self._task.done():
-                # The heartbeat gave up (the slot was being lost when the
-                # session was cancelled): hold it again from here on.
-                self._task = asyncio.ensure_future(self._hold())
+            # The heartbeat gives up once a renewal fails (and may already
+            # have, when the slot was being lost as the session was
+            # cancelled): hold it from here on, renewing or taking it again
+            # after any later failure.
+            await self._stop_heartbeat()
+            self._task = asyncio.ensure_future(self._hold())
             return
-        if self._task is not None:
-            self._task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._task
-            self._task = None
+        await self._stop_heartbeat()
         try:
             await self._run(self._store.release_session_slot(self._kind, self.holder))
         except Exception as error:
