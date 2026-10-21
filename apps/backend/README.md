@@ -260,6 +260,7 @@ Endpoint は `/api/v1` 以下です。OpenAPI Schema は `/api/v1/openapi.json` 
 | `/api/v1/memory/*` | Memory 画面の Scope の木と件数・一覧（検索）・履歴・出典、編集と復元（`expected_version`、衝突は 409 `memory_version_conflict`）。入口は本人の Memory への `memory.read`。[Memory の HTTP API](#memory-の-http-apiissue-186decision-0068approved) |
 | `/api/v1/memory/preferences/*` | Inferred Preference の候補と根拠・推奨 Scope、確認（`acknowledge_high_risk` なしの高リスクは 409）・保存しない・自由入力の構造化プレビュー。入口は本人の Memory への `memory.read`。[Inferred Preference の確認 Flow](#inferred-preference-の確認-flowissue-38paw-044decision-0081) |
 | `/api/v1/usage`、`/api/v1/quotas/me`、`/api/v1/users/{id}/quotas*`、`/api/v1/admin/users` | 使用状況の集計、Quota の閲覧と変更（Passkey Step-up）、User の一覧。[使用状況と Quota の HTTP API](#使用状況と-quota-の-http-apiissue-187decision-0069approved) |
+| `/api/v1/admin/connections*` | 共有の Codex / Claude の Connection の状態と、Secret Store の Credential の Handle の結び付け・差し替え（Compare-and-swap）・切断（`admin.config.manage` + Passkey Step-up）。[Connection の Credential の HTTP API](#connection-の-credential-の-http-apiissue-277) |
 
 Readiness は 200 または 503 で、Body の形は同じです。
 
@@ -2149,6 +2150,24 @@ CHECK 制約が、状態と終了・時間・Token・失敗の種類の対応（
 - Local（Issue #187 の 5、Decision 0077）: `tokens.local` は Local の Runtime が実行中に Task の Budget へ報告した `TOKENS` の合計、`gpu_seconds` は `local_gpu` に置かれた実行が Lease を持った秒数（Budget の `GPU_SECONDS` と同じ切り上げ。CPU への Fallback は数えない）、`daily[].local` と `agents` の `local` は Local の実行のある Task です。用途別は Codex / Claude だけです（Local の実行には用途の Category がない）。`escalations` は期間内に Escalation した Task の数で、Orchestrator の Escalation はすべて Loop 検知からなので `loop_detected` に数え、`failed` は 0 です。User 別の Task・Token は両方の合計です。
 - Quota の変更は、Capability → Session の Passkey Step-up（`AuthService.require_passkey_step_up`、変更の直前の別 Transaction）→ Service の認可と Owner の規則、の順に確かめます。Step-up の拒否は `connection.quota.set` / `.remove` の Deny（reason `step_up_required` / `step_up_method_insufficient`）として Audit に残します。
 - Test: `tests/test_connections_report.py`（期間と集計、認可）、`tests/test_local_usage_report.py`（Local・GPU 時間・Escalation の集計）、`tests/test_usage_api.py`（HTTP、Step-up、認可の否定）。
+
+### Connection の Credential の HTTP API（Issue #277）
+
+`paw_backend/api/v1/connections.py`。[Decision 0087](../../docs/decisions/0087-cli-secret-store-and-egress.md) の 2（平文は Server の上の管理 Command で Store に入れ、Owner / Admin は Handle を `connect` / `replace_credential` に渡す）の入口です。Web の画面（Design canvas の PAdminConnections）はまだありません。
+
+| Endpoint | 認可 | 内容 |
+| --- | --- | --- |
+| `GET /api/v1/admin/connections` | `admin.config.manage` | 種類ごと（`codex`・`claude`、未設定も）に、状態（`connected` / `unavailable` / `expired`）・有効・最後の確認・Credential（Store が持つか `stored`、版 `version`）・`revision`。値も Handle も返さない |
+| `POST /api/v1/admin/connections/{kind}` | 同上 + **Passkey Step-up** | Body `{"secret_handle": "cred_..."}`。Connection を作る（201）。既にあれば 409 `connection_exists` |
+| `PUT /api/v1/admin/connections/{kind}/credential` | 同上 | Body `{"secret_handle", "expected_revision"}`。`GET` の `revision` の Credential のままのときだけ差し替える（同じ文の条件。違えば 409 `stale_connection_credential`。読み直す） |
+| `DELETE /api/v1/admin/connections/{kind}` | 同上 | Connection を消す（使用量の履歴は残る）。参照されなくなった Credential は消える |
+
+- Store がその種類の Credential として持っていない Handle（無い・消えた・別の種類）は 422 `credential_not_stored`。Handle の形でない値は 422 `validation_error`（値は返さない）。Secret Store が設定されていない構成（`PAW_SECRET_STORE_DIR` なし）は、Handle を確かめられないので、結び付けと差し替えを 503 `secret_store_not_configured` で断る。
+- `revision` は Connection の ID と Handle の一方向の Digest（Handle は読み戻せない）。差し替えと Connection の作り直しで変わり、Rotation（同じ Credential の Refresh）と Health Check では変わらない。
+- Audit: `connection.connect` / `.replace` / `.disconnect`（成功は `succeeded`、古い `revision` は `.replace` の Deny `stale_connection_credential`、Step-up の拒否は各 Action の Deny `step_up_required` / `step_up_method_insufficient`）。ID と Enum だけで、Handle も値も入れない。
+- Step-up: Decision 0016 は Credential の差し替え・削除を PAW-023 の後に Step-up の対象にすると承認している。結び付け（初めての登録）も Credential を扱う変更なので同じにした。
+- 結び付けた・差し替えた Connection は、Health Check が確かめるまで `unavailable`（Decision 0016）。Health Check を動かすのは Codex / Claude の Runtime の側（`CloudPolicy` の承認の後）。
+- Test: `tests/test_connections_api.py`（HTTP、権限なし・Step-up なしの拒否、存在しない・別の種類の Handle、CAS、Audit、値と Handle が答え・Audit・Log に出ないこと）、`tests/test_connections_credential_store.py`（Service の状態と CAS）。
 
 ### Test
 

@@ -192,8 +192,16 @@ CASES: dict[str, tuple[dict[str, Any], dict[str, list[Any]]]] = {
         },
     ),
     "replace_credential": (
-        {"kind": ConnectionKind.CODEX, "secret_handle": handle(1)},
-        {"kind": not_a_member("codex"), "secret_handle": NOT_A_HANDLE},
+        {
+            "kind": ConnectionKind.CODEX,
+            "secret_handle": handle(1),
+            "expected_revision": "0" * 32,
+        },
+        {
+            "kind": not_a_member("codex"),
+            "secret_handle": NOT_A_HANDLE,
+            "expected_revision": [1, b"0" * 32, ["0" * 32]],
+        },
     ),
     "disable": ({"kind": ConnectionKind.CODEX}, {"kind": not_a_member("codex")}),
     "enable": ({"kind": ConnectionKind.CODEX}, {"kind": not_a_member("codex")}),
@@ -203,6 +211,7 @@ CASES: dict[str, tuple[dict[str, Any], dict[str, list[Any]]]] = {
         {"kind": not_a_member("codex")},
     ),
     "list_connections": ({}, {}),
+    "credential_status": ({}, {}),
     "availability": ({}, {}),
     "set_quota": (
         {

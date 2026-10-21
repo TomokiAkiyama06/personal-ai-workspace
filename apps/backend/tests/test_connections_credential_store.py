@@ -6,7 +6,9 @@ real PostgreSQL, the real file store in a temporary directory.
   deleted, one still referred to is kept;
 * ``rotate_credential`` writes the next version of the same handle only from
   the current one, and is audited as the system's;
-* the store's cleanup asks the database whether a handle is referred to.
+* the store's cleanup asks the database whether a handle is referred to;
+* the credential's status (stored, version, revision; never the value or the
+  handle) and the compare-and-swap of a replacement (issue #277).
 """
 
 import os
@@ -18,8 +20,10 @@ from pathlib import Path
 from paw_backend.connections import (
     ConnectionKind,
     ConnectionNotFoundError,
+    ConnectionPermissionDeniedError,
     CredentialNotStoredError,
     FileSecretStore,
+    StaleConnectionCredentialError,
     StaleCredentialVersionError,
 )
 
@@ -111,6 +115,138 @@ class RotationTest(CredentialStoreCase):
         with self.assertRaises(ConnectionNotFoundError):
             await self.service.rotate_credential(CLAUDE, stored, 1, VALUE)
         self.assertEqual((await self.store.read(stranger)).version, 1)
+
+
+class CredentialStatusTest(CredentialStoreCase):
+    """Issue #277: what an Owner / Admin sees of the attached credential."""
+
+    async def status(self, who=None):
+        return await self.service.credential_status(self.principal(who or self.admin))
+
+    async def test_the_status_holds_kind_state_and_version_never_the_secret(self):
+        stored = await self.store.put(CODEX, VALUE)
+        await self.connect(CODEX, stored)
+        await self.service.rotate_credential(CODEX, stored, 1, OTHER)
+
+        (status,) = await self.status()
+
+        self.assertIs(status.connection.kind, CODEX)
+        self.assertEqual(status.connection.status.value, "unavailable")
+        self.assertIs(status.stored, True)
+        self.assertEqual(status.version, 2)
+        self.assertNotIn(stored, repr(status))
+        self.assertNotIn(stored, status.revision)
+        for secret in (VALUE, OTHER):
+            self.assertNotIn(secret, repr(status))
+
+    async def test_a_credential_gone_from_the_store_is_not_stored(self):
+        stored = await self.store.put(CLAUDE, VALUE)
+        await self.connect(CLAUDE, stored)
+        shutil.rmtree(self.store._root / stored)
+
+        (status,) = await self.status()
+
+        self.assertEqual((status.stored, status.version), (False, None))
+
+    async def test_without_a_store_nothing_is_said_of_the_credential(self):
+        service = self.new_service()
+        await service.connect(self.principal(self.admin), CODEX, handle(1))
+
+        (status,) = await service.credential_status(self.principal(self.owner))
+
+        self.assertEqual((status.stored, status.version), (None, None))
+
+    async def test_only_an_owner_or_admin_sees_it(self):
+        with self.assertRaises(ConnectionPermissionDeniedError):
+            await self.status(self.user)
+        self.assertEqual(await self.status(self.owner), ())
+
+    async def test_the_revision_changes_with_a_replacement_not_a_rotation(self):
+        first = await self.store.put(CODEX, VALUE)
+        second = await self.store.put(CODEX, OTHER)
+        await self.connect(CODEX, first)
+        (before,) = await self.status()
+        await self.service.rotate_credential(CODEX, first, 1, OTHER)
+        (rotated,) = await self.status()
+        await self.service.replace_credential(
+            self.principal(self.admin), CODEX, second, expected_revision=before.revision
+        )
+        (replaced,) = await self.status()
+
+        self.assertEqual(rotated.revision, before.revision)
+        self.assertNotEqual(replaced.revision, before.revision)
+        self.assertEqual(replaced.version, 1)
+
+
+class ReplacementCompareAndSwapTest(CredentialStoreCase):
+    """Issue #277: a replacement names the credential it replaces."""
+
+    async def test_a_stale_revision_changes_nothing_and_is_audited(self):
+        first = await self.store.put(CODEX, VALUE)
+        second = await self.store.put(CODEX, OTHER)
+        third = await self.store.put(CODEX, VALUE + "-third")
+        await self.connect(CODEX, first)
+        (seen,) = await self.service.credential_status(self.principal(self.admin))
+        # Somebody else replaces it first.
+        await self.service.replace_credential(
+            self.principal(self.owner), CODEX, second, expected_revision=seen.revision
+        )
+
+        with self.assertRaises(StaleConnectionCredentialError):
+            await self.service.replace_credential(
+                self.principal(self.admin),
+                CODEX,
+                third,
+                expected_revision=seen.revision,
+            )
+
+        self.assertEqual(
+            self.scalar("SELECT secret_handle FROM shared_connections"), second
+        )
+        self.assertTrue(await self.store.verify(second, CODEX))
+        self.assertIn(
+            ("connection.replace", "deny", "stale_connection_credential"),
+            self.own_audit(),
+        )
+        self.assertNotIn(third, repr(self.sink.events))
+
+    async def test_a_revision_of_a_connection_made_again_is_stale(self):
+        first = await self.store.put(CODEX, VALUE)
+        second = await self.store.put(CODEX, OTHER)
+        await self.connect(CODEX, first)
+        (seen,) = await self.service.credential_status(self.principal(self.admin))
+        await self.service.disconnect(self.principal(self.admin), CODEX)
+        again = await self.store.put(CODEX, VALUE)
+        await self.connect(CODEX, again)
+
+        with self.assertRaises(StaleConnectionCredentialError):
+            await self.service.replace_credential(
+                self.principal(self.admin),
+                CODEX,
+                second,
+                expected_revision=seen.revision,
+            )
+
+    async def test_a_revision_that_is_not_one_is_stale(self):
+        first = await self.store.put(CODEX, VALUE)
+        second = await self.store.put(CODEX, OTHER)
+        await self.connect(CODEX, first)
+
+        for revision in ("", "0" * 32, first):
+            with self.assertRaises(StaleConnectionCredentialError):
+                await self.service.replace_credential(
+                    self.principal(self.admin),
+                    CODEX,
+                    second,
+                    expected_revision=revision,
+                )
+
+    async def test_a_replacement_without_a_connection_is_not_found(self):
+        stored = await self.store.put(CODEX, VALUE)
+        with self.assertRaises(ConnectionNotFoundError):
+            await self.service.replace_credential(
+                self.principal(self.admin), CODEX, stored, expected_revision="0" * 32
+            )
 
 
 class CollectTest(CredentialStoreCase):
