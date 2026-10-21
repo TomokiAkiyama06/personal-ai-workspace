@@ -633,21 +633,24 @@ class ConnectionService:
         current: str | None,
         expected_revision: str | None,
         correlation_id: uuid.UUID,
-    ) -> str | None:
-        """The handle a compare-and-swap replacement expects (``None``: no
-        compare-and-swap); a revision that is not the current one is refused."""
+    ) -> tuple[uuid.UUID, str] | None:
+        """The connection id and handle a compare-and-swap replacement expects
+        (``None``: no compare-and-swap); a revision that is not the current one
+        is refused. The UPDATE is guarded by both, so a connection made again
+        with the same handle in between is not this one."""
         if expected_revision is None:
             return None
         if current is None:
             raise ConnectionNotFoundError()
         info = await self._call_store(self._store.get_connection(kind))
         if info is None or not hmac.compare_digest(
-            credential_revision(info.id, current), expected_revision
+            credential_revision(info.id, current).encode(),
+            expected_revision.encode("utf-8", "replace"),
         ):
             await self._stale_replacement(
                 principal, correlation_id, None if info is None else info.id
             )
-        return current
+        return info.id, current
 
     async def _stale_replacement(
         self,
@@ -824,16 +827,12 @@ class ConnectionService:
             _connection_resource(),
             uuid.uuid4(),
         )
-        handles = await self._call_store(self._store.read_handles())
         found = []
-        for info in await self._call_store(self._store.list_connections()):
-            if info.kind not in handles:
-                continue  # removed in between
-            connection_id, handle = handles[info.kind]
+        for info, handle in await self._call_store(self._store.list_credentials()):
             stored, version = await self._stored_version(handle, info.kind)
             found.append(
                 ConnectionCredentialStatus(
-                    info, stored, version, credential_revision(connection_id, handle)
+                    info, stored, version, credential_revision(info.id, handle)
                 )
             )
         return tuple(found)

@@ -17,6 +17,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from sqlalchemy import text
+
 from paw_backend.connections import (
     ConnectionKind,
     ConnectionNotFoundError,
@@ -232,7 +234,7 @@ class ReplacementCompareAndSwapTest(CredentialStoreCase):
         second = await self.store.put(CODEX, OTHER)
         await self.connect(CODEX, first)
 
-        for revision in ("", "0" * 32, first):
+        for revision in ("", "0" * 32, first, "ä" * 32, "\ud800"):
             with self.assertRaises(StaleConnectionCredentialError):
                 await self.service.replace_credential(
                     self.principal(self.admin),
@@ -240,6 +242,57 @@ class ReplacementCompareAndSwapTest(CredentialStoreCase):
                     second,
                     expected_revision=revision,
                 )
+
+    async def test_the_guard_names_the_connection_not_only_the_handle(self):
+        # Codex review (P2): a connection removed and made again with the same
+        # handle between the revision check and the UPDATE is another
+        # connection; the statement's guard holds the id too.
+        stored = await self.store.put(CODEX, VALUE)
+        other = await self.store.put(CODEX, OTHER)
+        old = await self.connect(CODEX, stored)
+        with self.engine.begin() as connection:
+            connection.execute(text("DELETE FROM shared_connections"))
+        new = await self.connect(CODEX, stored)
+
+        changed = await self.service._store.replace_handle(
+            CODEX, other, expected=(old.id, stored)
+        )
+
+        self.assertIsNone(changed)
+        self.assertEqual(
+            self.scalar("SELECT secret_handle FROM shared_connections"), stored
+        )
+        current = await self.service._store.replace_handle(
+            CODEX, other, expected=(new.id, stored)
+        )
+        self.assertEqual(current.id, new.id)
+
+    async def test_the_status_is_one_snapshot_of_the_connection(self):
+        # Codex review (P2): the id, the handle and the state are one read, so
+        # a replacement in between cannot mix the old credential with the new
+        # row: the revision describes the connection that is shown.
+        first = await self.store.put(CODEX, VALUE)
+        second = await self.store.put(CODEX, OTHER)
+        await self.connect(CODEX, first)
+        (before,) = await self.service.credential_status(self.principal(self.admin))
+        reads = []
+        original = self.service._store.list_credentials
+
+        async def replaced_meanwhile():
+            found = await original()
+            reads.append(found)
+            await self.service.replace_credential(
+                self.principal(self.owner), CODEX, second,
+                expected_revision=before.revision,
+            )  # fmt: skip
+            return found
+
+        self.service._store.list_credentials = replaced_meanwhile
+        (during,) = await self.service.credential_status(self.principal(self.admin))
+
+        self.assertEqual(len(reads), 1)
+        self.assertEqual(during.revision, before.revision)
+        self.assertEqual(during.connection.updated_at, before.connection.updated_at)
 
     async def test_a_replacement_without_a_connection_is_not_found(self):
         stored = await self.store.put(CODEX, VALUE)
