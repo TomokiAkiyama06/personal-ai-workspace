@@ -112,12 +112,13 @@ Limits (stated, not hidden)
 
 import asyncio
 import contextlib
+import hmac
 import logging
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, NoReturn
 
 from paw_backend.authz import (
     AuditEvent,
@@ -158,6 +159,7 @@ from paw_backend.connections.errors import (
     InvalidConnectionInputError,
     QuotaExceededError,
     SessionSlotBusyError,
+    StaleConnectionCredentialError,
     TargetUserNotFoundError,
     TaskBudgetError,
     TaskNotUsableError,
@@ -172,12 +174,14 @@ from paw_backend.connections.limits import (
 )
 from paw_backend.connections.records import (
     ConnectionAvailability,
+    ConnectionCredentialStatus,
     ConnectionInfo,
     ConnectionRequest,
     ConnectionResult,
     Quota,
     QuotaUsage,
     UsageRecord,
+    credential_revision,
 )
 from paw_backend.connections.report import UsageRange, UsageReport
 from paw_backend.connections.secret import Secret, SecretResolver
@@ -620,14 +624,26 @@ class ConnectionService:
         return info
 
     async def replace_credential(
-        self, principal: Principal, kind: ConnectionKind, secret_handle: str
+        self,
+        principal: Principal,
+        kind: ConnectionKind,
+        secret_handle: str,
+        *,
+        expected_revision: str | None = None,
     ) -> ConnectionInfo:
         """Point the connection at another credential handle (a Security-sensitive
         change). The connection goes back to ``unavailable`` until a health check
-        verifies the new credential. ``ConnectionNotFoundError`` if none exists."""
+        verifies the new credential. ``ConnectionNotFoundError`` if none exists.
+
+        ``expected_revision`` (issue #277) is the ``revision`` of
+        ``credential_status`` the caller decided on: the replacement is made
+        only while the connection still has that credential (in the same
+        statement), else ``StaleConnectionCredentialError`` (audited)."""
         self._actor(principal)
         kind = validate_enum("kind", kind, ConnectionKind)
         handle = validate_handle("secret_handle", secret_handle)
+        if expected_revision is not None and type(expected_revision) is not str:
+            raise fail("expected_revision", InputProblem.WRONG_TYPE)
         correlation_id = uuid.uuid4()
         await self._authorize(
             principal,
@@ -636,8 +652,18 @@ class ConnectionService:
             correlation_id,
         )
         async with self._current_handle_locked(kind, handle) as previous:
+            # Under the locks of the current handle (and of the new one): the
+            # revision is checked against the handle no write-back or other
+            # replacement can change meanwhile.
+            expected = await self._expected_handle(
+                principal, kind, previous, expected_revision, correlation_id
+            )
             await self._require_stored(handle, kind)
-            info = await self._call_store(self._store.replace_handle(kind, handle))
+            info = await self._call_store(
+                self._store.replace_handle(kind, handle, expected=expected)
+            )
+        if info is None and expected is not None:
+            await self._stale_replacement(principal, correlation_id, None)
         if info is None:
             raise ConnectionNotFoundError()
         if previous is not None and previous != handle:
@@ -647,6 +673,44 @@ class ConnectionService:
             _RESOURCE_CONNECTION, info.id,
         )  # fmt: skip
         return info
+
+    async def _expected_handle(
+        self,
+        principal: Principal,
+        kind: ConnectionKind,
+        current: str | None,
+        expected_revision: str | None,
+        correlation_id: uuid.UUID,
+    ) -> tuple[uuid.UUID, str] | None:
+        """The connection id and handle a compare-and-swap replacement expects
+        (``None``: no compare-and-swap); a revision that is not the current one
+        is refused. The UPDATE is guarded by both, so a connection made again
+        with the same handle in between is not this one."""
+        if expected_revision is None:
+            return None
+        if current is None:
+            raise ConnectionNotFoundError()
+        info = await self._call_store(self._store.get_connection(kind))
+        if info is None or not hmac.compare_digest(
+            credential_revision(info.id, current).encode(),
+            expected_revision.encode("utf-8", "replace"),
+        ):
+            await self._stale_replacement(
+                principal, correlation_id, None if info is None else info.id
+            )
+        return info.id, current
+
+    async def _stale_replacement(
+        self,
+        principal: Principal,
+        correlation_id: uuid.UUID,
+        connection_id: uuid.UUID | None,
+    ) -> NoReturn:
+        await self._audit(
+            ACTION_REPLACE, StaleConnectionCredentialError.code, False, principal,
+            correlation_id, _RESOURCE_CONNECTION, connection_id,
+        )  # fmt: skip
+        raise StaleConnectionCredentialError()
 
     async def disable(
         self, principal: Principal, kind: ConnectionKind
@@ -825,6 +889,63 @@ class ConnectionService:
             uuid.uuid4(),
         )
         return await self._call_store(self._store.list_connections())
+
+    async def credential_status(
+        self, principal: Principal
+    ) -> tuple[ConnectionCredentialStatus, ...]:
+        """The configured connections with their attached credential (issue
+        #277, Owner / Admin): whether the store holds it, its version and the
+        ``revision`` a replacement names; never the value or the handle."""
+        self._actor(principal)
+        await self._authorize(
+            principal,
+            Capability.ADMIN_CONFIG_MANAGE,
+            _connection_resource(),
+            uuid.uuid4(),
+        )
+        found = []
+        for info, handle in await self._call_store(self._store.list_credentials()):
+            stored, version = await self._stored_version(handle, info.kind)
+            found.append(
+                ConnectionCredentialStatus(
+                    info, stored, version, credential_revision(info.id, handle)
+                )
+            )
+        return tuple(found)
+
+    async def committed_status(
+        self, info: ConnectionInfo, secret_handle: str
+    ) -> ConnectionCredentialStatus:
+        """The status of a connection this caller just made or pointed at
+        ``secret_handle`` (``connect`` / ``replace_credential`` returned
+        ``info``): built from that result, with no database read (a read after
+        the commit could fail or show a later change). Only the store is
+        asked for the version; its failure is ``stored`` ``False``."""
+        if type(info) is not ConnectionInfo:
+            raise fail("info", InputProblem.WRONG_TYPE)
+        handle = validate_handle("secret_handle", secret_handle)
+        stored, version = await self._stored_version(handle, info.kind)
+        return ConnectionCredentialStatus(
+            info, stored, version, credential_revision(info.id, handle)
+        )
+
+    async def _stored_version(
+        self, handle: str, kind: ConnectionKind
+    ) -> tuple[bool | None, int | None]:
+        if self._credentials is None or not hasattr(self._credentials, "read"):
+            return None, None
+        try:
+            stored = await self._credentials.read(handle)
+        except Exception as error:  # missing or damaged: type only
+            logger.warning(
+                "an attached credential cannot be read: kind=%s exception_type=%s",
+                kind.value,
+                log_type_name(error),
+            )
+            return False, None
+        if stored.kind is not kind:
+            return False, None
+        return True, stored.version
 
     async def availability(
         self, principal: Principal

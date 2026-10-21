@@ -192,8 +192,16 @@ CASES: dict[str, tuple[dict[str, Any], dict[str, list[Any]]]] = {
         },
     ),
     "replace_credential": (
-        {"kind": ConnectionKind.CODEX, "secret_handle": handle(1)},
-        {"kind": not_a_member("codex"), "secret_handle": NOT_A_HANDLE},
+        {
+            "kind": ConnectionKind.CODEX,
+            "secret_handle": handle(1),
+            "expected_revision": "0" * 32,
+        },
+        {
+            "kind": not_a_member("codex"),
+            "secret_handle": NOT_A_HANDLE,
+            "expected_revision": [1, b"0" * 32, ["0" * 32]],
+        },
     ),
     "disable": ({"kind": ConnectionKind.CODEX}, {"kind": not_a_member("codex")}),
     "enable": ({"kind": ConnectionKind.CODEX}, {"kind": not_a_member("codex")}),
@@ -203,6 +211,7 @@ CASES: dict[str, tuple[dict[str, Any], dict[str, list[Any]]]] = {
         {"kind": not_a_member("codex")},
     ),
     "list_connections": ({}, {}),
+    "credential_status": ({}, {}),
     "availability": ({}, {}),
     "set_quota": (
         {
@@ -324,7 +333,13 @@ class EveryArgumentIsCheckedTest(unittest.IsolatedAsyncioTestCase):
         # secret store's rotation and cleanup) are checked below on their own.
         self.assertEqual(
             public,
-            set(CASES) | {"check_health", "rotate_credential", "collect_credentials"},
+            set(CASES)
+            | {
+                "check_health",
+                "rotate_credential",
+                "collect_credentials",
+                "committed_status",
+            },
         )
 
     async def test_the_rotation_checks_its_arguments_and_needs_a_store(self):
@@ -373,6 +388,32 @@ class EveryArgumentIsCheckedTest(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(checked, 300)
         # Neither the Authorizer nor the audit sink was reached.
         self.assertEqual(self.service.audit_events, [])
+
+    async def test_the_committed_status_checks_its_arguments(self):
+        info = SimpleNamespace(id=uuid.uuid4(), kind=ConnectionKind.CODEX)
+        for field, call in (
+            ("info", lambda: self.service.committed_status(info, "cred_" + "0" * 32)),
+        ):
+            with self.assertRaises(InvalidConnectionInputError) as caught:
+                await call()
+            self.assertEqual(caught.exception.field, field)
+        for value in NOT_A_HANDLE:
+            with self.subTest(value=repr(value)[:40]):
+                with self.assertRaises(InvalidConnectionInputError) as caught:
+                    await self.service.committed_status(self.info(), value)
+                self.assertEqual(caught.exception.field, "secret_handle")
+
+    @staticmethod
+    def info():
+        from datetime import datetime
+
+        from paw_backend.connections import ConnectionInfo, ConnectionStatus
+
+        now = datetime.now(UTC)
+        return ConnectionInfo(
+            uuid.uuid4(), ConnectionKind.CODEX, ConnectionStatus.UNAVAILABLE,
+            True, None, now, now,
+        )  # fmt: skip
 
     async def test_a_bad_kind_of_check_health_is_refused(self):
         for value in not_a_member("codex"):

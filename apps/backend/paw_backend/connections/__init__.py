@@ -43,6 +43,7 @@ from paw_backend.connections.errors import (
     InvalidConnectionInputError,
     QuotaExceededError,
     SessionSlotBusyError,
+    StaleConnectionCredentialError,
     TargetUserNotFoundError,
     TaskBudgetError,
     TaskNotUsableError,
@@ -50,6 +51,7 @@ from paw_backend.connections.errors import (
 )
 from paw_backend.connections.records import (
     ConnectionAvailability,
+    ConnectionCredentialStatus,
     ConnectionInfo,
     ConnectionRequest,
     ConnectionResult,
@@ -105,6 +107,8 @@ __all__ = [
     "FileSecretStore",
     "SecretStoreError",
     "StaleCredentialVersionError",
+    "StaleConnectionCredentialError",
+    "ConnectionCredentialStatus",
     "ConnectionInfo",
     "ConnectionKind",
     "ConnectionNotFoundError",
