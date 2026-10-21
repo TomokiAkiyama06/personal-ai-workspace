@@ -11,6 +11,7 @@ import asyncio
 import io
 import unittest
 import uuid
+from pathlib import Path
 
 from alembic import command
 from alembic.script import ScriptDirectory
@@ -27,6 +28,7 @@ from .task_support import (
     new_database,
     requires_postgres,
 )
+from .test_deploy_release import load_tool
 from .test_migrations import offline_config
 
 REVISION = "0279"
@@ -61,6 +63,23 @@ class OfflineMigrationTest(unittest.TestCase):
         self.assertLess(
             sql.index("RAISE EXCEPTION"), sql.index("DROP COLUMN read_only")
         )
+
+    def test_the_downgrade_keeps_every_task_that_can_run_again(self):
+        # Only a completed task never runs again (failed / cancelled reopen).
+        sql = self.sql("downgrade", f"{REVISION}:{previous_revision()}")
+        self.assertIn("read_only AND state <> 'completed'", sql)
+
+    def test_a_rollback_does_not_keep_this_schema(self):
+        # Codex review of #284 (P1): the release before 0279 runs on the schema
+        # but would run an unfinished read-only task as an ordinary one, so the
+        # revision is not ``expand`` (Decision 0079, 4): a rollback over it
+        # needs a restore point.
+        scripts = ScriptDirectory.from_config(offline_config(io.StringIO()))
+        module = scripts.get_revision(REVISION).module
+        self.assertNotEqual(getattr(module, "paw_compatibility", None), "expand")
+        versions = Path(__file__).resolve().parents[1] / "migrations" / "versions"
+        migrations = load_tool().read_migrations(versions)
+        self.assertNotEqual(migrations[REVISION].compatibility, "expand")
 
     def test_the_revision_follows_the_head_it_was_written_on(self):
         # Re-chained when another revision written on 0194 merges first.
@@ -104,16 +123,28 @@ class RoundTripTest(PostgresTaskTestCase):
                 )
             )
 
-    async def test_down_is_refused_while_a_read_only_task_is_active(self):
-        task_id = await self.read_only_task()
-
+    async def refused(self) -> None:
         with self.assertRaises(DBAPIError) as raised:
             await asyncio.to_thread(migrate, previous_revision(), downgrade=True)
-
         self.assertEqual(getattr(raised.exception.orig, "sqlstate", None), "23001")
         self.assertTrue(await self.column_exists())
-        # Once it ended, down and up again.
+
+    async def test_down_is_refused_while_a_read_only_task_can_still_run(self):
+        task_id = await self.read_only_task()
+        await self.refused()
+        # Cancelled or failed, it can be restarted or retried (Codex review of
+        # #284): the code before 0279 would run it as an ordinary task.
         await self.service.execute(task_id, TaskCommand.CANCEL, actor=self.system)
+        await self.refused()
+        failed = await self.read_only_task()
+        await self.service.execute(failed, TaskCommand.START, actor=self.system)
+        await self.service.execute(failed, TaskCommand.FAIL, actor=self.system)
+        await self.refused()
+
+    async def test_down_and_up_once_every_read_only_task_completed(self):
+        task_id = await self.read_only_task()
+        await self.service.execute(task_id, TaskCommand.START, actor=self.system)
+        await self.service.execute(task_id, TaskCommand.COMPLETE, actor=self.system)
         await asyncio.to_thread(migrate, previous_revision(), downgrade=True)
         self.assertFalse(await self.column_exists())
         await asyncio.to_thread(migrate)
