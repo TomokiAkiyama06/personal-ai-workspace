@@ -1834,8 +1834,12 @@ def _start_mounts(spec: object, places: Places, config: Config, name: str) -> li
             options.append(f"type=bind,source={path},destination={inside},ro=true")
         elif stat.S_ISDIR(info.st_mode):
             # An empty tmpfs that the sandbox's user (not its root) cannot write.
+            # ``notmpcopyup``: Podman copies what is under a tmpfs mount into
+            # it by default, so a small directory would show what it hides
+            # and a larger one (a checkout's .git) fails the start (#286).
             options.append(
-                f"type=tmpfs,destination={inside},tmpfs-size=4k,tmpfs-mode=0555"
+                f"type=tmpfs,destination={inside},tmpfs-size=4k,tmpfs-mode=0555,"
+                "notmpcopyup"
             )
         elif stat.S_ISREG(info.st_mode):
             options.append(f"type=bind,source=/dev/null,destination={inside},ro=true")
