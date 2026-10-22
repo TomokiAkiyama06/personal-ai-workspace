@@ -28,6 +28,7 @@ import tempfile
 import unittest
 import uuid
 from pathlib import Path
+from unittest.mock import patch
 
 from paw_backend.agents.cli_session import UnitNotStoppedError
 from paw_backend.agents.codex_app_server import (
@@ -105,6 +106,7 @@ class Connections:
         self.write_back = write_back
         self.bind_session = bind_session
         self.still_held = still_held
+        self.given_back = None  # the slot's release, when a test says
         self.cli_running = []  # the adapter said its CLI could not be stopped
         self.turns = []
         self.budget = budget
@@ -136,6 +138,9 @@ class Connections:
             ),
         )
         self.raw = raw
+        if self.given_back is not None and request.on_slot_released is not None:
+            # What the service says once it released the slot.
+            request.on_slot_released(self.given_back)
         return SessionResult(uuid.uuid4(), raw.submission, 0, 0, raw.failure, None)
 
 
@@ -798,6 +803,37 @@ class SlotBindingTest(CodexCase):
         self.assertEqual(self.credentials.collected, [])
         (kept,) = list(self.sessions.iterdir())
         self.assertTrue((kept / "config" / "auth.json").exists())
+
+
+class ReleaseTest(CodexCase):
+    """Codex review of #291: the directory is deleted only when the service
+    gave this session's own slot row back; a row taken over meanwhile (the
+    process paused past the lease after its last check) leaves the directory,
+    and the login in it, to the collection."""
+
+    SUBMIT = [{"call": "submit", "arguments": {"summary": "s"}}, {"sleep": 30}]
+
+    async def run_released(self, given_back):
+        original = Connections.__init__
+
+        def init(connections, *args, **kwargs):
+            original(connections, *args, **kwargs)
+            connections.given_back = given_back
+
+        with patch.object(Connections, "__init__", init):
+            return await self.run_node(self.SUBMIT)
+
+    async def test_a_slot_given_back_removes_the_directory(self):
+        outcome = await self.run_released(True)
+        self.assertEqual(outcome.result.summary, "s")
+        self.assertEqual(list(self.sessions.iterdir()), [])
+
+    async def test_a_slot_taken_over_before_its_release_keeps_the_directory(self):
+        with self.assertLogs("paw_backend.agents.codex_cli", "ERROR") as logs:
+            outcome = await self.run_released(False)
+        self.assertEqual(outcome.result.summary, "s")  # the submit stands
+        self.assertEqual(len(list(self.sessions.iterdir())), 1)
+        self.assertIn("left to the collection", "\n".join(logs.output))
 
 
 class BoundaryTest(CodexCase):
