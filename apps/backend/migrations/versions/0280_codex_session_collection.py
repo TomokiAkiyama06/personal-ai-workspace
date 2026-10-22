@@ -28,9 +28,16 @@ its unit was confirmed stopped, across a restart of the backend:
   ``connected`` or the credential is replaced. Both set or both NULL.
 
 Privileges of the application role (``PAW_APP_DATABASE_ROLE``): UPDATE of the
-new columns (the table privileges stay). ``paw_compatibility`` is ``expand``
-(Decision 0079, 4): an older release never names the columns, its inserts
-take NULL and ``false``, and a row it binds nothing to it treats as before.
+new columns (the table privileges stay).
+
+The revision does **not** declare ``paw_compatibility = "expand"`` (Decision
+0079, 4; Codex review of #291, as 0279 did): the release before it runs on
+this schema, but its ``acquire_session_slot`` takes over any expired row
+(it checks only ``expires_at``) and would overwrite a row bound to a Codex
+session whose CLI may still run, start a second session on the same login,
+and delete the row the late collection needs. Undeclared, it is not backward
+compatible, and a rollback over it restores the database from its restore
+point (no bound row survives into the older release).
 ``downgrade()`` drops the columns (a kept session is then an ordinary lease
 that expires: development and test only).
 
@@ -49,8 +56,8 @@ down_revision: str | Sequence[str] | None = "0279"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
-# Decision 0079 4: what an older release can do with this schema.
-paw_compatibility: str = "expand"
+# Decision 0079 4: no ``paw_compatibility`` (not backward compatible; module
+# docstring). A rollback over this revision restores the database first.
 
 # Written out here (not imported): a migration keeps the values it was written
 # with. ``tests/test_codex_session_collection_migration.py`` compares them with
