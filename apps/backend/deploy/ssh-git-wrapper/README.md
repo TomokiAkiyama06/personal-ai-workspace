@@ -1,6 +1,6 @@
 # SSH の Forced Command の Wrapper（`paw-git-wrapper`）の配備
 
-更新日: 2026-10-16
+更新日: 2026-10-22
 
 Issue [#134](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/134)。
 [Decision 0029](../../../../docs/decisions/0029-per-user-git-runner-ssh.md)（Approved）の SSH の Wrapper と、
@@ -144,7 +144,7 @@ Sandbox（`paw-sandbox/v1`）の Log は `accepted user=alice sandbox=start`・`
 - git 2.45.1 以降（`merge-tree --write-tree` は 2.38 から。Decision 0036 の 14）。Wrapper が付ける `GIT_NO_LAZY_FETCH=1` は 2024-05 の Security Release（2.45.1、および 2.39.4・2.40.2・2.41.1・2.42.2・2.43.4・2.44.1 の各 Maintenance 版）で入ったもので、それより前の git は黙って無視する（Distribution の Backport の有無は配備の前に確かめる）。Wrapper は Partial Clone の設定（`extensions.partialClone`・`remote.<name>.promisor`）と Repository の `protocol.*` も拒否するので、古い git でも遅延取得・`ext::` は起きないが、版の要件は下げない。
 - `/usr/bin/python3` が 3.10 以降（Wrapper は標準ライブラリだけを使う）。
 - 対象の Linux User の Login Shell が `/bin/bash` などの普通の Shell であること。`sshd` は Forced Command を **その User の Login Shell の `-c`** で起動するため、`/usr/sbin/nologin` だと Wrapper が動かない（`ssh` は 1 などで終わり、`SshGitRunner` からは git の失敗に見える）。
-- 対象の Linux User の Home と `workspaces` は、他の User が書けない権限（例: `0750` か `0700`）。Wrapper の Symlink の検査は「その User 自身か root しか Path を差し替えられない」ことを前提にしている。
+- 対象の Linux User の Home と `workspaces` は、他の User が書けない権限。Wrapper の Symlink の検査は「その User 自身か root しか Path を差し替えられない」ことを前提にしている。ただし Backend の User（`paw`）が辿れること（`o+x`。例: Home は `0751` か `0711`、`workspaces` は `0711` か `0755`。`0750`・`0700` では Backend が Checkout を確かめられない）。下の「7. Home と `workspaces` の権限」。
 
 ## 配備（どの Linux User に・どの Path に置くか）
 
@@ -222,6 +222,37 @@ restrict,command="/usr/local/lib/paw/paw-git-wrapper",from="127.0.0.1",no-pty,no
 - `PAW_REPOSITORY_SSH_HOST=127.0.0.1`・`PAW_REPOSITORY_SSH_PORT=22`・`PAW_REPOSITORY_SSH_KNOWN_HOSTS_PATH=/etc/paw/ssh_known_hosts`（`SshGitRunnerPolicy`）。
 - `SshGitRunner` の本番の呼び出し経路への配線は、この Issue の範囲外（Decision 0029 の 6「移行」。下の確認がすべて済み、全 User の鍵がそろってから別の Issue で行う）。
 
+### 7. Home と `workspaces` の権限（Issue #285）
+
+git は Wrapper の中でその User として動くが、Backend の Process（`paw`）**自身**も、登録と Task の前に Checkout の Path を `lstat` / `realpath` で確かめる（`paw_backend/repositories/paths.py` の `plan_checkout_path`・`read_checkout_identity`・`inspect_checkout_root`・`check_existing_repository`）。そのため、Backend の User と Account が違う配備（`git: ssh`）では、次をすべて満たす。
+
+1. **Home は `paw` が辿れる**（`o+x`）。例: `sudo chmod 0751 /home/alice`（`0711` でもよい。Group / Other の書き込みは付けない）。`0750` のままだと、登録は `422 path_rejected`（`not_found`）になる。
+2. **`<home>/workspaces`（Wrapper の Root。`--root=`）が、その User の所有で、先にある。** Wrapper は Root がなければすべての呼び出しを `root_unavailable` で拒否する（作らない）。`paw` が辿れる権限にする。
+
+   ```sh
+   sudo install -d -o alice -g alice -m 0711 /home/alice/workspaces   # 0755 でもよい
+   ```
+
+3. **既存の Repository は `<home>/workspaces` の下に置く。** Backend の `PAW_REPOSITORY_EXISTING_ROOTS` の既定は `{home}`（Home の全体）だが、Wrapper は Root（`<home>/workspaces`）の外では git を動かさない（`root_unavailable` / `path_outside_root`）。Root の外の Repository は、Backend の検査を通っても最初の git で失敗する。途中の Directory もすべて `paw` が辿れる権限にする（`.` で始まる名前の Directory は Backend が `hidden` で拒否する）。
+4. Task の worktree（`<home>/workspaces/.paw-worktrees/...`）は `git worktree add` がその User として作るので、Backend は作らない（この節のほかに作業はない）。
+
+確認（`paw` として。何も書き換えない）:
+
+```sh
+sudo -u paw namei -l /home/alice/workspaces            # 最後まで辿れる（Permission denied がない）
+sudo -u paw stat -c '%U %a %n' /home/alice/workspaces  # alice 711 か alice 755
+```
+
+**Issue #285 が実装されるまでの制限。** `git: ssh` の配備では、Web の「リポジトリを登録」のうち **既存のディレクトリ** だけが使える。**GitHub から Clone**・**新規（ローカル）**・**新規（GitHub）** は、Checkout の Directory（`<home>/workspaces/<project>/<repo>`）を Backend（`paw`）自身が `mkdir` するため、他の User の Home では必ず `422 path_rejected`（`not_found`）になる（Decision 0029 は、その Directory を誰が作るかを決めていない）。それまでは、その User として手で Clone してから、既存のディレクトリとして登録する。
+
+```sh
+# cwd は / などの中立な場所にする（paw や別の User が入れない cwd のまま sudo しない）
+cd / && sudo -u alice git clone https://github.com/<owner>/<repo>.git /home/alice/workspaces/<dir>/<repo>
+```
+
+- `<dir>` は `workspaces` の下の、`.paw-worktrees` でも `.` で始まる名前でもない Directory（例: Project の名前）。`git clone` は足りない親の Directory も作る（その User の所有になる）。`<dir>` が `paw` の辿れない権限（`0700` など）で作られたら `sudo -u alice chmod 0711 /home/alice/workspaces/<dir>` にする。
+- 登録する Path は、Symbolic Link を含まない綴り（`realpath` の結果）で入れる。
+
 ## 失効・回転
 
 Decision 0029 の 4 のとおり（Admin の手動運用）。
@@ -272,5 +303,7 @@ W=/home/alice/workspaces
 - [ ] 13. Log: `sudo journalctl -t paw-git-wrapper --since -10min`（または `/var/log/auth.log`）に `accepted` / `rejected` の行があり、URL・Path・`-c` の値・Token を含まない。
 - [ ] 14. worktree の経路（PR #130 のマージ後）: Backend の `GitWorktreeCoordinator` を `SshGitRunner` で 1 Task 動かし、`$W/.paw-worktrees/...` に worktree と `paw/` の branch ができ、統合の Merge Commit の作者が `Personal AI Workspace <integration@paw.invalid>` で、`alice` の Checkout の HEAD と default branch が変わっていない。
 - [ ] 15. 失効: `authorized_keys` の行を消す（またはコメントにする）→ `paw_ssh` が `Permission denied`・`exit=255`。行を戻して元に戻ることを確かめる。
+
+- [ ] 16. Home と `workspaces` の権限（上の「7. Home と `workspaces` の権限」）: `sudo -u paw namei -l /home/alice/workspaces` が最後まで辿れ、`/home/alice/workspaces` は `alice` の所有で Group / Other が書けない。既存の Repository を登録するなら、その Path が `/home/alice/workspaces` の下にある。
 
 1 つでも期待と違えば、`SshGitRunner` を配線せず（`SubprocessGitRunner` のまま）、結果を Issue #134 に書く。

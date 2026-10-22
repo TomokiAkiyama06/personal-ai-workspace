@@ -214,6 +214,25 @@ Checklist (Decision 0093 5; the human, not an agent):
   `--sandbox-keep-groups=yes`) and `from="127.0.0.1"`; `/etc/paw/ssh-keys/tomoki.key`
   (owned by `paw`, `0600`); `/etc/paw/ssh_known_hosts` (Decision 0029,
   `apps/backend/deploy/ssh-git-wrapper/README.md`, `apps/backend/deploy/sandbox/README.md`).
+- [ ] Each account's home and checkout root (issue #285; details in
+  `apps/backend/deploy/ssh-git-wrapper/README.md`, "Home と `workspaces` の権限"):
+  - the home is searchable by `paw` (`o+x`, for example `0751` or `0711`; not
+    writable by group / others): the backend itself `lstat`s the checkout root and every
+    checkout (`namei -l /home/tomoki/workspaces` as `paw` reaches the end);
+  - `<home>/workspaces` exists, is owned by the account and is searchable by `paw`
+    (`0711` or `0755`; the wrapper's root, `--root=`, refuses every call with
+    `root_unavailable` while it is missing);
+  - a repository registered as `既存のディレクトリ` lies below `<home>/workspaces`
+    (the wrapper runs git only there, although the backend's
+    `PAW_REPOSITORY_EXISTING_ROOTS` default `{home}` accepts the whole home), and every
+    directory on the way is searchable by `paw`.
+- [ ] Until issue #285 is implemented, only `既存のディレクトリ` registers a repository
+  under `git: ssh`: `GitHub から Clone`, `新規（ローカル）` and `新規（GitHub）` always
+  fail with `422 path_rejected` (`not_found`), because the backend (`paw`) creates the
+  checkout directory itself and cannot in another account's home. Clone by hand as the
+  account from a neutral working directory, then register the path as `既存のディレクトリ`:
+  `cd / && sudo -u <user> git clone <url> <home>/workspaces/<dir>/<repo>`
+  (`<dir>` is any directory below `workspaces` that is not `.paw-worktrees`).
 - [ ] `/usr/local/lib/paw/paw-git-wrapper` knows `paw-sandbox/v2` (the sandbox README's
   checklist item 9); otherwise `PAW_SANDBOX_OOM_STATUS=false`.
 - [ ] `/run/paw-sandbox` (`paw:paw-sandbox 0711`, `tmpfiles.d`) and the group
