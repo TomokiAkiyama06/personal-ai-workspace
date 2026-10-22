@@ -1,6 +1,7 @@
 # Codex の ChatGPT の Login の `auth.json` の File の持ち主と Mode、Container の中の `CODEX_HOME`（Decision 0083 の 6 の一部を置き換える）
 
-- Status: Proposed
+- Status: Approved
+- Approval: 2026-10-22、Humanが作業Session内で、判断点の説明（推奨つき）を受けたうえで承認（approved as recommended: 1 の `auth.json` の実体を Session の Directory の File（0660・所有者 `paw`・Group `paw-cli-bridge`）とし、`CODEX_HOME` は tmpfs に `config.toml`（読み取り専用）と `auth.json`（読み書き）だけを Bind Mount、版ごとの Smoke で Truncate の保存を確かめる）
 - Date: 2026-10-20
 - Scope: Issue [#239](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/239) の Codex の ChatGPT の Login の PR（[Decision 0087](0087-cli-secret-store-and-egress.md) の 5 の 4、[Decision 0089](0089-codex-cli-runtime-route.md) の 4 の 2）。関係する既存の口: `apps/backend/paw_backend/agents/codex_credentials.py`（`CodexAuthFile`）、`agents/codex_cli.py`（`CodexSessionAdapter`）、`deploy/cli-session/paw_cli_session_run.py`。
 - Supersedes（一部）: [Decision 0083](0083-agent-runtime-adapters.md)（Approved）の 6 の「Credential の File を Session の間だけ CLI の Container の tmpfs（`CODEX_HOME` / `CLAUDE_CONFIG_DIR` に当たる場所、Mode 0700、所有者は上の専用の Account）に置く」のうち、**Codex の `auth.json` の File そのものの持ち主と Mode** だけ。`CODEX_HOME` を Container の tmpfs（0700、所有者は `paw-agent-cli`）にすること、Connection ごとに 1 Session の DB の Lease、Compare-and-swap の書き戻し、取り消しの時の書き戻しは変えない。[Decision 0088](0088-cli-token-file-mode.md)（Claude の `credential.env` の 0640）と同じ理由の、Codex の側の対になる決定。
