@@ -73,7 +73,9 @@ class CloudGate:
         try:
             return await connections.execute_session(kind, request, gate=record)
         except ConnectionBusyError:
-            # The database did not answer the admission in time.
+            # The database did not answer the admission in time, or the
+            # connection's one session slot stayed taken for the whole wait
+            # (``SessionSlotBusyError``, Decision 0083, 6): nothing admitted.
             raise RuntimeFailure(Failure.CONNECTION_BUSY) from None
         except QuotaExceededError:
             raise RuntimeFailure(Failure.CONNECTION_QUOTA_EXCEEDED) from None

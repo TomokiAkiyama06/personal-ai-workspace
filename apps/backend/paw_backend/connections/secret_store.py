@@ -123,7 +123,13 @@ class CredentialStore(Protocol):
     async def delete(self, handle: str) -> None: ...
 
     async def rotate(
-        self, handle: str, kind: ConnectionKind, expected_version: int, value: str
+        self,
+        handle: str,
+        kind: ConnectionKind,
+        expected_version: int,
+        value: str,
+        *,
+        check: Callable[[], Awaitable[None]] | None = None,
     ) -> int: ...
 
 
@@ -235,15 +241,25 @@ class FileSecretStore:
         return handle
 
     async def rotate(
-        self, handle: str, kind: ConnectionKind, expected_version: int, value: str
+        self,
+        handle: str,
+        kind: ConnectionKind,
+        expected_version: int,
+        value: str,
+        *,
+        check: Callable[[], Awaitable[None]] | None = None,
     ) -> int:
         """Write version ``expected_version + 1`` of ``handle`` while
         ``expected_version`` is the current one (``StaleCredentialVersionError``
-        otherwise); the kind stays. Returns the new version."""
+        otherwise); the kind stays. Returns the new version. ``check`` is
+        awaited under the handle's lock first (the service's "is it still the
+        connection's?"); what it raises passes and nothing is written."""
         handle = validate_handle("handle", handle)
         kind = validate_enum("kind", kind, ConnectionKind)
         secret = Secret(value)
         async with self.lock(handle):
+            if check is not None:
+                await check()
             return await asyncio.to_thread(
                 self._rotate, handle, kind, expected_version, secret
             )

@@ -214,6 +214,16 @@ class ConnectionBusyError(ConnectionsError):
         super().__init__("The database did not answer in time")
 
 
+class SessionSlotBusyError(ConnectionBusyError):
+    """The connection's one session slot (Decision 0083, 6: a CLI whose login
+    is a file it refreshes) stayed taken for the whole wait. Raised before the
+    admission: no ``connection.use`` audit, no usage row. The same code as
+    :class:`ConnectionBusyError` (the cloud gate's ``connection_busy``)."""
+
+    def __init__(self) -> None:
+        ConnectionsError.__init__(self, "The connection's session slot stayed taken")
+
+
 _ADAPTER_MEMBERS = frozenset({"kind", "check_health", "run"})
 
 

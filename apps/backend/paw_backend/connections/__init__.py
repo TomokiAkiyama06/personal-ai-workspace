@@ -42,6 +42,7 @@ from paw_backend.connections.errors import (
     InputProblem,
     InvalidConnectionInputError,
     QuotaExceededError,
+    SessionSlotBusyError,
     StaleConnectionCredentialError,
     TargetUserNotFoundError,
     TaskBudgetError,
@@ -74,6 +75,7 @@ from paw_backend.connections.session import (
     SessionRequest,
     SessionResult,
     SessionStop,
+    WriteBack,
 )
 from paw_backend.connections.store import ConnectionStore
 
@@ -86,6 +88,8 @@ __all__ = [
     "SessionRequest",
     "SessionResult",
     "SessionStop",
+    "SessionSlotBusyError",
+    "WriteBack",
     "DEFAULT_PERIOD_TIMEZONE",
     "UNLIMITED",
     "AdapterFailure",
