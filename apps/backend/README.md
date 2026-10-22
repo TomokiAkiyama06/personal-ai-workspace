@@ -260,6 +260,7 @@ Endpoint は `/api/v1` 以下です。OpenAPI Schema は `/api/v1/openapi.json` 
 | `/api/v1/memory/*` | Memory 画面の Scope の木と件数・一覧（検索）・履歴・出典、編集と復元（`expected_version`、衝突は 409 `memory_version_conflict`）。入口は本人の Memory への `memory.read`。[Memory の HTTP API](#memory-の-http-apiissue-186decision-0068approved) |
 | `/api/v1/memory/preferences/*` | Inferred Preference の候補と根拠・推奨 Scope、確認（`acknowledge_high_risk` なしの高リスクは 409）・保存しない・自由入力の構造化プレビュー。入口は本人の Memory への `memory.read`。[Inferred Preference の確認 Flow](#inferred-preference-の確認-flowissue-38paw-044decision-0081) |
 | `/api/v1/usage`、`/api/v1/quotas/me`、`/api/v1/users/{id}/quotas*`、`/api/v1/admin/users` | 使用状況の集計、Quota の閲覧と変更（Passkey Step-up）、User の一覧。[使用状況と Quota の HTTP API](#使用状況と-quota-の-http-apiissue-187decision-0069approved) |
+| `/api/v1/admin/connections*` | 共有の Codex / Claude の Connection の状態と、Secret Store の Credential の Handle の結び付け・差し替え（Compare-and-swap）・切断（`admin.config.manage` + Passkey Step-up）。[Connection の Credential の HTTP API](#connection-の-credential-の-http-apiissue-277) |
 
 Readiness は 200 または 503 で、Body の形は同じです。
 
@@ -2149,6 +2150,24 @@ CHECK 制約が、状態と終了・時間・Token・失敗の種類の対応（
 - Local（Issue #187 の 5、Decision 0077）: `tokens.local` は Local の Runtime が実行中に Task の Budget へ報告した `TOKENS` の合計、`gpu_seconds` は `local_gpu` に置かれた実行が Lease を持った秒数（Budget の `GPU_SECONDS` と同じ切り上げ。CPU への Fallback は数えない）、`daily[].local` と `agents` の `local` は Local の実行のある Task です。用途別は Codex / Claude だけです（Local の実行には用途の Category がない）。`escalations` は期間内に Escalation した Task の数で、Orchestrator の Escalation はすべて Loop 検知からなので `loop_detected` に数え、`failed` は 0 です。User 別の Task・Token は両方の合計です。
 - Quota の変更は、Capability → Session の Passkey Step-up（`AuthService.require_passkey_step_up`、変更の直前の別 Transaction）→ Service の認可と Owner の規則、の順に確かめます。Step-up の拒否は `connection.quota.set` / `.remove` の Deny（reason `step_up_required` / `step_up_method_insufficient`）として Audit に残します。
 - Test: `tests/test_connections_report.py`（期間と集計、認可）、`tests/test_local_usage_report.py`（Local・GPU 時間・Escalation の集計）、`tests/test_usage_api.py`（HTTP、Step-up、認可の否定）。
+
+### Connection の Credential の HTTP API（Issue #277）
+
+`paw_backend/api/v1/connections.py`。[Decision 0087](../../docs/decisions/0087-cli-secret-store-and-egress.md) の 2（平文は Server の上の管理 Command で Store に入れ、Owner / Admin は Handle を `connect` / `replace_credential` に渡す）の入口です。Web の画面（Design canvas の PAdminConnections）はまだありません。
+
+| Endpoint | 認可 | 内容 |
+| --- | --- | --- |
+| `GET /api/v1/admin/connections` | `admin.config.manage` | 種類ごと（`codex`・`claude`、未設定も）に、状態（`connected` / `unavailable` / `expired`）・有効・最後の確認・Credential（Store が持つか `stored`、版 `version`）・`revision`。値も Handle も返さない |
+| `POST /api/v1/admin/connections/{kind}` | 同上 + **Passkey Step-up** | Body `{"secret_handle": "cred_..."}`。Connection を作る（201）。既にあれば 409 `connection_exists` |
+| `PUT /api/v1/admin/connections/{kind}/credential` | 同上 | Body `{"secret_handle", "expected_revision"}`。`GET` の `revision` の Credential のままのときだけ差し替える（同じ文の条件。違えば 409 `stale_connection_credential`。読み直す） |
+| `DELETE /api/v1/admin/connections/{kind}` | 同上 | Connection を消す（使用量の履歴は残る）。参照されなくなった Credential は消える |
+
+- Store がその種類の Credential として持っていない Handle（無い・消えた・別の種類）は 422 `credential_not_stored`。Handle の形でない値は 422 `validation_error`（値は返さない）。Secret Store が設定されていない構成（`PAW_SECRET_STORE_DIR` なし）は、Handle を確かめられないので、結び付けと差し替えを 503 `secret_store_not_configured` で断る。
+- `revision` は Connection の ID と Handle の一方向の Digest（Handle は読み戻せない）。差し替えと Connection の作り直しで変わり、Rotation（同じ Credential の Refresh）と Health Check では変わらない。
+- Audit: `connection.connect` / `.replace` / `.disconnect`（成功は `succeeded`、古い `revision` は `.replace` の Deny `stale_connection_credential`、Step-up の拒否は各 Action の Deny `step_up_required` / `step_up_method_insufficient`）。ID と Enum だけで、Handle も値も入れない。
+- Step-up: Decision 0016 は Credential の差し替え・削除を PAW-023 の後に Step-up の対象にすると承認している。結び付け（初めての登録）も Credential を扱う変更なので同じにした。
+- 結び付けた・差し替えた Connection は、Health Check が確かめるまで `unavailable`（Decision 0016）。Health Check を動かすのは Codex / Claude の Runtime の側（`CloudPolicy` の承認の後）。
+- Test: `tests/test_connections_api.py`（HTTP、権限なし・Step-up なしの拒否、存在しない・別の種類の Handle、CAS、Audit、値と Handle が答え・Audit・Log に出ないこと）、`tests/test_connections_credential_store.py`（Service の状態と CAS）。
 
 ### Test
 
@@ -4330,10 +4349,39 @@ Test は `tests/test_cli_session_units.py`（Fake の `podman` と Fake の `sys
 - Runtime は Claude と同じ（Session の Directory・`McpBridge`・`CloudGate`・`submit` の Outcome・`no_submission`・Planner には使わない・`run_as_fallback`）。Session の準備・起動の口の例外（CLI がない、Directory を作れないなど）は `ErrorClassifier.from_error` で分類する（`NodeStopped`・取り消し・`MemoryError` はそのまま上げる）。CLI（版の確認の Process も `app-server` も）を止められなかった（起動の後始末の止めの失敗を含む。取り消しが来ても止めは最後まで待つ）ときは Session の Directory を消さずに残し、試行は `adapter_error`（Claude と同じ）。
 - Adapter はまず Credential なしで `codex --version` を読み、一覧にない版は何も起動しない。次に Session の `$CODEX_HOME/config.toml`（Tool に関わる既定で有効な Feature をすべて `false`・`web_search = "disabled"`・`update_plan` と `request_user_input` を無効・Telemetry と履歴なし・MCP の Server は `paw` の Relay だけで `required`・`enabled_tools`・`default_tools_approval_mode = "approve"`）を書き、`codex app-server --listen stdio://` を起動して `initialize`（`experimentalApi`）→ `thread/start`（`environments: []`・`approvalPolicy: "never"`・`sandbox: "read-only"`・`ephemeral`・PAW の System Prompt）→ `turn/start`（Task）。
 - `thread/tokenUsage/updated` の `total` の増分を `on_usage` で報告（同じ値の再送は数えない、減ったら止める）。Item は閉じた対応（`userMessage`・`agentMessage`・`reasoning`・`contextCompaction` と `paw` の `mcpToolCall` だけを通す。実行できる Item・知らない `type`・Server からの Request は止める）。`unauthorized` は `expired`、`usageLimitExceeded` / `rateLimitExceeded` は `rate_limited`。
-- ChatGPT の Login の `auth.json` は `CodexCredentials`（`place` / `collect`）が Session の `CODEX_HOME` に置いて回収する。**実装はまだなく**、無ければ Session を始めない（`unavailable`）。Connection ごとに 1 Session の Lease と書き戻し・Egress の Allowlist は Smoke の後の ChatGPT の Login の PR（Decision 0087 の 5 の 4、0089 の 4）。
+- ChatGPT の Login の `auth.json` は `CodexCredentials`（`place` / `collect`）が Session の `CODEX_HOME` に置いて回収する。実装は下の「Codex の ChatGPT の Login」の `CodexAuthFile`（Issue #239）。Handler が無ければ Session を始めない（`unavailable`）。Egress の Allowlist の Codex の宛先は Smoke の拒否の Log から決める（Decision 0087 の 4 の表。この Repository にはまだ入れない）。
 - 起動の口は子 Process の `InteractiveSubprocessLauncher`（stdin を開いたまま。開発と Test）と、本番の `SystemdCodexLauncher`（#236 の `SystemdLauncher.start_interactive`: `stream.sock` が CLI の stdout だけでなく stdin も運ぶ。`credential.env` と `prompt` は書かず、`launch.json` の `cli` は `codex`。版の確認と `app-server` は同じ Session の Unit を順に起動する）。
 
 Test は `tests/test_agents_codex_cli.py`（本物の Runtime・Adapter・Bridge・Relay・起動の口、Fake の `codex` = `tests/fake_codex_cli.py`（`rust-v0.162.1` の stdio の形）、`execute_session` の代わりの Fake）。
+
+## Codex の ChatGPT の Login（Connection ごとに 1 Session の Lease と `auth.json` の書き戻し。Issue #239、Decision 0083 の 6、Decision 0087 の 4、Decision 0089 の 4）
+
+`agents/codex_credentials.py` の `CodexAuthFile`、`connections/session_slot.py` の `SessionSlot`、Migration `0239`（`connection_session_leases`）です。**CLI の段は組み立てで無効のまま**（`CloudPolicy` の Decision と CLI の Smoke まで。Decision 0093 の 3）で、確かめた版の一覧（`VERIFIED_VERSIONS`）も空のままです。Egress の Allowlist に ChatGPT の宛先は入れていません（Smoke の拒否の Log から決める）。**`auth.json` の File の持ち主と Mode は [Decision 0095](../../docs/decisions/0095-codex-auth-file-owner-and-mode.md)（Approved）に依ります。**
+
+- **Connection ごとに 1 Session（`exclusive_sessions`）**: `CodexSessionAdapter` は `exclusive_sessions = True`。`execute_session` は確認（認可・Budget・Session の最低の枠・Queue の Lease）の後、**Admission の前に** Connection の Session の枠（DB の Lease の行。Connection ごとに 1 行 = 種類ごと: 持ち主・`acquired_at`・`heartbeat_at`・`expires_at`、DB の時計）を最大 60 秒（暫定）待ちます。空かなければ `SessionSlotBusyError`（`ConnectionBusyError` の Subclass、`connection_busy`）で、`connection.use` の Audit も使用量の行も作りません。`CloudGate` はこれを `connection_busy`（`ConnectionError`・`escalate=True`、`HybridRuntime` の振り替えの経路では `ComputeUnavailable`）にします。期限の切れた行は他の Process が取り直せます（Takeover）。
+- **Heartbeat と取れなくなったとき**: 持ち主は 10 秒ごとに期限を 300 秒先へ延ばします。延ばせない（行を失った・DB が答えない）まま「最後に確かめた延長を送った時刻 + 300 秒 − 240 秒」を過ぎたら、Lease が切れる前に自分の Session を取り消します（Decision 0083 の承認の条件 (2)。Adapter は CLI を止めて `auth.json` を書き戻してから終わる）。240 秒は本番の起動の口（`SystemdLauncher`、`systemctl` の 1 回は 30 秒まで）で止めるのに掛かりうる最悪（Unit の終わり方を読む約 100 秒 + `systemctl stop` 3 回の約 92 秒）と書き戻しの分です（`_UnitProcess` の終わり方の読み取りは時間でも 10 秒に区切った）。CLI を止められなかった（`UnitNotStoppedError`）Session は、Adapter が `AgentSessionRequest.cli_running` で知らせ、枠を返さずにこの Process が生きている間 Heartbeat を続けます（Operator が Unit を止める。Process が終われば Lease は期限で切れる）。Session は `unavailable` で失敗し、使用量は分からないものとして見積もり（0083 の 5 (d)）。枠は精算の後に返します（成功・失敗・拒否・取り消しのどれでも。`asyncio` の取り消しの中でも最後まで）。時間は `ConnectionService(session_slot_wait_seconds=..., session_slot_ttl_seconds=..., session_slot_heartbeat_seconds=..., session_slot_margin_seconds=...)`（既定が本番の値。Test だけが縮める）。
+- **書き戻し（`write_back`）**: Exclusive の Session には、Secret Store（`credential_store` の `read`）から読んだ版の Credential と、その版に対する Compare-and-swap の書き戻し（`AgentSessionRequest.write_back`、`rotate_credential` を通す: Handle の Lock の中で、保存された版が渡した版のままのときだけ次の版を書き、System の `connection.rotate` の Audit）を渡します。結果は `WriteBack`（`written` / `stale`（誰かが先に書いた・Connection が別の Credential を指す）/ `failed`）。
+- **`CodexAuthFile.place`**: Credential（JSON の Object でなければ `ValueError`）を Session の `CODEX_HOME`（Session の Directory の `config/`）に新しい `auth.json` として書きます（0660、umask に関わらず `fchmod`。Group は Session の Directory の `paw-cli-bridge`）。Session の `config.toml` は `cli_auth_credentials_store = "file"`・`forced_login_method = "chatgpt"`。
+- **`CodexAuthFile.collect`**: CLI を止めた後（失敗・取り消しの後も。Adapter は取り消しの中でも最後まで走らせてから取り消しを上げる）に読み戻し（Link は辿らない、大きさの上限あり）、置いた値と JSON として違えば `write_back` に渡します。JSON の Object でない・読めない・消えていたら書き戻さず Log（種類だけ。値は出さない）。Codex（`rust-v0.162.1`）は Refresh した Login を `auth.json` の Truncate と書き直しで保存する（Rename しない）ので、File の持ち主と Mode が残り Backend が読めます。
+- 本番の Container（`deploy/cli-session/paw_cli_session_run.py`）: `CODEX_HOME` は Container の tmpfs（`tmpfs-mode=0700`、`chown=true`）で、その中に Session の `config.toml`（読み取り専用）と `auth.json`（読み書き）だけを Bind Mount します（書いてあるものだけ。版の確認の時はどちらもない）。Codex がそこに書くその他（Log・状態）は Container と一緒に消えます。`launch.json` の `CODEX_HOME` が Session の `config` でなければ起動しません。
+
+Test は `tests/test_connections_session_slot.py`（本物の PostgreSQL と `FileSecretStore`、Fake の Exclusive の Adapter: Lease の取得・待ち・Timeout・Takeover・Heartbeat、`connection_busy` で Audit と行がないこと、取れなくなった枠の取り消し、書き戻しと Compare-and-swap の衝突、取り消しの後の書き戻し）、`tests/test_agents_codex_credentials.py`（`CodexAuthFile` と Fake の `codex` の `refresh`）、`tests/test_connection_session_lease_migration.py`（Migration の Up / Down）、`tests/test_cli_session_units.py`（Container の `CODEX_HOME` の Mount）、`tests/test_connections_grants.py`（App の Role の権限）。
+
+Codex の ChatGPT の Login の運用の手順（Host の root と Owner / Admin。CLI の段を有効にする前に）:
+
+1. Image と同じ版の Codex で、使い捨ての `CODEX_HOME` に Device Code の Login をする（版の Flag は `podman run --rm <codex_image> codex login --help` で確かめる。`rust-v0.162.1` の Source と、この Host の `codex-cli 0.156.1` の Help はどちらも `--device-auth`）:
+
+   ```sh
+   umask 077
+   export CODEX_HOME="$(mktemp -d)"
+   printf 'cli_auth_credentials_store = "file"\nforced_login_method = "chatgpt"\n' > "$CODEX_HOME/config.toml"
+   codex login --device-auth      # 表示された URL と Code を Browser で入力する
+   codex login status             # "Logged in using ChatGPT" を確かめる
+   ```
+
+2. `auth.json` を Secret Store に入れる（表示されるのは新しい Handle だけ）: `sudo paw-connection-credential-put codex < "$CODEX_HOME/auth.json"`（[`deploy/secret-store/README.md`](deploy/secret-store/README.md)）。
+3. Owner / Admin がその Handle を Codex の Connection に登録する（初めては `ConnectionService.connect`、入れ替えは `replace_credential`。`admin.config.manage`）。**この操作の HTTP / 管理 Command の口はまだありません**（Claude の Token と同じ。別の Issue）。
+4. 使い捨ての Directory を消す（その Login をこの Host で二度と使わない。使えば Refresh Token が回り、PAW の版が失効する）: `shred -u "$CODEX_HOME/auth.json"; rm -rf "$CODEX_HOME"; unset CODEX_HOME`。
 
 ## Tool Broker のファイル・Shell・Git の Tool と Sandbox（Issue #208、Decision 0083 の段階 2）
 
@@ -4844,7 +4892,7 @@ Task を作って Queue に入れる正規の入口です（Web の `エージ�
 
 - Working Set は 1〜32 件、同じ Repository は 1 回（422 `duplicate_repository`）、`target` が 1 つ以上（422 `no_target_repository`）。各 Repository はその ACL で、`referenced` は `project.read`、`working` / `target` は `project.repo.write` を判定します（[Decision 0035](../../docs/decisions/0035-working-set-capability-grants-and-legacy-tasks.md) の 3。`project.repo.write` は Audit 必須）。Project の外・ない・読めない Repository は同じ 404 `repository_not_found`、読めるが書けない Repository を `working` / `target` にすると 403 `repository_write_forbidden`。どの役割の Repository も、Task の Agent が使うので、その ACL で `project.task.run`（Repository では `agent` の権限）も判定し、`agent` を許さない Repository は 403 `repository_agent_forbidden`（`decide_agent` が実行時に拒むため、作成の時点で断る）。
 - Project が Archived / Pending deletion / Deleted / 所属しない Project は Guard が 403（Audit の理由 `project_state_forbids` など）。Guard の後で Active でなくなった Project は、`create_task` の Gate が 409 `project_not_active` で拒み、何も書きません。
-- 指示文（1〜20,000 文字）は Task の入力 `{"instruction": ...}` として保存し、Planner に渡ります。タイトルは 1〜200 文字（空白だけは 422 `invalid_command_argument`）。
+- 指示文（1〜20,000 文字）は Task の入力 `{"instruction": ...}` として保存し、Planner に渡ります。タイトルは 1〜200 文字。タイトルも指示文も、空白・改行だけ（Web の `trim()` と同じく U+FEFF も空白）なら 422 `invalid_command_argument`（#278）。
 - `create_task(..., in_transaction=...)` の同じ Transaction で、Queue の Entry（`normal`）と Budget の Preset（`standard` / `long`、既定 `standard`。`unlimited` は誰が選べるかが決まるまで 422）を、`Orchestrator.enqueue_task` と同じ順に書きます。Queue に入らない Task・Budget のない Task は残りません。
 - 作成の監査は、他の作成の Route と同じく Capability の判定の行（`audit_events`）と、Task の `create` の Event（作成者と Working Set）です。
 - CSRF は他の POST と同じ（`SameSite=Strict` と Origin の検査）。
