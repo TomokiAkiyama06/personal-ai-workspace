@@ -652,14 +652,16 @@ class ConnectionStore:
 
     async def release_session_slot(
         self, kind: ConnectionKind, holder: uuid.UUID
-    ) -> None:
+    ) -> bool:
         """Give the slot back (``holder``'s row only: a lease taken over in
-        the meantime stays its new holder's)."""
-        await self._write(
+        the meantime stays its new holder's). ``False``: there was no row of
+        ``holder`` (taken over, or gone) and nothing was deleted."""
+        rows = await self._write(
             "DELETE FROM connection_session_leases"
-            " WHERE kind = %(kind)s AND holder = %(holder)s",
+            " WHERE kind = %(kind)s AND holder = %(holder)s RETURNING 1",
             {"kind": kind.value, "holder": holder},
         )
+        return bool(rows)
 
     async def bind_session_slot(
         self,

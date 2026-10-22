@@ -276,6 +276,10 @@ class CodexAttachment:
     # session gave up, and its directory is the collection loop's (the
     # runtime must not delete it).
     fenced: list[bool] = field(default_factory=list, repr=False)
+    # Set by the runtime when the service released the connection's slot
+    # without deleting this session's own row (Codex review of #291: taken
+    # over meanwhile, or not known): the directory is the collection's.
+    slot_lost: list[bool] = field(default_factory=list, repr=False)
 
 
 def session_config(spec: CliSessionSpec, tools: Iterable[str]) -> str:
@@ -826,12 +830,19 @@ class CodexCliRuntime:
             try:
                 tools = frozenset(t["function"]["name"] for t in toolkit.tools)
                 attachment = CodexAttachment(spec, bridge, tools, system)
+                lost = attachment.slot_lost
+
+                def released(given_back: bool) -> None:
+                    if not given_back:
+                        lost.append(True)
+
                 request = SessionRequest(
                     self._model,
                     _PURPOSES[assignment.role],
                     task,
                     self._timeout,
                     attachment=attachment,
+                    on_slot_released=released,
                 )
                 try:
                     result = await self._gate.session(
@@ -859,7 +870,7 @@ class CodexCliRuntime:
                     "A CLI session could not be stopped; its files stay: session=%s",
                     spec.session_id,
                 )
-            elif attachment is not None and attachment.fenced:
+            elif attachment is not None and (attachment.fenced or attachment.slot_lost):
                 # The connection's slot was taken over (Decision 0096, 2's
                 # fencing): the directory is the collection loop's now.
                 logger.error(

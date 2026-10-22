@@ -137,6 +137,11 @@ class SessionSlot:
         self.fenced = False
         #: The session whose row :meth:`release` marked ``kept``.
         self.kept_session: uuid.UUID | None = None
+        #: Set by :meth:`release` once it deleted this holder's own row: the
+        #: session's files are nobody else's to collect (Codex review of
+        #: #291). ``False`` after a takeover, a database error, a kept or a
+        #: fenced slot: the files must stay for the collection.
+        self.given_back = False
 
     def __repr__(self) -> str:
         return f"SessionSlot(kind={self._kind.value})"
@@ -424,7 +429,17 @@ class SessionSlot:
             return
         await self._stop_heartbeat()
         try:
-            await self._run(self._store.release_session_slot(self._kind, self.holder))
+            self.given_back = await self._run(
+                self._store.release_session_slot(self._kind, self.holder)
+            )
+            if not self.given_back and self.session is not None:
+                logger.error(
+                    "connection session slot was taken over before it was given"
+                    " back; its files are left to the collection: kind=%s"
+                    " session=%s",
+                    self._kind.value,
+                    self.session,
+                )
         except Exception as error:
             logger.warning(
                 "connection session slot not released (it expires):"

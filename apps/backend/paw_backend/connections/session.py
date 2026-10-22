@@ -180,6 +180,12 @@ class SessionRequest:
     timeout_seconds: float
     # Handed to the adapter unchanged (``AgentSessionRequest.attachment``).
     attachment: Any = field(default=None, repr=False)
+    # Called once the connection's session slot was released (an exclusive
+    # session only), with whether this session gave its own row back
+    # (Codex review of #291): ``False`` (taken over meanwhile, kept, fenced,
+    # or not known) means the session's files must stay for the collection
+    # of Decision 0096; ``True``, they are nobody else's.
+    on_slot_released: Callable[[bool], None] | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "model", validate_model("model", self.model))
@@ -194,6 +200,8 @@ class SessionRequest:
                 "timeout_seconds", self.timeout_seconds, MAX_CALL_TIMEOUT_SECONDS
             ),
         )
+        if self.on_slot_released is not None and not callable(self.on_slot_released):
+            raise TypeError("on_slot_released must be callable")
 
 
 class SessionStop(StrEnum):

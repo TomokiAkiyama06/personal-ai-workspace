@@ -1521,6 +1521,14 @@ class ConnectionService:
         finally:
             if slot is not None:
                 await self._shielded(slot.release())
+                if request.on_slot_released is not None:
+                    try:
+                        request.on_slot_released(slot.given_back)
+                    except Exception as error:
+                        logger.error(
+                            "the slot release callback failed: exception_type=%s",
+                            log_type_name(error),
+                        )
                 if slot.kept_session is not None:
                     await self._shielded(self._audit_session(kind, ACTION_SESSION_KEPT))
 

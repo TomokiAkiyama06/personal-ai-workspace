@@ -20,6 +20,7 @@ fake session adapters.
 """
 
 import asyncio
+import dataclasses
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -30,13 +31,16 @@ from paw_backend.connections import (
     ConnectionStatus,
     CredentialSuspicion,
     SessionCollection,
+    SessionRequest,
     SessionSlotBusyError,
+    UsagePurpose,
     WriteBack,
 )
 from paw_backend.connections.store import ConnectionStore
 from paw_backend.db import Database
 from paw_backend.health.domain import Severity
 from paw_backend.health.sources import ConnectionSource
+from paw_backend.tasks.queueing.domain import QueueLease
 
 from .connections_support import requires_postgres
 from .support import make_settings
@@ -395,6 +399,50 @@ class SessionTest(SlotCase):
         # The row is the new holder's, as it was: not deleted.
         (row,) = self.rows("SELECT holder, session FROM connection_session_leases")
         self.assertEqual((row["holder"], row["session"]), (other, adapter.session))
+
+    def start_seeing_release(self, service, seen):
+        context = self.context(self.task, self.user, self.project_of(self.task))
+        context = dataclasses.replace(context, lease=QueueLease(self.entry, "w1", 1))
+        return service.execute_session(
+            self.principal(self.user),
+            context,
+            CODEX,
+            SessionRequest(
+                "gpt-5-codex",
+                UsagePurpose.CODING,
+                "the task",
+                600,
+                on_slot_released=seen.append,
+            ),
+        )
+
+    async def test_the_release_says_whether_this_session_gave_its_row_back(self):
+        # Codex review of #291: a session whose row was taken over after its
+        # last check (a pause past the lease) is told so, and the row stays.
+        seen = []
+        await self.start_seeing_release(self.slot_service(BindingSession()), seen)
+        self.assertEqual((seen, self.leases()), ([True], []))
+        other = uuid.uuid4()
+
+        class TakenAtTheEnd(BindingSession):
+            async def run_session(inner, secret, request):
+                result = await super().run_session(secret, request)
+                await asyncio.to_thread(self.set_holder, other)
+                return result
+
+        seen = []
+        with self.assertLogs("paw_backend.connections", "ERROR"):
+            await self.start_seeing_release(self.slot_service(TakenAtTheEnd()), seen)
+        self.assertEqual(seen, [False])
+        (row,) = self.rows("SELECT holder FROM connection_session_leases")
+        self.assertEqual(row["holder"], other)
+        # A kept slot is not given back either.
+        await asyncio.to_thread(self.clean_leases)
+        seen = []
+        await self.start_seeing_release(
+            self.slot_service(BindingSession(stuck=True)), seen
+        )
+        self.assertEqual(seen, [False])
 
     async def test_a_kept_slot_taken_over_is_let_go(self):
         # The holding process renews a kept bound slot only; once the
