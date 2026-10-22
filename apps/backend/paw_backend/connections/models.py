@@ -51,6 +51,7 @@ from paw_backend.connections.domain import (
     FailureCode,
     QuotaMetric,
     QuotaPeriod,
+    SessionCollection,
     UsagePurpose,
     UsageStatus,
 )
@@ -265,6 +266,12 @@ class ConnectionSessionLeaseRow(Base):
         ),
         CheckConstraint("NOT kept OR session IS NOT NULL", name="kept_has_session"),
         CheckConstraint(
+            "collected IS NULL OR (session IS NOT NULL AND collected IN ("
+            + ", ".join(f"'{member.value}'" for member in SessionCollection)
+            + "))",
+            name="collected_valid",
+        ),
+        CheckConstraint(
             "expected_version IS NULL OR expected_version >= 1",
             name="version_positive",
         ),
@@ -283,3 +290,4 @@ class ConnectionSessionLeaseRow(Base):
     secret_handle: Mapped[str | None] = mapped_column(Text)
     expected_version: Mapped[int | None] = mapped_column(BigInteger)
     kept: Mapped[bool] = mapped_column(Boolean, server_default=false())
+    collected: Mapped[str | None] = mapped_column(Text)

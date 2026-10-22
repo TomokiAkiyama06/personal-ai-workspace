@@ -62,6 +62,21 @@ class CredentialSuspicion(StrEnum):
     INVALID = "invalid"  # not a login (not a JSON object, unreadable)
 
 
+class SessionCollection(StrEnum):
+    """What the late collection of a Codex session's login came to (Decision
+    0096, 4 and 5: the reason of ``connection.session_collected``; kept on
+    the slot's row as ``collected`` before the login is deleted)."""
+
+    WRITTEN = "written"  # a refreshed login, stored as the next version
+    UNCHANGED = "unchanged"  # the same as the current version
+    # Not written: the credential changed meanwhile (cannot happen while the
+    # slot is held; logged as an error).
+    STALE_VERSION = "stale_version"
+    DETACHED = "detached"  # the connection points at another credential now
+    MISSING = "missing"  # no login to read back (marks the connection)
+    INVALID = "invalid"  # not a login (marks the connection)
+
+
 class UsagePurpose(StrEnum):
     """Why a call was made: a closed usage category, never text (privacy-safe).
 

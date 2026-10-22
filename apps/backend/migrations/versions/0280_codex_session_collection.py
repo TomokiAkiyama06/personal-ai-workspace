@@ -19,7 +19,11 @@ its unit was confirmed stopped, across a restart of the backend:
   taken over by the collection loop). A row with a ``session`` is never taken
   over by an ordinary acquisition, even once expired: the collection loop
   takes it over (Decision 0096, 1 D and 2 B). The three columns are all set
-  or all NULL; ``kept`` needs a ``session``.
+  or all NULL; ``kept`` needs a ``session``. ``collected`` is the definite
+  result of the collection (``written``, ``unchanged``, ``stale_version``,
+  ``detached``, ``missing``, ``invalid``), written BEFORE the session's
+  login is deleted, so a retry after a failure to give the slot back keeps
+  that result instead of finding no login (Codex review of #292).
 * ``shared_connections`` gains ``suspect_at`` and
   ``suspect_reason`` (``missing`` / ``invalid``): a collection
   that could not read a login back (Decision 0096, 5) marks the connection in
@@ -64,9 +68,23 @@ depends_on: str | Sequence[str] | None = None
 # the model.
 LEASES = "connection_session_leases"
 CONNECTIONS = "shared_connections"
-LEASE_COLUMNS = ("session", "secret_handle", "expected_version", "kept")
+LEASE_COLUMNS = (
+    "session",
+    "secret_handle",
+    "expected_version",
+    "kept",
+    "collected",
+)
 CONNECTION_COLUMNS = ("suspect_at", "suspect_reason")
 SUSPICIONS = ("missing", "invalid")
+RESULTS = (
+    "written",
+    "unchanged",
+    "stale_version",
+    "detached",
+    "missing",
+    "invalid",
+)
 HANDLE_PATTERN = "^cred_[0-9a-f]{32}$"
 
 
@@ -92,6 +110,14 @@ def upgrade() -> None:
         LEASES,
         "(session IS NULL) = (secret_handle IS NULL)"
         " AND (session IS NULL) = (expected_version IS NULL)",
+    )
+    op.add_column(LEASES, sa.Column("collected", sa.Text(), nullable=True))
+    op.create_check_constraint(
+        op.f("ck_connection_session_leases_collected_valid"),
+        LEASES,
+        "collected IS NULL OR (session IS NOT NULL AND collected IN ("
+        + ", ".join(f"'{result}'" for result in RESULTS)
+        + "))",
     )
     op.create_check_constraint(
         op.f("ck_connection_session_leases_kept_has_session"),
