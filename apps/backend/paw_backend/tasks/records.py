@@ -289,6 +289,8 @@ class TaskSnapshot:
     # most ``MAX_ACTIVE_TOOL_INVOCATIONS`` of them) and the latest 100 finished.
     tool_invocations: tuple[ToolInvocationInfo, ...] = field(default=())
     working_set: tuple[WorkingSetRepository, ...] = field(default=())
+    # A read-only task (issue #279, Decision 0094, 1 A; ``tasks.read_only``).
+    read_only: bool = False
 
     def repository(self, repository_id: uuid.UUID) -> WorkingSetRepository | None:
         """The Working Set's entry for ``repository_id`` (``None``: not in it)."""

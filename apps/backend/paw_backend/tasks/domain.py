@@ -24,6 +24,11 @@ Which commands each state accepts::
     completed    (nothing)
     failed       retry, restart
     cancelled    restart
+
+A **read-only** task (issue #279, Decision 0094, 1 A: ``tasks.read_only``) is
+never evaluated: ``running`` accepts ``complete`` instead of
+``begin_evaluation`` (the orchestrator completes it when its DAG succeeded);
+every other pair is the same (``READ_ONLY_TRANSITIONS``).
 """
 
 import uuid
@@ -361,6 +366,21 @@ TRANSITIONS: dict[TaskCommand, TransitionRule] = {
 }
 
 
+# A read-only task (module docstring): nothing to evaluate, no pull request to
+# deliver, so the DAG's success completes it from ``running``.
+READ_ONLY_TRANSITIONS: dict[TaskCommand, TransitionRule] = {
+    **TRANSITIONS,
+    _C.COMPLETE: TransitionRule(frozenset({_S.RUNNING}), _S.COMPLETED),
+}
+del READ_ONLY_TRANSITIONS[_C.BEGIN_EVALUATION]
+
+
+def _table(read_only: object) -> dict[TaskCommand, TransitionRule]:
+    if type(read_only) is not bool:
+        raise InvalidCommandArgumentError("read_only must be a bool")
+    return READ_ONLY_TRANSITIONS if read_only else TRANSITIONS
+
+
 @dataclass(frozen=True, slots=True)
 class TransitionPlan:
     command: TaskCommand
@@ -376,10 +396,13 @@ def interruption_of(command: TaskCommand) -> Interruption | None:
     return rule.interruption if rule else None
 
 
-def allowed_commands(state: TaskState) -> frozenset[TaskCommand]:
-    """The commands ``state`` accepts (for example to enable buttons in a UI)."""
+def allowed_commands(
+    state: TaskState, *, read_only: bool = False
+) -> frozenset[TaskCommand]:
+    """The commands ``state`` accepts (for example to enable buttons in a UI),
+    for a read-only task with ``read_only``."""
     return frozenset(
-        command for command, rule in TRANSITIONS.items() if state in rule.sources
+        command for command, rule in _table(read_only).items() if state in rule.sources
     )
 
 
@@ -388,8 +411,10 @@ def plan_transition(
     command: TaskCommand,
     *,
     wait_reason: WaitReason | None = None,
+    read_only: bool = False,
 ) -> TransitionPlan:
-    """Return the resulting state of ``command`` in ``state``.
+    """Return the resulting state of ``command`` in ``state`` (of a read-only
+    task with ``read_only``: ``READ_ONLY_TRANSITIONS``).
 
     Raises ``InvalidCommandArgumentError`` when ``wait_reason`` is not a
     ``WaitReason`` (or its value), whatever the state; ``IllegalTransitionError``
@@ -397,9 +422,10 @@ def plan_transition(
     ``InvalidCommandArgumentError`` when ``wait_reason`` is missing for Wait or
     given for any other command (an illegal transition is reported first).
     """
+    table = _table(read_only)
     if wait_reason is not None:
         wait_reason = enum_member("wait_reason", WaitReason, wait_reason)
-    rule = TRANSITIONS.get(command)
+    rule = table.get(command)
     if rule is None or state not in rule.sources:
         raise IllegalTransitionError(state.value, command.value)
     if command is TaskCommand.WAIT:

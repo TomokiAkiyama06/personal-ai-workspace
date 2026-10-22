@@ -51,7 +51,7 @@ from typing import Protocol
 
 from paw_backend.authz import AgentGrant, ProjectState, RepoAcl
 from paw_backend.db import Database
-from paw_backend.orchestrator.domain import ROLE_CEILING
+from paw_backend.orchestrator.domain import READ_ONLY_TASK_CAPABILITIES, ROLE_CEILING
 from paw_backend.projects import store as projects_store
 from paw_backend.projects.records import ProjectStatus
 from paw_backend.repositories.errors import (
@@ -149,7 +149,11 @@ class StoredTaskAuthority:
         stored = await self._tasks.restore(task.id, log_limit=0)
         _scope, projects = await self._resolve(stored)
         # The run is the one the orchestrator started with (like a node's id).
-        return AgentGrant(parent_agent_id(task), PARENT_CAPABILITIES, projects)
+        # A read-only task (issue #279) holds what its non-writing roles may.
+        capabilities = (
+            READ_ONLY_TASK_CAPABILITIES if stored.read_only else PARENT_CAPABILITIES
+        )
+        return AgentGrant(parent_agent_id(task), capabilities, projects)
 
     async def parent_scope(self, task: TaskSnapshot) -> TaskScope:
         stored = await self._tasks.restore(task.id, log_limit=0)

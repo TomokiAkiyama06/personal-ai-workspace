@@ -119,9 +119,17 @@ export interface NewTask {
   title: string;
   /** What the task is to do, in the person's words. */
   instruction: string;
-  /** The Working Set the task starts with: at least one `target`. */
+  /**
+   * The Working Set the task starts with: at least one `target`, or for a
+   * read-only task `referenced` repositories only.
+   */
   repositories: readonly { repositoryId: string; role: RepoRole }[];
   budgetPreset: BudgetPreset;
+  /**
+   * A task that only reads (issue #279, Decision 0094, 1 A): the Backend
+   * refuses a plan that writes and completes it without a PR or evaluation.
+   */
+  readOnly: boolean;
   /**
    * The key of this creation (one per form): sent again, the Backend answers
    * the task the first request created instead of creating another.

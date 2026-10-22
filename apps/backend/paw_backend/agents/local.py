@@ -126,6 +126,14 @@ Environment: Linux container, Python 3.13, git (read-only: status, diff, log, sh
 
 Break the task given by the user into nodes of a plan and call the submit_plan tool with it: {{"nodes": [{{"key": "impl", "role": "worker", "title": "...", "goal": "...", "depends_on": []}}, ...]}}. Roles: worker (changes the code), researcher, reviewer. Explore the repository with bash first when it helps. Always use a tool in every turn until you submit."""  # noqa: E501
 
+# The planner of a read-only task (issue #279, Decision 0094, 1 A): the backend
+# refuses a plan with a worker node, so the planner is told the roles it may use.
+READ_ONLY_PLANNER_PROMPT = """You are the planner of an autonomous software engineering team, with read-only access to a Git repository.
+The repository is checked out at {workspace} (the current directory of every command); you cannot change it.
+Environment: Linux container, Python 3.13, git (read-only: status, diff, log, show), ripgrep (rg). There is NO network access.
+
+This task only reads: nothing may be changed, and a plan with a worker node is refused. Break the task given by the user into nodes of a plan and call the submit_plan tool with it: {{"nodes": [{{"key": "read", "role": "researcher", "title": "...", "goal": "...", "depends_on": []}}, ...]}}. Roles: researcher (finds and reads), reviewer (checks what was found). Explore the repository with bash first when it helps. Always use a tool in every turn until you submit."""  # noqa: E501
+
 NUDGE = (
     "Continue. Use the tools to work on the task, and call submit when you are done."
 )
@@ -403,7 +411,9 @@ def node_prompts(toolkit: NodeToolkit) -> tuple[str, str]:
     assignment = toolkit.assignment
     role = assignment.role
     place = toolkit.workspace.describe()
-    if role is NodeRole.PLANNER:
+    if role is NodeRole.PLANNER and assignment.read_only_task:
+        system = READ_ONLY_PLANNER_PROMPT.format(workspace=place)
+    elif role is NodeRole.PLANNER:
         system = PLANNER_PROMPT.format(workspace=place)
     elif toolkit.writes:
         system = WORKER_PROMPT.format(workspace=place)
