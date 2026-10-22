@@ -148,6 +148,16 @@ class Settings(BaseSettings):
     # reaped only a day and an hour after it started. 0 turns it off: such rows
     # would then stay ``in_flight`` (counted as requests, without an end).
     connection_reap_interval_seconds: int = Field(default=600, ge=0, le=86_400)
+    # Decision 0096, 1 D (issue #280): how often every backend process looks
+    # for Codex sessions whose slot outlived their process (taken over and
+    # their login collected once their unit stopped), and how often a kept
+    # slot tries the collection (60 s, provisional). Runs only with a secret
+    # store. 0 turns it off: such a slot then blocks the Codex connection
+    # until it is collected by a process that has it on.
+    codex_collect_interval_seconds: int = Field(default=60, ge=0, le=3600)
+    # The CLI sessions' directories (``/run/paw-cli``, the
+    # ``paw-cli-session@.service`` units' ``<base>/<uuid>``).
+    cli_session_dir: Path = Path("/run/paw-cli")
     # How often the Memory freshness jobs run (stale candidates, expiry) together
     # with the sweep that finishes the cleanup of ended tasks (open approvals,
     # ``session_only`` memories) that did not finish right after the task ended

@@ -467,6 +467,28 @@ class ConnectionSourceTest(unittest.IsolatedAsyncioTestCase):
         codex, _ = health.parts
         self.assertEqual(codex["credential_suspect"], "missing")
 
+    async def test_egress_units_left_over_warn(self):
+        # Decision 0096, 7: read from the paw-egress-session@* units.
+        class Egress:
+            def __init__(self, left):
+                self.left = left
+
+            async def egress_left_over(self):
+                return self.left
+
+        for left, severity, reasons in (
+            (0, Severity.INFO, ()),
+            (None, Severity.INFO, ()),  # systemd could not be asked
+            (2, Severity.WARNING, ("egress_unit_left",)),
+        ):
+            with self.subTest(left):
+                health = await ConnectionSource(
+                    RowsDatabase([], [], []), egress=Egress(left)
+                ).check()
+                self.assertIs(health.severity, severity)
+                self.assertEqual(health.reasons, reasons)
+                self.assertEqual(health.metrics["egress_units_left"], left)
+
     async def test_no_handle_is_read(self):
         database = RowsDatabase([], [], [])
         await ConnectionSource(database).check()

@@ -113,6 +113,7 @@ Limits (stated, not hidden)
 import asyncio
 import contextlib
 import hmac
+import json
 import logging
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
@@ -140,10 +141,12 @@ from paw_backend.connections.domain import (
     DEFAULT_PERIOD_TIMEZONE,
     ConnectionKind,
     ConnectionStatus,
+    CredentialSuspicion,
     FailureCode,
     QuotaMetric,
     QuotaPeriod,
     RefusalReason,
+    SessionCollection,
     Unlimited,
     UsageStatus,
 )
@@ -201,10 +204,12 @@ from paw_backend.connections.session import (
     WriteBack,
 )
 from paw_backend.connections.session_slot import (
+    SLOT_COLLECT_SECONDS,
     SLOT_HEARTBEAT_SECONDS,
     SLOT_STOP_MARGIN_SECONDS,
     SLOT_TTL_SECONDS,
     SLOT_WAIT_SECONDS,
+    SessionCollector,
     SessionSlot,
     check_slot_timing,
     run_within,
@@ -213,6 +218,7 @@ from paw_backend.connections.store import (
     Admitted,
     ConnectionStore,
     Refused,
+    SessionLease,
     SessionTurn,
 )
 from paw_backend.connections.validation import (
@@ -260,8 +266,9 @@ ACTION_USE = "connection.use"
 ACTION_QUOTA_SET = "connection.quota.set"
 ACTION_QUOTA_REMOVE = "connection.quota.remove"
 # Decision 0096, 4: a Codex session whose CLI could not be stopped keeps the
-# slot (``kept``) until its login was collected.
+# slot (``kept``) until its login was collected (the reason is the result).
 ACTION_SESSION_KEPT = "connection.session_kept"
+ACTION_SESSION_COLLECTED = "connection.session_collected"
 OUTCOME_SUCCEEDED = "succeeded"
 OUTCOME_KEPT = "unit_running"
 # The most an answer may be, as the adapter returned it and as it is returned: the
@@ -501,6 +508,7 @@ class ConnectionService:
         session_slot_ttl_seconds: float = SLOT_TTL_SECONDS,
         session_slot_heartbeat_seconds: float = SLOT_HEARTBEAT_SECONDS,
         session_slot_margin_seconds: float = SLOT_STOP_MARGIN_SECONDS,
+        session_collect_interval_seconds: float = SLOT_COLLECT_SECONDS,
     ) -> None:
         """Wire the service.
 
@@ -524,7 +532,10 @@ class ConnectionService:
         connection's slot (60 s), how long a lease lasts after its heartbeat,
         how often it is renewed, and how long before it could expire a holder
         that cannot renew stops its session. The defaults are production's;
-        the tests shorten them.
+        the tests shorten them. ``session_collect_interval_seconds``
+        (Decision 0096, 1 D, 60 s): how often a slot kept for a session whose
+        CLI could not be stopped tries the collection attached with
+        :meth:`attach_session_collector`.
 
         ``period_timezone`` is the IANA zone of the calendar windows (``day``, ``week``,
         ``month``); the default is ``Asia/Tokyo`` (Decision 0016, section 4, approved;
@@ -560,6 +571,13 @@ class ConnectionService:
             )
         except ValueError:
             raise fail("session_slot", InputProblem.OUT_OF_RANGE) from None
+        try:
+            if not float(session_collect_interval_seconds) > 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            raise fail("session_collect", InputProblem.OUT_OF_RANGE) from None
+        self._collect_seconds = float(session_collect_interval_seconds)
+        self._session_collector: SessionCollector | None = None
         self._slot_wait = float(session_slot_wait_seconds)
         self._slot_timing = {
             "ttl_seconds": float(session_slot_ttl_seconds),
@@ -813,6 +831,133 @@ class ConnectionService:
         if self._credentials is None or not hasattr(self._credentials, "collect"):
             return 0
         return await self._credentials.collect(self._store.handle_referenced)
+
+    # --- the late collection of a Codex session's login (Decision 0096) ------
+
+    def attach_session_collector(self, collector: SessionCollector | None) -> None:
+        """The collection a kept slot of this service's sessions runs every
+        ``session_collect_interval_seconds`` (Decision 0096, 1 D:
+        ``agents.codex_collect.CodexLoginCollector``, built on this service).
+        ``None``: a kept slot is only renewed (another process's
+        collection loop takes it over once this process is gone)."""
+        if collector is not None:
+            try:
+                require_async_method(collector, "collect", 2)
+            except TypeError:
+                raise fail("session_collector", InputProblem.WRONG_TYPE) from None
+        self._session_collector = collector
+
+    async def session_leases(self) -> tuple[SessionLease, ...]:
+        """Every slot bound to a session (the collection loop's look)."""
+        return await self._call_store(self._store.session_slots())
+
+    async def session_lease(
+        self, kind: ConnectionKind, holder: uuid.UUID
+    ) -> SessionLease | None:
+        """``holder``'s bound slot of ``kind``, or ``None``."""
+        kind = validate_enum("kind", kind, ConnectionKind)
+        holder = validate_uuid("holder", holder)
+        for lease in await self.session_leases():
+            if lease.kind is kind and lease.holder == holder:
+                return lease
+        return None
+
+    async def take_over_session(
+        self, kind: ConnectionKind, previous: uuid.UUID, holder: uuid.UUID
+    ) -> bool:
+        """The collection loop takes over an expired bound slot (one process
+        wins)."""
+        kind = validate_enum("kind", kind, ConnectionKind)
+        previous = validate_uuid("previous", previous)
+        holder = validate_uuid("holder", holder)
+        return await self._call_store(
+            self._store.take_over_session_slot(
+                kind, previous, holder, self._slot_timing["ttl_seconds"]
+            )
+        )
+
+    async def renew_session(self, kind: ConnectionKind, holder: uuid.UUID) -> bool:
+        """Renew ``holder``'s slot; ``False``: not ``holder``'s any more."""
+        kind = validate_enum("kind", kind, ConnectionKind)
+        holder = validate_uuid("holder", holder)
+        return await self._call_store(
+            self._store.renew_session_slot(
+                kind, holder, self._slot_timing["ttl_seconds"]
+            )
+        )
+
+    async def write_collected_login(
+        self,
+        kind: ConnectionKind,
+        handle: str,
+        expected_version: int,
+        value: str,
+    ) -> SessionCollection | None:
+        """Write a login collected late from a session (Decision 0096, 2's
+        handle and version checks). Under the handle's lock: the connection
+        must still point at ``handle`` (else ``detached``: a replaced or
+        disconnected credential is never overwritten) and its current version
+        is the expected one (it is at least ``expected_version``: only this
+        session wrote it since; ``None`` when it is lower, which cannot
+        happen, the caller stops with an error). The same value as the
+        current version is ``unchanged``; another is written as the next
+        version (``written``, ``connection.rotate``), by compare-and-swap
+        (``stale_version`` if somebody wrote meanwhile). A transient failure
+        raises."""
+        kind = validate_enum("kind", kind, ConnectionKind)
+        handle = validate_handle("secret_handle", handle)
+        if (
+            isinstance(expected_version, bool)
+            or not isinstance(expected_version, int)
+            or expected_version < 1
+        ):
+            raise fail("expected_version", InputProblem.OUT_OF_RANGE)
+        if not isinstance(value, str):
+            raise fail("value", InputProblem.WRONG_TYPE)
+        reader = getattr(self._credentials, "read", None)
+        if self._credentials is None or not callable(reader):
+            raise ConnectionUnavailableError()
+        async with self._credentials.lock(handle):
+            if await self._call_store(self._store.read_handle(kind)) != handle:
+                return SessionCollection.DETACHED
+            stored = await reader(handle)
+        if stored.kind is not kind:
+            return SessionCollection.DETACHED
+        if stored.version < expected_version:
+            return None
+        if _same_json(stored.secret.reveal(), value):
+            return SessionCollection.UNCHANGED
+        try:
+            await self.rotate_credential(kind, handle, stored.version, value)
+        except StaleCredentialVersionError:
+            logger.error(
+                "a collected login was not written: the credential changed"
+                " meanwhile: kind=%s",
+                kind.value,
+            )
+            return SessionCollection.STALE_VERSION
+        except ConnectionNotFoundError:
+            return SessionCollection.DETACHED
+        return SessionCollection.WRITTEN
+
+    async def finish_session(
+        self, kind: ConnectionKind, holder: uuid.UUID, result: SessionCollection
+    ) -> bool:
+        """Give the collected slot back (Decision 0096, 2's step 5): the row
+        goes; a login that could not be read (``missing`` / ``invalid``)
+        marks the connection in the same transaction (Decision 0096, 5);
+        audited ``connection.session_collected`` with the result's code.
+        ``False``: not ``holder``'s slot (nothing changed, not audited)."""
+        kind = validate_enum("kind", kind, ConnectionKind)
+        holder = validate_uuid("holder", holder)
+        result = validate_enum("result", result, SessionCollection)
+        suspicion = _SUSPICIONS.get(result)
+        finished = await self._call_store(
+            self._store.finish_session_slot(kind, holder, suspicion)
+        )
+        if finished:
+            await self._audit_session(kind, ACTION_SESSION_COLLECTED, result.value)
+        return finished
 
     @contextlib.asynccontextmanager
     async def _current_handle_locked(self, kind: ConnectionKind, *also: str):
@@ -1335,7 +1480,12 @@ class ConnectionService:
         slot = None
         if _exclusive(adapter):
             slot = SessionSlot(
-                self._store, kind, call=self._call_store, **self._slot_timing
+                self._store,
+                kind,
+                call=self._call_store,
+                collector=self._session_collector,
+                collect_seconds=self._collect_seconds,
+                **self._slot_timing,
             )
             if not await slot.acquire(self._slot_wait):
                 logger.warning(
@@ -2146,6 +2296,21 @@ class ConnectionService:
                 log_type_name(error),
                 action,
             )
+
+
+#: Decision 0096, 5: the collection results that mark the connection.
+_SUSPICIONS = {
+    SessionCollection.MISSING: CredentialSuspicion.MISSING,
+    SessionCollection.INVALID: CredentialSuspicion.INVALID,
+}
+
+
+def _same_json(stored: str, value: str) -> bool:
+    """The same login (equal as JSON; text that is not JSON by its text)."""
+    try:
+        return json.loads(stored) == json.loads(value)
+    except ValueError:
+        return stored == value
 
 
 def _connection_resource() -> Resource:

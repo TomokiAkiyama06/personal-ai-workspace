@@ -339,8 +339,43 @@ class EveryArgumentIsCheckedTest(unittest.IsolatedAsyncioTestCase):
                 "rotate_credential",
                 "collect_credentials",
                 "committed_status",
+                # The late collection of a Codex session's login (issue #280,
+                # Decision 0096): backend-internal too.
+                "attach_session_collector",
+                "session_leases",
+                "session_lease",
+                "take_over_session",
+                "renew_session",
+                "write_collected_login",
+                "finish_session",
             },
         )
+
+    async def test_the_collection_checks_its_arguments_and_needs_a_store(self):
+        codex, holder = ConnectionKind.CODEX, uuid.uuid4()
+        cred = "cred_" + "0" * 32
+        for call in (
+            lambda: self.service.session_lease("gemini", holder),
+            lambda: self.service.session_lease(codex, "not-a-uuid"),
+            lambda: self.service.take_over_session(codex, holder, 1),
+            lambda: self.service.renew_session(codex, None),
+            lambda: self.service.write_collected_login(codex, "x", 1, "{}"),
+            lambda: self.service.write_collected_login(codex, cred, 0, "{}"),
+            lambda: self.service.write_collected_login(codex, cred, True, "{}"),
+            lambda: self.service.write_collected_login(codex, cred, 1, b"{}"),
+            lambda: self.service.finish_session(codex, holder, "lost"),
+        ):
+            with (
+                self.subTest(call=call),
+                self.assertRaises(InvalidConnectionInputError),
+            ):
+                await call()
+        # No secret store: nothing collected can be written.
+        with self.assertRaises(ConnectionUnavailableError):
+            await self.service.write_collected_login(codex, cred, 1, "{}")
+        with self.assertRaises(InvalidConnectionInputError):
+            self.service.attach_session_collector(object())
+        self.service.attach_session_collector(None)
 
     async def test_the_rotation_checks_its_arguments_and_needs_a_store(self):
         value = "paw-store-canary-" + "41d7"

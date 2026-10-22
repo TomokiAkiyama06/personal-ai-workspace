@@ -12,6 +12,11 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from paw_backend import __version__
+from paw_backend.agents.cli_session import SystemdLauncher
+from paw_backend.agents.codex_collect import (
+    SystemdSessionUnits,
+    build_codex_collection,
+)
 from paw_backend.agents.wiring import (
     LocalModelSetup,
     build_local_agent,
@@ -206,6 +211,7 @@ def create_app(
         stop_loop = None
         user_stop_loop = None
         reaper = None
+        collection = None
         maintenance = None
         health = app.state.system_health
         compute_stop = asyncio.Event()
@@ -294,6 +300,18 @@ def create_app(
                 )
                 background.add(asyncio.create_task(reaper.run()))
                 health.reaper.attach(reaper)
+            # Codex sessions whose slot outlived their process: taken over and
+            # their login collected once their unit stopped (Decision 0096, 1 D;
+            # issue #280). Every process runs it (one wins each slot).
+            units = app.state.codex_session_units
+            if units is not None and app.state.connections is not None:
+                collection = build_codex_collection(
+                    app.state.connections,
+                    session_base=settings.cli_session_dir,
+                    interval_seconds=settings.codex_collect_interval_seconds,
+                    units=units,
+                )
+                background.add(asyncio.create_task(collection.run()))
             # The Memory freshness jobs and the sweep that finishes the cleanup of
             # ended tasks (issue #125, Decision 0047).
             if (
@@ -373,6 +391,8 @@ def create_app(
                 user_stop_loop.stop()
             if reaper is not None:
                 reaper.stop()
+            if collection is not None:
+                collection.stop()
             if maintenance is not None:
                 maintenance.stop()
             # Cancelling aborts the connection each of them is using (a diagnostic
@@ -462,6 +482,16 @@ def create_app(
     # The model of the Inferred Preference interpreter (#38), or ``None``: the
     # rule interpreter answers.
     app.state.preference_interpreter = preference_interpreter
+    # Decision 0096 (issue #280): the session units the Codex collection asks
+    # about, with a secret store to write a collected login to; System Health
+    # reads the egress units left over through them too (Decision 0096, 7).
+    app.state.codex_session_units = (
+        SystemdSessionUnits(SystemdLauncher())
+        if secret_store is not None
+        and database.configured
+        and settings.codex_collect_interval_seconds > 0
+        else None
+    )
     probe = NvidiaSmiProbe() if settings.health_gpu_probe and compute is None else None
     app.state.system_health = build_system_health(
         settings,
@@ -470,6 +500,7 @@ def create_app(
         probe=probe,
         event_bus=event_bus,
         secret_store=secret_store,
+        egress=app.state.codex_session_units,
     )
     # A person's Notification Center (issue #188): ``/api/v1/notifications``
     # answers 503 without a database.

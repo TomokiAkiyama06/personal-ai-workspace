@@ -623,14 +623,21 @@ class ConnectionSource:
     (``unit_running:<kind>``, with ``kept_sessions``); a collection that could
     not read the login back marks the connection, an error
     (``collect_failed:<kind>``) until a health check finds it ``connected``
-    or the credential is replaced. Counts and codes only: never a session's
+    or the credential is replaced. Sessions whose egress units
+    (``paw-egress-session@*``) are still active while their CLI unit is not
+    are a warning (``egress_unit_left``, ``egress_units_left``; ``None``:
+    systemd could not be asked). Counts and codes only: never a session's
     UUID (the log has it)."""
 
     component = Component.CONNECTIONS
     max_age_seconds = limits.REPORT_MAX_AGE_SECONDS
 
-    def __init__(self, database: Database, secret_store=None) -> None:
+    def __init__(self, database: Database, secret_store=None, egress=None) -> None:
         self._database = database
+        # Decision 0096, 7: the sessions whose egress units outlive their CLI
+        # unit (``agents.codex_collect.SystemdSessionUnits``), when the
+        # deployment collects Codex sessions: a warning.
+        self._egress = egress
         # The secret store of the connections (Decision 0087, 1), when the
         # deployment has one: a store that cannot be read is ``CRITICAL``.
         self._secret_store = secret_store
@@ -696,6 +703,12 @@ class ConnectionSource:
             elif row[1] == ConnectionStatus.UNAVAILABLE.value:
                 severities.append(Severity.WARNING)
                 reasons.append(f"unavailable:{kind.value}")
+        if self._egress is not None:
+            left = await self._egress.egress_left_over()
+            metrics["egress_units_left"] = left
+            if left:
+                severities.append(Severity.WARNING)
+                reasons.append("egress_unit_left")
         if self._secret_store is not None:
             problem = await self._secret_store.check()
             metrics["secret_store_ok"] = 1 if problem is None else 0
