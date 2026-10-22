@@ -64,7 +64,8 @@ class CredentialSuspicion(StrEnum):
 
 class SessionCollection(StrEnum):
     """What the late collection of a Codex session's login came to (Decision
-    0096, 4 and 5: the reason of ``connection.session_collected``)."""
+    0096, 4 and 5: the reason of ``connection.session_collected``; kept on
+    the slot's row as ``collected`` before the login is deleted)."""
 
     WRITTEN = "written"  # a refreshed login, stored as the next version
     UNCHANGED = "unchanged"  # the same as the current version

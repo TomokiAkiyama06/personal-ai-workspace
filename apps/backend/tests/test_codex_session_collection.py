@@ -20,6 +20,7 @@ connection service, a real session directory.
 """
 
 import asyncio
+import dataclasses
 import os
 import shutil
 import stat
@@ -27,7 +28,9 @@ import tempfile
 import unittest
 import uuid
 from pathlib import Path
+from unittest.mock import patch
 
+from paw_backend.agents import codex_collect
 from paw_backend.agents.cli_session import SystemdLauncher
 from paw_backend.agents.codex_collect import (
     FENCE_MODE,
@@ -72,6 +75,7 @@ class Host:
         self.finished = []
         self.renewals = True
         self.fail = None
+        self.finish_fail = None
 
     async def session_lease(self, kind, holder):
         if self.lease is None or holder != self.lease.holder:
@@ -87,7 +91,14 @@ class Host:
         self.written.append((handle, expected_version, value))
         return self.result
 
+    async def record_collection(self, kind, holder, result):
+        self.lease = dataclasses.replace(self.lease, collected=result)
+        return True
+
     async def finish_session(self, kind, holder, result):
+        if self.finish_fail is not None:
+            error, self.finish_fail = self.finish_fail, None
+            raise error
         self.finished.append(result)
         return True
 
@@ -165,7 +176,75 @@ class WaitTest(CollectorCase):
         self.assertFalse((self.directory / "launch.json").exists())
 
 
+class FenceTest(CollectorCase):
+    """Codex review of #292 (P1): creation is blocked before the launch file
+    is looked at; a launch file that survived is removed with the directory
+    writable for that instant only; one that keeps coming back keeps the
+    slot instead of wedging every later fence."""
+
+    async def test_creation_is_blocked_before_the_launch_file_is_removed(self):
+        modes = []
+        remove = codex_collect._remove
+
+        def removing(path):
+            modes.append(
+                (self.mode(self.directory / "config"), self.mode(self.directory))
+            )
+            remove(path)
+
+        with patch.object(codex_collect, "_remove", removing):
+            self.assertTrue(codex_collect.fence(self.directory))
+        # ``config`` was already closed; the directory was opened only for
+        # the removal and is closed again.
+        self.assertEqual(modes, [(FENCE_MODE, 0o700)])
+        self.assertFalse((self.directory / "launch.json").exists())
+        self.assertEqual(self.mode(self.directory), FENCE_MODE)
+
+    async def test_a_launch_file_in_an_already_fenced_directory_is_removed(self):
+        # A previous round fenced the directory; a launch file is there all
+        # the same (written just before it): no later fence is wedged.
+        os.chmod(self.directory, FENCE_MODE)
+        self.assertTrue(codex_collect.fence(self.directory))
+        self.assertFalse((self.directory / "launch.json").exists())
+        self.assertEqual(self.mode(self.directory), FENCE_MODE)
+
+    @unittest.skipIf(os.geteuid() == 0, "root ignores the directory's mode")
+    async def test_nothing_can_be_created_once_fenced(self):
+        self.assertTrue(codex_collect.fence(self.directory))
+        for path in (self.directory / "launch.json", self.directory / "config" / "x"):
+            with self.subTest(path=path), self.assertRaises(PermissionError):
+                path.write_text("{}")
+
+    async def test_a_launch_file_that_keeps_coming_back_keeps_the_slot(self):
+        self.units.running = False
+        with (
+            patch.object(codex_collect, "_remove", lambda path: None),
+            self.assertLogs("paw_backend.agents.codex_collect", "ERROR") as logs,
+        ):
+            self.assertFalse(await self.collect())
+        self.assertIn("came back", "\n".join(logs.output))
+        self.assertEqual((self.host.written, self.host.finished), ([], []))
+        self.assertEqual(self.auth.read_text(), REFRESHED)
+        self.assertEqual(self.mode(self.directory), FENCE_MODE)
+        # Once it stays away, the next round collects.
+        self.assertTrue(await self.collect())
+        self.assertEqual(self.host.finished, [SessionCollection.WRITTEN])
+
+
 class CollectTest(CollectorCase):
+    async def test_a_failed_finish_is_retried_with_the_kept_result(self):
+        # Codex review of #292 (P2): the definite result is on the row before
+        # the login goes, so the next round does not find "no login".
+        self.units.running = False
+        self.host.finish_fail = TimeoutError()
+        with self.assertLogs("paw_backend.agents.codex_collect", "WARNING"):
+            self.assertFalse(await self.collect())
+        self.assertEqual(self.host.lease.collected, SessionCollection.WRITTEN)
+        self.assertEqual(list(self.directory.iterdir()), [])  # the tombstone
+        self.assertTrue(await self.collect())
+        self.assertEqual(self.host.finished, [SessionCollection.WRITTEN])
+        self.assertEqual(len(self.host.written), 1)  # written once
+
     async def test_a_stopped_unit_is_collected_and_tombstoned(self):
         self.units.running = False
         with self.assertLogs("paw_backend.agents.codex_collect", "INFO") as logs:

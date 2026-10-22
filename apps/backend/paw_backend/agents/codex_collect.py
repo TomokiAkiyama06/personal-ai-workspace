@@ -14,17 +14,22 @@ after the session's unit was confirmed stopped:
   keeps it until collected. It looks at the slots' rows only, never at the
   directories under ``/run/paw-cli`` (another process's running sessions).
 * the order (Decision 0096, 2's fencing (b)): (1) the fence: the session's
-  ``launch.json`` is deleted and its directory and ``config`` made 0550
-  (nothing can be created, deleted or renamed in them, so neither the unit's
-  program nor a resumed previous holder can start the session again; the
-  CLI's group can still reach ``auth.json`` and rewrite it in place);
+  directory and ``config`` are made 0550 first (nothing can be created,
+  deleted or renamed in them; the CLI's group can still reach ``auth.json``
+  and rewrite it in place), then a ``launch.json`` that is there is removed
+  (writable for that instant only) and its absence confirmed with creation
+  blocked, so neither the unit's program nor a resumed previous holder can
+  start the session again (a start already under way shows as a job or an
+  active unit in step 2);
   (2) the unit is confirmed stopped (otherwise its stop is tried, and the
   collection waits for the next round); (3) ``auth.json`` is read back and,
   when it differs from the credential's current version, written through
   ``ConnectionService.write_collected_login`` (compare-and-swap against the
   current version, which is at least the row's: Decision 0096, 2's version
   check; with the row's handle: a replaced credential is ``detached``);
-  (4) the unit is confirmed stopped again; (5) the directory's content is
+  (4) the unit is confirmed stopped again, and the definite result is kept
+  on the slot's row (a later round after a failure to give the slot back
+  finishes with it, not with a login it no longer finds); (5) the directory's content is
   deleted (made 0700 for that instant only, then 0550 again: an empty
   tombstone that ``/run``'s tmpfs drops at the next boot), and only once it is
   empty and the unit is still stopped is the slot given back
@@ -239,6 +244,10 @@ class CollectionHost(Protocol):
         self, kind: ConnectionKind, handle: str, expected_version: int, value: str
     ) -> SessionCollection | None: ...
 
+    async def record_collection(
+        self, kind: ConnectionKind, holder: uuid.UUID, result: SessionCollection
+    ) -> bool: ...
+
     async def finish_session(
         self, kind: ConnectionKind, holder: uuid.UUID, result: SessionCollection
     ) -> bool: ...
@@ -281,7 +290,14 @@ class CodexLoginCollector:
         session = lease.session
         directory = self._base / str(session)
         # (1) The fence, before the unit is looked at.
-        await asyncio.to_thread(fence, directory)
+        if not await asyncio.to_thread(fence, directory):
+            logger.error(
+                "A Codex session's launch file came back while it was fenced;"
+                " its slot stays and the fence is tried again: kind=%s session=%s",
+                kind.value,
+                session,
+            )
+            return False
         # (2) Stopped?
         if not await self._units.stopped(session):
             with contextlib.suppress(Exception):
@@ -306,32 +322,41 @@ class CodexLoginCollector:
                 session,
                 kind.value,
             )
-        # (3) The login.
-        text, result = await asyncio.to_thread(read_session_login, directory)
-        if text is not None:
-            if not await self._host.renew_session(kind, holder):
-                return True  # taken over meanwhile: not ours to write
-            result = await self._host.write_collected_login(
-                kind, lease.secret_handle, lease.expected_version, text
-            )
-            if result is None:
+        result = lease.collected
+        if result is None:
+            # (3) The login.
+            text, result = await asyncio.to_thread(read_session_login, directory)
+            if text is not None:
+                if not await self._host.renew_session(kind, holder):
+                    return True  # taken over meanwhile: not ours to write
+                result = await self._host.write_collected_login(
+                    kind, lease.secret_handle, lease.expected_version, text
+                )
+                if result is None:
+                    logger.error(
+                        "A Codex session's credential is older than the version"
+                        " it was given; its slot stays (operator): kind=%s"
+                        " session=%s",
+                        kind.value,
+                        session,
+                    )
+                    return False
+            # (4) Still stopped?
+            if not await self._units.stopped(session):
                 logger.error(
-                    "A Codex session's credential is older than the version it"
-                    " was given; its slot stays (operator): kind=%s session=%s",
+                    "A Codex session's unit ran again after its login was read;"
+                    " its slot stays: kind=%s session=%s",
                     kind.value,
                     session,
                 )
                 return False
-        assert result is not None
-        # (4) Still stopped?
-        if not await self._units.stopped(session):
-            logger.error(
-                "A Codex session's unit ran again after its login was read;"
-                " its slot stays: kind=%s session=%s",
-                kind.value,
-                session,
-            )
-            return False
+            # The definite result is kept on the slot's row BEFORE the login
+            # is deleted (Codex review of #292): a round after a failure to
+            # give the slot back finishes with it instead of finding no login.
+            if not await self._host.record_collection(kind, holder, result):
+                return True  # taken over meanwhile: its holder goes on
+        # (Collected in an earlier round: the fence and step (2) were checked
+        # again above; the login is already in the store.)
         # (5) The tombstone, then once more empty and stopped.
         await asyncio.to_thread(tombstone, directory)
         if not await asyncio.to_thread(empty, directory) or not (
@@ -364,21 +389,46 @@ class CodexLoginCollector:
         return True
 
 
-def fence(directory: Path) -> None:
-    """Decision 0096, 2's step 1. A directory that is gone (a reboot emptied
-    ``/run``) is nothing to fence."""
+#: How often a launch file that survived the fence is removed before the round
+#: gives up (and tries again next round).
+FENCE_ATTEMPTS: Final = 3
+
+
+def fence(directory: Path) -> bool:
+    """Decision 0096, 2's step 1, creation blocked FIRST (Codex review of
+    #292): the directory and ``config`` are made 0550, so neither a resumed
+    previous holder nor anything else of the backend's user can create,
+    delete or rename an entry in them; only then is a launch file that was
+    written before (or that a previous round could not remove) removed, with
+    the directory writable for that instant only, and its absence confirmed
+    with creation blocked again. ``True``: fenced, no launch file. ``False``:
+    one kept coming back (the round waits; the slot stays). A directory that
+    is gone (a reboot emptied ``/run``) is nothing to fence (``True``)."""
     try:
         info = os.lstat(directory)
     except FileNotFoundError:
-        return
+        return True
     if not stat.S_ISDIR(info.st_mode):
         raise OSError("not a session directory")
-    (directory / LAUNCH_NAME).unlink(missing_ok=True)
     config = directory / CONFIG_DIR_NAME
     with contextlib.suppress(FileNotFoundError):
         if stat.S_ISDIR(os.lstat(config).st_mode):
             os.chmod(config, FENCE_MODE)
     os.chmod(directory, FENCE_MODE)
+    launch = directory / LAUNCH_NAME
+    for _ in range(FENCE_ATTEMPTS):
+        if not os.path.lexists(launch):
+            return True
+        os.chmod(directory, _OPEN_MODE)
+        try:
+            _remove(launch)
+        finally:
+            os.chmod(directory, FENCE_MODE)
+    return not os.path.lexists(launch)
+
+
+def _remove(path: Path) -> None:
+    path.unlink(missing_ok=True)
 
 
 def read_session_login(
@@ -562,6 +612,7 @@ __all__ = [
     "CGROUP_ROOT",
     "COLLECT_INTERVAL_SECONDS",
     "EGRESS_SOCKET_DIR",
+    "FENCE_ATTEMPTS",
     "FENCE_MODE",
     "CodexCollectionLoop",
     "CodexLoginCollector",

@@ -145,6 +145,34 @@ class KeptTest(CollectionCase):
         await self.start(self.slot_service(after))
         self.assertEqual(after.secrets, [LATER])
 
+    async def test_a_failed_finish_does_not_turn_into_missing(self):
+        # Codex review of #292 (P2): the result is kept on the row before the
+        # login is deleted; the round after a failure to give the slot back
+        # finishes with it (no mark on the connection).
+        adapter = BindingSession(stuck=True)
+        directory = self.session_directory(adapter.session, REFRESHED)
+        service = self.collecting_service(adapter)
+        finish = service.finish_session
+        failures = [TimeoutError()]
+
+        async def failing_once(*args):
+            if failures:
+                raise failures.pop()
+            return await finish(*args)
+
+        service.finish_session = failing_once
+        self.units.running = False
+        await self.start(service)
+        await self.until(lambda: self.collected())
+        self.assertEqual(self.collected(), ["written"])
+        self.assertEqual(failures, [])
+        self.assertEqual(list(directory.iterdir()), [])
+        (row,) = self.rows(
+            "SELECT suspect_reason FROM shared_connections WHERE kind = 'codex'"
+        )
+        self.assertIsNone(row["suspect_reason"])
+        self.assertEqual((await self.store.read(self.handle)).version, 2)
+
     async def test_an_unchanged_login_is_given_back_unchanged(self):
         adapter = BindingSession(stuck=True)
         self.session_directory(adapter.session, LOGIN)

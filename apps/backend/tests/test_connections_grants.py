@@ -97,6 +97,7 @@ EXPECTED = {
             "secret_handle",
             "expected_version",
             "kept",
+            "collected",
         },
     ),
 }

@@ -19,7 +19,11 @@ its unit was confirmed stopped, across a restart of the backend:
   taken over by the collection loop). A row with a ``session`` is never taken
   over by an ordinary acquisition, even once expired: the collection loop
   takes it over (Decision 0096, 1 D and 2 B). The three columns are all set
-  or all NULL; ``kept`` needs a ``session``.
+  or all NULL; ``kept`` needs a ``session``. ``collected`` is the definite
+  result of the collection (``written``, ``unchanged``, ``stale_version``,
+  ``detached``, ``missing``, ``invalid``), written BEFORE the session's
+  login is deleted, so a retry after a failure to give the slot back keeps
+  that result instead of finding no login (Codex review of #292).
 * ``shared_connections`` gains ``suspect_at`` and
   ``suspect_reason`` (``missing`` / ``invalid``): a collection
   that could not read a login back (Decision 0096, 5) marks the connection in
@@ -28,9 +32,16 @@ its unit was confirmed stopped, across a restart of the backend:
   ``connected`` or the credential is replaced. Both set or both NULL.
 
 Privileges of the application role (``PAW_APP_DATABASE_ROLE``): UPDATE of the
-new columns (the table privileges stay). ``paw_compatibility`` is ``expand``
-(Decision 0079, 4): an older release never names the columns, its inserts
-take NULL and ``false``, and a row it binds nothing to it treats as before.
+new columns (the table privileges stay).
+
+The revision does **not** declare ``paw_compatibility = "expand"`` (Decision
+0079, 4; Codex review of #291, as 0279 did): the release before it runs on
+this schema, but its ``acquire_session_slot`` takes over any expired row
+(it checks only ``expires_at``) and would overwrite a row bound to a Codex
+session whose CLI may still run, start a second session on the same login,
+and delete the row the late collection needs. Undeclared, it is not backward
+compatible, and a rollback over it restores the database from its restore
+point (no bound row survives into the older release).
 ``downgrade()`` drops the columns (a kept session is then an ordinary lease
 that expires: development and test only).
 
@@ -49,17 +60,31 @@ down_revision: str | Sequence[str] | None = "0279"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
-# Decision 0079 4: what an older release can do with this schema.
-paw_compatibility: str = "expand"
+# Decision 0079 4: no ``paw_compatibility`` (not backward compatible; module
+# docstring). A rollback over this revision restores the database first.
 
 # Written out here (not imported): a migration keeps the values it was written
 # with. ``tests/test_codex_session_collection_migration.py`` compares them with
 # the model.
 LEASES = "connection_session_leases"
 CONNECTIONS = "shared_connections"
-LEASE_COLUMNS = ("session", "secret_handle", "expected_version", "kept")
+LEASE_COLUMNS = (
+    "session",
+    "secret_handle",
+    "expected_version",
+    "kept",
+    "collected",
+)
 CONNECTION_COLUMNS = ("suspect_at", "suspect_reason")
 SUSPICIONS = ("missing", "invalid")
+RESULTS = (
+    "written",
+    "unchanged",
+    "stale_version",
+    "detached",
+    "missing",
+    "invalid",
+)
 HANDLE_PATTERN = "^cred_[0-9a-f]{32}$"
 
 
@@ -85,6 +110,14 @@ def upgrade() -> None:
         LEASES,
         "(session IS NULL) = (secret_handle IS NULL)"
         " AND (session IS NULL) = (expected_version IS NULL)",
+    )
+    op.add_column(LEASES, sa.Column("collected", sa.Text(), nullable=True))
+    op.create_check_constraint(
+        op.f("ck_connection_session_leases_collected_valid"),
+        LEASES,
+        "collected IS NULL OR (session IS NOT NULL AND collected IN ("
+        + ", ".join(f"'{result}'" for result in RESULTS)
+        + "))",
     )
     op.create_check_constraint(
         op.f("ck_connection_session_leases_kept_has_session"),

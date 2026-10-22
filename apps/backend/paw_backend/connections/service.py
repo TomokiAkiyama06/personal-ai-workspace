@@ -940,6 +940,20 @@ class ConnectionService:
             return SessionCollection.DETACHED
         return SessionCollection.WRITTEN
 
+    async def record_collection(
+        self, kind: ConnectionKind, holder: uuid.UUID, result: SessionCollection
+    ) -> bool:
+        """Keep the collection's definite ``result`` on ``holder``'s slot
+        BEFORE the session's login is deleted (Codex review of #292): a round
+        after a failure of :meth:`finish_session` finishes with it. ``False``:
+        not ``holder``'s slot."""
+        kind = validate_enum("kind", kind, ConnectionKind)
+        holder = validate_uuid("holder", holder)
+        result = validate_enum("result", result, SessionCollection)
+        return await self._call_store(
+            self._store.record_session_result(kind, holder, result)
+        )
+
     async def finish_session(
         self, kind: ConnectionKind, holder: uuid.UUID, result: SessionCollection
     ) -> bool:

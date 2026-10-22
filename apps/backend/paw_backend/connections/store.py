@@ -70,6 +70,7 @@ from paw_backend.connections.domain import (
     QuotaMetric,
     QuotaPeriod,
     RefusalReason,
+    SessionCollection,
     Unlimited,
     UsagePurpose,
     UsageStatus,
@@ -299,7 +300,8 @@ class SessionLease:
     0096, 2): what its late collection needs. ``secret_handle`` is the
     opaque handle the session was given (never the value; not in the
     ``repr``). ``expired``: its lease ran out (by the database's clock) when
-    it was read."""
+    it was read. ``collected``: the collection's definite result, once it was
+    recorded (before the login was deleted)."""
 
     kind: ConnectionKind
     holder: uuid.UUID
@@ -308,6 +310,7 @@ class SessionLease:
     expected_version: int
     kept: bool
     expired: bool
+    collected: SessionCollection | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -729,8 +732,8 @@ class ConnectionStore:
         clock, params = self._clock_cte()
         rows = await self._fetch(
             f"WITH {clock} SELECT kind, holder, session, secret_handle,"
-            " expected_version, kept, expires_at <= (SELECT ts FROM clock)"
-            " FROM connection_session_leases WHERE session IS NOT NULL"
+            " expected_version, kept, expires_at <= (SELECT ts FROM clock),"
+            " collected FROM connection_session_leases WHERE session IS NOT NULL"
             " ORDER BY kind",
             params,
         )
@@ -743,9 +746,24 @@ class ConnectionStore:
                 int(row[4]),
                 bool(row[5]),
                 bool(row[6]),
+                None if row[7] is None else SessionCollection(row[7]),
             )
             for row in rows
         )
+
+    async def record_session_result(
+        self, kind: ConnectionKind, holder: uuid.UUID, result: SessionCollection
+    ) -> bool:
+        """Keep the collection's definite ``result`` on ``holder``'s bound
+        lease, before the session's login is deleted (a retry then finishes
+        with it). ``False``: not ``holder``'s bound lease."""
+        rows = await self._write(
+            "UPDATE connection_session_leases SET collected = %(result)s"
+            " WHERE kind = %(kind)s AND holder = %(holder)s"
+            " AND session IS NOT NULL RETURNING 1",
+            {"kind": kind.value, "holder": holder, "result": result.value},
+        )
+        return bool(rows)
 
     async def take_over_session_slot(
         self,

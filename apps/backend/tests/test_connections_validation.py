@@ -347,6 +347,7 @@ class EveryArgumentIsCheckedTest(unittest.IsolatedAsyncioTestCase):
                 "take_over_session",
                 "renew_session",
                 "write_collected_login",
+                "record_collection",
                 "finish_session",
             },
         )
@@ -364,6 +365,8 @@ class EveryArgumentIsCheckedTest(unittest.IsolatedAsyncioTestCase):
             lambda: self.service.write_collected_login(codex, cred, True, "{}"),
             lambda: self.service.write_collected_login(codex, cred, 1, b"{}"),
             lambda: self.service.finish_session(codex, holder, "lost"),
+            lambda: self.service.record_collection(codex, holder, "lost"),
+            lambda: self.service.record_collection(codex, 7, "written"),
         ):
             with (
                 self.subTest(call=call),

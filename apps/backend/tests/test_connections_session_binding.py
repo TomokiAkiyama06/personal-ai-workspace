@@ -29,6 +29,7 @@ from paw_backend.connections import (
     ConnectionKind,
     ConnectionStatus,
     CredentialSuspicion,
+    SessionCollection,
     SessionSlotBusyError,
     WriteBack,
 )
@@ -169,6 +170,23 @@ class StoreTest(SlotCase):
         self.assertTrue(await store.acquire_session_slot(CODEX, holder, 60))
         now[0] += timedelta(seconds=60)
         self.assertFalse(await store.take_over_session_slot(CODEX, holder, first, 60))
+
+    async def test_a_definite_result_is_kept_on_the_bound_lease(self):
+        # Codex review of #292 (P2): kept before the login is deleted.
+        now = [datetime(2026, 10, 22, 12, 0, tzinfo=UTC)]
+        store = self.store_at(now)
+        holder, other = uuid.uuid4(), uuid.uuid4()
+        self.assertTrue(await store.acquire_session_slot(CODEX, holder, 60))
+        written = SessionCollection.WRITTEN
+        self.assertFalse(await store.record_session_result(CODEX, holder, written))
+        self.clean_leases()
+        await self.bound(store, holder)
+        (lease,) = await store.session_slots()
+        self.assertIsNone(lease.collected)
+        self.assertFalse(await store.record_session_result(CODEX, other, written))
+        self.assertTrue(await store.record_session_result(CODEX, holder, written))
+        (lease,) = await store.session_slots()
+        self.assertIs(lease.collected, written)
 
     async def test_the_version_only_moves_up_and_kept_needs_a_bound_lease(self):
         now = [datetime(2026, 10, 22, 12, 0, tzinfo=UTC)]
