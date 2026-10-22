@@ -226,31 +226,41 @@ restrict,command="/usr/local/lib/paw/paw-git-wrapper",from="127.0.0.1",no-pty,no
 
 git は Wrapper の中でその User として動くが、Backend の Process（`paw`）**自身**も、登録と Task の前に Checkout の Path を `lstat` / `realpath` で確かめる（`paw_backend/repositories/paths.py` の `plan_checkout_path`・`read_checkout_identity`・`inspect_checkout_root`・`check_existing_repository`）。そのため、Backend の User と Account が違う配備（`git: ssh`）では、次をすべて満たす。
 
-1. **Home は `paw` が辿れる**（`o+x`）。例: `sudo chmod 0751 /home/alice`（`0711` でもよい。Group / Other の書き込みは付けない）。`0750` のままだと、登録は `422 path_rejected`（`not_found`）になる。
-2. **`<home>/workspaces`（Wrapper の Root。`--root=`）が、その User の所有で、先にある。** Wrapper は Root がなければすべての呼び出しを `root_unavailable` で拒否する（作らない）。`paw` が辿れる権限にする。
+1. **Home は `paw` **だけ**が辿れる**（ACL の `u:paw:x`）。Other の `x`（`o+x`、`0751` / `0711`）は付けない。付けると、その Host の **すべての** Local User が Home を辿れ、`git clone` が既定の `umask 022` で作る `0755` / `0644` の Checkout を、Path を知っていれば（推し量れれば）読めてしまう。ACL なら、Home より下が `0755` のままでも、他の User は Home で止まる。Mode は `0750` / `0700` のままでよい（Group / Other の書き込みは付けない）。
 
    ```sh
-   sudo install -d -o alice -g alice -m 0711 /home/alice/workspaces   # 0755 でもよい
+   sudo setfacl -m u:paw:x /home/alice
    ```
 
-3. **既存の Repository は `<home>/workspaces` の下に置く。** Backend の `PAW_REPOSITORY_EXISTING_ROOTS` の既定は `{home}`（Home の全体）だが、Wrapper は Root（`<home>/workspaces`）の外では git を動かさない（`root_unavailable` / `path_outside_root`）。Root の外の Repository は、Backend の検査を通っても最初の git で失敗する。途中の Directory もすべて `paw` が辿れる権限にする（`.` で始まる名前の Directory は Backend が `hidden` で拒否する）。
+   `paw` が辿れないと、登録は `422 path_rejected` になる。
+2. **`<home>/workspaces`（Wrapper の Root。`--root=`）が、その User の所有で、先にある。** Wrapper は Root がなければすべての呼び出しを `root_unavailable` で拒否する（作らない）。Home と同じく、`paw` だけが辿れる ACL にする（Mode に Other の `x` は付けない）。
+
+   ```sh
+   sudo install -d -o alice -g alice -m 0700 /home/alice/workspaces
+   sudo setfacl -m u:paw:x /home/alice/workspaces
+   ```
+
+   後で `chmod` すると ACL の Mask が変わり、`paw` の `x` が効かなくなることがある。`chmod` の後は下の確認をやり直す。
+
+3. **既存の Repository は `<home>/workspaces` の下に置く。** Backend の `PAW_REPOSITORY_EXISTING_ROOTS` の既定は `{home}`（Home の全体）だが、Wrapper は Root（`<home>/workspaces`）の外では git を動かさない（`root_unavailable` / `path_outside_root`）。Root の外の Repository は、Backend の検査を通っても最初の git で失敗する。`workspaces` より下の途中の Directory も `paw` が辿れる権限にする（`git clone` が作る `0755` のままでよい。他の User は Home で止まる。`0700` にした Directory には `setfacl -m u:paw:x` を付ける。`.` で始まる名前の Directory は Backend が `hidden` で拒否する）。
 4. Task の worktree（`<home>/workspaces/.paw-worktrees/...`）は `git worktree add` がその User として作るので、Backend は作らない（この節のほかに作業はない）。
 
 確認（`paw` として。何も書き換えない）:
 
 ```sh
 sudo -u paw namei -l /home/alice/workspaces            # 最後まで辿れる（Permission denied がない）
-sudo -u paw stat -c '%U %a %n' /home/alice/workspaces  # alice 711 か alice 755
+getfacl -p /home/alice /home/alice/workspaces          # user:paw:--x（#effective も --x）、other::---
+sudo -u nobody ls /home/alice/workspaces               # Permission denied（paw 以外は辿れない）
 ```
 
-**Issue #285 が実装されるまでの制限。** `git: ssh` の配備では、Web の「リポジトリを登録」のうち **既存のディレクトリ** だけが使える。**GitHub から Clone**・**新規（ローカル）**・**新規（GitHub）** は、Checkout の Directory（`<home>/workspaces/<project>/<repo>`）を Backend（`paw`）自身が `mkdir` するため、他の User の Home では必ず `422 path_rejected`（`not_found`）になる（Decision 0029 は、その Directory を誰が作るかを決めていない）。それまでは、その User として手で Clone してから、既存のディレクトリとして登録する。
+**Issue #285 が実装されるまでの制限。** `git: ssh` の配備では、Web の「リポジトリを登録」のうち **既存のディレクトリ** だけが使える。**GitHub から Clone**・**新規（ローカル）**・**新規（GitHub）** は、Checkout の Directory（`<home>/workspaces/<project>/<repo>`）を Backend（`paw`）自身が `mkdir` するため、他の User の Home では必ず `422 path_rejected` になる（理由は、上の 1 のとおり `paw` が Home を辿れるだけで読めないときは `home_unsafe`。Backend は Home を `O_RDONLY` で開くため。Home を `paw` が読める配備では、`mkdir` の失敗で `not_found`）（Decision 0029 は、その Directory を誰が作るかを決めていない）。それまでは、その User として手で Clone してから、既存のディレクトリとして登録する。
 
 ```sh
 # cwd は / などの中立な場所にする（paw や別の User が入れない cwd のまま sudo しない）
 cd / && sudo -u alice git clone https://github.com/<owner>/<repo>.git /home/alice/workspaces/<dir>/<repo>
 ```
 
-- `<dir>` は `workspaces` の下の、`.paw-worktrees` でも `.` で始まる名前でもない Directory（例: Project の名前）。`git clone` は足りない親の Directory も作る（その User の所有になる）。`<dir>` が `paw` の辿れない権限（`0700` など）で作られたら `sudo -u alice chmod 0711 /home/alice/workspaces/<dir>` にする。
+- `<dir>` は `workspaces` の下の、`.paw-worktrees` でも `.` で始まる名前でもない Directory（例: Project の名前）。`git clone` は足りない親の Directory も作る（その User の所有になる）。`<dir>` が `paw` の辿れない権限（`0700` など）で作られたら `sudo setfacl -m u:paw:x /home/alice/workspaces/<dir>` を付ける（Other の `x` は付けない）。
 - 登録する Path は、Symbolic Link を含まない綴り（`realpath` の結果）で入れる。
 
 ## 失効・回転

@@ -216,20 +216,26 @@ Checklist (Decision 0093 5; the human, not an agent):
   `apps/backend/deploy/ssh-git-wrapper/README.md`, `apps/backend/deploy/sandbox/README.md`).
 - [ ] Each account's home and checkout root (issue #285; details in
   `apps/backend/deploy/ssh-git-wrapper/README.md`, "Home と `workspaces` の権限"):
-  - the home is searchable by `paw` (`o+x`, for example `0751` or `0711`; not
-    writable by group / others): the backend itself `lstat`s the checkout root and every
-    checkout (`namei -l /home/tomoki/workspaces` as `paw` reaches the end);
-  - `<home>/workspaces` exists, is owned by the account and is searchable by `paw`
-    (`0711` or `0755`; the wrapper's root, `--root=`, refuses every call with
-    `root_unavailable` while it is missing);
+  - the home is searchable by `paw` and by no other local account: an ACL entry
+    `setfacl -m u:paw:x <home>`, not the other-execute bit (`o+x` / `0751` / `0711` lets
+    every local user traverse to checkouts that `git clone` creates `0755` / `0644`);
+    the mode stays `0750` / `0700`, not writable by group / others. The backend itself
+    `lstat`s the checkout root and every checkout (`namei -l /home/tomoki/workspaces` as
+    `paw` reaches the end; `getfacl -p` shows `user:paw:--x` with an effective `--x`);
+  - `<home>/workspaces` exists, is owned by the account (`0700`) and is searchable by
+    `paw` through the same ACL entry (the wrapper's root, `--root=`, refuses every call
+    with `root_unavailable` while it is missing; a later `chmod` can change the ACL mask,
+    so check again after one);
   - a repository registered as `既存のディレクトリ` lies below `<home>/workspaces`
     (the wrapper runs git only there, although the backend's
     `PAW_REPOSITORY_EXISTING_ROOTS` default `{home}` accepts the whole home), and every
     directory on the way is searchable by `paw`.
 - [ ] Until issue #285 is implemented, only `既存のディレクトリ` registers a repository
   under `git: ssh`: `GitHub から Clone`, `新規（ローカル）` and `新規（GitHub）` always
-  fail with `422 path_rejected` (`not_found`), because the backend (`paw`) creates the
-  checkout directory itself and cannot in another account's home. Clone by hand as the
+  fail with `422 path_rejected` (`home_unsafe` while `paw` can only traverse, not read,
+  the home: the backend opens the home `O_RDONLY`; `not_found` where it can read it),
+  because the backend (`paw`) creates the checkout directory itself and cannot in
+  another account's home. Clone by hand as the
   account from a neutral working directory, then register the path as `既存のディレクトリ`:
   `cd / && sudo -u <user> git clone <url> <home>/workspaces/<dir>/<repo>`
   (`<dir>` is any directory below `workspaces` that is not `.paw-worktrees`).
