@@ -75,7 +75,12 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from paw_backend.config import Settings
-from paw_backend.repositories.errors import GitCommandError, GitFailure
+from paw_backend.repositories.errors import (
+    GitCommandError,
+    GitFailure,
+    PathProblem,
+    PathRejectedError,
+)
 from paw_backend.repositories.git import (
     SAFE_PATH,
     GitResult,
@@ -96,6 +101,9 @@ from paw_backend.tools.scope import TargetError, normalise_host, normalise_path
 #: The first word of every remote command: a wrapper that does not recognise it
 #: (an older or newer protocol version) must refuse rather than guess.
 PROTOCOL_TAG = "paw-git-run/v1"
+#: The first word of a directory command (Decision 0097): the wrapper makes or
+#: removes a managed checkout's directory as the account, not git.
+DIRECTORY_TAG = "paw-dir/v1"
 
 #: ``ssh``'s own convention: 255 means ssh itself never delivered a remote
 #: command result (unreachable host, rejected key, host key mismatch, the
@@ -285,6 +293,14 @@ def build_remote_command(
     return " ".join(shlex.quote(word) for word in words)
 
 
+def build_directory_command(op: str, path: str) -> str:
+    """``paw-dir/v1 <op> <path>`` (Decision 0097), each word quoted like
+    :func:`build_remote_command`'s. ``op`` is ``mkdir`` or ``rmdir``."""
+    if op not in ("mkdir", "rmdir"):
+        raise ValueError("op must be mkdir or rmdir")
+    return " ".join(shlex.quote(word) for word in (DIRECTORY_TAG, op, path))
+
+
 def ssh_arguments(
     executable: str,
     *,
@@ -412,12 +428,6 @@ class SshGitRunner:
         timeout_s: float,
         ceiling: str | None = None,
     ) -> GitResult:
-        name = command_name(args)
-        try:
-            identity = await self._keys.key_path_of(account)
-        except OSError:
-            raise GitCommandError(name, GitFailure.SSH_KEY_UNAVAILABLE) from None
-        policy = self._policy
         command = build_remote_command(
             args,
             cwd=cwd,
@@ -425,11 +435,33 @@ class SshGitRunner:
             allowed_protocols=self._protocols,
             extra_config=self._extra,
         )
+        return await self._remote(
+            command_name(args), command, account=account, timeout_s=timeout_s
+        )
+
+    async def run_directory(
+        self, op: str, path: str, *, account: LinuxAccount, timeout_s: float
+    ) -> GitResult:
+        """``paw-dir/v1 <op> <path>`` as ``account`` (Decision 0097): the
+        wrapper makes (``mkdir``) or removes an empty (``rmdir``) managed
+        checkout directory. The same key, options and limits as :meth:`run`;
+        :class:`SshCheckoutDirectories` reads the answer."""
+        return await self._remote(
+            op, build_directory_command(op, path), account=account, timeout_s=timeout_s
+        )
+
+    async def _remote(
+        self, name: str, command: str, *, account: LinuxAccount, timeout_s: float
+    ) -> GitResult:
+        try:
+            identity = await self._keys.key_path_of(account)
+        except OSError:
+            raise GitCommandError(name, GitFailure.SSH_KEY_UNAVAILABLE) from None
         argv = ssh_arguments(
             self._ssh(),
             identity=identity,
             config_path=self._ssh_config,
-            policy=policy,
+            policy=self._policy,
             account=account,
             remote_command=command,
         )
@@ -444,3 +476,73 @@ class SshGitRunner:
         if result.returncode == SSH_TRANSPORT_FAILURE_CODE:
             raise GitCommandError(name, GitFailure.SSH_UNAVAILABLE)
         return result
+
+
+#: What ``paw-dir/v1`` answers with exit status 1: the problem of the path, one
+#: word on stdout (the wrapper's ``DirectoryProblem``), and what it means here.
+_DIRECTORY_PROBLEMS = {
+    problem.value: problem
+    for problem in (
+        PathProblem.EXISTS,
+        PathProblem.SYMLINK,
+        PathProblem.NOT_OWNER,
+        PathProblem.WORLD_WRITABLE,
+        PathProblem.NOT_A_DIRECTORY,
+        PathProblem.NOT_FOUND,
+    )
+}
+_DIRECTORY_PROBLEM_CODE = 1
+
+
+class SshCheckoutDirectories:
+    """Managed checkout directories made by the account itself (Decision 0097).
+
+    The ``CheckoutDirectories`` of a backend that reaches its accounts through
+    ``runner`` (an :class:`SshGitRunner`): the backend's own Linux user cannot
+    create a directory in another user's home, and one it made would be its own,
+    not the account's. The forced-command wrapper makes it instead
+    (``paw-dir/v1 mkdir``: from the checkout root, every level opened with
+    ``O_NOFOLLOW`` and the account's, the last one new) and removes it when a
+    registration failed and it is still empty (``rmdir``; anything left in it
+    stays, as a directory a dead attempt left behind does). ``timeout_s`` bounds
+    each call (``RepositoryPolicy.git_timeout_s`` in ``from_policy``).
+    """
+
+    def __init__(self, runner: SshGitRunner, *, timeout_s: float = 30.0) -> None:
+        if not isinstance(runner, SshGitRunner):
+            raise TypeError("runner must be an SshGitRunner")
+        if isinstance(timeout_s, bool) or not (
+            isinstance(timeout_s, (int, float)) and timeout_s > 0
+        ):
+            raise ValueError("timeout_s must be a positive number")
+        self.runner = runner
+        self.timeout_s = float(timeout_s)
+
+    async def create(self, path: str, account: LinuxAccount) -> None:
+        """Make the empty directory ``path`` as ``account``.
+
+        ``PathRejectedError`` for a problem of the path the wrapper names
+        (``exists``, ``symlink``, ...); ``GitCommandError`` when the wrapper
+        refused the call itself (a wrapper without ``paw-dir/v1`` included) or
+        ``ssh`` failed: those are not facts about the path."""
+        result = await self.runner.run_directory(
+            "mkdir", path, account=account, timeout_s=self.timeout_s
+        )
+        if result.returncode == 0 and result.stdout == "created\n":
+            return
+        if result.returncode == _DIRECTORY_PROBLEM_CODE:
+            problem = _DIRECTORY_PROBLEMS.get(result.stdout.removesuffix("\n"))
+            if problem is not None:
+                raise PathRejectedError(problem)
+        raise GitCommandError("mkdir", GitFailure.NONZERO_EXIT)
+
+    async def remove(self, path: str, account: LinuxAccount) -> bool:
+        """Remove ``path`` as ``account`` if it is empty. Best effort: whether it
+        is gone afterwards (``False`` for anything else, never an error)."""
+        try:
+            result = await self.runner.run_directory(
+                "rmdir", path, account=account, timeout_s=self.timeout_s
+            )
+        except GitCommandError:
+            return False
+        return result.returncode == 0 and result.stdout == "removed\n"
