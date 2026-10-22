@@ -24,7 +24,7 @@ Decision 0067 の 2 は Task の API が Event の詳細と Node の結果を返
 
 ## 提案（推奨の全体）
 
-- `GET /api/v1/tasks/{task_id}/result` を足す。Guard は `GET /tasks/{task_id}` と同じ（Task の Project に `project.read`）。加えて、**読む人が Task の Working Set のすべての Repository を（今の ACL で）読めるときだけ** 返す。返すのは `complete` の Event の `detail.result` の **すべての文字列の Field（`key`・`role`・`title`・`summary`）** を、表示の前に `redact_text` と制御文字の Escape に通したもの（保存した行は変えない）。加えて、Plan の受け入れで Credential の形を含む Node の `key` と `title` を拒む（DAG の Panel は 0067 のとおり `key` と `title` を Redact なしで出しているため）。結果がないときは 404 `task_result_not_found`、Repository の条件で読めないときは 403 `task_result_forbidden`（7）。
+- `GET /api/v1/tasks/{task_id}/result` を足す。Guard は `GET /tasks/{task_id}` と同じ（Task の Project に `project.read`）。加えて、**読む人が、Task の Working Set に一度でも入ったすべての Repository（`task_repositories` の行。`removed_at` で外れた行を含む）を今の ACL で読めるときだけ** 返す（1）。返すのは `complete` の Event の `detail.result` の **すべての文字列の Field（`key`・`role`・`title`・`summary`）** を、表示の前に `redact_text` と制御文字の Escape に通したもの（保存した行は変えない）。加えて、Plan の受け入れで Credential の形を含む Node の `key` と `title` を拒む（DAG の Panel は 0067 のとおり `key` と `title` を Redact なしで出しているため）。結果がないときは 404 `task_result_not_found`、Repository の条件で読めないときは 403 `task_result_forbidden`（7）。
 - `GET /tasks/{task_id}` の答えに `result`（`"none"` / `"available"` / `"hidden"`）だけを足す。`hidden` は「読み取りだけの `completed` の Task だが、読めない Repository が Working Set にあるので見せない」で、その事実（名前・数・中身ではない）を見せることを明示して受け入れる（7）。詳細は Task を開くたび・Control の後・動いている間は 5 秒ごとに読まれる軽い答えなので、最大約 1 MiB の本文は載せない。
 - 出すのは読み取りだけの Task が `completed` のときだけ。
 - Web の Task の詳細で、`result` が `available` のとき、DAG の Panel の上に「結果」の Panel を出し（`hidden` のときは同じ場所に「読めないリポジトリを含むため、結果を表示できません」とだけ出す）、Node ごとに Title・役割・要約を Plan の順に、ただの文（Markdown にしない、Link にしない、改行は保つ）で出す。読み込みは Panel を開いた時に 1 回。
@@ -36,14 +36,18 @@ Decision 0067 の 2 は Task の API が Event の詳細と Node の結果を返
 
 結果は Agent が Working Set の Repository を読んで書いた自由な文なので、どの文がどの Repository から来たかは分けられない。一方 0067 の 2 は、ACL で読めない Repository を名前も含めて見せない。
 
-- **A（推奨）: Task の Project に `project.read` があり、かつ Task の Working Set のすべての Repository を今の ACL で `project.read` で読める人。** Task の作成者も同じ条件（作成の後に ACL が狭められたら、作成者でも読めない）。Owner / Admin の System Role だけでは読めない（0004）。Viewer は読める（REQUIREMENTS の Viewer は「Task の閲覧」を持つ）。
+- **A（推奨）: Task の Project に `project.read` があり、かつ Task の Working Set に一度でも入ったすべての Repository を今の ACL で `project.read` で読める人。** 「一度でも入った」は `task_repositories` のその Task のすべての行（`removed_at` のある行を含む）。Task の動いている間に `change_working_set` で `referenced` の Repository が外されても、外される前に Node がそれを読んで要約に書いているかもしれず、今の Working Set（`TaskSnapshot.working_set`、`removed_at` のない行だけ）で判定すると、外された Repository を読めない人に要約が見えてしまう（Codex review）。`task_repositories` の行は消えず（外すのは `removed_at`、入れ直しは同じ行）、Task ごとの集合は増えるだけなので、完了の後に変わらない判定の材料になる。前の Attempt（Retry / Restart の前）で入っていた Repository も含む（Retry は同じ Context で続けるので、前の Attempt の読んだものが要約に残りうる。広い側に倒す）。Task の作成者も同じ条件（作成の後に ACL が狭められたら、作成者でも読めない）。Owner / Admin の System Role だけでは読めない（0004）。Viewer は読める（REQUIREMENTS の Viewer は「Task の閲覧」を持つ）。
+- 判定の材料の代案（A の「一度でも入った」の取り方）:
+  - A-2: 成功した Attempt の `task_attempt_repositories` の行（外されても残る）。A より狭いが、前の Attempt の分を落とし、Attempt の途中で入った Repository に必ず行がある、という不変条件に頼る。
+  - A-3: 完了の時に、その時点までの Repository の ID の集合を `complete` の Event の `detail` に写す（不変の Snapshot）。良い点: 判定が Event だけで済む。悪い点: 0094 の (c) の記録の形を変え、#284 の後に保存された行には無いので A に戻る道が要る。
+  - 推奨は A（Migration なし、既存の行にそのまま効き、いちばん広い側）。
 - B: Task の作成者だけ（と、A の条件）。良い点: 狭い。悪い点: 同じ Project の Member に調べた結果を共有できず、読み取りだけの Task の使い道（調べものの共有）に合わない。
 - C: Project に `project.read` があれば、Repository の ACL を問わず読める。悪い点: ACL で拒否された Repository の中身が、要約を通して読めてしまう（0067 の 2 と REQUIREMENTS の ACL override の意味を崩す）。推奨しない。
 - D: Owner / Admin は所属しなくても読める。悪い点: 0004 の「System Role は Project を開かない」を崩す。推奨しない。
 
 ### 2. Repository の ACL・除外 Path・Redact
 
-- Repository の ACL: 1 の A のとおり、すべてを読めるときだけ出す（一部を隠して残りを出すことはしない。文を Repository ごとに分けられないため）。
+- Repository の ACL: 1 の A のとおり、一度でも入ったすべてを読めるときだけ出す（一部を隠して残りを出すことはしない。文を Repository ごとに分けられないため）。
 - 除外 Path: **追加の Filter はしない（推奨）。** `excluded_paths` と `protected` は System の除外で、Sandbox の Mask と Broker が Agent に読ませないので、結果にも入らない。利用者が決める Path の単位の ACL は要件にない。もし後で Path の単位の ACL を入れるなら、そのとき結果の扱いをこの Decision の Supersede で決め直す（自由な文から Path の中身を取り除くことはできないので、「その Path を隠される人には結果を出さない」になるはず）。
 - Redact:
   - **A（推奨）: 返す時に、各 Node の文字列の Field をすべて（`key`・`role`・`title`・`summary`）`tools.credentials.redact_text` に通し、Tab と改行以外の制御文字を見える Escape にする（0078 の 2 の差分と同じ規則、`integration/changes.py` の関数を共用）。** 保存した Event の行は変えない（記録・Evidence として残す。DB を読めるのは Operator だけ）。既に保存された結果にもそのまま効く。答えに Redact した数（`redacted`）を付け、画面は 1 以上のとき「認証情報らしい文字列を隠しました」と出す。`key` は `KEY_PATTERN`（`[a-z][a-z0-9_-]{0,31}`）なので `sk-` や `glpat-` と 20 文字のような Credential の形を含みうる（Codex review）。`role` は列挙の値だが、Field を選ばずにすべて通す（後で Field が増えても漏れない）。
@@ -83,7 +87,7 @@ Decision 0067 の 2 は Task の API が Event の詳細と Node の結果を返
 
 ### 7. 読めない Repository があることを見せるか（Metadata の開示）
 
-1 の A で読めない Member に対し、読み取りだけの `completed` の Task の結果だけがない（または 404）と、それ自体が「この Task の Working Set に自分の読めない Repository がある」ことの印になる（Codex review）。中身・名前・数は出ないが、存在は分かる。
+1 の A で読めない Member に対し、読み取りだけの `completed` の Task の結果だけがない（または 404）と、それ自体が「この Task の Working Set に（今、または以前に）自分の読めない Repository がある」ことの印になる（Codex review）。中身・名前・数は出ないが、存在は分かる。
 
 ただし今（0067）でも同じ事実は推し量れる: Task の Title と指示は作成者が書いた自由な文で全 Member に見え、読み取りだけの Task は `referenced` を 1 つ以上必ず持つので、詳細の Repository の表が空なら読めない Repository があると分かる。普通の Task も `target` を必ず持つので同じ。
 
@@ -94,7 +98,7 @@ Decision 0067 の 2 は Task の API が Event の詳細と Node の結果を返
 
 ## Test の方針（実装の PR）
 
-- Backend: 読み取りだけで `completed` の Task は結果を返す（Plan の順、4 つの Field）。詳細の `result` が `none` / `available` / `hidden` を正しく返す。普通の Task・`running` / `failed` / `cancelled` の読み取りだけの Task は 404 `task_result_not_found`。Working Set の 1 つの Repository を ACL で拒否された Member（作成者を含む）は 403 `task_result_forbidden` で、詳細は `hidden`（Repository の名前・数は答えのどこにも出ない）、拒否は監査される。所属しない Owner / Admin と存在しない Task は 403 `forbidden`。Viewer は読める。Summary・Title・**Key** の Credential（`ghp_...`、Key に収まる `sk-` + 20 文字・`glpat-` + 20 文字）は Redact され `redacted` が数える、保存した Event の行は変わらない（Key の Credential は Plan の受け入れの規則の前に保存された行を DB に直接入れて再現する）。Plan の受け入れは Credential の形の `key` / `title` を `credential_in_plan` で拒み、次の Planner へ進む（読み取りだけの Task と普通の Task の両方）。制御文字は Escape される。最大の結果（32 Node・最悪の文字）を返せる。Route の Guard の一覧（`tests/test_authz_routes.py`）に足す。
+- Backend: 読み取りだけで `completed` の Task は結果を返す（Plan の順、4 つの Field）。詳細の `result` が `none` / `available` / `hidden` を正しく返す。普通の Task・`running` / `failed` / `cancelled` の読み取りだけの Task は 404 `task_result_not_found`。Working Set の 1 つの Repository を ACL で拒否された Member（作成者を含む）は 403 `task_result_forbidden`。**外してから完了した Repository の回帰 Test**: `referenced` の Repository 2 つで始めた読み取りだけの Task から、動いている間に 1 つを `change_working_set` で外し、その後に DAG が成功して `completed` になったとき、外した Repository を ACL で読めない Member は 403 で詳細は `hidden`（今の Working Set だけなら読めるのに、結果は出ない）。外した後に入れ直した場合と、Retry の前の Attempt にだけあった Repository の場合も同じ で、詳細は `hidden`（Repository の名前・数は答えのどこにも出ない）、拒否は監査される。所属しない Owner / Admin と存在しない Task は 403 `forbidden`。Viewer は読める。Summary・Title・**Key** の Credential（`ghp_...`、Key に収まる `sk-` + 20 文字・`glpat-` + 20 文字）は Redact され `redacted` が数える、保存した Event の行は変わらない（Key の Credential は Plan の受け入れの規則の前に保存された行を DB に直接入れて再現する）。Plan の受け入れは Credential の形の `key` / `title` を `credential_in_plan` で拒み、次の Planner へ進む（読み取りだけの Task と普通の Task の両方）。制御文字は Escape される。最大の結果（32 Node・最悪の文字）を返せる。Route の Guard の一覧（`tests/test_authz_routes.py`）に足す。
 - Web: `available` のときだけ Panel を出し、1 回だけ読む（Poll では読み直さない）。`hidden` は一行の説明だけ。要約の中の `<script>`・Markdown・URL がただの文で出る。`none` と 404 で何も出さない。Redact の注記。日本語と英語の文言。Phone の幅。
 - 既存の Test を消さない・緩めない。
 
@@ -115,7 +119,7 @@ Migration は要らない（`task_events` の `(task_id, seq)` の Index で `co
 
 ## リスク
 
-- 1 の A では、Working Set の 1 つの Repository を読めない Member は結果の全部を読めない（一部だけ出すことはしない）。安全側の振る舞いで、要るなら作成者が読める Repository だけで Task を作り直す。
+- 1 の A では、Working Set に一度でも入った 1 つの Repository を読めない Member は結果の全部を読めない（途中で外した Repository も数える）（一部だけ出すことはしない）。安全側の振る舞いで、要るなら作成者が読める Repository だけで Task を作り直す。
 - Redact は既知の形の Credential だけを見つける。形の分からない秘密（社内の名前など）は、Repository を読める人だけが読むこと（1 の A）で守る。
 
 ## 承認後の扱い
