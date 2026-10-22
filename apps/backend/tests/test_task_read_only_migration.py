@@ -82,8 +82,8 @@ class OfflineMigrationTest(unittest.TestCase):
         self.assertNotEqual(migrations[REVISION].compatibility, "expand")
 
     def test_the_revision_follows_the_head_it_was_written_on(self):
-        # Re-chained when another revision written on 0194 merges first.
-        self.assertEqual(previous_revision(), "0194")
+        # Re-chained onto 0239 (#276), which was written on 0194 and merged first.
+        self.assertEqual(previous_revision(), "0239")
 
 
 @requires_postgres

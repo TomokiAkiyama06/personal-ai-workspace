@@ -1,7 +1,7 @@
 """The read-only mark of a task (issue #279, Decision 0094, 1 A).
 
 Revision ID: 0279
-Revises: 0194
+Revises: 0239
 Create Date: 2026-10-21
 
 ``tasks.read_only`` (boolean, ``false`` for every existing task): the task was
@@ -36,7 +36,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "0279"
-down_revision: str | Sequence[str] | None = "0194"
+down_revision: str | Sequence[str] | None = "0239"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
