@@ -65,6 +65,14 @@ cgroup counted an ``oom_kill`` (its host-side ``memory.events``, read before and
 after the command) while it ran, ``oom=0`` when not, ``oom=-`` when it could not
 be read; ``v1`` keeps its old line.
 
+Decision 0097 (Proposed, issue #285) adds ``paw-dir/v1 <mkdir|rmdir> <path>``
+(:data:`DIRECTORY_TAG`): a backend that is not this Linux user cannot create a
+managed checkout's directory (``<root>/<project>/<repository>``) in this
+user's home, so this user makes it (:func:`make_directory`: from the root,
+each level opened with ``O_NOFOLLOW`` and this user's, the last one new) or
+removes it again when it is still empty (:func:`remove_directory`). Nothing
+else: no file, no other depth, nothing hidden, no recursive removal.
+
 The client's ``-c`` values are checked, then **dropped**: git always gets this
 file's own hardening (:func:`hardening`) and, for ``merge``, this file's own
 merge identity, never the client's copy. The environment of git is a fixed
@@ -85,6 +93,7 @@ Linux user. Never an argument, a path, a URL, a ``-c`` value or git's output: a
 URL or a configuration value may carry a credential (Issue #134).
 """
 
+import errno
 import json
 import os
 import pwd
@@ -92,6 +101,7 @@ import re
 import selectors
 import shlex
 import stat
+import struct
 import subprocess
 import sys
 import syslog
@@ -1640,6 +1650,296 @@ def _read_small_file(git_dir: str, name: str) -> str:
     return text
 
 
+# -- a managed checkout's directory (``paw-dir/v1``, Decision 0097) -----------------
+
+#: The first word of a directory command (``paw_backend.repositories.ssh``).
+DIRECTORY_TAG = "paw-dir/v1"
+DIRECTORY_OPS = ("mkdir", "rmdir")
+#: One name below the root: a project directory or a repository name of the
+#: backend (``paths.project_directory_name``, ``validation.validate_name``).
+#: Never hidden, so never ``.paw-worktrees`` or ``.git``.
+_DIRECTORY_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,254}")
+#: A project directory this wrapper made, before it gets the root's traversal
+#: (:func:`_grant_root_traversal`): the account's alone.
+PROJECT_DIRECTORY_MODE = 0o700
+#: A checkout directory: the account's alone (Decision 0017 §1).
+CHECKOUT_DIRECTORY_MODE = 0o700
+#: The exit status of a directory command refused for a problem of the path;
+#: the problem is the one word on stdout (``paths.PathProblem``'s value).
+DIRECTORY_PROBLEM = 1
+
+
+@dataclass(frozen=True)
+class DirectoryCall:
+    """One accepted directory command: ``op`` on ``<root>/<project>/<name>``,
+    ``root`` resolved."""
+
+    op: str
+    root: str
+    project: str
+    name: str
+
+
+class DirectoryProblem(Exception):
+    """The path cannot be used; ``problem`` is what the backend is told."""
+
+    def __init__(self, problem: str) -> None:
+        super().__init__(problem)
+        self.problem = problem
+
+
+def directory_plan(original: str | None, config: Config) -> DirectoryCall:
+    """The :class:`DirectoryCall` of a ``paw-dir/v1`` command, or ``Rejected``.
+
+    ``paw-dir/v1 <mkdir|rmdir> <path>``: exactly three words, and the path
+    exactly two levels below the root (either spelling of it, as
+    :meth:`Places.check` accepts), each name a plain directory name."""
+    words = _split(original)
+    if len(words) != 3 or words[0] != DIRECTORY_TAG:
+        raise Rejected("bad_protocol")
+    _, op, path = words
+    if op not in DIRECTORY_OPS:
+        raise Rejected("bad_arguments")
+    places = Places.of(config)
+    if not _canonical(path):
+        raise Rejected("bad_path")
+    for base in (places.root_text, places.root):
+        prefix = base.rstrip("/") + "/"
+        if path.startswith(prefix):
+            parts = path[len(prefix) :].split("/")
+            break
+    else:
+        raise Rejected("path_outside_root")
+    if len(parts) != 2 or not all(_DIRECTORY_NAME.fullmatch(p) for p in parts):
+        raise Rejected("bad_path")
+    return DirectoryCall(op, places.root, parts[0], parts[1])
+
+
+def _owned(fd: int) -> None:
+    info = os.fstat(fd)
+    if info.st_uid != os.geteuid():
+        raise DirectoryProblem("not_owner")
+    if info.st_mode & stat.S_IWOTH:
+        raise DirectoryProblem("world_writable")
+
+
+def _open_below(name: str, dir_fd: int) -> int:
+    """``name`` in ``dir_fd``, opened without following a link; it must be a
+    directory of this user that not everybody can write."""
+    try:
+        fd = os.open(
+            name,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=dir_fd,
+        )
+    except FileNotFoundError:
+        raise DirectoryProblem("not_found") from None
+    except OSError:
+        # ``O_NOFOLLOW | O_DIRECTORY`` refuses a link and a file alike
+        # (``ENOTDIR`` or ``ELOOP``): say which, never follow either.
+        try:
+            info = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        except OSError:
+            raise DirectoryProblem("not_found") from None
+        if stat.S_ISLNK(info.st_mode):
+            raise DirectoryProblem("symlink") from None
+        if not stat.S_ISDIR(info.st_mode):
+            raise DirectoryProblem("not_a_directory") from None
+        raise DirectoryProblem("not_found") from None
+    try:
+        _owned(fd)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _open_root(root: str) -> int:
+    """The resolved root, which must be this user's and not world-writable
+    (the deployment's directory: a problem of it refuses the call)."""
+    try:
+        fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError:
+        raise Rejected("root_unavailable") from None
+    try:
+        _owned(fd)
+    except DirectoryProblem:
+        os.close(fd)
+        raise Rejected("root_unsafe") from None
+    return fd
+
+
+#: The POSIX ACL extended attributes (Linux ``posix_acl_xattr`` format).
+ACL_ACCESS = "system.posix_acl_access"
+ACL_DEFAULT = "system.posix_acl_default"
+_ACL_VERSION = 2
+_ACL_USER_OBJ = 0x01
+_ACL_EXECUTE = 0x01
+_ACL_ENTRY = struct.Struct("<HHI")
+#: "No ACL here": no such attribute, or a file system without ACLs.
+_NO_ACL = (errno.ENODATA, errno.EOPNOTSUPP)
+
+
+def _read_acl(fd: int) -> bytes | None:
+    try:
+        return os.getxattr(fd, ACL_ACCESS)
+    except OSError as error:
+        if error.errno in _NO_ACL:
+            return None
+        raise
+
+
+def _traversal_only(acl: bytes) -> bytes:
+    """``acl`` with every entry but the owner's cut down to execute: whoever
+    may pass through the root may pass through the project directory, and
+    nobody else may list or write it. ``OSError`` for a malformed value."""
+    if len(acl) < 4 or (len(acl) - 4) % _ACL_ENTRY.size:
+        raise OSError(errno.EINVAL, "malformed ACL")
+    (version,) = struct.unpack_from("<I", acl)
+    if version != _ACL_VERSION:
+        raise OSError(errno.EINVAL, "unknown ACL version")
+    out = [acl[:4]]
+    for offset in range(4, len(acl), _ACL_ENTRY.size):
+        tag, perm, ident = _ACL_ENTRY.unpack_from(acl, offset)
+        perm = 0o7 if tag == _ACL_USER_OBJ else perm & _ACL_EXECUTE
+        out.append(_ACL_ENTRY.pack(tag, perm, ident))
+    return b"".join(out)
+
+
+def _drop_acls(fd: int, *names: str) -> None:
+    for name in names:
+        try:
+            os.removexattr(fd, name)
+        except OSError as error:
+            if error.errno not in _NO_ACL:
+                raise
+
+
+def _grant_root_traversal(root_fd: int, project_fd: int) -> None:
+    """Give a project directory this call made the root's traversal, nothing
+    more (Decision 0097, 2): the backend's Linux user reaches a checkout
+    (``lstat``) exactly when the deployment let it through the root.
+
+    With an access ACL on the root (``setfacl -m u:paw:x``, the documented
+    way), the project directory gets that ACL cut down to execute
+    (:func:`_traversal_only`); without one, the root's group / other execute
+    bits. A default ACL it inherited is dropped either way, so nothing below
+    (the checkout, git's own directories) inherits a grant."""
+    _drop_acls(project_fd, ACL_DEFAULT, ACL_ACCESS)
+    os.fchmod(project_fd, PROJECT_DIRECTORY_MODE)
+    acl = _read_acl(root_fd)
+    if acl is not None:
+        os.setxattr(project_fd, ACL_ACCESS, _traversal_only(acl))
+        return
+    traverse = stat.S_IMODE(os.fstat(root_fd).st_mode) & (stat.S_IXGRP | stat.S_IXOTH)
+    os.fchmod(project_fd, PROJECT_DIRECTORY_MODE | traverse)
+
+
+def make_directory(call: DirectoryCall) -> None:
+    """Create ``<root>/<project>/<name>`` as this user (Decision 0097, 2).
+
+    The project directory is made when missing (the root's traversal and
+    nothing more, whatever the umask: :func:`_grant_root_traversal`) and used
+    as it is when it is there; either way it is opened from the root with
+    ``O_NOFOLLOW`` and must be this user's. The checkout directory is
+    always new (mode ``0700``): anything at its place is ``exists``, never
+    reused, never followed."""
+    root_fd = _open_root(call.root)
+    try:
+        created = False
+        try:
+            os.mkdir(call.project, PROJECT_DIRECTORY_MODE, dir_fd=root_fd)
+            created = True
+        except FileExistsError:
+            pass
+        except OSError:
+            raise DirectoryProblem("not_found") from None
+        project_fd = _open_below(call.project, root_fd)
+        try:
+            if created:
+                _grant_root_traversal(root_fd, project_fd)
+            try:
+                os.mkdir(call.name, CHECKOUT_DIRECTORY_MODE, dir_fd=project_fd)
+            except FileExistsError:
+                raise DirectoryProblem("exists") from None
+            except OSError:
+                raise DirectoryProblem("not_found") from None
+            fd = _open_below(call.name, project_fd)
+            try:
+                # The account's alone: no ACL inherited from an existing
+                # project directory, whatever the umask.
+                _drop_acls(fd, ACL_DEFAULT, ACL_ACCESS)
+                os.fchmod(fd, CHECKOUT_DIRECTORY_MODE)
+            finally:
+                os.close(fd)
+        finally:
+            os.close(project_fd)
+    finally:
+        os.close(root_fd)
+
+
+def remove_directory(call: DirectoryCall) -> None:
+    """Remove the **empty** directory ``<root>/<project>/<name>`` (a failed
+    registration's), reached from the root without following a link. Gone
+    already is done; anything in it is ``not_empty`` (nothing is deleted)."""
+    root_fd = _open_root(call.root)
+    try:
+        try:
+            project_fd = _open_below(call.project, root_fd)
+        except DirectoryProblem as problem:
+            if problem.problem == "not_found":
+                return
+            raise
+        try:
+            os.rmdir(call.name, dir_fd=project_fd)
+        except FileNotFoundError:
+            return
+        except OSError as error:
+            if error.errno in (errno.ENOTEMPTY, errno.EEXIST):
+                raise DirectoryProblem("not_empty") from None
+            if error.errno == errno.ENOTDIR:
+                raise DirectoryProblem("not_a_directory") from None
+            raise DirectoryProblem("not_found") from None
+        finally:
+            os.close(project_fd)
+    finally:
+        os.close(root_fd)
+
+
+def _directory_main(original: str, config: Config, log: Callable[[str], None]) -> int:
+    """Run a ``paw-dir/v1`` command. stdout is one word (``created`` /
+    ``removed``, or the problem); the log names the operation and the user,
+    never the path."""
+    user = config.user
+    try:
+        call = directory_plan(original, config)
+        if call.op == "mkdir":
+            make_directory(call)
+            answer = "created"
+        else:
+            remove_directory(call)
+            answer = "removed"
+    except Rejected as rejected:
+        log(f"rejected user={user} reason={rejected.reason}")
+        sys.stderr.write(f"paw-git-wrapper: rejected ({rejected.reason})\n")
+        return REJECTED
+    except DirectoryProblem as problem:
+        log(f"rejected user={user} directory={call.op} reason={problem.problem}")
+        sys.stdout.write(f"{problem.problem}\n")
+        sys.stdout.flush()
+        return DIRECTORY_PROBLEM
+    except OSError:
+        # Anything else (``fchmod``, ``close``, ...): never a traceback, never
+        # exit status 1 (a path problem), never the path in the log.
+        log(f"failed user={user} directory={call.op} reason=os_error")
+        sys.stderr.write("paw-git-wrapper: the directory could not be made\n")
+        return REJECTED
+    log(f"accepted user={user} directory={call.op}")
+    sys.stdout.write(f"{answer}\n")
+    sys.stdout.flush()
+    return 0
+
+
 # -- the sandbox of Decision 0083 §6 (``paw-sandbox/v1``) ---------------------------
 
 #: The first word of a sandbox command (``paw_backend.sandbox.wire``).
@@ -2174,6 +2474,8 @@ def main(
         config = parse_config(arguments)
         user = config.user
         original = environment.get("SSH_ORIGINAL_COMMAND")
+        if original is not None and original.startswith(f"{DIRECTORY_TAG} "):
+            return _directory_main(original, config, log)
         if original is not None and original.startswith(
             (f"{SANDBOX_TAG} ", f"{SANDBOX_TAG_V2} ")
         ):
