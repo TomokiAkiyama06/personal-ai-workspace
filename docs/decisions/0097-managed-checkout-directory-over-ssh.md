@@ -1,6 +1,7 @@
 # `git: ssh` の配備で、Managed Checkout の Directory をその Linux User として作る（Wrapper の `paw-dir/v1`）
 
-- Status: Proposed
+- Status: Approved
+- Approval: 2026-10-22、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで承認（approved as recommended, all 6 points: 1 は A（Wrapper の `paw-dir/v1` の `mkdir` / `rmdir` で、その User として作る）、2 は Backend の Path の確認を Backend に残し、Home と `<home>/workspaces` を `paw` が辿れること（ACL の `u:paw:x`。`o+x` ではない）を `git: ssh` の配備の要件にする、3 は新しい Project の Directory に Root の Access ACL を `x` だけに削って写す（ACL がなければ Root の Group / Other の `x` だけ）・継いだ Default ACL は外す・Checkout は ACL なしの `0700`、4 は Root（`<home>/workspaces`）を Wrapper が作らない、5 は失敗した登録の後始末を空の Directory の `rmdir` だけにする、6 は Backend の `PAW_REPOSITORY_EXISTING_ROOTS` の既定 `{home}` を変えず、`git: ssh` の配備では `{home}/workspaces` にするよう別の小さな PR で手順書に書く）
 - Date: 2026-10-22
 - Scope: Issue [#285](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/285)。`SshGitRunner`（[Decision 0029](0029-per-user-git-runner-ssh.md)）で git を動かす配備（[Decision 0093](0093-production-runtime-config.md) の `[git] runner = "ssh"`）の、Managed Checkout（GitHub から Clone・新規（ローカル）・新規（GitHub）・他の人の Checkout の作成）の Directory の作成と、失敗したときの後始末だけ。`SubprocessGitRunner`（Backend の User が Account と同じ配備）は変えない。
 - Supersedes:
@@ -109,7 +110,7 @@ Log は 1 行（`accepted user=alice directory=mkdir` / `rejected user=alice rea
 - 古い Wrapper と新しい Backend の組み合わせは、Managed Checkout が `git_failed` で失敗する（6 の 2）。
 - `mkdir` の答えが届かなかったとき（`ssh` の Timeout、接続の切断）は、Wrapper が作った空の Directory が残り得る（Backend は作ったかを知らないので消さない）。次の登録は `exists` で止まり、持ち主が `rmdir` する。今の「死んだ試みの Directory」と同じ扱い。
 
-## 実装（この PR に含めるもの。Decision の承認待ち）
+## 実装（この PR に含めるもの）
 
 - `apps/backend/deploy/ssh-git-wrapper/paw_git_wrapper.py`: `paw-dir/v1` の `mkdir` / `rmdir`（`directory_plan`・`make_directory`・`remove_directory`）。
 - `apps/backend/paw_backend/repositories/directories.py`: `CheckoutDirectories`・`LocalCheckoutDirectories`。

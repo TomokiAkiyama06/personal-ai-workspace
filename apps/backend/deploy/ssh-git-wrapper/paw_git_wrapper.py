@@ -65,7 +65,7 @@ cgroup counted an ``oom_kill`` (its host-side ``memory.events``, read before and
 after the command) while it ran, ``oom=0`` when not, ``oom=-`` when it could not
 be read; ``v1`` keeps its old line.
 
-Decision 0097 (Proposed, issue #285) adds ``paw-dir/v1 <mkdir|rmdir> <path>``
+Decision 0097 (issue #285) adds ``paw-dir/v1 <mkdir|rmdir> <path>``
 (:data:`DIRECTORY_TAG`): a backend that is not this Linux user cannot create a
 managed checkout's directory (``<root>/<project>/<repository>``) in this
 user's home, so this user makes it (:func:`make_directory`: from the root,
@@ -1723,6 +1723,31 @@ def _owned(fd: int) -> None:
         raise DirectoryProblem("world_writable")
 
 
+#: What an ``errno`` says about the path itself (``paths.PathProblem``'s
+#: words). Anything else -- ``ENOSPC``, ``EDQUOT``, ``EROFS``, ``EIO``,
+#: ``EMFILE`` ... -- is not a fact about the path: it propagates, and
+#: :func:`_directory_main` refuses the call (126, ``os_error``) rather than
+#: telling the backend the path cannot be used (Codex review of PR #289).
+#: ``EACCES`` / ``EPERM`` in this user's own root mean the same as for the
+#: backend's own ``paths.create_checkout_directory``: ``not_found``.
+_PATH_ERRNOS = {
+    errno.ENOENT: "not_found",
+    errno.EACCES: "not_found",
+    errno.EPERM: "not_found",
+    errno.ENOTDIR: "not_a_directory",
+    errno.ELOOP: "symlink",
+}
+
+
+def _path_problem(error: OSError) -> "DirectoryProblem":
+    """The :class:`DirectoryProblem` of a path ``errno``; any other error is
+    re-raised as it is."""
+    problem = _PATH_ERRNOS.get(error.errno)
+    if problem is None:
+        raise error
+    return DirectoryProblem(problem)
+
+
 def _open_below(name: str, dir_fd: int) -> int:
     """``name`` in ``dir_fd``, opened without following a link; it must be a
     directory of this user that not everybody can write."""
@@ -1734,13 +1759,15 @@ def _open_below(name: str, dir_fd: int) -> int:
         )
     except FileNotFoundError:
         raise DirectoryProblem("not_found") from None
-    except OSError:
+    except OSError as error:
+        if error.errno not in _PATH_ERRNOS:
+            raise
         # ``O_NOFOLLOW | O_DIRECTORY`` refuses a link and a file alike
         # (``ENOTDIR`` or ``ELOOP``): say which, never follow either.
         try:
             info = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
-        except OSError:
-            raise DirectoryProblem("not_found") from None
+        except OSError as stat_error:
+            raise _path_problem(stat_error) from None
         if stat.S_ISLNK(info.st_mode):
             raise DirectoryProblem("symlink") from None
         if not stat.S_ISDIR(info.st_mode):
@@ -1852,8 +1879,8 @@ def make_directory(call: DirectoryCall) -> None:
             created = True
         except FileExistsError:
             pass
-        except OSError:
-            raise DirectoryProblem("not_found") from None
+        except OSError as error:
+            raise _path_problem(error) from None
         project_fd = _open_below(call.project, root_fd)
         try:
             if created:
@@ -1862,8 +1889,8 @@ def make_directory(call: DirectoryCall) -> None:
                 os.mkdir(call.name, CHECKOUT_DIRECTORY_MODE, dir_fd=project_fd)
             except FileExistsError:
                 raise DirectoryProblem("exists") from None
-            except OSError:
-                raise DirectoryProblem("not_found") from None
+            except OSError as error:
+                raise _path_problem(error) from None
             fd = _open_below(call.name, project_fd)
             try:
                 # The account's alone: no ACL inherited from an existing
@@ -1897,9 +1924,7 @@ def remove_directory(call: DirectoryCall) -> None:
         except OSError as error:
             if error.errno in (errno.ENOTEMPTY, errno.EEXIST):
                 raise DirectoryProblem("not_empty") from None
-            if error.errno == errno.ENOTDIR:
-                raise DirectoryProblem("not_a_directory") from None
-            raise DirectoryProblem("not_found") from None
+            raise _path_problem(error) from None
         finally:
             os.close(project_fd)
     finally:
@@ -1932,7 +1957,7 @@ def _directory_main(original: str, config: Config, log: Callable[[str], None]) -
         # Anything else (``fchmod``, ``close``, ...): never a traceback, never
         # exit status 1 (a path problem), never the path in the log.
         log(f"failed user={user} directory={call.op} reason=os_error")
-        sys.stderr.write("paw-git-wrapper: the directory could not be made\n")
+        sys.stderr.write("paw-git-wrapper: the directory command failed\n")
         return REJECTED
     log(f"accepted user={user} directory={call.op}")
     sys.stdout.write(f"{answer}\n")

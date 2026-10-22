@@ -21,6 +21,7 @@ test process's own user, in temporary directories only (no second Linux user, no
 """
 
 import contextlib
+import errno
 import io
 import os
 import pwd
@@ -400,6 +401,71 @@ class DirectoryMainTest(DirectoryTestCase):
         for text in (err, *logged):
             self.assertNotIn(self.root, text)
             self.assertNotIn(PROJECT, text)
+
+    @contextlib.contextmanager
+    def failing(self, name, code, *, when=lambda *args, **kwargs: True):
+        """``wrapper.os.<name>`` fails with ``code`` when ``when`` says so."""
+        real = getattr(wrapper.os, name)
+
+        def fake(*args, **kwargs):
+            if when(*args, **kwargs):
+                raise OSError(code, os.strerror(code))
+            return real(*args, **kwargs)
+
+        setattr(wrapper.os, name, fake)
+        try:
+            yield
+        finally:
+            setattr(wrapper.os, name, real)
+
+    def assert_os_error(self, op, path):
+        code, out, err, logged = self.run_main(op, path)
+        self.assertEqual((code, out), (wrapper.REJECTED, ""))
+        self.assertEqual(
+            logged, [f"failed user={self.user} directory={op} reason=os_error"]
+        )
+        self.assertNotIn(self.root, err)
+
+    def test_a_full_or_read_only_file_system_is_not_a_path_problem(self):
+        # Codex review of PR #289: only an errno about the path is a
+        # ``DirectoryProblem`` (exit status 1, which the backend reports as
+        # ``path_rejected``); ``ENOSPC``, ``EDQUOT``, ``EROFS``, ``EIO`` refuse
+        # the call (126, ``os_error``, ``git_failed`` in the backend).
+        for code in (errno.ENOSPC, errno.EDQUOT, errno.EROFS, errno.EIO):
+            for which in ("project", "checkout"):
+                with self.subTest(errno=errno.errorcode[code], directory=which):
+                    if which == "checkout":
+                        os.makedirs(self.project, exist_ok=True)
+                    name = PROJECT if which == "project" else "tool"
+                    with self.failing(
+                        "mkdir", code, when=lambda path, *a, n=name, **k: path == n
+                    ):
+                        self.assert_os_error("mkdir", self.checkout)
+                    self.assertFalse(os.path.lexists(self.checkout))
+                    shutil.rmtree(self.project, ignore_errors=True)
+
+    def test_an_open_that_fails_for_a_reason_other_than_the_path_is_an_os_error(self):
+        os.makedirs(self.project)
+        with self.failing(
+            "open", errno.EMFILE, when=lambda *a, **k: k.get("dir_fd") is not None
+        ):
+            self.assert_os_error("mkdir", self.checkout)
+
+    def test_rmdir_that_fails_for_a_reason_other_than_the_path_is_an_os_error(self):
+        os.makedirs(self.checkout)
+        with self.failing("rmdir", errno.EIO):
+            self.assert_os_error("rmdir", self.checkout)
+        self.assertTrue(os.path.isdir(self.checkout))
+
+    def test_a_permission_error_on_the_path_is_still_not_found(self):
+        with self.failing(
+            "mkdir", errno.EACCES, when=lambda path, *a, **k: path == "tool"
+        ):
+            code, out, _, logged = self.run_main("mkdir", self.checkout)
+        self.assertEqual((code, out), (1, "not_found\n"))
+        self.assertEqual(
+            logged, [f"rejected user={self.user} directory=mkdir reason=not_found"]
+        )
 
     def test_an_unexpected_os_error_is_a_refusal_not_a_path_problem(self):
         def broken_fchmod(fd, mode):

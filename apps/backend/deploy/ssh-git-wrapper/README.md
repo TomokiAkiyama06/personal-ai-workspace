@@ -105,7 +105,7 @@ paw-sandbox/v1 stop  <sandbox id>
 - `paw-sandbox/v2 exec`（語の並びは `v1` の `exec` と同じ。[Decision 0092](../../../../docs/decisions/0092-runtime-oom-kill-detection.md) の 5）は、状態行に `oom=<0|1|->` を足す（`paw-sandbox-status <nonce> exit=<n> truncated=<0|1> oom=<0|1|->`）。Container の cgroup の Host の側の `memory.events` の `oom_kill` を Command の前後に比べる。`start` / `stop` に `v2` はない（`bad_protocol`）。手順は [`../sandbox/README.md`](../sandbox/README.md) の「OOM の検出」。
 - Podman の環境は固定（`PATH`・`HOME`・`LC_ALL`・`LANG`・`XDG_RUNTIME_DIR`）。Log は操作の名前と User だけ。
 
-### Managed Checkout の Directory（`paw-dir/v1`、[Decision 0097](../../../../docs/decisions/0097-managed-checkout-directory-over-ssh.md)。Proposed）
+### Managed Checkout の Directory（`paw-dir/v1`、[Decision 0097](../../../../docs/decisions/0097-managed-checkout-directory-over-ssh.md)）
 
 Issue #285。Backend の User（`paw`）は他の User の Home に Directory を作れない（作れても持ち主が `paw` になる）ので、`git: ssh` の配備では、Managed Checkout（GitHub から Clone・新規・他の人の Checkout）の Directory をその User 自身が作る。Backend（`paw_backend.repositories.ssh.SshCheckoutDirectories`。`RepositoryService.from_policy` が `SshGitRunner` のとき自動で使う）が次を送る。
 
