@@ -3,12 +3,15 @@
 // dialog (PTaskWorkingSet, リポジトリを追加: a repository and its role, the role's
 // description) and the projects screen's inline form (PProjectCreate). The
 // person picks one of their Active projects, writes the title and the
-// instruction, picks the target repository and the budget preset. The Backend
+// instruction, picks the target repository and the budget preset. 読み取りだけ
+// (issue #279, Decision 0094, 1 A) makes it a read-only task: the repository is
+// then referenced (read) instead of the target, and the Backend guarantees that
+// nothing is written. The Backend
 // decides everything (project.task.run, the repository's ACL, the project's
 // state); the form only leaves out what it already knows cannot work (a
 // project the person only views, a repository whose ACL does not allow
 // writing) and shows the Backend's refusal otherwise.
-import { type FormEvent, useEffect, useId, useState } from "react";
+import { type FormEvent, useEffect, useId, useRef, useState } from "react";
 import { useI18n } from "../i18n";
 import { errorMessage } from "../i18n/errors";
 import type { ProjectRepository, ProjectSummary } from "../projects/model";
@@ -43,6 +46,16 @@ function writable(repository: ProjectRepository): boolean {
   );
 }
 
+/**
+ * Whether a read-only task (issue #279) may reference the repository: its ACL
+ * override lets the person read it and the task's agents work on it.
+ */
+function readable(repository: ProjectRepository): boolean {
+  return (
+    repository.acl === null || (repository.acl.includes("read") && repository.acl.includes("agent"))
+  );
+}
+
 export function CreateTaskForm({
   source,
   onCreated,
@@ -62,6 +75,10 @@ export function CreateTaskForm({
   const [title, setTitle] = useState("");
   const [instruction, setInstruction] = useState("");
   const [preset, setPreset] = useState<BudgetPreset>("standard");
+  const [readOnly, setReadOnly] = useState(false);
+  // What the repositories' answer is judged with (it arrives later).
+  const readOnlyRef = useRef(readOnly);
+  readOnlyRef.current = readOnly;
   const [busy, setBusy] = useState(false);
   // One key per form: a retry after a lost answer gets the task already created.
   const [requestKey] = useState(() => crypto.randomUUID());
@@ -100,9 +117,9 @@ export function CreateTaskForm({
       .then((detail) => {
         if (cancelled) return;
         setRepositories({ status: "ready", data: detail.repositories });
-        const usable = detail.repositories.filter(writable);
-        const [only] = usable;
-        if (usable.length === 1 && only) setRepositoryId(only.id);
+        const allowed = detail.repositories.filter(readOnlyRef.current ? readable : writable);
+        const [only] = allowed;
+        if (allowed.length === 1 && only) setRepositoryId(only.id);
       })
       .catch((caught: unknown) => {
         if (!cancelled) setRepositories({ status: "error", message: errorMessage(t, caught) });
@@ -111,6 +128,19 @@ export function CreateTaskForm({
       cancelled = true;
     };
   }, [projects, projectId, t]);
+
+  const usable = readOnly ? readable : writable;
+
+  // Switching 読み取りだけ: a repository the new kind of task cannot use is
+  // unchosen, and the only one it can use is chosen.
+  const switchReadOnly = (next: boolean) => {
+    setReadOnly(next);
+    if (repositories?.status !== "ready") return;
+    const allowed = repositories.data.filter(next ? readable : writable);
+    const [only] = allowed;
+    if (allowed.length === 1 && only) setRepositoryId(only.id);
+    else if (!allowed.some((repository) => repository.id === repositoryId)) setRepositoryId("");
+  };
 
   const ready =
     projectId !== "" && repositoryId !== "" && title.trim() !== "" && instruction.trim() !== "";
@@ -125,9 +155,10 @@ export function CreateTaskForm({
         projectId,
         title: title.trim(),
         instruction: instruction.trim(),
-        repositories: [{ repositoryId, role: "target" }],
+        repositories: [{ repositoryId, role: readOnly ? "referenced" : "target" }],
         budgetPreset: preset,
         requestKey,
+        readOnly,
       });
       onCreated(task);
     } catch (caught) {
@@ -196,10 +227,23 @@ export function CreateTaskForm({
             onChange={(event) => setInstruction(event.target.value)}
           />
         </label>
-        <p className="muted small">{t("tasks.create.readOnlyNote")}</p>
+        <div className="task-create-mode">
+          <label className="checkbox">
+            <input
+              type="checkbox"
+              checked={readOnly}
+              disabled={busy}
+              onChange={(event) => switchReadOnly(event.target.checked)}
+            />
+            {t("tasks.create.readOnly")}
+          </label>
+          <p className="muted small">{t("tasks.create.readOnlyHint")}</p>
+        </div>
         <fieldset className="task-create-group" disabled={busy}>
-          <legend>{t("tasks.create.target")}</legend>
-          <p className="muted small">{t("tasks.create.targetHint")}</p>
+          <legend>{t(readOnly ? "tasks.create.reference" : "tasks.create.target")}</legend>
+          <p className="muted small">
+            {t(readOnly ? "tasks.create.referenceHint" : "tasks.create.targetHint")}
+          </p>
           {repositories === null && (
             <p className="muted small">{t("tasks.create.targetPickProject")}</p>
           )}
@@ -219,7 +263,7 @@ export function CreateTaskForm({
           {repositories?.status === "ready" && repositories.data.length > 0 && (
             <div className="task-create-options">
               {repositories.data.map((repository) => {
-                const allowed = writable(repository);
+                const allowed = usable(repository);
                 return (
                   <label key={repository.id} className="radio-option task-create-option">
                     <input
@@ -233,7 +277,13 @@ export function CreateTaskForm({
                     <span className="task-create-option-text">
                       <span>{repository.name}</span>
                       <span className="muted small mono">
-                        {allowed ? repository.default_branch : t("tasks.create.targetReadOnly")}
+                        {allowed
+                          ? repository.default_branch
+                          : t(
+                              readOnly
+                                ? "tasks.create.referenceUnavailable"
+                                : "tasks.create.targetReadOnly",
+                            )}
                       </span>
                     </span>
                   </label>

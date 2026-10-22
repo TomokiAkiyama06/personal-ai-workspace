@@ -1519,6 +1519,17 @@
   gap: 2px;
 }
 
+/* 読み取りだけ (issue #279): the checkbox and what it changes, one block. */
+.task-create-mode {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.task-create-mode p {
+  margin: 0;
+}
+
 .task-create-done {
   margin: 0 0 12px;
   color: var(--ok);

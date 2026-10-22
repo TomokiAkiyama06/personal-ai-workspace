@@ -234,6 +234,15 @@ class NoTargetRepositoryError(WorkingSetError):
     message = "The task has no target repository"
 
 
+class ReadOnlyTaskError(WorkingSetError):
+    """A change that would let a read-only task write (issue #279, Decision 0094,
+    1 A): its Working Set holds ``referenced`` repositories only, so making one
+    ``working`` or ``target`` is refused. Nothing is written."""
+
+    code = "read_only_task"
+    message = "A read-only task reads its repositories only"
+
+
 class CompletionRequirementsNotMetError(WorkingSetError):
     """Complete of a task one of whose repositories lacks what it must have
     (Decision 0030, section 5): see ``TaskSnapshot`` for which one."""

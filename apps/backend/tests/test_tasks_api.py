@@ -1178,6 +1178,84 @@ class TasksApiTest(PostgresRepositoryTestCase):
         self.assertIn(("project.task.run", "repo_acl_forbids"), self.denials())
         self.assertEqual(self.task_count(), 0)
 
+    # -- a read-only task (issue #279) ----------------------------------------------
+
+    async def test_a_read_only_task_references_its_repositories_only(self):
+        # A repository the person may only read (and agents may use) is enough.
+        vendor = self.seed_repository(
+            self.project, name="vendor", acl_allowed=["read", "agent"]
+        )
+        self.as_creator()
+
+        response = await self.create(
+            read_only=True,
+            repositories=[
+                {"repository_id": str(self.repo), "role": "referenced"},
+                {"repository_id": str(vendor), "role": "referenced"},
+            ],
+        )
+
+        self.assertEqual(response.status_code, 201)
+        body = response.json()
+        self.assertIs(body["read_only"], True)
+        self.assertEqual(body["state"], "queued")
+        self.assertEqual(
+            [(repo["name"], repo["role"]) for repo in body["repositories"]],
+            [("web-app", "referenced"), ("vendor", "referenced")],
+        )
+        task_id = uuid.UUID(body["id"])
+        self.assertTrue((await self.tasks.restore(task_id, log_limit=0)).read_only)
+        self.assertEqual(
+            self.queue_rows(task_id), [{"status": "queued", "priority": "normal"}]
+        )
+        history = await self.tasks.history(task_id)
+        self.assertIs(history[0].detail["read_only"], True)
+        # Read as it was created; an ordinary task says it is not one.
+        detail = (await self.client.get(f"/api/v1/tasks/{task_id}")).json()
+        self.assertIs(detail["read_only"], True)
+        self.assertIs((await self.create()).json()["read_only"], False)
+
+    async def test_a_read_only_task_takes_no_target_or_working_repository(self):
+        self.as_creator()
+        for role in ("target", "working"):
+            with self.subTest(role=role):
+                response = await self.create(
+                    read_only=True,
+                    repositories=[{"repository_id": str(self.repo), "role": role}],
+                )
+                self.assertEqual(response.status_code, 422)
+                self.assertEqual(
+                    response.json()["error"]["code"], "read_only_repository_role"
+                )
+        for value in ("true", 1, None):
+            with self.subTest(read_only=value):
+                response = await self.create(
+                    read_only=value,
+                    repositories=[
+                        {"repository_id": str(self.repo), "role": "referenced"}
+                    ],
+                )
+                self.assertEqual(response.status_code, 422)
+        self.assertEqual(self.task_count(), 0)
+
+    async def test_a_read_only_task_still_needs_its_repositories_readable(self):
+        self.as_creator()
+        response = await self.create(
+            read_only=True,
+            repositories=[
+                {"repository_id": str(self.hidden_repo), "role": "referenced"}
+            ],
+        )
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["error"]["code"], "repository_not_found")
+        self.sign_in(uuid.uuid4(), {self.project: ProjectRole.VIEWER})
+        response = await self.create(
+            read_only=True,
+            repositories=[{"repository_id": str(self.repo), "role": "referenced"}],
+        )
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(self.task_count(), 0)
+
     async def test_there_is_no_merge_route(self):
         self.as_creator()
         for path in ("/api/v1/pull-requests/1/merge", "/api/v1/tasks/x/merge"):

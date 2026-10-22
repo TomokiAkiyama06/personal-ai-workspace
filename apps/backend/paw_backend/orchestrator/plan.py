@@ -386,3 +386,13 @@ class Plan:
             if node.key == key:
                 return index
         raise KeyError(key)
+
+
+def refuse_writers(plan: Plan) -> Plan:
+    """``plan`` itself if no node of it may write, else ``InvalidPlanError``
+    (``WORKER_IN_READ_ONLY_TASK``): the plan of a read-only task (issue #279,
+    Decision 0094, 1 A) has no ``worker`` node. The Planner, the Researcher and
+    the Reviewer hold no capability that writes (``domain.ROLE_CEILING``)."""
+    if any(node.role is NodeRole.WORKER for node in plan.nodes):
+        _refuse(PlanReason.WORKER_IN_READ_ONLY_TASK)
+    return plan

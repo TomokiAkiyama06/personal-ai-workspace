@@ -227,18 +227,22 @@ Checklist (Decision 0093 5; the human, not an agent):
     with `root_unavailable` while it is missing; a later `chmod` can change the ACL mask,
     so check again after one);
   - a repository registered as `既存のディレクトリ` lies below `<home>/workspaces`
-    (the wrapper runs git only there, although the backend's
-    `PAW_REPOSITORY_EXISTING_ROOTS` default `{home}` accepts the whole home), and every
-    directory on the way is searchable by `paw`.
-- [ ] Until issue #285 is implemented, only `既存のディレクトリ` registers a repository
-  under `git: ssh`: `GitHub から Clone`, `新規（ローカル）` and `新規（GitHub）` always
-  fail with `422 path_rejected` (`home_unsafe` while `paw` can only traverse, not read,
-  the home: the backend opens the home `O_RDONLY`; `not_found` where it can read it),
-  because the backend (`paw`) creates the checkout directory itself and cannot in
-  another account's home. Clone by hand as the
-  account from a neutral working directory, then register the path as `既存のディレクトリ`:
-  `cd / && sudo -u <user> git clone <url> <home>/workspaces/<dir>/<repo>`
+    (the wrapper runs git only there; see the `PAW_REPOSITORY_EXISTING_ROOTS` item
+    below), and every directory on the way is searchable by `paw`.
+- [ ] `GitHub から Clone`, `新規（ローカル）` and `新規（GitHub）` under `git: ssh` create
+  the checkout directory through the wrapper's `paw-dir/v1` as the account (Decision
+  0097, issue #285): install the wrapper that knows `paw-dir/v1` before (or with) the
+  backend that sends it; an older wrapper refuses it with `bad_protocol` (126) and the
+  registration fails as `git_failed` without creating anything. Until both are in, clone
+  by hand as the account from a neutral working directory and register the path as
+  `既存のディレクトリ`: `cd / && sudo -u <user> git clone <url> <home>/workspaces/<dir>/<repo>`
   (`<dir>` is any directory below `workspaces` that is not `.paw-worktrees`).
+- [ ] `/etc/paw/backend.env` has `PAW_REPOSITORY_EXISTING_ROOTS={home}/workspaces`
+  (`{home}/<PAW_REPOSITORY_WORKSPACE_SUBDIR>` if that is changed). With
+  `[git] runner = "ssh"` the wrapper runs git only below `<home>/workspaces` (its
+  `--root=`), so the backend's default `{home}` would accept an existing repository
+  elsewhere in the home that then fails at its first git command. The default stays
+  `{home}` for the `subprocess` runner (Decision 0097 6, issue #285).
 - [ ] `/usr/local/lib/paw/paw-git-wrapper` knows `paw-sandbox/v2` (the sandbox README's
   checklist item 9); otherwise `PAW_SANDBOX_OOM_STATUS=false`.
 - [ ] `/run/paw-sandbox` (`paw:paw-sandbox 0711`, `tmpfiles.d`) and the group
@@ -259,19 +263,22 @@ Checklist (Decision 0093 5; the human, not an agent):
      and restart the backend, with nothing else in the queue
      (`SELECT count(*) FROM queue_entries WHERE status IN ('queued', 'claimed')` is 0).
   2. Signed in as a Manager / Contributor of the project, open `エージェント / タスク` ›
-     `新しいタスク` (`/agents`): the project, a title, an instruction that asks to only
-     read and report (for example "README と docs/ の構成を読み、5 行でまとめてください。
-     ファイルは変更しないでください。"), the repository as the target, the budget
-     `標準`. The same is `POST /api/v1/projects/{project_id}/tasks` with
-     `{"title", "instruction", "repositories": [{"repository_id", "role": "target"}],
-     "budget_preset": "standard"}`. There is no setting that makes a task read-only yet
-     (Decision 0094, Proposed): the instruction is the only guard, and a Worker node
-     would write only to its own `paw/` branch and worktree.
+     `新しいタスク` (`/agents`): the project, a title, an instruction to read and report
+     (for example "README と docs/ の構成を読み、5 行でまとめてください。"), check
+     `読み取りだけ`, the repository under `読むリポジトリ`, the budget `標準`. The same is
+     `POST /api/v1/projects/{project_id}/tasks` with `{"title", "instruction",
+     "repositories": [{"repository_id", "role": "referenced"}], "budget_preset":
+     "standard", "read_only": true}`. The backend guarantees the task writes nothing
+     (issue #279, Decision 0094 1 A): its repository is only `referenced`, a plan with a
+     `worker` node is refused (the next planner is asked) and no node gets a capability
+     or a tool that writes.
   3. The task goes from `キュー待ち` to running; then
      `SELECT placement, placement_agent, placement_model FROM agent_dag_node_attempts a
      JOIN agent_dags d ON d.id = a.dag_id WHERE d.task_id = '<task id>'` shows `local_gpu`.
-     The task then waits in `evaluating` (a target needs a pull request to complete):
-     cancel it on the task's screen.
+     When its DAG succeeds the task is `completed` (no evaluation, no pull request), and
+     the summary of each node is kept in its `complete` event:
+     `SELECT detail->'result' FROM task_events WHERE task_id = '<task id>' AND command =
+     'complete'`. Nothing is left to cancel.
 
 The CLI runtimes (`[agents.codex]` / `[agents.claude]`) cannot be enabled yet: the names
 are reserved and refused until a `CloudPolicy` Decision and the CLI smoke (Decision

@@ -71,6 +71,8 @@ class PlanReason(StrEnum):
     CAPABILITY_ABOVE_ROLE = "capability_above_role"
     BAD_REPOSITORY = "bad_repository"
     NO_REQUIRED_NODE = "no_required_node"
+    # A read-only task (issue #279): only the roles that never write.
+    WORKER_IN_READ_ONLY_TASK = "worker_in_read_only_task"
 
 
 class InvalidPlanError(OrchestratorError):

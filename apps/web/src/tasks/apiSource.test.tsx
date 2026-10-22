@@ -241,6 +241,7 @@ describe("apiTaskSource", () => {
       repositories: [{ repositoryId: "r-1", role: "target" }],
       budgetPreset: "standard",
       requestKey: "k-1",
+      readOnly: false,
     });
     expect(calls[0]?.body).toEqual({
       title: "Read the parser",
@@ -248,6 +249,7 @@ describe("apiTaskSource", () => {
       repositories: [{ repository_id: "r-1", role: "target" }],
       budget_preset: "standard",
       request_key: "k-1",
+      read_only: false,
     });
     expect(task.state).toBe("queued");
     expect(task.id).toBe(TASK);

@@ -29,7 +29,13 @@ from paw_backend.orchestrator.authority import (
     StoredTaskAuthority,
     parent_agent_id,
 )
-from paw_backend.orchestrator.domain import ROLE_CEILING, RunOutcome
+from paw_backend.orchestrator.domain import (
+    READ_ONLY_TASK_CAPABILITIES,
+    ROLE_CEILING,
+    WRITING_CAPABILITIES,
+    NodeRole,
+    RunOutcome,
+)
 from paw_backend.projects.records import ProjectStatus
 from paw_backend.repositories.errors import (
     CheckoutChangedError,
@@ -306,6 +312,28 @@ class StoredScopeTest(PostgresTaskTestCase):
         self.assertEqual(len(scope.projects), MAX_WORKING_SET_REPOSITORIES + 1)
         self.assertIn(self.project_id, scope.projects)
         self.assertEqual(grant.project_ids, frozenset(scope.projects))
+
+    async def test_a_read_only_task_holds_no_capability_that_writes(self):
+        # Issue #279: what the roles that never write may hold, nothing more.
+        task_id = await self.create_task(
+            repositories=[
+                WorkingSetEntry(self.referenced, RepoRole.REFERENCED, BASELINE)
+            ],
+            read_only=True,
+        )
+        snapshot = await self.service.restore(task_id)
+
+        grant = await self.authority.parent_grant(snapshot)
+
+        self.assertEqual(grant.capabilities, READ_ONLY_TASK_CAPABILITIES)
+        self.assertFalse(grant.capabilities & WRITING_CAPABILITIES)
+        self.assertNotIn(Capability.PROJECT_TASK_RUN, grant.capabilities)
+        self.assertEqual(
+            READ_ONLY_TASK_CAPABILITIES,
+            ROLE_CEILING[NodeRole.PLANNER]
+            | ROLE_CEILING[NodeRole.RESEARCHER]
+            | ROLE_CEILING[NodeRole.REVIEWER],
+        )
 
     async def test_the_parent_grant(self):
         snapshot = await self.task((self.target, RepoRole.TARGET))

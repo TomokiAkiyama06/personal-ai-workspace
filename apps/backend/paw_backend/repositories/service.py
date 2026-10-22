@@ -138,6 +138,10 @@ from paw_backend.repositories.accounts import (
     AccountDirectory,
     LoginNameAccountDirectory,
 )
+from paw_backend.repositories.directories import (
+    CheckoutDirectories,
+    LocalCheckoutDirectories,
+)
 from paw_backend.repositories.errors import (
     CheckoutChangedError,
     CheckoutExistsError,
@@ -184,13 +188,11 @@ from paw_backend.repositories.limits import (
 from paw_backend.repositories.paths import (
     LinuxAccount,
     check_existing_repository,
-    create_checkout_directory,
     inspect_checkout_root,
     locate_directory_identity,
     plan_checkout_path,
     project_directory_name,
     read_checkout_identity,
-    remove_directory,
 )
 from paw_backend.repositories.policy import RepositoryPolicy
 from paw_backend.repositories.records import (
@@ -202,6 +204,7 @@ from paw_backend.repositories.records import (
     RepositoryDetail,
     RepositorySource,
 )
+from paw_backend.repositories.ssh import SshCheckoutDirectories, SshGitRunner
 from paw_backend.repositories.transaction import transaction
 from paw_backend.repositories.validation import (
     validate_bool,
@@ -288,8 +291,13 @@ class RepositoryService:
         github: GitHubGateway | None = None,
         clock: Clock | None = None,
         lock_timeout_ms: int = DEFAULT_LOCK_TIMEOUT_MS,
+        directories: CheckoutDirectories | None = None,
     ) -> None:
-        """``TypeError`` for a wrong type, ``ValueError`` for a bad lock timeout."""
+        """``TypeError`` for a wrong type, ``ValueError`` for a bad lock timeout.
+
+        ``directories`` makes a managed checkout's directory
+        (``repositories.directories``; default: this process,
+        ``LocalCheckoutDirectories``)."""
         if not isinstance(database, Database):
             raise TypeError("database must be a Database")
         if not isinstance(authorizer, Authorizer):
@@ -314,6 +322,10 @@ class RepositoryService:
             raise TypeError("lock_timeout_ms must be an int")
         if not MIN_LOCK_TIMEOUT_MS <= lock_timeout_ms <= MAX_LOCK_TIMEOUT_MS:
             raise ValueError("lock_timeout_ms is out of range")
+        if directories is not None and not (
+            hasattr(directories, "create") and hasattr(directories, "remove")
+        ):
+            raise TypeError("directories must be CheckoutDirectories")
         self._database = database
         self._authorizer = authorizer
         self._accounts = accounts
@@ -322,6 +334,7 @@ class RepositoryService:
         self._github = github or UnavailableGitHubGateway()
         self._clock = clock or _utc_now
         self._lock_timeout_ms = lock_timeout_ms
+        self._directories = directories or LocalCheckoutDirectories()
 
     @classmethod
     def from_policy(
@@ -338,6 +351,7 @@ class RepositoryService:
         gh_executable: str = "gh",
         clock: Clock | None = None,
         lock_timeout_ms: int = DEFAULT_LOCK_TIMEOUT_MS,
+        directories: CheckoutDirectories | None = None,
     ) -> "RepositoryService":
         """The production wiring: **one** ``RepositoryPolicy`` for every part.
 
@@ -367,6 +381,13 @@ class RepositoryService:
         (``SubprocessGhRunner(gh_executable=...)``) here too, so the credential
         helper names the binary that is actually installed rather than a bare
         ``gh`` git's own ``PATH`` cannot find.
+
+        ``directories`` (Decision 0097, issue #285) makes a managed checkout's
+        directory. By default it follows ``runner``: with an ``SshGitRunner``
+        the account makes it through the same wrapper
+        (``SshCheckoutDirectories``: this process's Linux user cannot create a
+        directory in another user's home), otherwise this process does
+        (``LocalCheckoutDirectories``, Decision 0017 §1).
         """
         if not isinstance(policy, RepositoryPolicy):
             raise TypeError("policy must be a RepositoryPolicy")
@@ -381,6 +402,8 @@ class RepositoryService:
             github = GhCliGitHubGateway(
                 accounts, gh_runner, policy.clone_hosts, timeout_s=policy.gh_timeout_s
             )
+        if directories is None and isinstance(runner, SshGitRunner):
+            directories = SshCheckoutDirectories(runner, timeout_s=policy.git_timeout_s)
         return cls(
             database,
             authorizer,
@@ -395,6 +418,7 @@ class RepositoryService:
             github=github,
             clock=clock,
             lock_timeout_ms=lock_timeout_ms,
+            directories=directories,
         )
 
     # -- plumbing --------------------------------------------------------------
@@ -841,7 +865,7 @@ class RepositoryService:
         created_directory = False
         populated: _Populated | None = None
         try:
-            await asyncio.to_thread(create_checkout_directory, path, account)
+            await self._directories.create(path, account)
             created_directory = True
             populated = await populate(path)
             identity = await asyncio.to_thread(read_checkout_identity, path, account)
@@ -959,7 +983,10 @@ class RepositoryService:
                 if owned and repository_id is not None:
                     await store.delete_repository_if_unused(session, repository_id)
             if owned and created_directory:
-                await asyncio.to_thread(remove_directory, path, account)
+                if not await self._directories.remove(path, account):
+                    # Kept (not empty, or not this call's to remove): the next
+                    # attempt stops with ``exists`` until its owner removes it.
+                    logger.warning("The directory of a failed checkout was kept")
         except Exception as error:
             # Only the type is logged.
             logger.error(
@@ -1040,7 +1067,7 @@ class RepositoryService:
             # A directory a dead attempt left behind is never deleted here (it could
             # hold anything by now): creating this one fails with ``exists`` and the
             # owner removes it.
-            await asyncio.to_thread(create_checkout_directory, path, account)
+            await self._directories.create(path, account)
             created_directory = True
             await self._git.clone(source, path, account)
             identity = await asyncio.to_thread(read_checkout_identity, path, account)

@@ -201,6 +201,13 @@ def main() -> int:
             if "turn_error" in action:
                 turn["error"] = {"message": "x", "codexErrorInfo": action["turn_error"]}
             notify("turn/completed", {"turn": turn})
+        elif "refresh" in action:
+            # A refreshed login, saved as ``rust-v0.162.1`` saves it
+            # (``login/src/auth/storage.rs``): truncated and rewritten in
+            # place, never renamed over.
+            with open(auth, "r+", encoding="utf-8") as handle:
+                handle.truncate(0)
+                handle.write(action["refresh"])
         elif "sleep" in action:
             time.sleep(action["sleep"])
         elif "exit" in action:

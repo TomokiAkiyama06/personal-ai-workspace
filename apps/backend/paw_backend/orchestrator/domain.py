@@ -99,7 +99,8 @@ class RunOutcome(StrEnum):
     IDLE = "idle"  # nothing to claim
     SKIPPED = "skipped"  # the task is not in a state that can run
     LEASE_LOST = "lease_lost"  # the worker lost its lease and stopped writing
-    DAG_SUCCEEDED = "dag_succeeded"  # every required node succeeded: evaluating
+    # Every required node succeeded: evaluating (a read-only task: completed).
+    DAG_SUCCEEDED = "dag_succeeded"
     DAG_FAILED = "dag_failed"  # a required node did not succeed: the task failed
     # PAW-035: the DAG succeeded but a Worker branch conflicts (or a worktree has
     # uncommitted changes) in the integration: the task waits for a human.
@@ -144,6 +145,15 @@ ROLE_CEILING: MappingProxyType[NodeRole, frozenset[Capability]] = MappingProxyTy
 # read-only roles get none. The Worker gets the handles of the task.
 ROLES_WITH_CREDENTIALS = frozenset({NodeRole.WORKER})
 del _C
+# The most any node of a read-only task (issue #279, Decision 0094, 1 A) holds:
+# what the roles that never write may hold. The orchestrator narrows the parent
+# grant of such a task to it, whatever the authority grants.
+READ_ONLY_TASK_CAPABILITIES = frozenset(
+    capability
+    for role, ceiling in ROLE_CEILING.items()
+    if role is not NodeRole.WORKER
+    for capability in ceiling
+)
 
 WRITING_CAPABILITIES = frozenset(
     {Capability.PROJECT_REPO_WRITE, Capability.PROJECT_PR_CREATE, Capability.PR_CREATE}

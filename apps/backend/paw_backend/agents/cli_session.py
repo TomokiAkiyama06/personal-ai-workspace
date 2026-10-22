@@ -345,12 +345,20 @@ class _UnitProcess:
         polls = (
             int(launcher.unit_end_seconds / _UNIT_POLL_SECONDS) if ended_itself else 0
         )
+        # Bounded in time as well as in polls: a slow systemctl (each call
+        # may take up to ``systemctl_seconds``) must not stretch the wait,
+        # since a stop's whole duration counts against the session slot's
+        # margin (``connections.session_slot``).
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + (launcher.unit_end_seconds if ended_itself else 0)
         for attempt in range(polls + 1):
             state = await launcher.show(self._unit, "ActiveState")
             if state in _ENDED_STATES:
                 break
-            if attempt < polls:
+            if attempt < polls and loop.time() < deadline:
                 await asyncio.sleep(_UNIT_POLL_SECONDS)
+            else:
+                return
         else:
             return
         result = await launcher.show(self._unit, "Result")

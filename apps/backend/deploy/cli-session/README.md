@@ -1,6 +1,6 @@
 # CLI の Session の Container の配備（Claude Code・Codex の Subscription）
 
-更新日: 2026-10-16
+更新日: 2026-10-20
 
 [Decision 0083](../../../../docs/decisions/0083-agent-runtime-adapters.md) の 6 と [Decision 0087](../../../../docs/decisions/0087-cli-secret-store-and-egress.md) の 3・4（どちらも Approved）。
 Backend の側は `paw_backend/agents/cli_session.py` の `SystemdLauncher`、`claude_cli.py` の `ClaudeSessionAdapter` / `ClaudeCliRuntime`、`codex_cli.py` の `SystemdCodexLauncher` / `CodexSessionAdapter` / `CodexCliRuntime`（[Decision 0089](../../../../docs/decisions/0089-codex-cli-runtime-route.md)）、`bridge.py` の `McpBridge`。
@@ -25,6 +25,8 @@ Backend（User paw）
 
 Codex の Session（`launch.json` の `cli` が `codex`）は `codex app-server`（stdio の JSON-RPC の対話）なので、Program は `stream.sock` を Container の stdin と stdout の両方にする。Image は `codex_image`（`Containerfile.codex`、入口は `/opt/paw/start-codex`）。`credential.env` と `prompt` は書かない（Codex の Login は `CODEX_HOME` の `auth.json`。`credential.env` があれば拒否する）。版の確認（`codex --version`）と `app-server` は同じ Session の Unit を順に起動する。
 
+Codex の `CODEX_HOME`（Issue #239、Decision 0083 の 6、[Decision 0095](../../../../docs/decisions/0095-codex-auth-file-owner-and-mode.md)（Approved））: `launch.json` の `CODEX_HOME` は Session の Directory の `config` でなければならない（違えば拒否）。Program はそこに Container の tmpfs（`--mount type=tmpfs,destination=<dir>/config,tmpfs-mode=0700,chown=true`。所有者は Container の User = `paw-agent-cli`）を重ね、その中へ Session の `config.toml`（`:ro`）と `auth.json`（`:rw`）だけを Bind Mount する（Backend が書いたものだけ。普通の File でなければ拒否）。`auth.json` は Backend が作る 0660・所有者 `paw`・Group `paw-cli-bridge` の File で、Codex は Refresh した Login をこの File の Truncate と書き直しで保存し、Backend は Session の終わりに読み戻して Secret Store に書き戻す（Compare-and-swap）。Codex がその他に `CODEX_HOME` へ書く物（Log・状態）は Container の tmpfs に残り、Container と一緒に消える。Codex の Session は Connection ごとに同時に 1 つ（Backend の DB の Lease。`../../README.md` の「Codex の ChatGPT の Login」）。
+
 Egress（[Decision 0091](../../../../docs/decisions/0091-egress-per-session-socket.md)）: Container に Mount するのは自分の Session の Socket（`<egress_session_dir>/<uuid>.sock`、既定 `/run/paw-egress/session`）だけで、Proxy はどの Socket で受けたかで Session を知る（Header は使わない。`PAW_SESSION_ID` も渡さない）。その Socket がなければ Program は起動を拒む（共有の Socket に戻らない）。設定に古い `egress_socket` が残っていても拒む。Backend は Session を起動するとき 1 行の Log（`CLI session started: session=<uuid> task=<id> node=<key> connection=<id> cli=<claude|codex>`）を書き、Egress の Log の `session=` を Task・Node・Connection に結び付ける。
 
 `credential.env` は 0640・所有者 Backend・Group `paw-cli-bridge`（Decision 0088 で承認。Decision 0087 の「0400・所有者 `paw-agent-cli`」の代わり。Backend は別の Account に File を渡せないため）。
@@ -48,4 +50,6 @@ Memory 不足（[Decision 0092](../../../../docs/decisions/0092-runtime-oom-kill
 - CLI の Unit が止められなかった（`systemctl stop` が 3 回とも失敗した）ときは、Runtime は Session の Directory を消さずに残す（Unit が Mount しているため）。Log の `A CLI session could not be stopped` を見たら、Unit を止めてから `/run/paw-cli/<uuid>` を消す。
 - Container の中から `127.0.0.1:3128` 経由で `api.anthropic.com` に届き、他の Host は拒否されること（Proxy の Log）。Egress の Session ごとの Socket と Proxy の確認（polkit の追加なしで Socket が作られる・Session の終わりで止まり File が消える・Container から見える Socket が自分の 1 つだけ・Log の `session=` と集計の 1 行）は [`../egress/README.md`](../egress/README.md) の「確かめること」。
 - `claude` の `system/init` に PAW の Tool と `EndConversation` だけが出ること（違えば Runtime が止める）。
+- **Codex の `CODEX_HOME`**（Issue #239）: この硬くした Unit の下の Rootless の Podman が `--mount type=tmpfs,...,tmpfs-mode=0700,chown=true` と、その tmpfs の中への File の Bind Mount（`config.toml:ro`・`auth.json:rw`）を受け付けること。Container の中で `stat -c '%a %U' "$CODEX_HOME"` が `700 paw-agent-cli`（の Container の中の名前）、`codex` が `CODEX_HOME` に Log などを書けること、`auth.json` を書けること（Host 側の File の持ち主・Mode が `paw paw-cli-bridge 0660` のまま変わらないこと）。Session の後の `/run/paw-cli/<uuid>` が Backend によって消えること。
+- **Codex の Login の書き戻し**（Smoke。Human の規約の確認の後）: Session の間に Codex が Login を Refresh したとき、Backend の Log に `Codex refreshed its login; written back` が出て、Secret Store の版が 1 つ上がり、次の Session が新しい版で動くこと。2 つ目の Session が同じ Connection で 60 秒待ってから `connection_busy` になること。
 - Provider の規約の確認（Human）。
