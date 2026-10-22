@@ -215,3 +215,30 @@ class ConnectionUsageRow(Base):
     duration_ms: Mapped[int | None] = mapped_column(BigInteger)
     # A CLI session's row (Decision 0083, 5; revision ``0194``).
     session: Mapped[bool] = mapped_column(Boolean, server_default=false())
+
+
+#: The table of the per-connection session slot (revision ``0239``).
+SESSION_LEASE_TABLE = "connection_session_leases"
+
+
+class ConnectionSessionLeaseRow(Base):
+    """The one session slot of a connection whose CLI keeps its credential in a
+    file it refreshes (Decision 0083, 6: a Codex ChatGPT login). One row per
+    connection (keyed by its kind: there is one connection per kind) while a
+    session holds the slot: the holder (a random id per acquisition), when it
+    was taken, the last heartbeat and the expiry (the database's clock). An
+    expired row may be taken over by any process; the holder deletes its own
+    row when its session ended. No credential, no task, no content."""
+
+    __tablename__ = SESSION_LEASE_TABLE
+    __table_args__ = (
+        _in("kind", ConnectionKind, "kind_valid"),
+        CheckConstraint("heartbeat_at >= acquired_at", name="heartbeat_after_acquire"),
+        CheckConstraint("expires_at > heartbeat_at", name="expires_after_heartbeat"),
+    )
+
+    kind: Mapped[str] = mapped_column(Text, primary_key=True)
+    holder: Mapped[uuid.UUID] = mapped_column(Uuid)
+    acquired_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    heartbeat_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

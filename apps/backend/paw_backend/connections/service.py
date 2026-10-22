@@ -112,12 +112,13 @@ Limits (stated, not hidden)
 
 import asyncio
 import contextlib
+import hmac
 import logging
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, NoReturn
 
 from paw_backend.authz import (
     AuditEvent,
@@ -157,6 +158,8 @@ from paw_backend.connections.errors import (
     InputProblem,
     InvalidConnectionInputError,
     QuotaExceededError,
+    SessionSlotBusyError,
+    StaleConnectionCredentialError,
     TargetUserNotFoundError,
     TaskBudgetError,
     TaskNotUsableError,
@@ -171,16 +174,21 @@ from paw_backend.connections.limits import (
 )
 from paw_backend.connections.records import (
     ConnectionAvailability,
+    ConnectionCredentialStatus,
     ConnectionInfo,
     ConnectionRequest,
     ConnectionResult,
     Quota,
     QuotaUsage,
     UsageRecord,
+    credential_revision,
 )
 from paw_backend.connections.report import UsageRange, UsageReport
 from paw_backend.connections.secret import Secret, SecretResolver
-from paw_backend.connections.secret_store import CredentialStore
+from paw_backend.connections.secret_store import (
+    CredentialStore,
+    StaleCredentialVersionError,
+)
 from paw_backend.connections.session import (
     SESSION_MIN_TOKENS,
     UNKNOWN_SESSION_TOKENS,
@@ -190,6 +198,16 @@ from paw_backend.connections.session import (
     SessionRequest,
     SessionResult,
     SessionStop,
+    WriteBack,
+)
+from paw_backend.connections.session_slot import (
+    SLOT_HEARTBEAT_SECONDS,
+    SLOT_STOP_MARGIN_SECONDS,
+    SLOT_TTL_SECONDS,
+    SLOT_WAIT_SECONDS,
+    SessionSlot,
+    check_slot_timing,
+    run_within,
 )
 from paw_backend.connections.store import (
     Admitted,
@@ -428,6 +446,12 @@ class _Session:
         object.__setattr__(self, name, value)
 
 
+def _exclusive(adapter: object) -> bool:
+    """Does ``adapter`` run one session per connection (Decision 0083, 6)?
+    Read from its class, exactly ``True``."""
+    return getattr(type(adapter), "exclusive_sessions", False) is True
+
+
 def _session_adapters(
     adapters: Mapping[ConnectionKind, AgentSessionAdapter] | None,
 ) -> dict[ConnectionKind, AgentSessionAdapter]:
@@ -469,6 +493,10 @@ class ConnectionService:
         health_timeout_seconds: float = DEFAULT_HEALTH_TIMEOUT_SECONDS,
         clock=None,
         allow_explicit_clock: bool = False,
+        session_slot_wait_seconds: float = SLOT_WAIT_SECONDS,
+        session_slot_ttl_seconds: float = SLOT_TTL_SECONDS,
+        session_slot_heartbeat_seconds: float = SLOT_HEARTBEAT_SECONDS,
+        session_slot_margin_seconds: float = SLOT_STOP_MARGIN_SECONDS,
     ) -> None:
         """Wire the service.
 
@@ -486,6 +514,13 @@ class ConnectionService:
         a credential nothing refers to any more is deleted after a replacement
         or a disconnection, and ``rotate_credential`` is possible. Without it
         (the HTTP layer's quota service, the tests), handles are taken as given.
+
+        ``session_slot_*`` (Decision 0083, 6; ``session_slot``): how long a
+        session of an ``exclusive_sessions`` adapter waits for its
+        connection's slot (60 s), how long a lease lasts after its heartbeat,
+        how often it is renewed, and how long before it could expire a holder
+        that cannot renew stops its session. The defaults are production's;
+        the tests shorten them.
 
         ``period_timezone`` is the IANA zone of the calendar windows (``day``, ``week``,
         ``month``); the default is ``Asia/Tokyo`` (Decision 0016, section 4, approved;
@@ -512,6 +547,21 @@ class ConnectionService:
         validate_seconds(
             "health_timeout_seconds", health_timeout_seconds, MAX_HEALTH_TIMEOUT_SECONDS
         )
+        try:
+            check_slot_timing(
+                session_slot_wait_seconds,
+                session_slot_ttl_seconds,
+                session_slot_heartbeat_seconds,
+                session_slot_margin_seconds,
+            )
+        except ValueError:
+            raise fail("session_slot", InputProblem.OUT_OF_RANGE) from None
+        self._slot_wait = float(session_slot_wait_seconds)
+        self._slot_timing = {
+            "ttl_seconds": float(session_slot_ttl_seconds),
+            "heartbeat_seconds": float(session_slot_heartbeat_seconds),
+            "margin_seconds": float(session_slot_margin_seconds),
+        }
         self._store = ConnectionStore(
             database,
             timeout_seconds=database_timeout_seconds,
@@ -574,14 +624,26 @@ class ConnectionService:
         return info
 
     async def replace_credential(
-        self, principal: Principal, kind: ConnectionKind, secret_handle: str
+        self,
+        principal: Principal,
+        kind: ConnectionKind,
+        secret_handle: str,
+        *,
+        expected_revision: str | None = None,
     ) -> ConnectionInfo:
         """Point the connection at another credential handle (a Security-sensitive
         change). The connection goes back to ``unavailable`` until a health check
-        verifies the new credential. ``ConnectionNotFoundError`` if none exists."""
+        verifies the new credential. ``ConnectionNotFoundError`` if none exists.
+
+        ``expected_revision`` (issue #277) is the ``revision`` of
+        ``credential_status`` the caller decided on: the replacement is made
+        only while the connection still has that credential (in the same
+        statement), else ``StaleConnectionCredentialError`` (audited)."""
         self._actor(principal)
         kind = validate_enum("kind", kind, ConnectionKind)
         handle = validate_handle("secret_handle", secret_handle)
+        if expected_revision is not None and type(expected_revision) is not str:
+            raise fail("expected_revision", InputProblem.WRONG_TYPE)
         correlation_id = uuid.uuid4()
         await self._authorize(
             principal,
@@ -589,10 +651,19 @@ class ConnectionService:
             _connection_resource(),
             correlation_id,
         )
-        previous = await self._call_store(self._store.read_handle(kind))
-        async with self._credential_lock(handle):
+        async with self._current_handle_locked(kind, handle) as previous:
+            # Under the locks of the current handle (and of the new one): the
+            # revision is checked against the handle no write-back or other
+            # replacement can change meanwhile.
+            expected = await self._expected_handle(
+                principal, kind, previous, expected_revision, correlation_id
+            )
             await self._require_stored(handle, kind)
-            info = await self._call_store(self._store.replace_handle(kind, handle))
+            info = await self._call_store(
+                self._store.replace_handle(kind, handle, expected=expected)
+            )
+        if info is None and expected is not None:
+            await self._stale_replacement(principal, correlation_id, None)
         if info is None:
             raise ConnectionNotFoundError()
         if previous is not None and previous != handle:
@@ -602,6 +673,44 @@ class ConnectionService:
             _RESOURCE_CONNECTION, info.id,
         )  # fmt: skip
         return info
+
+    async def _expected_handle(
+        self,
+        principal: Principal,
+        kind: ConnectionKind,
+        current: str | None,
+        expected_revision: str | None,
+        correlation_id: uuid.UUID,
+    ) -> tuple[uuid.UUID, str] | None:
+        """The connection id and handle a compare-and-swap replacement expects
+        (``None``: no compare-and-swap); a revision that is not the current one
+        is refused. The UPDATE is guarded by both, so a connection made again
+        with the same handle in between is not this one."""
+        if expected_revision is None:
+            return None
+        if current is None:
+            raise ConnectionNotFoundError()
+        info = await self._call_store(self._store.get_connection(kind))
+        if info is None or not hmac.compare_digest(
+            credential_revision(info.id, current).encode(),
+            expected_revision.encode("utf-8", "replace"),
+        ):
+            await self._stale_replacement(
+                principal, correlation_id, None if info is None else info.id
+            )
+        return info.id, current
+
+    async def _stale_replacement(
+        self,
+        principal: Principal,
+        correlation_id: uuid.UUID,
+        connection_id: uuid.UUID | None,
+    ) -> NoReturn:
+        await self._audit(
+            ACTION_REPLACE, StaleConnectionCredentialError.code, False, principal,
+            correlation_id, _RESOURCE_CONNECTION, connection_id,
+        )  # fmt: skip
+        raise StaleConnectionCredentialError()
 
     async def disable(
         self, principal: Principal, kind: ConnectionKind
@@ -644,8 +753,9 @@ class ConnectionService:
         kind = validate_enum("kind", kind, ConnectionKind)
         correlation_id = uuid.uuid4()
         existing = await self._authorize_existing(principal, kind, correlation_id)
-        previous = await self._call_store(self._store.read_handle(kind))
-        if not await self._call_store(self._store.delete_connection(kind)):
+        async with self._current_handle_locked(kind) as previous:
+            deleted = await self._call_store(self._store.delete_connection(kind))
+        if not deleted:
             raise ConnectionNotFoundError()
         if previous is not None:
             await self._discard_credential(previous)
@@ -674,12 +784,19 @@ class ConnectionService:
         if self._credentials is None:
             raise ConnectionUnavailableError()
         current = await self._call_store(self._store.get_connection(kind))
-        if (
-            current is None
-            or (await self._call_store(self._store.read_handle(kind))) != handle
-        ):
+        if current is None:
             raise ConnectionNotFoundError()
-        version = await self._credentials.rotate(handle, kind, expected_version, value)
+
+        async def still_attached() -> None:
+            # Under the handle's lock: a replacement or a disconnection holds
+            # the same lock while it changes the row (``_current_handle_
+            # locked``), so a credential detached meanwhile is never rotated.
+            if (await self._call_store(self._store.read_handle(kind))) != handle:
+                raise ConnectionNotFoundError()
+
+        version = await self._credentials.rotate(
+            handle, kind, expected_version, value, check=still_attached
+        )
         await self._audit(
             ACTION_ROTATE, OUTCOME_SUCCEEDED, True, None, uuid.uuid4(),
             _RESOURCE_CONNECTION, current.id,
@@ -692,6 +809,26 @@ class ConnectionService:
         if self._credentials is None or not hasattr(self._credentials, "collect"):
             return 0
         return await self._credentials.collect(self._store.handle_referenced)
+
+    @contextlib.asynccontextmanager
+    async def _current_handle_locked(self, kind: ConnectionKind, *also: str):
+        """Hold the secret store's locks of the connection's current handle
+        (read again once they are held: the handle that is current under the
+        lock) and of ``also``, in a fixed order; yield the current handle
+        (``None``: no connection). A rotation of the current handle
+        (``rotate_credential``) checks under the same lock, so a replacement
+        or a disconnection and a write-back never cross. Without a store,
+        no lock."""
+        while True:
+            previous = await self._call_store(self._store.read_handle(kind))
+            handles = sorted({h for h in (previous, *also) if h is not None})
+            async with contextlib.AsyncExitStack() as stack:
+                for name in handles:
+                    await stack.enter_async_context(self._credential_lock(name))
+                again = await self._call_store(self._store.read_handle(kind))
+                if again == previous:
+                    yield previous
+                    return
 
     def _credential_lock(self, handle: str):
         """The secret store's lock of ``handle`` (none without a store)."""
@@ -752,6 +889,63 @@ class ConnectionService:
             uuid.uuid4(),
         )
         return await self._call_store(self._store.list_connections())
+
+    async def credential_status(
+        self, principal: Principal
+    ) -> tuple[ConnectionCredentialStatus, ...]:
+        """The configured connections with their attached credential (issue
+        #277, Owner / Admin): whether the store holds it, its version and the
+        ``revision`` a replacement names; never the value or the handle."""
+        self._actor(principal)
+        await self._authorize(
+            principal,
+            Capability.ADMIN_CONFIG_MANAGE,
+            _connection_resource(),
+            uuid.uuid4(),
+        )
+        found = []
+        for info, handle in await self._call_store(self._store.list_credentials()):
+            stored, version = await self._stored_version(handle, info.kind)
+            found.append(
+                ConnectionCredentialStatus(
+                    info, stored, version, credential_revision(info.id, handle)
+                )
+            )
+        return tuple(found)
+
+    async def committed_status(
+        self, info: ConnectionInfo, secret_handle: str
+    ) -> ConnectionCredentialStatus:
+        """The status of a connection this caller just made or pointed at
+        ``secret_handle`` (``connect`` / ``replace_credential`` returned
+        ``info``): built from that result, with no database read (a read after
+        the commit could fail or show a later change). Only the store is
+        asked for the version; its failure is ``stored`` ``False``."""
+        if type(info) is not ConnectionInfo:
+            raise fail("info", InputProblem.WRONG_TYPE)
+        handle = validate_handle("secret_handle", secret_handle)
+        stored, version = await self._stored_version(handle, info.kind)
+        return ConnectionCredentialStatus(
+            info, stored, version, credential_revision(info.id, handle)
+        )
+
+    async def _stored_version(
+        self, handle: str, kind: ConnectionKind
+    ) -> tuple[bool | None, int | None]:
+        if self._credentials is None or not hasattr(self._credentials, "read"):
+            return None, None
+        try:
+            stored = await self._credentials.read(handle)
+        except Exception as error:  # missing or damaged: type only
+            logger.warning(
+                "an attached credential cannot be read: kind=%s exception_type=%s",
+                kind.value,
+                log_type_name(error),
+            )
+            return False, None
+        if stored.kind is not kind:
+            return False, None
+        return True, stored.version
 
     async def availability(
         self, principal: Principal
@@ -1096,6 +1290,20 @@ class ConnectionService:
         ``alive`` (the caller's attempt fence, Decision 0046): asked after every
         turn is counted; once it answers ``False`` (the orchestrator abandoned
         the attempt) the session stops (``SessionStop.ABANDONED``).
+
+        An adapter with ``exclusive_sessions`` (Decision 0083, 6: Codex's
+        ChatGPT login) runs one session per connection at a time: after the
+        checks above and BEFORE the admission, the connection's session slot
+        (a database lease, ``session_slot``) is waited for up to 60 s; when it
+        stays taken, ``SessionSlotBusyError`` (``connection_busy``) is raised
+        with nothing admitted, audited or recorded. The slot is held, with its
+        heartbeat, until the session was settled; a holder that cannot renew
+        it cancels its session in time (the adapter stops the CLI and writes
+        its credential back) and the session fails ``unavailable``. Such a
+        session's adapter is also given ``write_back``: the refreshed
+        credential, written as the stored credential's next version only while
+        the version the session was given is still the current one
+        (compare-and-swap under the credential's lock, ``rotate_credential``).
         """
         self._actor(principal)
         require_type("context", context, TaskContext)
@@ -1120,6 +1328,44 @@ class ConnectionService:
         await self._check_task_budget(principal, context, correlation_id)
         await self._check_session_floor(principal, context, correlation_id)
         await self._check_lease(principal, context, correlation_id)
+        slot = None
+        if _exclusive(adapter):
+            slot = SessionSlot(
+                self._store, kind, call=self._call_store, **self._slot_timing
+            )
+            if not await slot.acquire(self._slot_wait):
+                logger.warning(
+                    "connection session slot stayed taken: kind=%s", kind.value
+                )
+                raise SessionSlotBusyError()
+        try:
+            return await self._admitted_session(
+                principal,
+                context,
+                kind,
+                request,
+                adapter,
+                correlation_id,
+                gate,
+                alive,
+                slot,
+            )
+        finally:
+            if slot is not None:
+                await self._shielded(slot.release())
+
+    async def _admitted_session(
+        self,
+        principal: Principal,
+        context: TaskContext,
+        kind: ConnectionKind,
+        request: SessionRequest,
+        adapter: AgentSessionAdapter,
+        correlation_id: uuid.UUID,
+        gate: Callable[[], Awaitable[None]] | None,
+        alive: Callable[[], bool] | None,
+        slot: SessionSlot | None,
+    ) -> SessionResult:
         admission = await self._call_store(
             self._store.admit(
                 principal.user_id,
@@ -1151,9 +1397,17 @@ class ConnectionService:
                     state.known_totals = (0, 0)  # nothing was sent
                     raise
             try:
-                await self._run_session(
-                    adapter, admission, context, request, state, alive
+                work = self._run_session(
+                    adapter, admission, context, request, state, alive, kind, slot
                 )
+                if slot is None:
+                    await work
+                elif not await run_within(slot, work):
+                    # The slot could not be renewed: the session was stopped
+                    # before its lease could expire (Decision 0083's approval,
+                    # condition (2)); what it spent is unknown.
+                    state.fail(FailureCode.UNAVAILABLE)
+                    state.known_totals = (None, None)
             except asyncio.CancelledError:
                 state.status = UsageStatus.CANCELLED
                 raise
@@ -1189,6 +1443,8 @@ class ConnectionService:
         request: SessionRequest,
         state: "_Session",
         alive: Callable[[], bool] | None = None,
+        kind: ConnectionKind | None = None,
+        slot: SessionSlot | None = None,
     ) -> None:
         async def on_usage(input_tokens: int, output_tokens: int) -> bool:
             if state.stopped is not None:
@@ -1230,7 +1486,13 @@ class ConnectionService:
 
         try:
             async with asyncio.timeout(request.timeout_seconds):
-                secret = await self._resolve(admission.secret_handle)
+                write_back = None
+                if slot is not None and kind is not None:
+                    secret, write_back = await self._session_credential(
+                        kind, admission.secret_handle
+                    )
+                else:
+                    secret = await self._resolve(admission.secret_handle)
                 # The last fences before the first turn is sent: the attempt,
                 # and (a turn of 0 tokens) the run and the queue lease, after
                 # everything this side waited for.
@@ -1247,6 +1509,8 @@ class ConnectionService:
                         on_usage,
                         attachment=request.attachment,
                         connection_id=admission.connection_id,
+                        write_back=write_back,
+                        cli_running=None if slot is None else slot.keep,
                     ),
                 )
         except TimeoutError:
@@ -1297,6 +1561,39 @@ class ConnectionService:
             state.status = UsageStatus.SUCCEEDED
         else:
             state.status = UsageStatus.CANCELLED
+
+    async def _session_credential(self, kind: ConnectionKind, handle: str):
+        """The credential of an exclusive session and its write-back
+        (Decision 0083, 6), or the resolver's credential and no write-back
+        when there is no secret store to write to."""
+        reader = getattr(self._credentials, "read", None)
+        if self._credentials is None or not callable(reader):
+            return await self._resolve(handle), None
+        stored = await reader(handle)
+        if stored.kind is not kind or type(stored.secret) is not Secret:
+            raise TypeError("the stored credential is not this connection's")
+        version = stored.version
+
+        async def write_back(value: str) -> WriteBack:
+            nonlocal version
+            try:
+                version = await self.rotate_credential(kind, handle, version, value)
+            except (StaleCredentialVersionError, ConnectionNotFoundError):
+                logger.warning(
+                    "refreshed credential not written back: kind=%s stale",
+                    kind.value,
+                )
+                return WriteBack.STALE
+            except Exception as error:
+                logger.error(
+                    "refreshed credential not written back: kind=%s exception_type=%s",
+                    kind.value,
+                    log_type_name(error),
+                )
+                return WriteBack.FAILED
+            return WriteBack.WRITTEN
+
+        return stored.secret, write_back
 
     async def _settle_session(
         self,

@@ -100,6 +100,17 @@ class CredentialNotStoredError(ConnectionsError):
         super().__init__("The secret store holds no such credential for this kind")
 
 
+class StaleConnectionCredentialError(ConnectionsError):
+    """A replacement named a credential that is not the connection's any more
+    (``expected_revision``: somebody replaced it, or the connection was made
+    again, in the meantime). Nothing was changed: read the status again."""
+
+    code = "stale_connection_credential"
+
+    def __init__(self) -> None:
+        super().__init__("The connection's credential was changed in the meantime")
+
+
 class ConnectionExistsError(ConnectionsError):
     """A connection of this kind is already configured: replace its credential."""
 
@@ -201,6 +212,16 @@ class ConnectionBusyError(ConnectionsError):
 
     def __init__(self) -> None:
         super().__init__("The database did not answer in time")
+
+
+class SessionSlotBusyError(ConnectionBusyError):
+    """The connection's one session slot (Decision 0083, 6: a CLI whose login
+    is a file it refreshes) stayed taken for the whole wait. Raised before the
+    admission: no ``connection.use`` audit, no usage row. The same code as
+    :class:`ConnectionBusyError` (the cloud gate's ``connection_busy``)."""
+
+    def __init__(self) -> None:
+        ConnectionsError.__init__(self, "The connection's session slot stayed taken")
 
 
 _ADAPTER_MEMBERS = frozenset({"kind", "check_health", "run"})

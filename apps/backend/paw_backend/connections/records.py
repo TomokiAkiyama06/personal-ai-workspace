@@ -6,6 +6,7 @@ never returned), and the only ones that carry content (``ConnectionRequest.promp
 ``ConnectionResult.text``) keep it out of their ``repr``.
 """
 
+import hashlib
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -48,6 +49,35 @@ class ConnectionInfo:
     def available(self) -> bool:
         """Whether a call may start: enabled by the admin and verified connected."""
         return self.enabled and self.status is ConnectionStatus.CONNECTED
+
+
+def credential_revision(connection_id: uuid.UUID, handle: str) -> str:
+    """The opaque token of "this connection with this credential attached"
+    (issue #277): what a replacement names as the credential it expects to
+    replace (compare-and-swap). A one-way digest: the handle is not in it and
+    cannot be read back out (a handle is 128 random bits). It changes with a
+    replacement and with a new connection, not with a rotation (the same
+    credential, refreshed) or a health check."""
+    digest = hashlib.sha256(
+        f"paw-connection-credential|{connection_id}|{handle}".encode()
+    )
+    return digest.hexdigest()[:32]
+
+
+@dataclass(frozen=True, slots=True)
+class ConnectionCredentialStatus:
+    """A connection's attached credential as an Owner / Admin sees it (issue
+    #277): never the value, never the handle.
+
+    ``stored`` is whether the secret store holds the handle for this kind (its
+    current version decrypts), ``version`` the store's current version of it
+    (``rotate_credential`` counts it up); both ``None`` without a store.
+    ``revision`` is the compare-and-swap token of ``replace_credential``."""
+
+    connection: ConnectionInfo
+    stored: bool | None
+    version: int | None
+    revision: str
 
 
 @dataclass(frozen=True, slots=True)

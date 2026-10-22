@@ -38,6 +38,7 @@ from . import (
     test_connections_quota_enforcement,
     test_connections_report,
     test_connections_result_limit,
+    test_connections_session_slot,
     test_connections_settlement_cancel,
 )
 from .connections_support import FakeLeaseVerifier, PostgresConnectionTestCase
@@ -71,6 +72,11 @@ EXPECTED = {
             "finished_at",
             "duration_ms",
         },
+    ),
+    # The session slot (revision 0239): taken, renewed, taken over, released.
+    "connection_session_leases": (
+        {"SELECT", "INSERT", "DELETE"},
+        {"holder", "acquired_at", "heartbeat_at", "expires_at"},
     ),
 }
 ALL_PRIVILEGES = (
@@ -178,6 +184,7 @@ for _module in (
     test_connections_report,
     test_connections_concurrency,
     test_connections_result_limit,
+    test_connections_session_slot,
     test_connections_settlement_cancel,
 ):
     _prefix = _module.__name__.removeprefix("tests.test_connections_")
@@ -246,7 +253,7 @@ class AppRolePrivilegesTest(PostgresConnectionTestCase):
             for row in self.rows(
                 "SELECT tablename FROM pg_tables WHERE schemaname = current_schema()"
                 " AND tablename IN ('shared_connections', 'connection_quotas',"
-                " 'connection_usage')"
+                " 'connection_usage', 'connection_session_leases')"
             )
         }
         self.assertEqual(tables, set(EXPECTED))
