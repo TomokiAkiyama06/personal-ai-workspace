@@ -87,6 +87,12 @@ EGRESS_SOCKET_DIR: Final = Path("/run/paw-egress/session")
 #: Decision 0096, 2's fence and tombstone.
 FENCE_MODE: Final = 0o550
 _OPEN_MODE: Final = 0o700
+#: The directory while a surviving launch file is removed during the fence:
+#: writable by the backend, and still reachable (``x``) by the CLI's group
+#: (``paw-cli-bridge``): the unit may still run then, and a refreshed login
+#: must still be saved to ``config/auth.json`` (Codex review of #292). 0700
+#: only once the unit was confirmed stopped (the tombstone).
+_FENCE_OPEN_MODE: Final = 0o750
 _STOPPED_STATES: Final = frozenset({"inactive", "failed"})
 LAUNCH_NAME: Final = "launch.json"
 
@@ -400,7 +406,8 @@ def fence(directory: Path) -> bool:
     previous holder nor anything else of the backend's user can create,
     delete or rename an entry in them; only then is a launch file that was
     written before (or that a previous round could not remove) removed, with
-    the directory writable for that instant only, and its absence confirmed
+    the directory writable for that instant only (0750: the CLI's group can
+    still reach ``auth.json`` while the unit may run), and its absence confirmed
     with creation blocked again. ``True``: fenced, no launch file. ``False``:
     one kept coming back (the round waits; the slot stays). A directory that
     is gone (a reboot emptied ``/run``) is nothing to fence (``True``)."""
@@ -419,7 +426,7 @@ def fence(directory: Path) -> bool:
     for _ in range(FENCE_ATTEMPTS):
         if not os.path.lexists(launch):
             return True
-        os.chmod(directory, _OPEN_MODE)
+        os.chmod(directory, _FENCE_OPEN_MODE)
         try:
             _remove(launch)
         finally:

@@ -195,10 +195,28 @@ class FenceTest(CollectorCase):
         with patch.object(codex_collect, "_remove", removing):
             self.assertTrue(codex_collect.fence(self.directory))
         # ``config`` was already closed; the directory was opened only for
-        # the removal and is closed again.
-        self.assertEqual(modes, [(FENCE_MODE, 0o700)])
+        # the removal, keeping the CLI's group's traversal (Codex review of
+        # #292: the unit may still run and save a refreshed login), and is
+        # closed again.
+        self.assertEqual(modes, [(FENCE_MODE, 0o750)])
         self.assertFalse((self.directory / "launch.json").exists())
         self.assertEqual(self.mode(self.directory), FENCE_MODE)
+
+    async def test_the_group_can_reach_the_login_throughout_the_fence(self):
+        # Every mode the directory has during the fence keeps the group's x.
+        seen = []
+        chmod = os.chmod
+
+        def recording(path, mode, *args, **kwargs):
+            if Path(path) == self.directory:
+                seen.append(mode)
+            return chmod(path, mode, *args, **kwargs)
+
+        with patch.object(codex_collect.os, "chmod", recording):
+            self.assertTrue(codex_collect.fence(self.directory))
+        self.assertTrue(seen)
+        for mode in seen:
+            self.assertTrue(mode & stat.S_IXGRP, oct(mode))
 
     async def test_a_launch_file_in_an_already_fenced_directory_is_removed(self):
         # A previous round fenced the directory; a launch file is there all
