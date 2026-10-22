@@ -23,6 +23,7 @@ import asyncio
 import dataclasses
 import uuid
 from datetime import UTC, datetime, timedelta
+from unittest.mock import patch
 
 from sqlalchemy import text
 
@@ -36,6 +37,7 @@ from paw_backend.connections import (
     UsagePurpose,
     WriteBack,
 )
+from paw_backend.connections.session_slot import SessionSlot
 from paw_backend.connections.store import ConnectionStore
 from paw_backend.db import Database
 from paw_backend.health.domain import Severity
@@ -433,6 +435,43 @@ class SessionTest(SlotCase):
             self.slot_service(BindingSession(stuck=True)), seen
         )
         self.assertEqual(seen, [False])
+
+    async def test_the_release_is_told_also_through_a_cancellation(self):
+        # Codex review of #291: a cancellation that comes while the slot is
+        # being released still tells the runtime what the release came to.
+        releasing = asyncio.Event()
+        real = SessionSlot.release
+
+        async def slow_release(slot):
+            releasing.set()
+            await asyncio.sleep(0.3)
+            await real(slot)
+
+        for taken_over in (False, True):
+            with self.subTest(taken_over=taken_over):
+                await asyncio.to_thread(self.clean_leases)
+                releasing.clear()
+                other = uuid.uuid4()
+
+                class Session(BindingSession):
+                    take, new_holder = taken_over, other
+
+                    async def run_session(inner, secret, request):
+                        result = await super().run_session(secret, request)
+                        if inner.take:
+                            await asyncio.to_thread(self.set_holder, inner.new_holder)
+                        return result
+
+                seen = []
+                with patch.object(SessionSlot, "release", slow_release):
+                    running = asyncio.ensure_future(
+                        self.start_seeing_release(self.slot_service(Session()), seen)
+                    )
+                    await asyncio.wait_for(releasing.wait(), 10)
+                    running.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await running
+                self.assertEqual(seen, [not taken_over])
 
     async def test_a_kept_slot_taken_over_is_let_go(self):
         # The holding process renews a kept bound slot only; once the

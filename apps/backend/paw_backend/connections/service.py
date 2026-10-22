@@ -1356,17 +1356,30 @@ class ConnectionService:
             )
         finally:
             if slot is not None:
-                await self._shielded(slot.release())
-                if request.on_slot_released is not None:
-                    try:
-                        request.on_slot_released(slot.given_back)
-                    except Exception as error:
-                        logger.error(
-                            "the slot release callback failed: exception_type=%s",
-                            log_type_name(error),
+                try:
+                    await self._shielded(slot.release())
+                finally:
+                    # Also when a cancellation came during the release (it
+                    # is raised once the release ended): the runtime must
+                    # learn whether the session's files are its own to delete
+                    # (Codex review of #291).
+                    self._slot_released(request, slot)
+                    if slot.kept_session is not None:
+                        await self._shielded(
+                            self._audit_session(kind, ACTION_SESSION_KEPT)
                         )
-                if slot.kept_session is not None:
-                    await self._shielded(self._audit_session(kind, ACTION_SESSION_KEPT))
+
+    @staticmethod
+    def _slot_released(request: SessionRequest, slot: SessionSlot) -> None:
+        if request.on_slot_released is None:
+            return
+        try:
+            request.on_slot_released(slot.given_back)
+        except Exception as error:
+            logger.error(
+                "the slot release callback failed: exception_type=%s",
+                log_type_name(error),
+            )
 
     async def _audit_session(
         self, kind: ConnectionKind, action: str, reason: str = OUTCOME_KEPT
