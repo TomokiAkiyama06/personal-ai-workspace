@@ -60,7 +60,10 @@ class ValuesTest(unittest.TestCase):
         self.assertEqual(ConnectionSessionLeaseRow.__tablename__, SESSION_LEASE_TABLE)
         self.assertEqual(revision.KINDS, tuple(kind.value for kind in ConnectionKind))
         columns = set(ConnectionSessionLeaseRow.__table__.columns.keys())
-        self.assertEqual(set(revision.UPDATE_COLUMNS), columns - {"kind"})
+        # The columns of a later revision (0280, issue #280) have their own
+        # grants (``tests/test_codex_session_collection_migration.py``).
+        later = {"session", "secret_handle", "expected_version", "kept"}
+        self.assertEqual(set(revision.UPDATE_COLUMNS), columns - {"kind"} - later)
 
     def test_it_follows_the_connection_sessions(self):
         self.assertEqual(previous_revision(), "0194")

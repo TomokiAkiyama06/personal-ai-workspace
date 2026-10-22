@@ -54,6 +54,14 @@ class ConnectionStatus(StrEnum):
     EXPIRED = "expired"  # the provider refused the credential as no longer valid
 
 
+class CredentialSuspicion(StrEnum):
+    """Why a connection's stored login may be stale (Decision 0096, 5): the
+    late collection of a Codex session found its ``auth.json`` so."""
+
+    MISSING = "missing"  # gone (a reboot emptied /run, or it was deleted)
+    INVALID = "invalid"  # not a login (not a JSON object, unreadable)
+
+
 class UsagePurpose(StrEnum):
     """Why a call was made: a closed usage category, never text (privacy-safe).
 

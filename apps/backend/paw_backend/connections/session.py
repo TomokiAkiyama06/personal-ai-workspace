@@ -93,6 +93,19 @@ class AgentSessionRequest:
     # run with the login): the service then keeps the connection's session
     # slot held (``session_slot.SessionSlot.keep``). ``None``: no slot.
     cli_running: Callable[[], None] | None = field(default=None, repr=False)
+    # Decision 0096, 2 B: called with the session's UUID BEFORE the login is
+    # placed, to record the session (and the credential's handle and version)
+    # on the connection's session slot, so a session that outlives its
+    # process is collected later. ``False``: the login must not be placed.
+    # ``None``: no slot or no secret store.
+    bind_session: Callable[[uuid.UUID], Awaitable[bool]] | None = field(
+        default=None, repr=False
+    )
+    # Decision 0096, 2's fencing: asked before each side effect of a bound
+    # session (starting the unit, the write-back, deleting its directory).
+    # ``False``: the slot is no longer this session's; it gives up and
+    # leaves its files to the collection. ``None``: no slot.
+    still_held: Callable[[], Awaitable[bool]] | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "model", validate_model("model", self.model))
@@ -112,6 +125,10 @@ class AgentSessionRequest:
             raise TypeError("write_back must be callable")
         if self.cli_running is not None and not callable(self.cli_running):
             raise TypeError("cli_running must be callable")
+        if self.bind_session is not None and not callable(self.bind_session):
+            raise TypeError("bind_session must be callable")
+        if self.still_held is not None and not callable(self.still_held):
+            raise TypeError("still_held must be callable")
 
 
 @dataclass(frozen=True, slots=True)

@@ -47,6 +47,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from paw_backend.connections.domain import (
     ConnectionKind,
     ConnectionStatus,
+    CredentialSuspicion,
     FailureCode,
     QuotaMetric,
     QuotaPeriod,
@@ -84,6 +85,18 @@ class SharedConnectionRow(Base):
         _in("kind", ConnectionKind, "kind_valid"),
         _in("status", ConnectionStatus, "status_valid"),
         CheckConstraint(f"secret_handle ~ '{HANDLE_SQL_PATTERN}'", name="handle_shape"),
+        # Revision ``0280`` (Decision 0096, 5): a login that could not be
+        # collected marks the connection until it is checked or replaced.
+        CheckConstraint(
+            "(suspect_at IS NULL) = (suspect_reason IS NULL)",
+            name="suspect_complete",
+        ),
+        CheckConstraint(
+            "suspect_reason IS NULL OR suspect_reason IN ("
+            + ", ".join(f"'{member.value}'" for member in CredentialSuspicion)
+            + ")",
+            name="suspect_reason_valid",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -96,6 +109,8 @@ class SharedConnectionRow(Base):
     checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    suspect_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    suspect_reason: Mapped[str | None] = mapped_column(Text)
 
 
 class ConnectionQuotaRow(Base):
@@ -228,13 +243,35 @@ class ConnectionSessionLeaseRow(Base):
     session holds the slot: the holder (a random id per acquisition), when it
     was taken, the last heartbeat and the expiry (the database's clock). An
     expired row may be taken over by any process; the holder deletes its own
-    row when its session ended. No credential, no task, no content."""
+    row when its session ended. No credential, no task, no content.
+
+    Revision ``0280`` (Decision 0096, 2): a Codex session records on its row,
+    before its login is placed, its UUID (``session``), the credential handle
+    it was given (an opaque id) and that credential's version
+    (``expected_version``); ``kept`` says its CLI could not be stopped (or the
+    collection loop took the row over). A row with a ``session`` is never
+    taken over by an ordinary acquisition: only the collection loop takes it
+    over, once it expired."""
 
     __tablename__ = SESSION_LEASE_TABLE
     __table_args__ = (
         _in("kind", ConnectionKind, "kind_valid"),
         CheckConstraint("heartbeat_at >= acquired_at", name="heartbeat_after_acquire"),
         CheckConstraint("expires_at > heartbeat_at", name="expires_after_heartbeat"),
+        CheckConstraint(
+            "(session IS NULL) = (secret_handle IS NULL)"
+            " AND (session IS NULL) = (expected_version IS NULL)",
+            name="session_complete",
+        ),
+        CheckConstraint("NOT kept OR session IS NOT NULL", name="kept_has_session"),
+        CheckConstraint(
+            "expected_version IS NULL OR expected_version >= 1",
+            name="version_positive",
+        ),
+        CheckConstraint(
+            f"secret_handle IS NULL OR secret_handle ~ '{HANDLE_SQL_PATTERN}'",
+            name="handle_shape",
+        ),
     )
 
     kind: Mapped[str] = mapped_column(Text, primary_key=True)
@@ -242,3 +279,7 @@ class ConnectionSessionLeaseRow(Base):
     acquired_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     heartbeat_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    session: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    secret_handle: Mapped[str | None] = mapped_column(Text)
+    expected_version: Mapped[int | None] = mapped_column(BigInteger)
+    kept: Mapped[bool] = mapped_column(Boolean, server_default=false())

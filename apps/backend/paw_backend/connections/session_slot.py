@@ -25,6 +25,17 @@ revision ``0239``), not a lock of one process:
   holder that renews it or takes it again after any failure (the operator
   stops the unit; a process that ends lets the lease expire).
 
+A Codex session binds its slot to itself before its login is placed
+(:meth:`SessionSlot.bind`, Decision 0096, 2 B: the session's UUID, the
+credential handle and version it was given, on the row): such a row is never
+taken over by an ordinary acquisition, even once expired, but only by the
+collection loop that collects the login after the unit was confirmed stopped
+(Decision 0096, 1 D). Before each side effect (placing the login,
+starting the unit, the write-back) the session checks that it still holds the
+slot (:meth:`SessionSlot.confirm`); once that fails it gives up for good and
+leaves its row and directory to the collection loop (Decision 0096, 2's
+fencing).
+
 The margin is the stop's worst case on production's launcher
 (``cli_session.SystemdLauncher``, each ``systemctl`` call bounded by 30 s):
 reading how the unit ended (at most 10 s of polls, then up to three calls:
@@ -110,6 +121,13 @@ class SessionSlot:
         self._confirmed = 0.0
         self._task: asyncio.Task | None = None
         self._keep = False
+        #: The Codex session this slot was bound to (Decision 0096, 2 B).
+        self.session: uuid.UUID | None = None
+        #: Set once a check before a side effect failed (Decision 0096, 2's
+        #: fencing): the row is left to the collection loop.
+        self.fenced = False
+        #: The session whose row :meth:`release` marked ``kept``.
+        self.kept_session: uuid.UUID | None = None
 
     def __repr__(self) -> str:
         return f"SessionSlot(kind={self._kind.value})"
@@ -171,12 +189,132 @@ class SessionSlot:
         )
         self.lost.set()
 
+    async def bind(self, session: uuid.UUID, handle: str, version: int) -> bool:
+        """Record on the held lease the Codex session, the credential handle
+        it was given and that credential's version, BEFORE its login is
+        placed (Decision 0096, 2 B); a renewal as well. ``False`` (also on a
+        database error): the session must not place its login."""
+        loop = asyncio.get_running_loop()
+        sent = loop.time()
+        try:
+            bound = await self._run(
+                self._store.bind_session_slot(
+                    self._kind, self.holder, session, handle, version, self._ttl
+                )
+            )
+        except Exception as error:
+            logger.error(
+                "connection session slot not bound to its session: kind=%s"
+                " exception_type=%s",
+                self._kind.value,
+                log_type_name(error),
+            )
+            return False
+        if not bound:
+            logger.error(
+                "connection session slot not bound to its session (not held): kind=%s",
+                self._kind.value,
+            )
+            return False
+        self._confirmed = sent
+        self.session = session
+        return True
+
+    async def confirm(self) -> bool:
+        """The check before a side effect of a bound session (placing the
+        login, starting the unit, writing back, deleting the session's
+        directory: Decision 0096, 2's fencing (a)): the lease's own deadline
+        (the last confirmed renewal plus the TTL, by the monotonic clock) has
+        not come, and a renewal now succeeds (the row is still this holder's
+        and unexpired). ``False``, also on a database error, from then on for
+        good: the session must give up without touching its directory, and
+        :meth:`release` leaves the row to the collection loop."""
+        if self.fenced:
+            return False
+        loop = asyncio.get_running_loop()
+        sent = loop.time()
+        if sent >= self._confirmed + self._ttl:
+            renewed = False
+        else:
+            try:
+                renewed = await self._run(
+                    self._store.renew_session_slot(self._kind, self.holder, self._ttl)
+                )
+            except Exception as error:
+                logger.warning(
+                    "connection session slot not confirmed: kind=%s exception_type=%s",
+                    self._kind.value,
+                    log_type_name(error),
+                )
+                renewed = False
+        if not renewed:
+            logger.error(
+                "connection session slot no longer held; the session gives up and"
+                " leaves its files to the collection: kind=%s session=%s",
+                self._kind.value,
+                self.session or "-",
+            )
+            self.fenced = True
+            return False
+        self._confirmed = max(self._confirmed, sent)
+        return True
+
+    async def record_version(self, version: int) -> None:
+        """The immediate write-back stored ``version``: the bound row's
+        expected version follows (Decision 0096, 2's version check makes a
+        failure here harmless; logged by type)."""
+        if self.session is None:
+            return
+        try:
+            await self._run(
+                self._store.record_session_slot_version(
+                    self._kind, self.holder, version
+                )
+            )
+        except Exception as error:
+            logger.warning(
+                "connection session slot's version not moved on: kind=%s"
+                " exception_type=%s",
+                self._kind.value,
+                log_type_name(error),
+            )
+
     async def _hold(self) -> None:
         """Keep the slot of a CLI that could not be stopped for as long as
         this process lives: renew it, or take it again once it is free or
         expired (only a lease that expired can be taken over). Errors are
-        logged and tried again."""
+        logged and tried again. A slot bound to a session is only renewed:
+        once that fails (the collection loop took the row over, collected
+        it, or it expired) this process lets it go for good (Decision 0096,
+        2's fencing): an acquisition here would make an unbound row the
+        collection never looks at."""
         while True:
+            if self.session is not None:
+                try:
+                    held = await self._run(
+                        self._store.renew_session_slot(
+                            self._kind, self.holder, self._ttl
+                        )
+                    )
+                except Exception as error:
+                    logger.warning(
+                        "connection session slot not renewed: kind=%s"
+                        " exception_type=%s",
+                        self._kind.value,
+                        log_type_name(error),
+                    )
+                else:
+                    if not held:
+                        logger.error(
+                            "connection session slot of a CLI that could not be"
+                            " stopped is no longer this process's; the collection"
+                            " loop has it: kind=%s session=%s",
+                            self._kind.value,
+                            self.session,
+                        )
+                        return
+                await asyncio.sleep(self._heartbeat)
+                continue
             try:
                 held = await self._run(
                     self._store.renew_session_slot(self._kind, self.holder, self._ttl)
@@ -212,14 +350,51 @@ class SessionSlot:
     async def release(self) -> None:
         """Stop the heartbeat and delete the holder's row (best effort: a row
         left behind expires by itself). After :meth:`keep`, neither: the slot
-        stays held while this process lives. Never raises."""
-        if self._keep:
+        stays held while this process lives; a slot bound to a session is
+        marked ``kept`` on its row (Decision 0096, 2 B: it outlives this
+        process until its login was collected). After a failed
+        :meth:`confirm`, neither: the row is left as it is to the collection
+        loop. Never raises."""
+        if self.fenced:
+            await self._stop_heartbeat()
             logger.error(
-                "connection session slot kept: its CLI could not be stopped;"
-                " stop the session's unit (the slot is held while this process"
-                " runs): kind=%s",
+                "connection session slot left to the collection loop: kind=%s"
+                " session=%s",
                 self._kind.value,
+                self.session or "-",
             )
+            return
+        if self._keep:
+            if self.session is not None:
+                try:
+                    self.kept_session = await self._run(
+                        self._store.keep_session_slot(self._kind, self.holder)
+                    )
+                except Exception as error:
+                    # The row is bound all the same: once it expires the
+                    # collection loop takes it over as if kept.
+                    logger.warning(
+                        "connection session slot not marked kept: kind=%s"
+                        " exception_type=%s",
+                        self._kind.value,
+                        log_type_name(error),
+                    )
+                logger.error(
+                    "connection session slot kept: its CLI could not be stopped;"
+                    " stop its unit (systemctl stop paw-cli-session@%s.service)"
+                    " and do not delete /run/paw-cli/%s: its login is collected"
+                    " once the unit stopped: kind=%s",
+                    self.session,
+                    self.session,
+                    self._kind.value,
+                )
+            else:
+                logger.error(
+                    "connection session slot kept: its CLI could not be stopped;"
+                    " stop the session's unit (the slot is held while this"
+                    " process runs): kind=%s",
+                    self._kind.value,
+                )
             # The heartbeat gives up once a renewal fails (and may already
             # have, when the slot was being lost as the session was
             # cancelled): hold it from here on, renewing or taking it again

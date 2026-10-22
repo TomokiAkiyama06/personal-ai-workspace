@@ -43,7 +43,12 @@ from paw_backend.agents.codex_cli import (
     CodexSessionAdapter,
     InteractiveSubprocessLauncher,
 )
-from paw_backend.connections import AgentSessionRequest, Secret, SessionResult
+from paw_backend.connections import (
+    AgentSessionRequest,
+    FailureCode,
+    Secret,
+    SessionResult,
+)
 from paw_backend.orchestrator.domain import NodeRole
 from paw_backend.orchestrator.runtime import NodeAssignment
 
@@ -87,9 +92,19 @@ class Credentials:
 class Connections:
     """What ``ConnectionService.execute_session`` does around the adapter."""
 
-    def __init__(self, adapter, *, budget=10_000_000, write_back=None):
+    def __init__(
+        self,
+        adapter,
+        *,
+        budget=10_000_000,
+        write_back=None,
+        bind_session=None,
+        still_held=None,
+    ):
         self.adapter = adapter
         self.write_back = write_back
+        self.bind_session = bind_session
+        self.still_held = still_held
         self.cli_running = []  # the adapter said its CLI could not be stopped
         self.turns = []
         self.budget = budget
@@ -116,6 +131,8 @@ class Connections:
                 connection_id=self.connection_id,
                 write_back=self.write_back,
                 cli_running=lambda: self.cli_running.append(True),
+                bind_session=self.bind_session,
+                still_held=self.still_held,
             ),
         )
         self.raw = raw
@@ -132,6 +149,9 @@ class CodexCase(unittest.IsolatedAsyncioTestCase):
         self.sessions.mkdir()
         self.credentials = Credentials()
         self.write_back = None  # the service's write-back, when a test sets one
+        # The service's slot binding and check (Decision 0096), when set.
+        self.bind_session = None
+        self.still_held = None
 
     def adapter(self, *, verified=frozenset({VERSION}), credentials=True):
         return CodexSessionAdapter(
@@ -162,7 +182,11 @@ class CodexCase(unittest.IsolatedAsyncioTestCase):
     ):
         self.scenario.write_text(json.dumps({"actions": actions, **extra}))
         self.connections = Connections(
-            adapter or self.adapter(), budget=budget, write_back=self.write_back
+            adapter or self.adapter(),
+            budget=budget,
+            write_back=self.write_back,
+            bind_session=self.bind_session,
+            still_held=self.still_held,
         )
         self.placement = Placement()
         runtime = CodexCliRuntime(
@@ -700,6 +724,80 @@ class UnstoppedTest(CodexCase):
     async def test_a_stopped_cli_still_removes_its_directory(self):
         await self.run_node([{"usage": [1, 1]}, {"complete": "completed"}])
         self.assertEqual(list(self.sessions.iterdir()), [])
+
+
+class SlotBindingTest(CodexCase):
+    """Decision 0096, 2 B: the session is recorded on the connection's slot
+    before its login is placed; and its fencing: before the unit starts and
+    before the write-back the session checks that it still holds the slot,
+    and once that fails it gives up and leaves its directory (and the login
+    in it) to the collection loop."""
+
+    SUBMIT = [
+        {"usage": [100, 10]},
+        {"call": "submit", "arguments": {"summary": "s"}},
+        {"sleep": 30},
+    ]
+
+    def bind(self, *, bound=True, held=()):
+        self.events = []
+        answers = list(held)
+
+        async def bind_session(session):
+            self.events.append(("bind", session, len(self.credentials.placed)))
+            return bound
+
+        async def still_held():
+            self.events.append(("held", len(self.credentials.placed)))
+            return answers.pop(0) if answers else True
+
+        self.bind_session = bind_session
+        self.still_held = still_held
+
+    async def test_the_session_is_bound_before_its_login_is_placed(self):
+        self.bind()
+        outcome = await self.run_node(self.SUBMIT)
+        self.assertEqual(outcome.result.summary, "s")
+        (bind, *checks) = self.events
+        self.assertEqual(bind[0], "bind")
+        self.assertIsInstance(bind[1], uuid.UUID)
+        self.assertEqual(bind[2], 0)  # nothing placed yet
+        # Before the unit starts and before the write-back.
+        self.assertEqual(checks, [("held", 1), ("held", 1)])
+        self.assertEqual(len(self.credentials.collected), 1)
+        self.assertEqual(list(self.sessions.iterdir()), [])
+
+    async def test_a_session_whose_slot_cannot_be_bound_places_nothing(self):
+        self.bind(bound=False)
+        outcome = await self.run_node(self.SUBMIT)
+        self.assertIsNone(outcome.result)
+        self.assertEqual(self.connections.raw.failure, FailureCode.UNAVAILABLE)
+        self.assertEqual(self.credentials.placed, [])
+        self.assertFalse(self.report.exists())  # app-server never started
+        self.assertEqual(self.connections.cli_running, [])
+        self.assertEqual(list(self.sessions.iterdir()), [])
+
+    async def test_a_slot_lost_before_the_start_starts_nothing(self):
+        self.bind(held=[False])
+        with self.assertLogs("paw_backend.agents.codex_cli", "ERROR") as logs:
+            outcome = await self.run_node(self.SUBMIT)
+        self.assertIsNone(outcome.result)
+        self.assertEqual(self.connections.raw.failure, FailureCode.UNAVAILABLE)
+        self.assertEqual(len(self.credentials.placed), 1)
+        self.assertFalse(self.report.exists())  # app-server never started
+        # Not collected here, not deleted: the collection loop's now.
+        self.assertEqual(self.credentials.collected, [])
+        (kept,) = list(self.sessions.iterdir())
+        self.assertTrue((kept / "config" / "auth.json").exists())
+        self.assertIn("left to the collection", "\n".join(logs.output))
+
+    async def test_a_slot_lost_before_the_write_back_leaves_the_login(self):
+        self.bind(held=[True, False])
+        await self.run_node(self.SUBMIT)
+        self.assertEqual(self.read_report()["args"][0], "app-server")
+        self.assertEqual(self.credentials.collected, [])
+        (kept,) = list(self.sessions.iterdir())
+        self.assertTrue((kept / "config" / "auth.json").exists())
 
 
 class BoundaryTest(CodexCase):
