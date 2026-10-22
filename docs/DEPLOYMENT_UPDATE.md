@@ -234,19 +234,22 @@ Checklist (Decision 0093 5; the human, not an agent):
      and restart the backend, with nothing else in the queue
      (`SELECT count(*) FROM queue_entries WHERE status IN ('queued', 'claimed')` is 0).
   2. Signed in as a Manager / Contributor of the project, open `エージェント / タスク` ›
-     `新しいタスク` (`/agents`): the project, a title, an instruction that asks to only
-     read and report (for example "README と docs/ の構成を読み、5 行でまとめてください。
-     ファイルは変更しないでください。"), the repository as the target, the budget
-     `標準`. The same is `POST /api/v1/projects/{project_id}/tasks` with
-     `{"title", "instruction", "repositories": [{"repository_id", "role": "target"}],
-     "budget_preset": "standard"}`. There is no setting that makes a task read-only yet
-     (Decision 0094, Proposed): the instruction is the only guard, and a Worker node
-     would write only to its own `paw/` branch and worktree.
+     `新しいタスク` (`/agents`): the project, a title, an instruction to read and report
+     (for example "README と docs/ の構成を読み、5 行でまとめてください。"), check
+     `読み取りだけ`, the repository under `読むリポジトリ`, the budget `標準`. The same is
+     `POST /api/v1/projects/{project_id}/tasks` with `{"title", "instruction",
+     "repositories": [{"repository_id", "role": "referenced"}], "budget_preset":
+     "standard", "read_only": true}`. The backend guarantees the task writes nothing
+     (issue #279, Decision 0094 1 A): its repository is only `referenced`, a plan with a
+     `worker` node is refused (the next planner is asked) and no node gets a capability
+     or a tool that writes.
   3. The task goes from `キュー待ち` to running; then
      `SELECT placement, placement_agent, placement_model FROM agent_dag_node_attempts a
      JOIN agent_dags d ON d.id = a.dag_id WHERE d.task_id = '<task id>'` shows `local_gpu`.
-     The task then waits in `evaluating` (a target needs a pull request to complete):
-     cancel it on the task's screen.
+     When its DAG succeeds the task is `completed` (no evaluation, no pull request), and
+     the summary of each node is kept in its `complete` event:
+     `SELECT detail->'result' FROM task_events WHERE task_id = '<task id>' AND command =
+     'complete'`. Nothing is left to cancel.
 
 The CLI runtimes (`[agents.codex]` / `[agents.claude]`) cannot be enabled yet: the names
 are reserved and refused until a `CloudPolicy` Decision and the CLI smoke (Decision

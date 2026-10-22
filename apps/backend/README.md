@@ -4888,7 +4888,7 @@ Task を作って Queue に入れる正規の入口です（Web の `エージ�
 
 | Endpoint | Capability | 内容 |
 | --- | --- | --- |
-| `POST /api/v1/projects/{project_id}/tasks` | Project の `project.task.run`（Audit 必須）と、Working Set の各 Repository の ACL | `{"title", "instruction", "repositories": [{"repository_id", "role"}], "budget_preset"?, "request_key"?}`。201 で `GET /tasks/{id}` と同じ形の Task（`queued`、Priority `normal`） |
+| `POST /api/v1/projects/{project_id}/tasks` | Project の `project.task.run`（Audit 必須）と、Working Set の各 Repository の ACL | `{"title", "instruction", "repositories": [{"repository_id", "role"}], "budget_preset"?, "request_key"?, "read_only"?}`。201 で `GET /tasks/{id}` と同じ形の Task（`queued`、Priority `normal`、`read_only`） |
 
 - Working Set は 1〜32 件、同じ Repository は 1 回（422 `duplicate_repository`）、`target` が 1 つ以上（422 `no_target_repository`）。各 Repository はその ACL で、`referenced` は `project.read`、`working` / `target` は `project.repo.write` を判定します（[Decision 0035](../../docs/decisions/0035-working-set-capability-grants-and-legacy-tasks.md) の 3。`project.repo.write` は Audit 必須）。Project の外・ない・読めない Repository は同じ 404 `repository_not_found`、読めるが書けない Repository を `working` / `target` にすると 403 `repository_write_forbidden`。どの役割の Repository も、Task の Agent が使うので、その ACL で `project.task.run`（Repository では `agent` の権限）も判定し、`agent` を許さない Repository は 403 `repository_agent_forbidden`（`decide_agent` が実行時に拒むため、作成の時点で断る）。
 - Project が Archived / Pending deletion / Deleted / 所属しない Project は Guard が 403（Audit の理由 `project_state_forbids` など）。Guard の後で Active でなくなった Project は、`create_task` の Gate が 409 `project_not_active` で拒み、何も書きません。
@@ -4897,9 +4897,14 @@ Task を作って Queue に入れる正規の入口です（Web の `エージ�
 - 作成の監査は、他の作成の Route と同じく Capability の判定の行（`audit_events`）と、Task の `create` の Event（作成者と Working Set）です。
 - CSRF は他の POST と同じ（`SameSite=Strict` と Origin の検査）。
 - 再送: 任意の `request_key`（1〜64 文字の英数字と `. _ : -`。Web はフォームごとに UUID）を送ると、同じ人が同じ Project で同じ Key を 24 時間以内に送り直したとき、作らずに最初の Task を返します（応答が失われたときの再送で Task が 2 つにならない）。Key は `create` の Event の `detail.request_key` に残し、その Project の自分の最近の Task から（Project の Index と `(task_id, seq)` で）探し、Project・人・Key の Advisory Lock で同時の Request を順に並べます。Key がなければ毎回作ります。
-- Priority は受けず、常に `normal` です。読み取りだけの Task の指定はまだなく、指示文で頼むだけです。この入口では `target` が必須です（Service の `create_task` は Decision 0035 の 3 のとおり `target` なしも受けます）。Unlimited・再送・Priority・`target` の 4 点は [Decision 0094](../../docs/decisions/0094-task-create-entry-open-points.md)（**Proposed**）で人間の判断を待っています。
+- Priority は受けず、常に `normal` です。この入口では `target` が必須です（Service の `create_task` は Decision 0035 の 3 のとおり `target` なしも受けます）。再送・Priority と Unlimited・`target` は [Decision 0094](../../docs/decisions/0094-task-create-entry-open-points.md)（Approved）の 2〜4 です。
+- 読み取りだけの Task（[Issue #279](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/279)、Decision 0094 の 1 の A）: `"read_only": true` で作ると、Task の行の `tasks.read_only`（Migration `0279`）に残り、`create` の Event の `detail.read_only` にも出ます。
+  - Working Set は `referenced` だけ（1 つ以上。`target` は要らない。`working` / `target` は 422 `read_only_repository_role`）。各 Repository の判定は上と同じ（`project.read` と `agent`）。後から `working` / `target` にする変更は `change_working_set` が拒みます（`read_only_task`）。
+  - Plan の受け入れで `worker` の Node を含む Plan を拒みます（`InvalidPlanError` の `worker_in_read_only_task`。Planner の失敗として次の Planner へ）。`submit_plan` も同じです。Planner には、Worker を使えないことを伝える Prompt を渡します。
+  - 書き込みの Capability と Tool は出しません: Orchestrator が親の Grant を書かない役割の上限（`READ_ONLY_TASK_CAPABILITIES`）に絞り、`StoredTaskAuthority` も同じ Grant を返します。`referenced` の Repository は Tool Broker でも書き込みを拒みます。
+  - DAG が成功すると、統合・Evaluation・PR なしに `running` から `completed` にします（`READ_ONLY_TRANSITIONS`。Begin evaluation はありません）。成功した各 Node の `key`・`role`・`title`・`summary` を `complete` の Event の `detail.result` に残します（全体の結果は DAG の Node に残る）。変更が記録された Repository があれば、Decision 0030 の 5 の完了の条件はそのまま効きます。
 
-Test: `tests/test_tasks_api.py` の「creating a task」（権限なし・`target` なし・停止中の Project・Gate の 409・ACL・Body・Origin・監査と `create` の Event・Queue と Budget・`request_key` の再送と同時送信、`agent` を許さない Repository）、`tests/test_task_in_transaction.py`（`create_task` の `in_transaction`）。
+Test: `tests/test_tasks_api.py` の「creating a task」（権限なし・`target` なし・停止中の Project・Gate の 409・ACL・Body・Origin・監査と `create` の Event・Queue と Budget・`request_key` の再送と同時送信、`agent` を許さない Repository、読み取りだけの Task）、`tests/test_task_in_transaction.py`（`create_task` の `in_transaction`）、`tests/test_task_read_only.py`（遷移と Working Set）、`tests/test_orchestrator_read_only.py`（Worker の拒否・`referenced` だけで始まる・DAG の成功で `completed`・書き込みの Capability と Tool を出さない）、`tests/test_task_read_only_migration.py`。
 
 ### PR 画面とモバイルの Board（Issue #185 の 6、Decision 0078）
 

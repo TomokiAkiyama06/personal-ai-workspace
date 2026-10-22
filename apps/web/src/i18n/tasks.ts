@@ -88,8 +88,12 @@ export const tasksJa = {
   "tasks.create.taskTitlePlaceholder": "例: README の構成を調べる",
   "tasks.create.instruction": "指示",
   "tasks.create.instructionPlaceholder": "このタスクでしてほしいことを書きます。",
-  "tasks.create.readOnlyNote":
-    "読み取りだけにしたいときは、指示にそう書いてください。書き込みを止める設定はまだありません。",
+  "tasks.create.readOnly": "読み取りだけ",
+  "tasks.create.readOnlyHint":
+    "リポジトリを読むだけのタスクにします。何も書き込まず、PR と評価もありません。調べ終わると完了し、結果が残ります。",
+  "tasks.create.reference": "読むリポジトリ",
+  "tasks.create.referenceHint": "このリポジトリを読むだけで、書き込みはしません。",
+  "tasks.create.referenceUnavailable": "読み取り・エージェントの権限なし",
   "tasks.create.target": "Target のリポジトリ",
   "tasks.create.targetHint": "Target は書き込みと PR の作成まで行うリポジトリです。",
   "tasks.create.targetPickProject": "プロジェクトを選ぶと、リポジトリが表示されます。",
@@ -386,8 +390,12 @@ export const tasksEn: Record<keyof typeof tasksJa, string> = {
   "tasks.create.taskTitlePlaceholder": "e.g. Look into how the README is organised",
   "tasks.create.instruction": "Instruction",
   "tasks.create.instructionPlaceholder": "What should this task do?",
-  "tasks.create.readOnlyNote":
-    "To keep it read-only, say so in the instruction. There is no setting that stops writes yet.",
+  "tasks.create.readOnly": "Read only",
+  "tasks.create.readOnlyHint":
+    "The task only reads the repository: nothing is written, and there is no pull request or evaluation. It completes when it has looked, and keeps what it found.",
+  "tasks.create.reference": "Repository to read",
+  "tasks.create.referenceHint": "The task reads this repository and never writes to it.",
+  "tasks.create.referenceUnavailable": "No read or agent permission",
   "tasks.create.target": "Target repository",
   "tasks.create.targetHint": "A target is written to and gets the pull request.",
   "tasks.create.targetPickProject": "Choose a project to see its repositories.",

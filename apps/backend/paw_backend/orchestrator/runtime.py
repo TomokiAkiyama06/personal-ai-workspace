@@ -155,6 +155,9 @@ class NodeAssignment:
     # The shared connections of this attempt (Decision 0083, 1; ``None``: the
     # orchestrator was given none, or the call is the planner's: no CLI session).
     connections: NodeConnections | None = field(default=None, repr=False)
+    # The task is read-only (issue #279, Decision 0094, 1 A): its plan may have
+    # no ``worker`` node (a planner is told so) and no node may write.
+    read_only_task: bool = False
 
 
 @dataclass(frozen=True, slots=True)

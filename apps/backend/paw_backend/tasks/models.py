@@ -40,6 +40,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     Uuid,
+    false,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -101,6 +102,12 @@ class TaskRow(Base):
     # Current attempt number (Restart increments it) and total Retry count.
     attempt: Mapped[int] = mapped_column(Integer, default=1)
     retry_count: Mapped[int] = mapped_column(Integer, default=0)
+    # A read-only task (revision ``0279``, issue #279, Decision 0094, 1 A): only
+    # ``referenced`` repositories, no Worker node, completed when its DAG
+    # succeeded (no evaluation, no pull request). Fixed at creation.
+    read_only: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=false()
+    )
     # Optimistic concurrency: SQLAlchemy adds "AND version = <loaded>" to every
     # UPDATE and increments it, so a stale writer matches no row.
     version: Mapped[int] = mapped_column(Integer)
