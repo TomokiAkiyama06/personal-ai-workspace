@@ -186,7 +186,8 @@ class SandboxPlanTest(unittest.TestCase):
             mounts,
             [
                 f"type=bind,source={worktree},destination=/workspace",
-                "type=tmpfs,destination=/workspace/secret,tmpfs-size=4k,tmpfs-mode=0555",
+                "type=tmpfs,destination=/workspace/secret,tmpfs-size=4k,tmpfs-mode=0555,"
+                "notmpcopyup",
                 "type=bind,source=/dev/null,destination=/workspace/secret.txt,ro=true",
                 f"type=bind,source={worktree}/.git,destination=/workspace/.git,ro=true",
                 f"type=bind,source={self.r.shims}/{SANDBOX.hex},destination=/run/paw-shim,ro=true",
@@ -208,6 +209,14 @@ class SandboxPlanTest(unittest.TestCase):
         mounts = [a for a in self.plan(spec).argv if a.startswith("type=")]
         self.assertEqual(
             mounts[0], f"type=bind,source={checkout},destination=/workspace,ro=true"
+        )
+        # Podman copies what is under a tmpfs into it by default (tmpcopyup):
+        # the checkout's .git does not fit in 4k, so the start failed (126),
+        # and a small masked directory showed what it hid (#286).
+        self.assertEqual(
+            mounts[1],
+            "type=tmpfs,destination=/workspace/.git,tmpfs-size=4k,"
+            "tmpfs-mode=0555,notmpcopyup",
         )
         writable = SandboxSpec((SandboxMount(checkout, "/workspace", writable=True),))
         self.refused("path_outside_worktrees", writable)

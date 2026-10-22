@@ -38,7 +38,7 @@ Backend が Scope から作り（`paw_backend/sandbox/plan.py`）、Wrapper が�
 | 何 | Backend が送るもの | Wrapper の確認 |
 | --- | --- | --- |
 | Repository | 呼び出しの Path（`workdir` / `path`）を含む Repository の Root を 1 つ。1 つの Repository の Node は `/workspace`、2 つ以上は `/workspace/<repository id>` | Root（既定 `<home>/workspaces`）の中、Symbolic Link を解決した結果が送られた Path と同じ（途中に Link がない）、Directory。**書き込みは `.paw-worktrees` の中の worktree（`.git` が通常の File）だけ**。利用者の Checkout は読み取り専用でしか Mount しない |
-| Mask | Scope の `excluded_paths`（`NodeWorktree.protected` を含む）と除外の Repository・入れ子の他の Repository のうち、Mount した Root の中のもの。読むだけの Node では Checkout の `.git` と、それが指す git directory・common directory（Root の中なら）も | Mount の中、Link でない。Directory には空の tmpfs（`tmpfs-mode=0555`。Container の User は書けない）、File には `/dev/null` を読み取り専用で重ねる。無い・Link・その他の種類なら **起動しない**（`mask_unavailable` / `path_is_link` / `bad_path`。Node は `PermissionError`） |
+| Mask | Scope の `excluded_paths`（`NodeWorktree.protected` を含む）と除外の Repository・入れ子の他の Repository のうち、Mount した Root の中のもの。読むだけの Node では Checkout の `.git` と、それが指す git directory・common directory（Root の中なら）も | Mount の中、Link でない。Directory には空の tmpfs（`tmpfs-mode=0555`。Container の User は書けない。`notmpcopyup` で Podman の既定の「下の中身を tmpfs へ写す」をしない。写すと小さな Directory は隠した中身が見え、Checkout の `.git` のような大きな Directory は 4 KiB に入らず起動しない（#286））、File には `/dev/null` を読み取り専用で重ねる。無い・Link・その他の種類なら **起動しない**（`mask_unavailable` / `path_is_link` / `bad_path`。Node は `PermissionError`） |
 | 読み取り専用 | 書き込む Node の worktree の `.git` の File | 書き込みの Mount の中の通常の File / Directory を、読み取り専用で重ね直す |
 | Shim | `shim: true` | `<--sandbox-shim-base>/<id の hex>` が Link でない Directory。`/run/paw-shim` に読み取り専用 |
 
