@@ -13,10 +13,12 @@ says only whether there is one (``result``: ``none`` / ``available`` /
 
 import json
 import uuid
+from datetime import datetime
 
 import httpx
 from sqlalchemy import text
 
+from paw_backend.api.v1.tasks import TaskResultOut
 from paw_backend.app import create_app
 from paw_backend.authz import Authorizer, InMemoryAuditSink, Principal
 from paw_backend.authz.roles import ProjectRole, SystemRole
@@ -194,7 +196,17 @@ class TaskResultApiTest(PostgresRepositoryTestCase):
         # The plan's order, the four fields, the line breaks kept.
         self.assertEqual(body["nodes"], RESULT["nodes"])
         (event,) = self.complete_events(task_id)
-        self.assertEqual(body["completed_at"], event["created_at"].isoformat())
+        # The API's own form of a time (pydantic's JSON: ``Z`` for UTC, else the
+        # offset of the database session's time zone), of the ``complete`` event.
+        self.assertEqual(
+            body["completed_at"],
+            TaskResultOut(nodes=[], completed_at=event["created_at"]).model_dump(
+                mode="json"
+            )["completed_at"],
+        )
+        self.assertEqual(
+            datetime.fromisoformat(body["completed_at"]), event["created_at"]
+        )
         self.assertEqual((await self.detail(task_id))["result"], "available")
         self.assertEqual(self.denials(), [])
 
