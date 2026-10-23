@@ -82,6 +82,7 @@ from paw_backend.identity.models import (
     passkey_required_for,
 )
 from paw_backend.identity.redeemer import LIVE_STATUSES
+from paw_backend.identity.single_user import lock_user_activation
 
 # Constraint names the operator tells apart when an INSERT is refused.
 _SINGLE_OWNER = "uq_users_single_owner"
@@ -282,6 +283,8 @@ class OwnerOperator:
                             for audit_ref in revoked
                         ),
                     ]
+                # Decision 0099, 2: a user is created under the single-user lock.
+                await lock_user_activation(session)
                 session.add(
                     UserRow(
                         id=user_id,

@@ -67,6 +67,7 @@ from paw_backend.authz.roles import SystemRole
 from paw_backend.authz.subjects import Principal
 from paw_backend.db import Database
 from paw_backend.identity import InvalidLoginNameError, normalize_login_name
+from paw_backend.identity.single_user import lock_user_activation
 
 logger = logging.getLogger(__name__)
 
@@ -202,6 +203,8 @@ class InvitationService:
             await guard.require_in(
                 session, session_id=session_id, user_id=actor.user_id, now=now
             )
+            # Decision 0099, 2: a user is created under the single-user lock.
+            await lock_user_activation(session)
             try:
                 await session.execute(
                     text("SELECT paw_invite_user(:id, :name, :role, :now, :actor)"),
@@ -528,6 +531,8 @@ class InvitationService:
                 ),
                 {"id": user_id, "hash": new_hash, "now": now},
             )
+            # Decision 0099, 2: serialised with the cloud send's recount.
+            await lock_user_activation(session)
             activated = (
                 await session.execute(
                     text(

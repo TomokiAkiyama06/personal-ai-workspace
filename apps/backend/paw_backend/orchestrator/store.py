@@ -34,6 +34,7 @@ does) and it does not decide what a failure means (``orchestrator.py``).
 """
 
 import uuid
+from typing import Protocol
 
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
@@ -56,6 +57,7 @@ from paw_backend.orchestrator.domain import (
 )
 from paw_backend.orchestrator.errors import (
     OUT_OF_MEMORY_CLASSES,
+    CloudSendRefusedError,
     DagAlreadyExistsError,
     DagNotFoundError,
     DagStateError,
@@ -260,11 +262,31 @@ async def _record(session: AsyncSession, dag: DagRow) -> DagRecord:
     )
 
 
+class CloudSendCheck(Protocol):
+    """The deployment policy's check of a send to the cloud, asked again in
+    the transaction that records it (Decision 0099, 2, condition 3:
+    ``ConfiguredCloudPolicy.recheck_in``). Only an exact ``True`` allows."""
+
+    async def __call__(self, session: AsyncSession) -> bool: ...
+
+
 class DagStore:
-    def __init__(self, database: Database) -> None:
+    """``cloud_send_check``: asked in the transaction of a ``CLOUD`` placement
+    before anything is written (``None``: no check there; the policy's own
+    ``allows`` is then the only one)."""
+
+    def __init__(
+        self,
+        database: Database,
+        *,
+        cloud_send_check: CloudSendCheck | None = None,
+    ) -> None:
         if not isinstance(database, Database):
             raise TypeError("database must be a Database")
+        if cloud_send_check is not None and not callable(cloud_send_check):
+            raise TypeError("cloud_send_check must be callable")
         self._database = database
+        self._cloud_send_check = cloud_send_check
 
     # -- creation and reading -----------------------------------------------
 
@@ -617,7 +639,11 @@ class DagStore:
         the attempt, which must still be running (``StaleNodeAttemptError``). A
         placement is recorded once: a second one is
         ``InvalidOrchestratorArgumentError("placement")`` (and the database's
-        trigger refuses to change one, whoever writes)."""
+        trigger refuses to change one, whoever writes).
+
+        For ``CLOUD``, the store's ``cloud_send_check`` (when it has one) is
+        asked first in the same transaction; anything but ``True`` writes
+        nothing and raises ``CloudSendRefusedError`` (Decision 0099, 2)."""
         check_uuid("dag_id", dag_id)
         check_int("epoch", epoch, minimum=1, maximum=MAX_INT32)
         check_label("key", key, maximum=32)
@@ -649,6 +675,12 @@ class DagStore:
             if attempt.placement is not None:
                 raise InvalidOrchestratorArgumentError("placement")
             if cloud is not None:
+                # Decision 0099, 2: the policy asked again under the
+                # single-user lock (shared) before anything is written; a
+                # refusal writes nothing and nothing is sent.
+                check = self._cloud_send_check
+                if check is not None and await check(session) is not True:
+                    raise CloudSendRefusedError()
                 # The audit row first: the attempt's columns are set together
                 # afterwards (a flush in between would write a cloud placement
                 # without its audit id, which the database refuses).

@@ -13,6 +13,10 @@ A CLI runtime (a later stage) sends a node to a provider only through this gate:
    adapter;
 4. the adapter.
 
+The record's transaction may ask the policy again (Decision 0099, 2: the
+single-user recount, ``CloudSendRefusedError``): a refusal there is
+``CLOUD_POLICY_DENIED`` as well.
+
 If any of them refuses, nothing is sent and no placement is recorded (a refused
 placement closes the admitted row ``cancelled``). An attempt without a placement
 or without connections (a planner's call) is refused: fail closed. A refusal is
@@ -34,6 +38,7 @@ from paw_backend.connections import (
     TaskNotUsableError,
 )
 from paw_backend.orchestrator.domain import ExecutionPlacement
+from paw_backend.orchestrator.errors import CloudSendRefusedError
 from paw_backend.orchestrator.runtime import NodeAssignment
 from paw_backend.tools.interfaces import require_async_method
 
@@ -77,6 +82,11 @@ class CloudGate:
             # connection's one session slot stayed taken for the whole wait
             # (``SessionSlotBusyError``, Decision 0083, 6): nothing admitted.
             raise RuntimeFailure(Failure.CONNECTION_BUSY) from None
+        except CloudSendRefusedError:
+            # The record's transaction asked the policy again (Decision 0099,
+            # 2: one active user, under the single-user lock) and wrote
+            # nothing: refused like the policy itself.
+            raise RuntimeFailure(Failure.CLOUD_POLICY_DENIED) from None
         except QuotaExceededError:
             raise RuntimeFailure(Failure.CONNECTION_QUOTA_EXCEEDED) from None
         except TaskBudgetError:
