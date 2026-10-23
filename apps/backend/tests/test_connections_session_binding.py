@@ -14,13 +14,16 @@ fake session adapters.
   handle and the version it was given); a CLI that could not be stopped
   after the immediate write-back leaves its row ``kept`` with the written
   version, audited ``connection.session_kept`` and seen by System Health;
-  the next session is ``connection_busy``;
+  the next session is ``connection_busy``; a ``kept`` mark the database
+  failed to take is tried again by the holding loop before any renewal
+  (Codex review of #291), audited all the same;
 * fencing: a session whose slot was taken over cannot confirm it any more,
   and its row is left as it is (not deleted) for the collection loop.
 """
 
 import asyncio
 import dataclasses
+import unittest
 import uuid
 from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
@@ -492,8 +495,111 @@ class SessionTest(SlotCase):
         await self.start(self.slot_service(after))
         self.assertEqual(after.secrets, [LOGIN])
 
+    async def test_a_kept_mark_the_database_failed_is_tried_again(self):
+        # Codex review of #291: a transient failure of the ``kept`` mark is
+        # tried again while the slot is held; the audit and the log come at
+        # once, System Health sees the row once it is marked.
+        real = ConnectionStore.keep_session_slot
+        calls = []
+
+        async def flaky(store, kind, holder):
+            calls.append(holder)
+            if len(calls) == 1:
+                raise ConnectionError("database restarting")
+            return await real(store, kind, holder)
+
+        adapter = BindingSession(stuck=True)
+        with patch.object(ConnectionStore, "keep_session_slot", flaky):
+            with self.assertLogs("paw_backend.connections", "ERROR") as logs:
+                await self.start(self.slot_service(adapter))
+            self.assertIn(
+                f"systemctl stop paw-cli-session@{adapter.session}.service",
+                "\n".join(logs.output),
+            )
+            for _ in range(100):
+                if len(calls) > 1:
+                    break
+                await asyncio.sleep(0.05)
+            await asyncio.sleep(0.2)
+        (row,) = self.rows("SELECT session, kept FROM connection_session_leases")
+        self.assertEqual((row["session"], row["kept"]), (adapter.session, True))
+        (kept,) = [e for e in self.sink.events if e.action == "connection.session_kept"]
+        self.assertEqual(kept.reason, "unit_running")
+        database = Database(make_settings(database_url=TEST_DATABASE_URL))
+        self.addAsyncCleanup(database.dispose)
+        health = await ConnectionSource(database).check()
+        self.assertIn("unit_running:codex", health.reasons)
+        self.assertEqual(health.metrics["codex_kept_sessions"], 1)
+
+
+class FlakyKeepStore:
+    """A store whose ``kept`` mark fails ``failures`` times (no database)."""
+
+    def __init__(self, failures):
+        self.failures = failures
+        self.calls = []
+
+    async def keep_session_slot(self, kind, holder):
+        self.calls.append("keep")
+        if self.failures:
+            self.failures -= 1
+            raise ConnectionError("database restarting")
+        return self.session
+
+    async def renew_session_slot(self, kind, holder, ttl):
+        self.calls.append("renew")
+        return True
+
+
+class KeptMarkRetryTest(unittest.IsolatedAsyncioTestCase):
+    """Codex review of #291: the holding loop of a bound, kept slot whose
+    ``kept`` mark failed marks it before renewing it; it never renews an
+    unmarked row (left alone, it expires and the collection sees it)."""
+
+    async def kept_slot(self, store):
+        slot = SessionSlot(
+            store,
+            CODEX,
+            ttl_seconds=1.2,
+            heartbeat_seconds=0.02,
+            margin_seconds=0.6,
+        )
+        slot.session = store.session = uuid.uuid4()
+        slot.keep()
+        with self.assertLogs("paw_backend.connections", "WARNING"):
+            await slot.release()
+        self.addAsyncCleanup(slot._stop_heartbeat)
+        return slot
+
+    async def test_the_mark_is_tried_again_before_any_renewal(self):
+        store = FlakyKeepStore(failures=3)
+        slot = await self.kept_slot(store)
+        # Audited and logged at once: the slot outlives its session.
+        self.assertEqual(slot.kept_session, slot.session)
+        for _ in range(100):
+            if "renew" in store.calls:
+                break
+            await asyncio.sleep(0.02)
+        first = store.calls.index("renew")
+        self.assertEqual(store.calls[:first], ["keep"] * 4)
+        self.assertNotIn("keep", store.calls[first:])
+
+    async def test_a_mark_that_finds_the_row_gone_lets_it_go(self):
+        store = FlakyKeepStore(failures=1)
+
+        async def gone(kind, holder):
+            store.calls.append("keep")
+            return None  # taken over meanwhile
+
+        slot = await self.kept_slot(store)
+        store.keep_session_slot = gone
+        for _ in range(100):
+            if slot._task.done():
+                break
+            await asyncio.sleep(0.02)
+        self.assertTrue(slot._task.done())
+        self.assertNotIn("renew", store.calls)
+
 
 if __name__ == "__main__":
-    import unittest
-
     unittest.main()

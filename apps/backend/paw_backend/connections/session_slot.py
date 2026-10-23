@@ -126,8 +126,13 @@ class SessionSlot:
         #: Set once a check before a side effect failed (Decision 0096, 2's
         #: fencing): the row is left to the collection loop.
         self.fenced = False
-        #: The session whose row :meth:`release` marked ``kept``.
+        #: The session whose slot :meth:`release` kept: its row is marked
+        #: ``kept``, or (the database failed) the holding loop marks it
+        #: before it renews it (Codex review of #291).
         self.kept_session: uuid.UUID | None = None
+        #: Whether the ``kept`` mark got its answer (marked, or the row was
+        #: not this holder's any more).
+        self._marked = False
         #: Set by :meth:`release` once it deleted this holder's own row: the
         #: session's files are nobody else's to collect (Codex review of
         #: #291). ``False`` after a takeover, a database error, a kept or a
@@ -292,8 +297,36 @@ class SessionSlot:
         once that fails (the collection loop took the row over, collected
         it, or it expired) this process lets it go for good (Decision 0096,
         2's fencing): an acquisition here would make an unbound row the
-        collection never looks at."""
+        collection never looks at. Its ``kept`` mark, when the database
+        failed it, is tried again first and the row is not renewed before:
+        a renewed row neither kept nor expired would block every session
+        unseen by System Health (Codex review of #291); left alone, it
+        expires and the collection loop takes it over."""
         while True:
+            if self.session is not None and not self._marked:
+                try:
+                    marked = await self._run(
+                        self._store.keep_session_slot(self._kind, self.holder)
+                    )
+                except Exception as error:
+                    logger.warning(
+                        "connection session slot not marked kept: kind=%s"
+                        " exception_type=%s",
+                        self._kind.value,
+                        log_type_name(error),
+                    )
+                    await asyncio.sleep(self._heartbeat)
+                    continue
+                self._marked = True
+                if marked is None:
+                    logger.error(
+                        "connection session slot of a CLI that could not be"
+                        " stopped is no longer this process's; the collection"
+                        " loop has it: kind=%s session=%s",
+                        self._kind.value,
+                        self.session,
+                    )
+                    return
             if self.session is not None:
                 try:
                     held = await self._run(
@@ -375,12 +408,15 @@ class SessionSlot:
                     self.kept_session = await self._run(
                         self._store.keep_session_slot(self._kind, self.holder)
                     )
+                    self._marked = True
                 except Exception as error:
-                    # The row is bound all the same: once it expires the
-                    # collection loop takes it over as if kept.
+                    # The holding loop marks it before renewing it (Codex
+                    # review of #291); the slot outlives the session all the
+                    # same (audited).
+                    self.kept_session = self.session
                     logger.warning(
-                        "connection session slot not marked kept: kind=%s"
-                        " exception_type=%s",
+                        "connection session slot not marked kept (tried again"
+                        " while it is held): kind=%s exception_type=%s",
                         self._kind.value,
                         log_type_name(error),
                     )
