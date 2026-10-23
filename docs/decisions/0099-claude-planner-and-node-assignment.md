@@ -1,7 +1,8 @@
 # DAG Orchestrator を、Claude が計画して Node ごとに Agent を割り当てる形にする（本番の `CloudPolicy`（すべての Project を許す）、Claude Code の CLI の Planner と その記録、Plan の `agent` と Ladder、Backend が保証する独立した Review、Prompt Injection と権限、PR の分け方）
 
-- Status: Proposed
-- Date: 2026-10-23
+- Status: Approved
+- Approval: 2026-10-23、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで「推奨通りで」と回答して承認（approved as recommended, all 6 points: 1 は A（Backend が Claude と Codex の 2 つの独立した Reviewer の Node を並列に足し、どちらも必須）、2 は A（Researcher の候補は `local`・`claude`、既定 `local`、Local から Claude へ Escalation）、3 は A（Claude の Planner が使えなければ 2 回目を Local の Planner が行い、Log に残す）、4 は A（Worker の Ladder は `["local", "codex"]`。Codex が実装した Node があれば Codex の Review は独立でなく、Task は `failed` で Human が判断）、5 は A（すべての Project への Cloud の送信は、配備の有効な User がちょうど 1 人の間だけ）、6 は A（Reviewer に、上流の Worker の Branch を合わせた読み取り専用の Worktree を用意し、`refs/paw/review-base/<Branch>` から `HEAD` までの差分を読ませる）。Codex review（5ef5116）の P1・P2（Planner の呼び出しの識別に `retry_count`、Review の差分の起点、Fence された呼び出しの行）は承認の前に本文へ反映した。末尾の「承認時の決定」）
+- Date: 2026-10-23（承認 2026-10-23）
 - Scope: Issue [#297](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/297)。この Decision は設計だけで、コードは承認の後の下の「PR の分け方」の PR で書く。関係する既存の口: `apps/backend/paw_backend/orchestrator/orchestrator.py`（`_plan`・`_spec_of`・`_placement`・`_node_connections`・`_settle_failure`）、`orchestrator/plan.py`（`NODE_FIELDS`・`Plan.from_mapping`）、`orchestrator/config.py`（`OrchestratorConfig.ladders`）、`orchestrator/placement.py`（`NodePlacementHandle`・`content_digest`）、`orchestrator/domain.py`（`NodeRole`・`ROLE_CEILING`・`ExecutionPlacement`）、`orchestrator/audit.py`（`CloudSend`）、`agents/cloud.py`（`CloudGate`）、`agents/claude_cli.py`（`ClaudeCliRuntime`。今は Planner を `CLOUD_POLICY_DENIED` で断る）、`agents/codex_cli.py`、`agents/toolkit.py`（`submit_plan`）、`agents/local.py`（`PLANNER_PROMPT`）、`agents/wiring.py`、`compute/runtimes.py`（`HybridRuntime`・`CloudPolicy`）、`runtime_config.py`（`[agents.*]` を `cli runtimes are not available yet` で拒否）、`apps/backend/deploy/runtime/runtime.example.toml`
 - Supersedes（一部）:
   - [Decision 0021](0021-dag-orchestrator-policy.md)（Approved）の 1 の Plan の形に、Node ごとの任意の Field `agent` を足す（下の 4）。0021 の 1 の「Agent の起動・Permission の付与・Worktree の割当・並列数は Backend が決める」は変えない（Planner は **Backend が決めた候補の中から提案するだけ** で、起動するかどうかは Backend が決める）。
@@ -31,7 +32,9 @@ Human は 2026-10-23 に、DAG Orchestrator を「**Claude が Task を計画し
 
 要件との関係: REQUIREMENTS.md の「Logical roles」は「Codex / Claude 等も Adapter 経由で任意 Role に割当可能」「Planner は並列化・分解を提案できるが、実際の Agent 起動、Permission 付与、worktree 割当、並列数決定は Backend Orchestrator が行う」と定める。AGENTS.md の基本原則は Local-first だが「品質を犠牲にしてまで Local に固執しない」。「Review independence」は「Merge Ready 判定に利用する Reviewer は可能な限り実装 Agent と分離する」。Human の 3 つの回答は、これらの範囲で Planner の **提案** の幅を広げるもので、Backend の決定権は残す。[AGENTS.md](../../AGENTS.md) の 14 に従い、推奨をここに置いて承認を求める。
 
-## 提案（推奨の全体）
+## 決定（承認された全体）
+
+下の各節の「推奨」は、2026-10-23 に Human が「推奨通りで」と回答して、そのまま承認された方針である（「判断点」の 1〜6 はすべて A）。各節の「代替」は採らなかった案として残す。
 
 ### 1. 全体の流れ
 
@@ -53,8 +56,8 @@ Task
 
 - **推奨:** `paw_backend/agents/cloud_policy.py` に `ConfiguredCloudPolicy`（`CloudPolicy.allows(assignment)` を満たす）を置き、`runtime.toml` の `[cloud]`（下の 7）から組み立てる。`allows` は次をすべて満たすときだけ `True`（どれかが分からなければ `False`。今の `CloudGate` と同じく `True` そのものだけを許可とみなす）。
   1. `[cloud].enabled = true`（全体の Switch。既定は `false`。File は root の持ち物で Admin が変える: Decision 0093 の 2）。
-  2. Assignment の Agent の Label が CLI の Runtime（`claude` / `codex`）で、その Agent がその Role の Ladder にある（下の 4 の表の「段」。Planner が始めさせられる候補（`allowed`）より広く、Escalation の行き先を含む。Worker が Cloud で走るのは「決めてほしいこと」4 の A の Escalation のときだけ）。
-  3. **配備の有効な User が 1 人だけ**（下の「決めてほしいこと」5 の A。Human の回答 3 の前提「1 人で使う配備」を Policy で確かめる）。2 人目が有効になったら、Admin が決め直すまで `False`。
+  2. Assignment の Agent の Label が CLI の Runtime（`claude` / `codex`）で、その Agent がその Role の Ladder にある（下の 4 の表の「段」。Planner が始めさせられる候補（`allowed`）より広く、Escalation の行き先を含む。Worker が Cloud で走るのは「判断点」4 の A の Escalation のときだけ）。
+  3. **配備の有効な User が 1 人だけ**（下の「判断点」5 の A。Human の回答 3 の前提「1 人で使う配備」を Policy で確かめる）。2 人目が有効になったら、Admin が決め直すまで `False`。
   4. Task が Project に属し、その Project が削除待ちでない（今の `stop_project_tasks` の対象は送らない）。**Project ごとの許可の一覧は持たない**（Human の回答 3: すべての Project）。
 - **送るもの**: Orchestrator が Node に渡す内容（`title`・`goal`・`input`・直接の依存の `NodeResult`。Planner には Task の `title` と `input`）、CLI が PAW の Tool（MCP の Bridge → Tool Broker）で読んだ Repository の内容（Node の Scope の中だけ）と Tool の出力（Broker の Redact の後）、Role の上限にある `project.memory.use` / `shared_memory.read` で読んだ Project の Memory と共有 Memory。
 - **送らないもの**（今の仕組みのまま。この Decision で緩めない）: `TaskScope.excluded_paths` と `NodeWorktree.protected`（Sandbox で Mask し、Broker も拒否: 0083 の 6）、`.git` と Object Store（Mask と Git の Shim: 0083 の 2・6）、Credential（Connection の Handle は Task の `credential_handles` に入れない: 0016 の 1。CLI の Container に Worktree を Mount しない。Tool の出力と CLI の出力は Redact: 0083 の 6）、User の Private Memory（`memory.use` はどの Role にも与えない: 0021 の 2）、他の Task・他の User の Workspace。
@@ -65,16 +68,16 @@ Task
 
 ### 3. Planner を Claude Code の CLI で動かし、呼び出しを記録する（(b)）
 
-- **推奨（Ladder）:** Planner の Ladder を `["claude", "local"]` にする。0021 の 3 のとおり Planner の試行は 2 回まで（`max_plan_attempts`）で、2 回目は Ladder の次の段なので、**Claude が使えない・Quota を超えた・Gate で断られた・受け入れられない Plan を返した・Timeout のときは、2 回目を Local の Planner が行う**（下の「決めてほしいこと」3 の A）。Local の Planner の Plan も同じ検査を受け、`agent` を書かなければ Role の既定（下の 4）が入る。Task の Log に固定の 1 行（`plan: planner=local (fallback)`）を残し、Task の詳細で分かるようにする。組み立ては Planner の Ladder の CLI の Label を `claude` だけ許し（`codex` は拒否）、`claude` を置くなら `[cloud].enabled` と `[agents.claude]` を必須にする（0083 の 1 の「`CloudPolicy` なしの CLI の段は拒否」を Planner にも当てる）。
+- **推奨（Ladder）:** Planner の Ladder を `["claude", "local"]` にする。0021 の 3 のとおり Planner の試行は 2 回まで（`max_plan_attempts`）で、2 回目は Ladder の次の段なので、**Claude が使えない・Quota を超えた・Gate で断られた・受け入れられない Plan を返した・Timeout のときは、2 回目を Local の Planner が行う**（下の「判断点」3 の A）。Local の Planner の Plan も同じ検査を受け、`agent` を書かなければ Role の既定（下の 4）が入る。Task の Log に固定の 1 行（`plan: planner=local (fallback)`）を残し、Task の詳細で分かるようにする。組み立ては Planner の Ladder の CLI の Label を `claude` だけ許し（`codex` は拒否）、`claude` を置くなら `[cloud].enabled` と `[agents.claude]` を必須にする（0083 の 1 の「`CloudPolicy` なしの CLI の段は拒否」を Planner にも当てる）。
 - **推奨（Runtime）:** `ClaudeCliRuntime` が Planner の Role を受ける。Local の Planner と同じく、CLI に見せる Tool は読み取りだけの PAW の Tool（MCP の Bridge 経由で Tool Broker を通る。0083 の 6）と `submit_plan`（0083 の 10。Bridge から Runtime へ直接渡し、Broker を通らない）。CLI の組み込みの Tool は止めたまま（0087 の 4 の `--tools ""` など）。Sandbox は Worktree のない Node と同じ読み取り専用の Mount（`.git`・除外 Path・保護された File を Mask）。Planner の Prompt（Local と Claude で同じ文）に、Role ごとの `agent` の候補と既定（下の 4 の表）、「Review の Node は Backend が足す」（下の 5）、0098 の 8 の `key` / `title` の規則を書く。
-- **推奨（記録）:** Planner の呼び出しには DAG も試行の行もない（DAG を作るのは受け入れの後）ので、新しい Table `agent_plan_calls`（Migration。番号は実装の PR で Issue の番号から）を足す: `task_id`・Task の試行（`task_attempt`）・呼び出しの番号（1〜`max_plan_attempts`）・`placement`（`local_gpu` / `local_cpu` / `cloud`）・`placement_agent`・`placement_model`・`placed_at`（DB の時計）・Cloud のときだけ `content_fingerprint`（`sha256:` + 64 桁）・`content_bytes`・`placement_audit_id`。CHECK と「1 回だけ」の Trigger は 0048 の 1 の 7 列と同じ形。`UNIQUE (task_id, task_attempt, call)`。DELETE を誰にも与えない（0021 の 8 の Table と同じ）。
-  - 行は今の `_start_planner_call` の Transaction（Task が `running` でこの Run であることを確かめて `steps` / `retries` を計上する）で作り、Runtime が呼ぶ `PlanCallPlacementHandle.record(...)` が Placement の列を埋める。**Fencing は Task の Run と Queue の Lease**（DAG がないので `epoch` はない。`NodeConnectionGateway` と同じ `RunGuard` と `AttemptFence` を使う）。Run が替わった・Lease を失った呼び出しは何も記録せず `NodeStopped`。
+- **推奨（記録）:** Planner の呼び出しには DAG も試行の行もない（DAG を作るのは受け入れの後）ので、新しい Table `agent_plan_calls`（Migration。番号は実装の PR で Issue の番号から）を足す: `task_id`・Task の Run（`task_attempt` と `retry_count`。Retry は `attempt` を変えず `retry_count` だけを増やすので、両方で Run を区別する: `TaskRun`）・呼び出しの番号（1〜`max_plan_attempts`）・`placement`（`local_gpu` / `local_cpu` / `cloud`）・`placement_agent`・`placement_model`・`placed_at`（DB の時計）・Cloud のときだけ `content_fingerprint`（`sha256:` + 64 桁）・`content_bytes`・`placement_audit_id`。CHECK と「1 回だけ」の Trigger は 0048 の 1 の 7 列と同じ形。`UNIQUE (task_id, task_attempt, retry_count, call)`（DAG ができる前に計画が失敗して Retry された Run は、呼び出しの番号を 1 から数え直しても前の Run の行とぶつからない）。DELETE を誰にも与えない（0021 の 8 の Table と同じ）。
+  - 行は今の `_start_planner_call` の Transaction（Task が `running` でこの Run であることを確かめて `steps` / `retries` を計上する）で作り、Runtime が呼ぶ `PlanCallPlacementHandle.record(...)` が Placement の列を埋める。**Fencing は Task の Run と Queue の Lease**（DAG がないので `epoch` はない。`NodeConnectionGateway` と同じ `RunGuard` と `AttemptFence` を使う）。行は Budget の開始の記録と同じ Transaction で作るので消さない。**Placement の列を埋める前に Run が替わった・Lease を失った呼び出しは、Placement の列がすべて NULL の行として残り、それが「始めたが送らなかった呼び出し」の記録である**（`record` は何も書かず `NodeStopped`。CHECK は 0048 の 1 と同じく 4 列が揃って NULL を許す）。
   - Cloud のときは同じ Transaction で `audit_events` に 1 行（0048 の 3 と同じ `action` `orchestrator.cloud_send`、`reason` は `cloud_planning`、`resource_kind` `task`、`agent_id` は `agent_id_of(task, run, "@planner", call)`、`details` は NULL）。内容の指紋は **Orchestrator が** Task の `title` と `input` から計算する（Runtime は偽れない: 0048 の 3）。CLI が Tool で読んだ Repository の内容は、Node と同じく Tool Broker の Audit に残る。
   - Local の Planner の呼び出しも同じ行に記録する（0048 の 4 の「Local の試行も記録する」と同じ理由）。
   - Planner の呼び出しの `NodeConnections` は、今の `_node_connections` が `None` を返す代わりに、上の Fencing の Gateway を渡す（`execute_session` だけを見せる。0083 の 1）。
 - **推奨（Budget と使用量）:** 0083 の 5 の CLI の規則をそのまま使う: Token は `ConnectionService.execute_session` だけが計上し（用途の Category は 0083 の 1 のとおり Planner は `coding`）、開始の前に Task の `tokens` の残りが最低の枠（50,000）以上かを確かめ、Turn ごとにその場で計上し、尽きたら止める。`steps` / `retries` は今の Planner の計上（0021 の 7）のまま。**Task の Budget に `tokens` がない Task は Claude の Planner を始められない**（`TaskBudgetError` → `TOKEN_FLOOR`）ので、2 回目の Local の Planner になる。
 - **推奨（Timeout）:** Planner の呼び出しの上限は今の Node の Timeout（30 分、0021 の 3）で、CLI の Session はそれから 60 秒を引いた値（0083 の 8）。新しい値は作らない。Planner の実行中に Task の状態と Budget を読む規則（0021 の 7）も今のまま。
-- 代替: (a) Claude が使えなければ Local に戻さず、Task を待たせる（`waiting`）か失敗にする（下の「決めてほしいこと」3 の B / C）。(b) Planner の記録を `audit_events` の行だけにする（Placement と内容の指紋の置き場がなく、0048 と形が分かれる）。(c) Planner の呼び出しを DAG の行の前に「仮の DAG」として作る（DAG の一意の制約と Fencing の意味が変わるので採らない）。
+- 代替: (a) Claude が使えなければ Local に戻さず、Task を待たせる（`waiting`）か失敗にする（下の「判断点」3 の B / C）。(b) Planner の記録を `audit_events` の行だけにする（Placement と内容の指紋の置き場がなく、0048 と形が分かれる）。(c) Planner の呼び出しを DAG の行の前に「仮の DAG」として作る（DAG の一意の制約と Fencing の意味が変わるので採らない）。
 
 ### 4. Plan の `agent` と、Ladder・Escalation との関係（(c)）
 
@@ -89,15 +92,15 @@ Task
 
   | Role | 候補（`allowed`） | 既定（`agent` を書かないとき） | 段（Ladder。Escalation の行き先） |
   | --- | --- | --- | --- |
-  | `worker` | `local` だけ | `local` | `["local", "codex"]`（「決めてほしいこと」4 の A） |
-  | `researcher` | `local`・`claude` | `local` | `["local", "claude"]`（「決めてほしいこと」2 の A） |
+  | `worker` | `local` だけ | `local` | `["local", "codex"]`（「判断点」4 の A） |
+  | `researcher` | `local`・`claude` | `local` | `["local", "claude"]`（「判断点」2 の A） |
   | `reviewer` | `claude`・`codex` | （Backend が足す Node は固定。下の 5） | `["claude", "codex"]`（ただし下の 5 の規則で他の Review と同じ Agent へは移らない） |
   | `planner`（Plan の中の読み取りだけの分析の Node） | `local` だけ | `local` | `["local"]` |
 
 - **推奨（検査）:** `Plan` を作る時（`InvalidPlanError` の閉じた理由に `agent_not_allowed` を足す）に、`agent` が `allowed[role]` にない（未知の Label、Worker に `claude` など）Plan は **全体を拒否する**（黙って既定に直さない。0021 の 1 の「未知の Field は拒否」、0021 の 2 の「黙って削らない」と同じ考え方）。拒否は Planner の失敗の 1 回として数え、2 回目の Planner（Local）へ移る。Plan の大きさ（128 KiB）には `agent` も数える。受け入れた Plan は、`agent` を書かなかった Node にも既定を入れて **割り当てを明示して保存する**（何が割り当てられたかが記録から分かるように）。
 - **推奨（Ladder との関係）:** 割り当ては **始まりの段** を決める。Node の実際の段は「その Role の Ladder の、割り当てた Agent の位置から上」で、Escalation は今の規則（0021 の 3 の Loop 検知、0083 の 4 の `escalate=True`）でその上の段へ移る。
   1. 割り当ては Ladder の中になければならない（組み立てで `allowed[role]` ⊆ `ladders[role]` を確かめ、外れていれば起動しない）。
-  2. Worker は候補が `local` だけなので、**Planner は Worker を Cloud で始めさせられない**。Worker が Cloud（`codex`）で走るのは、Local の段で今の Escalation の規則が働いたときだけ（「決めてほしいこと」4）。
+  2. Worker は候補が `local` だけなので、**Planner は Worker を Cloud で始めさせられない**。Worker が Cloud（`codex`）で走るのは、Local の段で今の Escalation の規則が働いたときだけ（「判断点」4）。
   3. Reviewer は下の 5 の規則で、他の必須の Review と同じ Agent の段へは移らない（その段を飛ばし、上がなければ Escalation しない）。
   4. 段の数え方（`agent_index`）は「割り当ての位置からの相対」ではなく、今までどおり **Role の Ladder の絶対の位置** にする（Migration 0034 の CHECK `agent_index BETWEEN 0 AND 3` を変えない）。DAG を作る時に、Node の最初の試行の `agent_index` を割り当ての位置にする。
   5. `HybridRuntime` の Cloud への振り替え（0037 の 8。GPU が混んでいたら Cloud へ）は **使わない**（`cloud` を渡さない）。Planner の割り当てと Ladder の外で Worker が Cloud に出る経路になるため。GPU が混んでいる間、Local の段の Node は今までどおり待つ（`ComputeUnavailable` で再試行）。
@@ -106,12 +109,12 @@ Task
 
 ### 5. 独立した Review は Backend が保証する（(d)）
 
-- **推奨（Review の Node を Backend が足す）:** 書き込む Task（`read_only` でない Task）で、Plan に Worker の Node が 1 つ以上あれば、Backend は受け入れた Plan に **2 つの Reviewer の Node を足す**: `paw-review-claude`（`agent` `claude`）と `paw-review-codex`（`agent` `codex`）。どちらも `required: true`、すべての Worker の Node に依存し、互いには依存しない（並列。「決めてほしいこと」1 の A）。`title` と `goal` は Backend の固定の文（Task の `title` を引用し、Worker の Node の key を並べる）。`paw-` で始まる `key` は Planner には使わせない（`InvalidPlanError` の `reserved_key`）。Node の数の上限（32）は足した後の数で確かめ、超えるなら Plan を拒否する（Planner に 30 以下を求める Prompt にする）。
+- **推奨（Review の Node を Backend が足す）:** 書き込む Task（`read_only` でない Task）で、Plan に Worker の Node が 1 つ以上あれば、Backend は受け入れた Plan に **2 つの Reviewer の Node を足す**: `paw-review-claude`（`agent` `claude`）と `paw-review-codex`（`agent` `codex`）。どちらも `required: true`、すべての Worker の Node に依存し、互いには依存しない（並列。「判断点」1 の A）。`title` と `goal` は Backend の固定の文（Task の `title` を引用し、Worker の Node の key を並べる）。`paw-` で始まる `key` は Planner には使わせない（`InvalidPlanError` の `reserved_key`）。Node の数の上限（32）は足した後の数で確かめ、超えるなら Plan を拒否する（Planner に 30 以下を求める Prompt にする）。
   - Planner は自分の Reviewer の Node（途中の確認など）を足してよい（候補は `claude` / `codex`）。それらは追加で、Backend の 2 つの代わりにはならない。
   - 読み取りだけの Task（Decision 0094）には足さない（Worker がなく、変更がない）。
   - これは「Node が Node を足す」（0021 の 1 が禁じた動的な分解）ではなく、Plan を受け入れる 1 回の時に Backend が決まった形で足すだけである。
 - **推奨（独立の規則）:** Backend が足した 2 つの Review の Node は、Escalation で **互いの Agent、および上流の Worker を実際に走らせた Agent**（Placement の `placement_agent`）の段へ移らない。今の表では Claude の Review は `codex` へ移れず、Codex の Review は上の段がないので、どちらも Escalation しない（段の試行の 6 回と Loop の規則で失敗すれば Node が失敗し、必須なので DAG は `failed`。0021 の 6 の Retry で開き直せる）。Worker が `codex` に Escalation して走ったときは、Codex の Review は独立でなくなるので、その Node は固定の Class（`ReviewNotIndependent`）で失敗にし、Task は `failed` で Human が判断する（Claude の Review は走る）。
-- **推奨（Reviewer が差分を読めるようにする）:** 上の「背景」の隙間を埋める。Worker の Node に依存する Reviewer の Node には、**上流の Worker の Branch を合わせた読み取り専用の Worktree** を用意する（`GitWorktreeCoordinator.prepare_node` の上流の Merge と同じ手順で作り、Sandbox は読み取り専用で Mount、Commit はしない）。Git の Shim は Worker と同じく「起点（`refs/paw/base/<Branch>`）から `HEAD` まで」の `diff` / `log -p` / `show` を許す（0083 の 2 の Worktree のある Node の規則）。こうして Claude と Codex は Worker の差分を Tool で読む。除外 Path と保護された File は今までどおり Mask と Pathspec で外す。
+- **推奨（Reviewer が差分を読めるようにする）:** 上の「背景」の隙間を埋める。Worker の Node に依存する Reviewer の Node には、**上流の Worker の Branch を合わせた読み取り専用の Worktree** を用意する（`GitWorktreeCoordinator.prepare_node` の上流の Merge と同じ手順で作り、Sandbox は読み取り専用で Mount、Commit はしない）。ただし Worker の `refs/paw/base/<Branch>` は上流の Merge の **後** の Commit なので、そのまま使うと起点と `HEAD` が同じになり差分が空になる。そこで Review の Worktree には、上流の Merge の **前** の Commit（Branch を作った元の Checkout の Commit。Coordinator の `_base_commit` が返すもの）を指す別の Ref `refs/paw/review-base/<Branch>` を作り、一度作ったら動かさない。Git の Shim は Review の Worktree に限って、この Review の起点から `HEAD` までの `diff` / `log -p` / `show`（上流の Worker の Commit と Merge を含む）を許す（0083 の 2 の Worktree のある Node の規則を、起点だけ差し替えて当てる）。こうして Claude と Codex は Worker の差分を Tool で読む。除外 Path と保護された File は今までどおり Mask と Pathspec で外す。
 - 代替: (a) Planner が Review の Node を書くことを Backend が検査だけする（無ければ Plan を拒否）。足りなければ Local の Planner へ移り、Local の Planner も書き忘れれば Task が失敗する。Prompt Injection で Review を抜く Plan を作らせる余地も残る。(b) 0021 のまま Ladder の並べ方に任せる（Human の回答 2 の「Claude と Codex」を保証できない）。
 
 ### 6. Security: Prompt Injection・権限・Credential（(e)）
@@ -134,7 +137,7 @@ Task
   ```toml
   [cloud]
   enabled = true                 # 全体の Switch（既定 false）
-  single_user_only = true        # 「決めてほしいこと」5 の A
+  single_user_only = true        # 「判断点」5 の A
 
   [agents.claude]                # ClaudeCliRuntime（model・session_base・relay_command）
   [agents.codex]                 # CodexCliRuntime
@@ -155,7 +158,7 @@ Task
 - 起動の検査（0093 の 2 の Fail closed に足す）: CLI の Label が Ladder にあるのに `[cloud].enabled` か `[agents.<name>]` がない、Planner の Ladder に `codex`、`allowed` が Ladder の外、`worker` の `allowed` に CLI の Label、`reviewer` の `allowed` が `claude` と `codex` の両方を含まない、のどれかなら起動しない。起動の Log の 1 行（0093 の 2）に `cloud: enabled single_user` と `assignment: yes` を足す。
 - 本番の File を変えるのは Human（0093 の 5）。CLI の段は Smoke（下の「PR の分け方」の 6）の後に有効にする。
 
-## 決めてほしいこと
+## 判断点（承認の時の説明。決定は上の「決定」と Approval の行）
 
 1. **「Review は Claude と Codex」の形**（5）。
    - **A（推奨）**: Backend が 2 つの独立した Reviewer の Node（Claude・Codex）を **並列に** 足し、どちらも必須。互いの結果を見ない（独立性が最も高い。待ち時間は長い方の 1 回分）。
@@ -187,9 +190,9 @@ Task
 - CI では本物の CLI・GPU・Network を使わない（0083 の 9 と同じ: Fake の CLI・Fake の OpenAI 互換 Server・Fake の Sandbox）。
 - 固定するもの:
   - `ConfiguredCloudPolicy`: `enabled = false`・Worker の Role・候補にない Agent・User が 2 人・削除待ちの Project で `False`、分からないときも `False`、すべて満たして `True`。Connection を Admin が無効にした後の Session が Admission で断られること（既存の Test を Planner でも）。
-  - Planner: Claude の Fake の CLI が `submit_plan` で返した Plan が受け入れられること。Gate の拒否・Quota の超過・Timeout・不正な Plan・`tokens` のない Budget の各々で、2 回目が Local の Planner になり、Log の固定の 1 行が出ること。**記録の前に何も送らないこと**、`agent_plan_calls` の行と `audit_events` の行が同じ Transaction で Commit されること、記録が失敗したら送らないこと、Run が替わった・Lease を失った呼び出しが何も記録しないこと、指紋が Runtime ではなく Orchestrator の計算であること。
+  - Planner: Claude の Fake の CLI が `submit_plan` で返した Plan が受け入れられること。Gate の拒否・Quota の超過・Timeout・不正な Plan・`tokens` のない Budget の各々で、2 回目が Local の Planner になり、Log の固定の 1 行が出ること。**記録の前に何も送らないこと**、`agent_plan_calls` の行と `audit_events` の行が同じ Transaction で Commit されること、記録が失敗したら送らないこと、Run が替わった・Lease を失った呼び出しの行の Placement の列が NULL のまま残ること、Retry の Run（`retry_count` だけが違う）の呼び出しが前の Run の行とぶつからないこと、指紋が Runtime ではなく Orchestrator の計算であること。
   - Plan の `agent`: 候補の外（未知の Label、Worker に `claude`、Planner の Role に `codex`）・形の誤り・`paw-` の `key` は `InvalidPlanError`。書かなければ既定が入り、保存された行が非 NULL。Node の最初の試行の `agent_index` が割り当ての位置。Escalation が上の段へ移ること。NULL の古い行が 1 段目から今の動きで走ること（Migration の前に作った DAG の Retry を含む）。割り当てが Ladder から消えたら `AssignmentUnavailable`。
-  - 独立した Review: 書き込む Task に 2 つの Node が足され、読み取りだけの Task には足されないこと。足した後に 32 を超える Plan の拒否。Claude の Review が `codex` へ Escalation しないこと。Worker が `codex` で走ったら Codex の Review が `ReviewNotIndependent` で失敗すること。Reviewer の読み取り専用の Worktree で起点から `HEAD` の `diff` が読め、除外 Path が出ず、書き込みの Tool がないこと。
+  - 独立した Review: 書き込む Task に 2 つの Node が足され、読み取りだけの Task には足されないこと。足した後に 32 を超える Plan の拒否。Claude の Review が `codex` へ Escalation しないこと。Worker が `codex` で走ったら Codex の Review が `ReviewNotIndependent` で失敗すること。Reviewer の読み取り専用の Worktree で `refs/paw/review-base/<Branch>` から `HEAD` の `diff` に上流の Worker の Commit が出て（空でない）、除外 Path が出ず、書き込みの Tool がないこと。
   - **Prompt Injection の回帰**: Fake の Planner が「Worker を `codex` に」「`capabilities` に `project.pr.create`」「Working Set の外の Repository」「Review の Node を消す / `paw-review-*` を自分で書く」を返したとき、それぞれ拒否・`GrantEscalation`・`ScopeEscalation`・Backend の Node が残ることを確かめる。
   - `runtime.toml`: 7 の拒否の各項目（0093 の 6 と同じく 1 つ以上ずつ）と、Error の文に値が出ないこと。
   - Migration: `agent_plan_calls` と `agent_dag_nodes.assigned_agent` の Upgrade / Downgrade、「1 回だけ」の Trigger、CHECK、既存の行が NULL のまま制約を満たすこと。
@@ -232,7 +235,20 @@ Task
 
 ## 承認後の扱い
 
-承認されたら `Approval` に記録し、Status を Approved に改める。
+2026-10-23 に承認され、Status を Approved に改め、承認の内容を Approval の行と「承認時の決定」に記録した。Supersede する Decision（0021・0083・0048・0093）の本文は書き換えず、この Decision が一部を Supersede することを README の表に記す。
+実装は「PR の分け方」の 2〜6 の PR で行う（どれも「Refs #297」）。CLI の段を有効にするのは 6 の Smoke（Human の許可の後）の後で、本番の `/etc/paw/runtime.toml` の変更は Human が行う。
 方針を変えるときは、この Decision を書き換えず、新しい Decision から `Supersedes` する。
-Supersede する Decision（0021・0083・0048・0093）の本文は書き換えない。
 [REQUIREMENTS.md](../../REQUIREMENTS.md) の原文は書き換えない。
+
+## 承認時の決定（2026-10-23）
+
+Human は、作業 Session で判断点ごとの説明（推奨つき）を受け、「推奨通りで」と回答して承認した（すべての判断点を推奨どおり。設計の変更はない）。
+
+1. **Review の形**: A。Backend が書き込む Task に `paw-review-claude` と `paw-review-codex` の 2 つの Reviewer の Node を並列に足し、どちらも必須（5）。
+2. **Researcher**: A。候補は `local`・`claude`、既定は `local`、Ladder は `["local", "claude"]`（4）。
+3. **Claude の Planner が使えないとき**: A。Planner の Ladder は `["claude", "local"]` で、2 回目を Local の Planner が行い、Task の Log に固定の 1 行を残す（3）。
+4. **Worker の Escalation**: A。Worker の Ladder は `["local", "codex"]`。Planner は Worker を `local` でしか始めさせられず、Codex が走るのは今の Escalation の規則が働いたときだけ。そのときは Codex の Review が `ReviewNotIndependent` で失敗し、Task は `failed` で Human が判断する（4・5）。
+5. **すべての Project を許す範囲**: A。配備の有効な User がちょうど 1 人の間だけ許す（`single_user_only = true`。2）。
+6. **Reviewer に Worker の差分を読ませる**: A。上流の Worker の Branch を合わせた読み取り専用の Worktree と、上流の Merge の前の Commit を指す `refs/paw/review-base/<Branch>` を起点にした Git の Shim の範囲（5）。
+
+承認の前に反映した Codex review（5ef5116）の指摘: (P1) Planner の呼び出しの行の識別と Fencing に Task の `retry_count` を含める（Retry は `attempt` を変えない）。(P1) Worker の `refs/paw/base/<Branch>` は上流の Merge の後の Commit なので、Review の Worktree は Merge の前の Commit を指す別の Ref を起点にする。(P2) Placement の前に Fence された Planner の呼び出しは、Placement の列が NULL の行として残る（消さない）。
