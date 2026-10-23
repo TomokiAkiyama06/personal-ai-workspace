@@ -195,8 +195,10 @@ class ChangesNotReadError(Exception):
     meanwhile). Carries no detail: nothing gh printed is kept."""
 
 
-def _visible(text: str, *, keep: str = "") -> str:
-    """Control characters (but those in ``keep``) as visible escapes."""
+def visible_text(text: str, *, keep: str = "") -> str:
+    """Control characters (but those in ``keep``) as visible escapes (C0, DEL
+    and C1 as ``\\uXXXX``). Also what the result of a read-only task is shown
+    with (Decision 0098, 2)."""
     return "".join(
         char
         if char in keep or not (ord(char) < 32 or 127 <= ord(char) < 160)
@@ -214,7 +216,7 @@ def safe_patch(patch: str, *, cut: bool = False) -> tuple[str, bool]:
     credential at the end of what was read is never kept in part (Codex review
     of #206)."""
     redacted, _ = redact_text(patch)
-    shown = _visible(redacted, keep="\t\n")
+    shown = visible_text(redacted, keep="\t\n")
     if not cut and len(shown) <= MAX_PATCH_CHARS:
         return shown, False
     kept = shown[:MAX_PATCH_CHARS]
@@ -246,10 +248,10 @@ def parse_listed(item: object) -> tuple[ChangedFile, bool]:
     if type(has_patch) is not bool:
         raise ChangesNotReadError()
     changed = ChangedFile(
-        path=_visible(_text(item.get("filename"), MAX_PATH_CHARS)),
+        path=visible_text(_text(item.get("filename"), MAX_PATH_CHARS)),
         previous_path=None
         if previous is None
-        else _visible(_text(previous, MAX_PATH_CHARS)),
+        else visible_text(_text(previous, MAX_PATH_CHARS)),
         status=status,
         additions=_count(item.get("additions")),
         deletions=_count(item.get("deletions")),
@@ -344,7 +346,7 @@ class GitHubChangeReader:
         item = answer[0]
         filename = item.get("filename")
         # The same file at the same place, or the pull request changed meanwhile.
-        if not isinstance(filename, str) or _visible(filename) != changed.path:
+        if not isinstance(filename, str) or visible_text(filename) != changed.path:
             raise ChangesNotReadError()
         patch, length = item.get("patch"), item.get("patch_chars")
         if patch is None:

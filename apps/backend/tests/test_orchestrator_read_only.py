@@ -10,7 +10,12 @@ no node is ever given a capability or a tool that writes.
 import unittest
 import uuid
 
-from paw_backend.agents.local import node_prompts
+from paw_backend.agents.local import (
+    PLAN_TEXT_RULE,
+    PLANNER_PROMPT,
+    READ_ONLY_PLANNER_PROMPT,
+    node_prompts,
+)
 from paw_backend.agents.toolkit import NodeToolkit
 from paw_backend.authz import Capability
 from paw_backend.orchestrator.domain import WRITING_CAPABILITIES, RunOutcome
@@ -51,6 +56,13 @@ class RefuseWritersTest(unittest.TestCase):
     def test_readers_only_are_accepted(self):
         plan = make_plan(node("a", role="researcher"), node("b", "a", role="reviewer"))
         self.assertIs(refuse_writers(plan), plan)
+
+
+class PlannerPromptTest(unittest.TestCase):
+    def test_every_planner_is_told_what_a_key_or_a_title_may_not_hold(self):
+        # Decision 0098 (8): fewer plans refused for a credential-shaped title.
+        for prompt in (PLANNER_PROMPT, READ_ONLY_PLANNER_PROMPT):
+            self.assertIn(PLAN_TEXT_RULE, prompt)
 
 
 @requires_postgres
@@ -133,6 +145,50 @@ class ReadOnlyRunTest(PostgresOrchestratorTestCase):
             (await h.tasks.restore(task_id, log_limit=0)).state, TaskState.COMPLETED
         )
 
+    async def test_a_plan_with_a_credential_title_is_refused_and_the_next_asked(self):
+        # Decision 0098 (2, 8): a key or a title ``redact_text`` would change is
+        # refused like any other invalid plan, in a read-only task and in any
+        # other task alike.
+        for read_only in (True, False):
+            for title in (
+                "ghp_" + "a1B2" * 9,
+                "DB_PASSWORD=hunter2",
+                "--password hunter2",
+            ):
+                with self.subTest(read_only=read_only, title=title):
+                    leaky = planned(node("read", role="researcher", title=title))
+                    first = FakeRuntime("local", script={"plan": leaky})
+                    second = FakeRuntime("cloud", script={"plan": READERS})
+                    h = self.harness(
+                        runtimes={"local": first, "cloud": second},
+                        ladder=("local", "cloud"),
+                    )
+                    task_id = await (
+                        self.read_only_task(h) if read_only else self.prepare(h)
+                    )
+
+                    report = await h.orchestrator.run_once("w1")
+
+                    self.assertEqual(report.outcome, Out.DAG_SUCCEEDED)
+                    self.assertEqual(len(first.calls_of("plan")), 1)
+                    self.assertEqual(len(second.calls_of("plan")), 1)
+                    dag = await self.store.get(task_id, 1)
+                    self.assertEqual(
+                        [n.title for n in dag.nodes], ["Node read", "Node check"]
+                    )
+                    (failure,) = await h.loops.history(task_id)
+                    self.assertNotIn("hunter2", str(failure))
+
+    async def test_a_submitted_plan_with_a_credential_key_is_refused(self):
+        h = self.harness()
+        task_id = await self.read_only_task(h)
+        with self.assertRaises(InvalidPlanError) as raised:
+            await h.orchestrator.submit_plan(
+                task_id, {"nodes": [node("sk-" + "a" * 20, role="researcher")]}
+            )
+        self.assertIs(raised.exception.reason, PlanReason.CREDENTIAL_IN_PLAN)
+        self.assertIsNone(await self.store.get(task_id, 1))
+
     async def test_only_plans_with_workers_fail_the_task(self):
         runtime = FakeRuntime("local", script={"plan": WITH_WORKER})
         h = self.harness(runtimes={"local": runtime})
@@ -191,6 +247,9 @@ class ReadOnlyRunTest(PostgresOrchestratorTestCase):
         (prompt,) = [text for key, text in seen if key == "prompt"]
         self.assertIn("a plan with a worker node is refused", prompt)
         self.assertIn("Roles: researcher", prompt)
+        # ... and that a key or a title holds no assignment, flag or secret
+        # (Decision 0098, 8).
+        self.assertIn(PLAN_TEXT_RULE, prompt)
         self.assertTrue(
             all(a.read_only_task for a in runtime.assignments), runtime.assignments
         )
