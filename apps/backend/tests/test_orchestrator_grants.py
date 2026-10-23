@@ -36,6 +36,7 @@ from paw_backend.tasks import TaskCommand, TaskRun, TaskService
 from paw_backend.tools import ApprovalService, PostgresApprovalStore
 
 from . import (
+    test_agents_cloud_policy,
     test_orchestrator_abandon,
     test_orchestrator_authority,
     test_orchestrator_budget,
@@ -357,6 +358,18 @@ class ProjectSweepAsAppRole(
 
 class StorePlacementAsAppRole(
     AsAppRole, test_orchestrator_placement.StorePlacementTest
+):
+    pass
+
+
+# Decision 0099, 2: the policy's reads and the single-user recount (the
+# advisory lock and the count of the users) as the application role.
+class CloudFactsAsAppRole(AsAppRole, test_agents_cloud_policy.PostgresCloudFactsTest):
+    pass
+
+
+class SingleUserRecheckAsAppRole(
+    AsAppRole, test_agents_cloud_policy.SingleUserRecheckTest
 ):
     pass
 

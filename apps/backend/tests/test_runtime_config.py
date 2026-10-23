@@ -460,15 +460,20 @@ class SchemaTest(Refused):
             wiring.summary(), "compute: deployments=main,embed control=yes"
         )
 
-    def test_the_cli_runtimes_are_reserved(self):
+    def test_the_cli_runtimes_are_checked_and_not_enabled(self):
+        # Decision 0099, 7 replaces 0093's reservation: the sections are
+        # parsed and checked (test_runtime_config_cloud), but a ladder that
+        # names a CLI runtime is still refused until the CLI smoke.
         for name in ("codex", "claude"):
             with self.subTest(name=name):
                 self.assertRefused(
                     f"version = 1\n[agents.{name}]\n",
-                    f"agents.{name}",
-                    reason="cli runtimes are not available yet",
+                    f"agents.{name}.model",
+                    reason="is required",
                 )
-        self.assertRefused("version = 1\n[agents]\n", "agents")
+        self.assertRefused("version = 1\n[agents.local]\n", "agents.local")
+        self.assertRefused("version = 1\nagents = 1\n", "agents")
+        self.assertEqual(load("version = 1\n[agents]\n").agents, {})
 
 
 class CommandTest(Refused):
