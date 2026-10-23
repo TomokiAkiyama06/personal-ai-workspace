@@ -1737,3 +1737,49 @@
 .grant-row button {
   flex-shrink: 0;
 }
+
+/* 結果 (Decision 0098, 5): a read-only task's result as plain text. The Design
+   canvas has no such panel; built from the task-card-panel and the grants
+   panel's rows, without new colours. */
+.result-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 16px;
+}
+
+.result-node {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+}
+
+.result-node:first-child {
+  border-top: 0;
+  padding-top: 4px;
+}
+
+.result-node-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+}
+
+.result-summary {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.result-error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}

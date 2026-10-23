@@ -94,6 +94,7 @@ function wire(overrides: Partial<TaskDetailWire> = {}): TaskDetailWire {
         ],
       },
     ],
+    result: "none",
     ...overrides,
   };
 }
@@ -225,6 +226,77 @@ describe("apiTaskSource", () => {
     expect(task.currentStep).toBeNull();
     expect(task.budget).toBeUndefined();
     expect(task.dag).toBeNull();
+  });
+
+  it("maps the detail's result state and reads the result apart (Decision 0098)", async () => {
+    const { calls } = mockApi({
+      [`GET /tasks/${TASK}`]: reply(200, wire({ state: "completed", result: "available" })),
+      [`GET /tasks/${TASK}/result`]: reply(200, {
+        nodes: [
+          { key: "survey", role: "researcher", title: "Survey", summary: "line 1\nline 2" },
+          { key: "x", role: "auditor", title: "Unknown role", summary: "" },
+        ],
+        completed_at: "2026-10-01T10:00:00Z",
+      }),
+    });
+    expect((await apiTaskSource.getTask(TASK)).result).toBe("available");
+    expect(await apiTaskSource.getTaskResult(TASK)).toEqual({
+      nodes: [
+        { key: "survey", role: "researcher", title: "Survey", summary: "line 1\nline 2" },
+        { key: "x", role: "auditor", title: "Unknown role", summary: "" },
+      ],
+      completedAt: "2026-10-01T10:00:00Z",
+    });
+    expect(calls.map((call) => `${call.method} ${call.path}`)).toEqual([
+      `GET /tasks/${TASK}`,
+      `GET /tasks/${TASK}/result`,
+    ]);
+  });
+
+  it("passes the result's refusals on with the Backend's codes", async () => {
+    mockApi({
+      [`GET /tasks/${TASK}/result`]: [
+        apiError(403, "task_result_forbidden"),
+        apiError(404, "task_result_not_found"),
+      ],
+    });
+    await expect(apiTaskSource.getTaskResult(TASK)).rejects.toMatchObject({
+      status: 403,
+      code: "task_result_forbidden",
+    });
+    await expect(apiTaskSource.getTaskResult(TASK)).rejects.toMatchObject({
+      status: 404,
+      code: "task_result_not_found",
+    });
+  });
+
+  it("shows a read-only task's result once on the task screen", async () => {
+    const { calls } = mockApi({
+      "GET /auth/session": reply(200, session()),
+      "GET /tasks": reply(200, { tasks: [wire({ state: "completed" })] }),
+      [`GET /tasks/${TASK}`]: reply(
+        200,
+        wire({ state: "completed", current_step: null, result: "available" }),
+      ),
+      [`GET /tasks/${TASK}/result`]: reply(200, {
+        nodes: [
+          {
+            key: "survey",
+            role: "researcher",
+            title: "Survey",
+            summary: "<b>not bold</b> https://example.com",
+          },
+        ],
+        completed_at: "2026-10-01T10:00:00Z",
+      }),
+    });
+    renderApp(`/agents/${TASK}`);
+    const panel = await screen.findByRole("region", { name: "結果" });
+    expect(
+      await within(panel).findByText("<b>not bold</b> https://example.com"),
+    ).toBeInTheDocument();
+    expect(panel.querySelector("b, a")).toBeNull();
+    expect(calls.filter((call) => call.path === `/tasks/${TASK}/result`)).toHaveLength(1);
   });
 
   it("creates a task in the project and answers with the queued task", async () => {

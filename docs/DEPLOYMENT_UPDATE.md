@@ -276,9 +276,12 @@ Checklist (Decision 0093 5; the human, not an agent):
      `SELECT placement, placement_agent, placement_model FROM agent_dag_node_attempts a
      JOIN agent_dags d ON d.id = a.dag_id WHERE d.task_id = '<task id>'` shows `local_gpu`.
      When its DAG succeeds the task is `completed` (no evaluation, no pull request), and
-     the summary of each node is kept in its `complete` event:
-     `SELECT detail->'result' FROM task_events WHERE task_id = '<task id>' AND command =
-     'complete'`. Nothing is left to cancel.
+     the task's screen shows the `結果` panel above `依存グラフ` with each node's title,
+     role and summary (issue #290, Decision 0098); the same is
+     `GET /api/v1/tasks/{task_id}/result`. It is shown to a person who may read every
+     repository the task's Working Set ever held; anyone else sees
+     `読めないリポジトリを含むため、結果を表示できません` (403 `task_result_forbidden`).
+     Nothing is left to cancel.
 
 The CLI runtimes (`[agents.codex]` / `[agents.claude]`) cannot be enabled yet: the names
 are reserved and refused until a `CloudPolicy` Decision and the CLI smoke (Decision
