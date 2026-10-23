@@ -156,6 +156,17 @@ class StaleNodeAttemptError(OrchestratorError):
         super().__init__("The node has moved on to another attempt")
 
 
+class StalePlanCallError(OrchestratorError):
+    """The planner call is no longer the one its worker may place: another
+    worker made the row, or a later call of the same run was started since
+    (Decision 0099, 3)."""
+
+    code = "stale_plan_call"
+
+    def __init__(self) -> None:
+        super().__init__("The planner call has been superseded")
+
+
 class NodeStateError(OrchestratorError):
     """The node is not in a state that allows the operation."""
 

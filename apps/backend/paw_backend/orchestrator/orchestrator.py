@@ -102,6 +102,11 @@ from paw_backend.orchestrator.gateway import (
 from paw_backend.orchestrator.limits import MAX_ERROR_CLASS_CHARS
 from paw_backend.orchestrator.placement import NodePlacementHandle, content_digest
 from paw_backend.orchestrator.plan import Plan, refuse_writers
+from paw_backend.orchestrator.plan_calls import (
+    CloudSendRecheck,
+    PlanCallPlacementHandle,
+    PlanCallStore,
+)
 from paw_backend.orchestrator.records import AttemptRecord, DagRecord, NodeRecord
 from paw_backend.orchestrator.runtime import (
     AgentRuntime,
@@ -387,6 +392,9 @@ class _Spec:
     upstream_workers: tuple[str, ...] = ()
     # The DAG of a node's attempt (``None`` for the planning call).
     dag_id: uuid.UUID | None = None
+    # The planning call's ``seq`` in ``agent_plan_calls`` (Decision 0099, 3;
+    # ``None`` for a node's attempt).
+    plan_call: int | None = None
 
 
 @dataclass(slots=True)
@@ -432,6 +440,7 @@ class Orchestrator:
         worktrees: NodeWorkspaces | None = None,
         connections: SessionService | None = None,
         principals: PrincipalDirectory | None = None,
+        cloud_send_recheck: CloudSendRecheck | None = None,
     ) -> None:
         """Every collaborator is checked here, once, so that a wrong one fails
         loudly at construction (``TypeError``, or ``InvalidOrchestratorArgumentError``
@@ -440,7 +449,12 @@ class Orchestrator:
         whose ``HEARTBEAT_FAILURES_TO_LOSE`` failures in a row would not end before
         the lease does (the run must give its lease up, fail closed, while the
         lease still holds: otherwise another worker could take the entry over
-        while this one still runs its nodes)."""
+        while this one still runs its nodes).
+
+        ``cloud_send_recheck`` (Decision 0099, 2 (3)): called inside the
+        transaction that records a planner call's cloud send, before anything is
+        written (``plan_calls.py``); it raises to refuse the send. ``None``: no
+        recheck (the single-user check of ``ConfiguredCloudPolicy`` fills it)."""
         for name, value, expected in (
             ("tasks", tasks, TaskService),
             ("queue", queue, TaskQueue),
@@ -467,6 +481,9 @@ class Orchestrator:
             require_async_method(principals, "get_principal_by_id", 1)
         self._connections = connections
         self._principals = principals
+        if cloud_send_recheck is not None and not callable(cloud_send_recheck):
+            raise TypeError("cloud_send_recheck must be callable")
+        self._cloud_send_recheck = cloud_send_recheck
         clock = clock or SystemClock()
         if not callable(getattr(clock, "monotonic", None)):
             raise TypeError("clock must have monotonic()")
@@ -496,6 +513,7 @@ class Orchestrator:
         self._budget = budget
         self._loops = loops
         self._store = store
+        self._plan_calls = PlanCallStore(queue.database)
         self._activity = activity
         self._tools = tools
         self._authority = authority
@@ -1029,16 +1047,25 @@ class Orchestrator:
         return attempt
 
     async def _start_planner_call(
-        self, run: _Run, planned: Mapping[BudgetKind, int]
-    ) -> None:
+        self, run: _Run, planned: Mapping[BudgetKind, int], claim_call: int
+    ) -> int:
         """Start one planner call: ONE transaction checks that the task is running
         in this run and charges the call's step (and, after the first call, its
-        retry). That charge is the call's durable start record; the planner is
-        launched only after it committed. A pause or a wait that commits after it
-        is a graceful stop, as for a node: the call finishes, and its plan is kept
-        (``DagStore.create(run=)``: fenced to the run, refused for an ended task),
-        like the outcome of a node that was running; no node of it starts until
-        the task runs again (``start_node`` requires ``running``)."""
+        retry), proves the worker's queue lease (``TaskQueue.heartbeat_in``: the
+        entry locked to the commit) and makes the call's row in
+        ``agent_plan_calls`` (Decision 0099, 3), whose ``seq`` (the run's next
+        number) it returns. That charge and that row are the call's durable start
+        record; the planner is launched only after they committed. A lost lease
+        (``LeaseLostError``) writes nothing and ends the run, as for a take-over
+        of the DAG (``_acquire_dag``). Lock order: the task row, the budget rows,
+        the entry, the call's row (as ``_start_runtime_with_lease``).
+
+        A pause or a wait that commits after it is a graceful stop, as for a
+        node: the call finishes, and its plan is kept (``DagStore.create(run=)``:
+        fenced to the run, refused for an ended task), like the outcome of a node
+        that was running; no node of it starts until the task runs again
+        (``start_node`` requires ``running``). The call's placement, though, is
+        recorded only while the task runs (``PlanCallPlacementHandle``)."""
         async with self._queue.database.session() as session, session.begin():
             for kind, amount in planned.items():
                 await self._budget.record_in(
@@ -1049,6 +1076,16 @@ class Orchestrator:
                     run=run.run,
                     require_running=True,
                 )
+            await self._queue.heartbeat_in(
+                session, run.entry.id, run.worker_id, run.entry.claim_count
+            )
+            return await self._plan_calls.start_in(
+                session,
+                run.task.id,
+                run.run,
+                claim_call=claim_call,
+                owner=run.worker_id,
+            )
 
     async def _hand_on_ended_dag(self, run: _Run, dag: DagRecord) -> RunReport:
         """Hand the task on as a DAG that ended for good says: back to evaluation
@@ -1726,21 +1763,7 @@ class Orchestrator:
                 parent_grant.project_ids,
             )
         parent_scope = await self._authority.parent_scope(run.task)
-        grant = node_grant(
-            parent_grant,
-            spec.node,
-            spec.role,
-            agent_id_of(
-                run.task.id,
-                run.run,
-                PLANNER_IDENTITY if spec.node is None else spec.key,
-                spec.attempt,
-                # The planner's attempts are counted per claim (``_plan``).
-                claim=(
-                    (run.entry.id, run.entry.claim_count) if spec.node is None else None
-                ),
-            ),
-        )
+        grant = node_grant(parent_grant, spec.node, spec.role, _agent_id(run, spec))
         scope = derive_child_scope(
             parent_scope,
             role=spec.role,
@@ -1760,10 +1783,12 @@ class Orchestrator:
         )
 
     def _node_connections(self, run, spec, worktrees, fence):
-        """The ``connections`` of an attempt of a DAG node (``None`` without a
-        connection service, and for the planner's calls: Decision 0083, 1 keeps
-        the planner off the cloud)."""
-        if self._connections is None or spec.node is None:
+        """The ``connections`` of an attempt of a DAG node, or of a planner call
+        that has its row in ``agent_plan_calls`` (Decision 0099, 3: its sends are
+        recorded through its ``PlanCallPlacementHandle``, fenced by the run and
+        the queue lease in the record's transaction). ``None`` without a
+        connection service, and for a planner call without a row."""
+        if self._connections is None or (spec.node is None and spec.plan_call is None):
             return None
         assert self._principals is not None
         return NodeConnectionGateway(
@@ -1885,11 +1910,36 @@ class Orchestrator:
 
     def _placement(
         self, run: _Run, spec: _Spec, fence: AttemptFence
-    ) -> NodePlacementHandle | None:
+    ) -> NodePlacementHandle | PlanCallPlacementHandle | None:
         """Where a node's attempt runs is recorded on its attempt row (issue
-        #133); the planning call has no attempt row, so nothing to record it on
-        (``None``: a runtime keeps it off the cloud)."""
-        if spec.node is None or spec.dag_id is None:
+        #133), where a planner call runs on its row of ``agent_plan_calls``
+        (Decision 0099, 3). The fingerprint of what is sent is computed here,
+        from what the orchestrator hands the runtime (never by the runtime).
+        ``None`` (nothing to record it on: a runtime keeps it off the cloud)
+        only for a call that has neither."""
+        if spec.node is None:
+            if spec.plan_call is None:
+                return None
+            return PlanCallPlacementHandle(
+                run.guard,
+                self._plan_calls,
+                self._queue,
+                entry=run.entry,
+                worker_id=run.worker_id,
+                seq=spec.plan_call,
+                agent_id=_agent_id(run, spec),
+                content=content_digest(
+                    node_key=spec.key,
+                    role=spec.role,
+                    title=spec.title,
+                    goal=spec.goal,
+                    input=spec.input,
+                    upstream={},
+                ),
+                fence=fence,
+                recheck=self._cloud_send_recheck,
+            )
+        if spec.dag_id is None:
             return None
         return NodePlacementHandle(
             run.guard,
@@ -2242,7 +2292,7 @@ class Orchestrator:
                 return await self._end_after_stop(
                     run, self._stop_for_budget(action), None
                 )
-            await self._start_planner_call(run, planned)
+            seq = await self._start_planner_call(run, planned, attempt)
             spec = _Spec(
                 key=PLAN_STEP,
                 role=NodeRole.PLANNER,
@@ -2254,6 +2304,7 @@ class Orchestrator:
                 attempt=attempt,
                 approach=0,
                 node=None,
+                plan_call=seq,
             )
             finished = await self._plan_attempt(run, spec)
             if isinstance(finished, RunReport):
@@ -2264,6 +2315,13 @@ class Orchestrator:
                 if finished.stopped is StopReason.BUDGET_EXCEEDED:
                     stop = await self._budget_stop(run)
                     return await self._end_after_stop(run, stop, None)
+                if finished.stopped not in _RUN_ENDING_STOPS:
+                    # A call stopped while the task was paused or put in
+                    # waiting (its placement is recorded only while the task
+                    # runs): the run ends as the task says.
+                    watch = await self._watch(run)
+                    if watch in (_Watch.PAUSED, _Watch.WAITING):
+                        return RunReport(_OUTCOME_OF_WATCH[watch], task_id)
                 return RunReport(
                     _OUTCOME_OF_STOP.get(finished.stopped, RunOutcome.TASK_ENDED),
                     task_id,
@@ -2334,6 +2392,19 @@ class Orchestrator:
                 break
         await self._end_task(run, TaskCommand.FAIL, Actor.system(), REASON_PLAN_FAILED)
         return RunReport(RunOutcome.PLAN_FAILED, task_id)
+
+
+def _agent_id(run: _Run, spec: _Spec) -> uuid.UUID:
+    """The agent id of one attempt of a node, or of one planner call: the id its
+    tool calls carry and its cloud send's audit row names."""
+    return agent_id_of(
+        run.task.id,
+        run.run,
+        PLANNER_IDENTITY if spec.node is None else spec.key,
+        spec.attempt,
+        # The planner's attempts are counted per claim (``_plan``).
+        claim=(run.entry.id, run.entry.claim_count) if spec.node is None else None,
+    )
 
 
 def _integration_line(repository: RepositoryIntegration) -> tuple[LogLevel, str]:

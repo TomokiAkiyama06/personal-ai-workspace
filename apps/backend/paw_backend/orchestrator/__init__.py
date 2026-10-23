@@ -36,6 +36,7 @@ from paw_backend.orchestrator.errors import (
     ScopeEscalationError,
     StaleDagEpochError,
     StaleNodeAttemptError,
+    StalePlanCallError,
     StopReason,
 )
 from paw_backend.orchestrator.gateway import (
@@ -55,6 +56,11 @@ from paw_backend.orchestrator.orchestrator import (
 )
 from paw_backend.orchestrator.placement import NodePlacementHandle
 from paw_backend.orchestrator.plan import Plan, PlanNode
+from paw_backend.orchestrator.plan_calls import (
+    PlanCallPlacementHandle,
+    PlanCallRecord,
+    PlanCallStore,
+)
 from paw_backend.orchestrator.project_sweep import (
     PendingDeletionLister,
     ProjectTaskStopLoop,
@@ -137,6 +143,9 @@ __all__ = [
     "OrchestratorError",
     "PendingDeletionLister",
     "Plan",
+    "PlanCallPlacementHandle",
+    "PlanCallRecord",
+    "PlanCallStore",
     "PlanNode",
     "PlanReason",
     "ProjectTaskStopLoop",
@@ -149,6 +158,7 @@ __all__ = [
     "ScopeEscalationError",
     "StaleDagEpochError",
     "StaleNodeAttemptError",
+    "StalePlanCallError",
     "StopReason",
     "SweepReport",
     "SystemClock",

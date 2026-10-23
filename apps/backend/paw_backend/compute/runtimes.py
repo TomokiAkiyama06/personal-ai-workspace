@@ -13,7 +13,7 @@
   is recorded through the assignment's ``placement`` BEFORE the node runs there
   (issue #133, Decision 0037's 14): for the cloud that record is also the audit
   of the external send, so a node whose placement cannot be recorded (an
-  assignment without ``placement``, such as a planner call, or a failed write)
+  assignment without ``placement``, or a failed write)
   never goes to the cloud. The wall time a
   node holds a local lease is charged to the task as ``GPU_SECONDS`` (the budget's
   "max GPU time"), also when the local runtime raises or is cancelled. A node
@@ -423,7 +423,7 @@ class HybridRuntime:
         """Record where the attempt runs (issue #133) and return the assignment
         for the runtime that runs it there. ``None``: it could not be recorded,
         and the node must not run there. An assignment without ``placement`` (a
-        planner call, a caller that records nothing) runs locally unrecorded; it
+        caller that records nothing) runs locally unrecorded; it
         never reaches the cloud (``_cloud_allowed``). ``NodeStopped`` passes.
 
         The returned assignment's ``placement`` is already on record: the chosen

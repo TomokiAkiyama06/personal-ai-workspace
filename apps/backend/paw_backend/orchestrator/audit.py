@@ -24,6 +24,11 @@ for text, and ``details`` stays NULL: Decision 0023's registry is not touched):
   ``placement_audit_id``: the row and the attempt (with the cloud agent, the
   model and the fingerprint and size of the content) are found from each other.
 
+A call of the planner sent to the cloud (Decision 0099, 3) leaves the same row
+with ``reason`` ``cloud_planning`` (``PlanCallPlacementHandle``): its ``agent_id``
+is the planner call's (the id its tool calls carry), and the row of
+``agent_plan_calls`` keeps its id as ``placement_audit_id``.
+
 What is not recorded: what the cloud agent sends out by itself while it runs
 (its own tool calls go through the Tool Broker and its audit, like a local
 agent's), and the content itself (only its SHA-256 and size, on the attempt).
@@ -43,6 +48,8 @@ from paw_backend.orchestrator.errors import InvalidOrchestratorArgumentError
 
 CLOUD_SEND_ACTION = "orchestrator.cloud_send"
 CLOUD_SEND_REASON = "cloud_placement"
+# A call of the planner (Decision 0099, 3).
+CLOUD_PLANNING_REASON = "cloud_planning"
 CLOUD_SEND_RESOURCE_KIND = "task"
 
 _TABLE = AuditEventRecord.__table__
@@ -94,8 +101,12 @@ def cloud_send_event(
     task_id: uuid.UUID,
     project_id: uuid.UUID | None,
     delegator_id: uuid.UUID | None,
+    reason: str = CLOUD_SEND_REASON,
 ) -> AuditEvent:
-    """The ``audit_events`` row of ``send``; no I/O."""
+    """The ``audit_events`` row of ``send``; no I/O. ``reason``: one of the two
+    fixed words (a node's attempt, or a call of the planner)."""
+    if reason not in (CLOUD_SEND_REASON, CLOUD_PLANNING_REASON):
+        raise InvalidOrchestratorArgumentError("reason")
     return AuditEvent(
         event_id=event_id,
         correlation_id=event_id,
@@ -108,7 +119,7 @@ def cloud_send_event(
         resource_id=task_id,
         project_id=project_id,
         decision="allow",
-        reason=CLOUD_SEND_REASON,
+        reason=reason,
     )
 
 

@@ -325,7 +325,7 @@ class PostgresOrchestratorTestCase(PostgresTaskTestCase):
         # use the unprivileged application role (test_orchestrator_grants).
         await self.owner_sql(
             "TRUNCATE " + ", ".join(TABLES) + ", queue_entries, budget_usages,"
-            " loop_failure_signatures, agent_incidents"
+            " loop_failure_signatures, agent_incidents, agent_plan_calls"
         )
         self.store = DagStore(self.database)
 
