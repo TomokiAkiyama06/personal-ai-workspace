@@ -39,7 +39,7 @@ from paw_backend.agents.codex_collect import (
     SystemdSessionUnits,
 )
 from paw_backend.connections import ConnectionKind, SessionCollection
-from paw_backend.connections.session_slot import keep_until_collected
+from paw_backend.connections.session_slot import SessionSlot, keep_until_collected
 from paw_backend.connections.store import SessionLease
 
 CODEX = ConnectionKind.CODEX
@@ -602,6 +602,70 @@ class LoopTest(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(running, 5)
         self.assertEqual(taken[0], (CODEX, expired.holder))
         self.assertNotIn((ConnectionKind.CLAUDE, alive.holder), taken)
+
+    async def test_a_kept_slot_of_this_process_without_a_collector_is_collected(
+        self,
+    ):
+        # Codex review of #292 (P1): the service that runs the sessions (the
+        # Orchestrator's) has no collector of its own; the process's loop
+        # collects its kept slots, whose rows its holder keeps unexpired.
+        session = uuid.uuid4()
+        given_back = asyncio.Event()
+
+        class SlotStore:
+            async def keep_session_slot(self, kind, holder):
+                return session
+
+            async def renew_session_slot(self, kind, holder, ttl):
+                return not given_back.is_set()
+
+        slot = SessionSlot(
+            SlotStore(),
+            CODEX,
+            ttl_seconds=1.2,
+            heartbeat_seconds=0.02,
+            margin_seconds=0.6,
+        )
+        slot.session = session
+        slot.keep()
+        with self.assertLogs("paw_backend.connections", "ERROR"):
+            await slot.release()
+        self.addAsyncCleanup(slot._stop_heartbeat)
+        mine = SessionLease(CODEX, slot.holder, session, HANDLE, 1, True, False)
+        theirs = SessionLease(CODEX, uuid.uuid4(), uuid.uuid4(), HANDLE, 1, True, False)
+        taken, collected = [], []
+
+        class LoopHost:
+            async def session_leases(self):
+                return () if given_back.is_set() else (mine, theirs)
+
+            async def take_over_session(self, kind, previous, holder):
+                taken.append(previous)
+                return True
+
+            async def renew_session(self, kind, holder):
+                return True
+
+        class Collector:
+            async def collect(self, kind, holder):
+                collected.append((kind, holder))
+                given_back.set()  # the collection gave the row back
+                return True
+
+        loop = CodexCollectionLoop(
+            LoopHost(), Collector(), interval_seconds=0.05, heartbeat_seconds=0.01
+        )
+        running = asyncio.ensure_future(loop.run())
+        try:
+            await asyncio.wait_for(given_back.wait(), 5)
+            # The slot lets go once its row is given back.
+            await asyncio.wait_for(asyncio.shield(slot._task), 5)
+        finally:
+            loop.stop()
+            await asyncio.wait_for(running, 5)
+        self.assertEqual(collected, [(CODEX, slot.holder)])
+        self.assertEqual(taken, [])  # unexpired rows are never taken over
+        self.assertNotIn(theirs.holder, [holder for _, holder in collected])
 
 
 if __name__ == "__main__":

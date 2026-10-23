@@ -238,6 +238,31 @@ class TakeOverTest(LoopCase):
         self.assertEqual(self.leases(), [])
         self.assertEqual(list(directory.iterdir()), [])
 
+    async def test_a_kept_session_of_the_running_service_is_collected_here(self):
+        # Codex review of #292 (P1): the service that runs the sessions has no
+        # collector (the loop's is the HTTP layer's): while this process
+        # renews the kept slot, its loop collects it once the unit stopped.
+        adapter = BindingSession(stuck=True, refresh=REFRESHED)
+        running = self.slot_service(adapter)  # no collector attached
+        directory = self.session_directory(adapter.session, REFRESHED)
+        await self.start(running)
+        (directory / "config" / "auth.json").write_text(LATER)
+        await self.running(self.loop(self.slot_service(ExclusiveSession())))
+        await asyncio.sleep(0.6)
+        # Running: nothing collected, the slot still its holder's.
+        self.assertEqual(self.collected(), [])
+        (row,) = self.rows("SELECT holder, kept FROM connection_session_leases")
+        self.assertTrue(row["kept"])
+        self.units.running = False
+        await self.until(lambda: self.collected())
+        self.assertEqual(self.collected(), ["written"])
+        stored = await self.store.read(self.handle)
+        self.assertEqual((stored.version, stored.secret.reveal()), (3, LATER))
+        self.assertEqual(self.leases(), [])
+        after = ExclusiveSession()
+        await self.start(self.slot_service(after))
+        self.assertEqual(after.secrets, [LATER])
+
     async def test_the_expected_version_is_the_stores_when_the_row_is_behind(self):
         # The immediate write-back stored version 2; the process died before
         # the row followed (Decision 0096, 2's version check).

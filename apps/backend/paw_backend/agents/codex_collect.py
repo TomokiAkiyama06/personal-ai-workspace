@@ -70,6 +70,7 @@ from paw_backend.connections.session_slot import (
     SLOT_HEARTBEAT_SECONDS,
     SessionCollector,
     keep_until_collected,
+    kept_here,
 )
 from paw_backend.research.providers.broker import log_type_name
 
@@ -571,13 +572,24 @@ class CodexCollectionLoop:
             self._kept.clear()
 
     async def cycle(self) -> int:
-        """One look at the rows; how many slots were taken over."""
+        """One look at the rows; how many slots were taken over. A kept slot
+        of this process without a collector of its own (its holder renews
+        it, :func:`kept_here`) is collected too, without a takeover (Codex
+        review of #292: the service that runs the sessions is not the one
+        the collector is attached to)."""
         for session, task in list(self._kept.items()):
             if task.done():
                 del self._kept[session]
         taken = 0
+        here = kept_here()
         for lease in await self._host.session_leases():
-            if not lease.expired or lease.session in self._kept:
+            if lease.session in self._kept:
+                continue
+            if not lease.expired:
+                if lease.holder in here:
+                    self._kept[lease.session] = asyncio.ensure_future(
+                        self._collect_here(lease.kind, lease.holder)
+                    )
                 continue
             holder = uuid.uuid4()
             if not await self._host.take_over_session(lease.kind, lease.holder, holder):
@@ -593,6 +605,24 @@ class CodexCollectionLoop:
                 self._keep(lease.kind, holder)
             )
         return taken
+
+    async def _collect_here(self, kind: ConnectionKind, holder: uuid.UUID) -> None:
+        """Collect a kept slot this process's holder renews: rounds every
+        ``interval_seconds`` (the first at once) while it is held here."""
+
+        async def held() -> bool:
+            return holder in kept_here()
+
+        async def collect() -> bool:
+            return await self._collector.collect(kind, holder)
+
+        await keep_until_collected(
+            held,
+            collect,
+            heartbeat_seconds=self._heartbeat,
+            interval_seconds=self._interval,
+            first_at_once=True,
+        )
 
     async def _keep(self, kind: ConnectionKind, holder: uuid.UUID) -> None:
         async def renew() -> bool:

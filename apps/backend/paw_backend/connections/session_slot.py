@@ -78,6 +78,11 @@ SLOT_STOP_MARGIN_SECONDS: Final = 240.0
 #: login collected once it stopped (provisional).
 SLOT_COLLECT_SECONDS: Final = 60.0
 _FIRST_RETRY_SECONDS: Final = 0.25
+#: Decision 0096, 1 D: the holders of this process's kept bound slots that
+#: no collector of their own collects (the service that runs the sessions,
+#: the Orchestrator's, has none: Codex review of #292). This process's
+#: collection loop collects them while they are here (:func:`kept_here`).
+_KEPT_HERE: set[uuid.UUID] = set()
 _MAX_RETRY_SECONDS: Final = 2.0
 
 
@@ -385,13 +390,18 @@ class SessionSlot:
             async def collect() -> bool:
                 return await collector.collect(self._kind, self.holder)
 
-        await keep_until_collected(
-            renew,
-            collect,
-            heartbeat_seconds=self._heartbeat,
-            interval_seconds=self._collect_seconds,
-            first_at_once=False,
-        )
+        else:
+            _KEPT_HERE.add(self.holder)
+        try:
+            await keep_until_collected(
+                renew,
+                collect,
+                heartbeat_seconds=self._heartbeat,
+                interval_seconds=self._collect_seconds,
+                first_at_once=False,
+            )
+        finally:
+            _KEPT_HERE.discard(self.holder)
 
     def keep(self) -> None:
         """The session's CLI could not be stopped (it may still run with the
@@ -554,6 +564,13 @@ async def keep_until_collected(
             await beating
 
 
+def kept_here() -> frozenset[uuid.UUID]:
+    """The holders of this process's kept bound slots without a collector of
+    their own, renewed by them until their login was collected (Decision
+    0096, 1 D): this process's collection loop collects them."""
+    return frozenset(_KEPT_HERE)
+
+
 async def run_within(slot: SessionSlot, work: Awaitable) -> bool:
     """Run ``work`` while ``slot`` is held. ``True``: it ended by itself (its
     exception passes). ``False``: the slot was lost first; ``work`` was
@@ -603,6 +620,7 @@ __all__ = [
     "SessionCollector",
     "SessionSlot",
     "check_slot_timing",
+    "kept_here",
     "keep_until_collected",
     "run_within",
 ]
