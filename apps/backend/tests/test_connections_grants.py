@@ -38,6 +38,7 @@ from . import (
     test_connections_quota_enforcement,
     test_connections_report,
     test_connections_result_limit,
+    test_connections_session_binding,
     test_connections_session_slot,
     test_connections_settlement_cancel,
 )
@@ -55,7 +56,16 @@ ROLE_PASSWORD = "dummy-test-password-connections"
 EXPECTED = {
     "shared_connections": (
         {"SELECT", "INSERT", "DELETE"},
-        {"secret_handle", "status", "enabled", "checked_at", "updated_at"},
+        {
+            "secret_handle",
+            "status",
+            "enabled",
+            "checked_at",
+            "updated_at",
+            # The collection's mark (revision 0280, Decision 0096, 5).
+            "suspect_at",
+            "suspect_reason",
+        },
     ),
     "connection_quotas": (
         {"SELECT", "INSERT", "DELETE"},
@@ -73,10 +83,21 @@ EXPECTED = {
             "duration_ms",
         },
     ),
-    # The session slot (revision 0239): taken, renewed, taken over, released.
+    # The session slot (revision 0239): taken, renewed, taken over, released;
+    # bound to a Codex session and kept (revision 0280, Decision 0096, 2).
     "connection_session_leases": (
         {"SELECT", "INSERT", "DELETE"},
-        {"holder", "acquired_at", "heartbeat_at", "expires_at"},
+        {
+            "holder",
+            "acquired_at",
+            "heartbeat_at",
+            "expires_at",
+            "session",
+            "secret_handle",
+            "expected_version",
+            "kept",
+            "collected",
+        },
     ),
 }
 ALL_PRIVILEGES = (
@@ -184,6 +205,7 @@ for _module in (
     test_connections_report,
     test_connections_concurrency,
     test_connections_result_limit,
+    test_connections_session_binding,
     test_connections_session_slot,
     test_connections_settlement_cancel,
 ):

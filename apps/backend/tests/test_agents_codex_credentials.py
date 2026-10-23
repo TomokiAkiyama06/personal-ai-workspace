@@ -18,6 +18,7 @@ import os
 import stat
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 from paw_backend.agents.codex_credentials import AUTH_NAME, CodexAuthFile
@@ -56,6 +57,24 @@ class AuthFileTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(path.read_text(), TOKEN)
         with self.assertRaises(FileExistsError):
             await CodexAuthFile().place(Secret(TOKEN), self.home)
+
+    async def test_place_never_shows_a_partial_login(self):
+        # Codex review of #292: the collection may read ``auth.json`` while a
+        # resumed session places it; the file appears whole (written aside,
+        # then linked in under its name), never empty or half written.
+        path = self.home / AUTH_NAME
+        seen = []
+        real_link = os.link
+
+        def link(source, target, *args, **kwargs):
+            seen.append((path.exists(), Path(source).read_text()))
+            return real_link(source, target, *args, **kwargs)
+
+        with unittest.mock.patch.object(os, "link", link):
+            await CodexAuthFile().place(Secret(TOKEN), self.home)
+        self.assertEqual(seen, [(False, TOKEN)])
+        self.assertEqual(path.read_text(), TOKEN)
+        self.assertEqual(sorted(p.name for p in self.home.iterdir()), [AUTH_NAME])
 
     async def test_place_refuses_what_is_not_a_login(self):
         for value in ("not json", "[1, 2]", '"text"'):

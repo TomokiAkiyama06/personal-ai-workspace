@@ -271,6 +271,15 @@ class CodexAttachment:
     # on a CLI that could not be stopped may hold the login (the version
     # probe before it never does).
     placed: list[bool] = field(default_factory=list, repr=False)
+    # Set by the adapter when the connection's session slot was no longer
+    # this session's before a side effect (Decision 0096, 2's fencing): the
+    # session gave up, and its directory is the collection loop's (the
+    # runtime must not delete it).
+    fenced: list[bool] = field(default_factory=list, repr=False)
+    # Set by the runtime when the service released the connection's slot
+    # without deleting this session's own row (Codex review of #291: taken
+    # over meanwhile, or not known): the directory is the collection's.
+    slot_lost: list[bool] = field(default_factory=list, repr=False)
 
 
 def session_config(spec: CliSessionSpec, tools: Iterable[str]) -> str:
@@ -419,20 +428,37 @@ class CodexSessionAdapter:
             logger.warning("Codex session refused: version")
             return AgentSessionResult(failure=FailureCode.INVALID_RESPONSE)
         codex_home = attachment.spec.config_dir
+        # Decision 0096, 2 B: the session is recorded on the connection's slot
+        # (with the credential's handle and version) before its login is
+        # placed, so a session that outlives this process is collected later.
+        if not await _bind(request, attachment):
+            return AgentSessionResult(failure=FailureCode.UNAVAILABLE)
         _write(
             codex_home / CONFIG_NAME, session_config(attachment.spec, attachment.tools)
         )
+        # Checked again right before the login is placed (Codex review of
+        # #292): a session paused after binding whose expired row the
+        # collection took over meanwhile stops here, before it writes into the
+        # directory the collection is fencing and reading.
+        if not await _held(request, attachment):
+            return AgentSessionResult(failure=FailureCode.UNAVAILABLE)
         try:
             attachment.placed.append(True)
             await self._credentials.place(secret, codex_home)
+            if not await _held(request, attachment):
+                # The slot is no longer this session's (Decision 0096, 2's
+                # fencing): the unit is not started.
+                return AgentSessionResult(failure=FailureCode.UNAVAILABLE)
             return await self._converse(request, attachment)
         finally:
             # After the CLI was stopped (``_converse``'s own ``finally``), run
             # to its end even through a cancellation: the refreshed login must
             # be written back while this session still holds the
-            # connection's slot (Decision 0083, 6).
+            # connection's slot (Decision 0083, 6), checked first (Decision
+            # 0096, 2's fencing: a session whose slot was taken over leaves
+            # its login to the collection loop).
             if await _through_cancellation(
-                self._collect(secret, codex_home, request.write_back)
+                self._collect_if_held(secret, codex_home, request, attachment)
             ):
                 raise asyncio.CancelledError
 
@@ -470,6 +496,16 @@ class CodexSessionAdapter:
             # may run with the session's files although no process came back.
             attachment.unstopped.append(True)
             raise
+
+    async def _collect_if_held(
+        self,
+        secret: Secret,
+        codex_home: Path,
+        request: AgentSessionRequest,
+        attachment: CodexAttachment,
+    ) -> None:
+        if await _held(request, attachment):
+            await self._collect(secret, codex_home, request.write_back)
 
     async def _collect(
         self,
@@ -645,6 +681,47 @@ class CodexSessionAdapter:
         return ended, stopped
 
 
+async def _bind(request: AgentSessionRequest, attachment: CodexAttachment) -> bool:
+    """Record the session on the connection's slot (Decision 0096, 2 B);
+    ``True`` when there is nothing to record it on."""
+    if request.bind_session is None:
+        return True
+    try:
+        bound = await request.bind_session(attachment.spec.session_id)
+    except Exception as error:
+        logger.error(
+            "Codex session not recorded on its slot: exception_type=%s",
+            type(error).__name__,
+        )
+        bound = False
+    if bound is not True:
+        logger.warning("Codex session refused: its slot could not be bound")
+        return False
+    return True
+
+
+async def _held(request: AgentSessionRequest, attachment: CodexAttachment) -> bool:
+    """The check before a side effect of the session (Decision 0096, 2's
+    fencing (a)); ``True`` without a slot. A failure marks the attachment
+    ``fenced`` (its directory is then the collection loop's)."""
+    if request.still_held is None:
+        return True
+    if attachment.fenced:
+        return False  # for good
+    try:
+        held = await request.still_held()
+    except Exception as error:
+        logger.error(
+            "Codex session's slot could not be checked: exception_type=%s",
+            type(error).__name__,
+        )
+        held = False
+    if held is not True:
+        attachment.fenced.append(True)
+        return False
+    return True
+
+
 async def _through_cancellation(work) -> bool:
     """Run ``work`` to its end even while being cancelled; whether a
     cancellation came meanwhile (the caller raises it afterwards)."""
@@ -759,12 +836,19 @@ class CodexCliRuntime:
             try:
                 tools = frozenset(t["function"]["name"] for t in toolkit.tools)
                 attachment = CodexAttachment(spec, bridge, tools, system)
+                lost = attachment.slot_lost
+
+                def released(given_back: bool) -> None:
+                    if not given_back:
+                        lost.append(True)
+
                 request = SessionRequest(
                     self._model,
                     _PURPOSES[assignment.role],
                     task,
                     self._timeout,
                     attachment=attachment,
+                    on_slot_released=released,
                 )
                 try:
                     result = await self._gate.session(
@@ -786,8 +870,20 @@ class CodexCliRuntime:
         finally:
             if attachment is not None and attachment.unstopped:
                 # The CLI's unit did not stop: its directory stays (the unit
-                # has it mounted); the operator stops the unit and removes it.
-                logger.error("A CLI session could not be stopped; its files stay")
+                # has it mounted); the operator stops the unit, and the login
+                # in it is collected once the unit stopped (Decision 0096).
+                logger.error(
+                    "A CLI session could not be stopped; its files stay: session=%s",
+                    spec.session_id,
+                )
+            elif attachment is not None and (attachment.fenced or attachment.slot_lost):
+                # The connection's slot was taken over (Decision 0096, 2's
+                # fencing): the directory is the collection loop's now.
+                logger.error(
+                    "A CLI session's slot was taken over; its files are left"
+                    " to the collection: session=%s",
+                    spec.session_id,
+                )
             else:
                 remove_session(spec)
         if attachment is not None and attachment.unstopped:

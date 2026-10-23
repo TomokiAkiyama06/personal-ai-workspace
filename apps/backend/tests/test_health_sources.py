@@ -399,7 +399,7 @@ class MemoryWorkerSourceTest(unittest.IsolatedAsyncioTestCase):
 
 class ConnectionSourceTest(unittest.IsolatedAsyncioTestCase):
     async def test_none_configured_is_quiet(self):
-        health = await ConnectionSource(RowsDatabase([], [])).check()
+        health = await ConnectionSource(RowsDatabase([], [], [])).check()
         self.assertIs(health.severity, Severity.INFO)
         self.assertEqual(
             [(p["kind"], p["configured"], p["available"]) for p in health.parts],
@@ -407,16 +407,24 @@ class ConnectionSourceTest(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_status_decides(self):
-        rows = [("codex", "connected", True, 5.0), ("claude", "expired", True, 9.0)]
-        health = await ConnectionSource(RowsDatabase(rows, [("codex", 2, 3.0)])).check()
+        rows = [
+            ("codex", "connected", True, 5.0, None),
+            ("claude", "expired", True, 9.0, None),
+        ]
+        health = await ConnectionSource(
+            RowsDatabase(rows, [("codex", 2, 3.0)], [])
+        ).check()
         self.assertIs(health.severity, Severity.ERROR)
         self.assertEqual(health.reasons, ("expired:claude",))
         codex, claude = health.parts
         self.assertEqual((codex["available"], codex["in_flight"]), (True, 2))
         self.assertFalse(claude["available"])
         self.assertEqual(health.metrics["codex_available"], 1)
-        rows = [("codex", "unavailable", True, 5.0), ("claude", "expired", False, 9.0)]
-        health = await ConnectionSource(RowsDatabase(rows, [])).check()
+        rows = [
+            ("codex", "unavailable", True, 5.0, None),
+            ("claude", "expired", False, 9.0, None),
+        ]
+        health = await ConnectionSource(RowsDatabase(rows, [], [])).check()
         # A disabled connection is not watched.
         self.assertIs(health.severity, Severity.WARNING)
         self.assertEqual(health.reasons, ("unavailable:codex",))
@@ -429,18 +437,38 @@ class ConnectionSourceTest(unittest.IsolatedAsyncioTestCase):
             async def check(self):
                 return self.problem
 
-        healthy = await ConnectionSource(RowsDatabase([], []), Store(None)).check()
+        healthy = await ConnectionSource(RowsDatabase([], [], []), Store(None)).check()
         self.assertIs(healthy.severity, Severity.INFO)
         self.assertEqual(healthy.metrics["secret_store_ok"], 1)
         broken = await ConnectionSource(
-            RowsDatabase([], []), Store("secret_store_unavailable")
+            RowsDatabase([], [], []), Store("secret_store_unavailable")
         ).check()
         self.assertIs(broken.severity, Severity.CRITICAL)
         self.assertEqual(broken.reasons, ("secret_store_unavailable",))
         self.assertEqual(broken.metrics["secret_store_ok"], 0)
 
+    async def test_a_kept_codex_session_warns_and_a_stale_login_is_an_error(self):
+        # Decision 0096, 4: a slot kept until the login is collected; a
+        # collection that could not read the login back.
+        rows = [("codex", "connected", True, 5.0, None)]
+        health = await ConnectionSource(RowsDatabase(rows, [], [("codex", 1)])).check()
+        self.assertIs(health.severity, Severity.WARNING)
+        self.assertEqual(health.reasons, ("unit_running:codex",))
+        self.assertEqual(health.metrics["codex_kept_sessions"], 1)
+        codex, _ = health.parts
+        self.assertEqual(
+            (codex["kept_sessions"], codex["credential_suspect"]), (1, None)
+        )
+        # A disabled connection whose login may be stale is still an error.
+        rows = [("codex", "connected", False, 5.0, "missing")]
+        health = await ConnectionSource(RowsDatabase(rows, [], [])).check()
+        self.assertIs(health.severity, Severity.ERROR)
+        self.assertEqual(health.reasons, ("collect_failed:codex",))
+        codex, _ = health.parts
+        self.assertEqual(codex["credential_suspect"], "missing")
+
     async def test_no_handle_is_read(self):
-        database = RowsDatabase([], [])
+        database = RowsDatabase([], [], [])
         await ConnectionSource(database).check()
         for sql, _ in database.calls:
             self.assertNotIn("secret_handle", sql)
@@ -573,7 +601,7 @@ class MetricNamesTest(unittest.IsolatedAsyncioTestCase):
             ).check(),
             await MemoryWorkerSource(RowsDatabase([(1, 0, 1.0, 0, 0)], [(0,)])).check(),
             await ConnectionSource(
-                RowsDatabase([("codex", "connected", True, 1.0)], [])
+                RowsDatabase([("codex", "connected", True, 1.0, None)], [], [])
             ).check(),
             await ReaperSource(
                 FakeReaper(ReaperStats(last_cycle_at=now, last_success_at=now))

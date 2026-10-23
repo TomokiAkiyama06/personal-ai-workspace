@@ -259,7 +259,11 @@ ACTION_STATUS = "connection.status"
 ACTION_USE = "connection.use"
 ACTION_QUOTA_SET = "connection.quota.set"
 ACTION_QUOTA_REMOVE = "connection.quota.remove"
+# Decision 0096, 4: a Codex session whose CLI could not be stopped keeps the
+# slot (``kept``) until its login was collected.
+ACTION_SESSION_KEPT = "connection.session_kept"
 OUTCOME_SUCCEEDED = "succeeded"
+OUTCOME_KEPT = "unit_running"
 # The most an answer may be, as the adapter returned it and as it is returned: the
 # limit of the adapter result, and never more than ``redact_text`` reads (it cuts an
 # input over its own limit). ``tests/test_connections_result_limit.py`` keeps the
@@ -1352,7 +1356,49 @@ class ConnectionService:
             )
         finally:
             if slot is not None:
-                await self._shielded(slot.release())
+                try:
+                    await self._shielded(slot.release())
+                finally:
+                    # Also when a cancellation came during the release (it
+                    # is raised once the release ended): the runtime must
+                    # learn whether the session's files are its own to delete
+                    # (Codex review of #291).
+                    self._slot_released(request, slot)
+                    if slot.kept_session is not None:
+                        await self._shielded(
+                            self._audit_session(kind, ACTION_SESSION_KEPT)
+                        )
+
+    @staticmethod
+    def _slot_released(request: SessionRequest, slot: SessionSlot) -> None:
+        if request.on_slot_released is None:
+            return
+        try:
+            request.on_slot_released(slot.given_back)
+        except Exception as error:
+            logger.error(
+                "the slot release callback failed: exception_type=%s",
+                log_type_name(error),
+            )
+
+    async def _audit_session(
+        self, kind: ConnectionKind, action: str, reason: str = OUTCOME_KEPT
+    ) -> None:
+        """The system's audit of a session slot that outlives its session
+        (Decision 0096, 4): the connection's id, the action and a code;
+        never the session's UUID (the log has it) or a credential."""
+        try:
+            info = await self._call_store(self._store.get_connection(kind))
+        except Exception as error:
+            logger.warning(
+                "connection not read for an audit: exception_type=%s",
+                log_type_name(error),
+            )
+            info = None
+        await self._audit(
+            action, reason, True, None, uuid.uuid4(), _RESOURCE_CONNECTION,
+            None if info is None else info.id,
+        )  # fmt: skip
 
     async def _admitted_session(
         self,
@@ -1487,9 +1533,10 @@ class ConnectionService:
         try:
             async with asyncio.timeout(request.timeout_seconds):
                 write_back = None
+                bind_session = None
                 if slot is not None and kind is not None:
-                    secret, write_back = await self._session_credential(
-                        kind, admission.secret_handle
+                    secret, write_back, bind_session = await self._session_credential(
+                        kind, admission.secret_handle, slot
                     )
                 else:
                     secret = await self._resolve(admission.secret_handle)
@@ -1511,6 +1558,12 @@ class ConnectionService:
                         connection_id=admission.connection_id,
                         write_back=write_back,
                         cli_running=None if slot is None else slot.keep,
+                        bind_session=bind_session,
+                        still_held=(
+                            None
+                            if slot is None or bind_session is None
+                            else slot.confirm
+                        ),
                     ),
                 )
         except TimeoutError:
@@ -1562,22 +1615,36 @@ class ConnectionService:
         else:
             state.status = UsageStatus.CANCELLED
 
-    async def _session_credential(self, kind: ConnectionKind, handle: str):
-        """The credential of an exclusive session and its write-back
-        (Decision 0083, 6), or the resolver's credential and no write-back
-        when there is no secret store to write to."""
+    async def _session_credential(
+        self, kind: ConnectionKind, handle: str, slot: SessionSlot | None = None
+    ):
+        """The credential of an exclusive session, its write-back (Decision
+        0083, 6) and the binding of ``slot`` to the session (Decision 0096,
+        2 B: the session's UUID with this handle and version); or the
+        resolver's credential, no write-back and no binding when there is no
+        secret store to write to."""
         reader = getattr(self._credentials, "read", None)
         if self._credentials is None or not callable(reader):
-            return await self._resolve(handle), None
+            return await self._resolve(handle), None, None
         stored = await reader(handle)
         if stored.kind is not kind or type(stored.secret) is not Secret:
             raise TypeError("the stored credential is not this connection's")
         version = stored.version
+        given = stored.version
+
+        async def bind_session(session: uuid.UUID) -> bool:
+            assert slot is not None
+            if type(session) is not uuid.UUID:
+                raise TypeError("session must be a UUID")
+            return await slot.bind(session, handle, given)
 
         async def write_back(value: str) -> WriteBack:
             nonlocal version
             try:
                 version = await self.rotate_credential(kind, handle, version, value)
+                if slot is not None:
+                    # The bound row follows (Decision 0096, 2's version check).
+                    await slot.record_version(version)
             except (StaleCredentialVersionError, ConnectionNotFoundError):
                 logger.warning(
                     "refreshed credential not written back: kind=%s stale",
@@ -1593,7 +1660,7 @@ class ConnectionService:
                 return WriteBack.FAILED
             return WriteBack.WRITTEN
 
-        return stored.secret, write_back
+        return stored.secret, write_back, (None if slot is None else bind_session)
 
     async def _settle_session(
         self,

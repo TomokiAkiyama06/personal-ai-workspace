@@ -52,7 +52,7 @@ moves time without sleeping; production code builds ``ConnectionStore(database)`
 
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, tzinfo
 from enum import StrEnum
 from typing import Any
@@ -65,10 +65,12 @@ from paw_backend.connections.domain import (
     UNLIMITED,
     ConnectionKind,
     ConnectionStatus,
+    CredentialSuspicion,
     FailureCode,
     QuotaMetric,
     QuotaPeriod,
     RefusalReason,
+    SessionCollection,
     Unlimited,
     UsagePurpose,
     UsageStatus,
@@ -293,6 +295,25 @@ class StatusChange:
 
 
 @dataclass(frozen=True, slots=True)
+class SessionLease:
+    """A session slot bound to a Codex session (revision ``0280``, Decision
+    0096, 2): what its late collection needs. ``secret_handle`` is the
+    opaque handle the session was given (never the value; not in the
+    ``repr``). ``expired``: its lease ran out (by the database's clock) when
+    it was read. ``collected``: the collection's definite result, once it was
+    recorded (before the login was deleted)."""
+
+    kind: ConnectionKind
+    holder: uuid.UUID
+    session: uuid.UUID
+    secret_handle: str = field(repr=False)
+    expected_version: int
+    kept: bool
+    expired: bool
+    collected: SessionCollection | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class _Sums:
     requests: int
     tasks: int
@@ -507,6 +528,9 @@ class ConnectionStore:
         rows = await self._write(
             f"WITH {clock} UPDATE shared_connections SET secret_handle = %(handle)s,"
             " status = 'unavailable', checked_at = NULL,"
+            # A new credential is not the one a collection found stale
+            # (Decision 0096, 5).
+            " suspect_at = NULL, suspect_reason = NULL,"
             f" updated_at = (SELECT ts FROM clock) WHERE kind = %(kind)s{guard}"
             f" RETURNING {_CONNECTION_COLUMNS}",
             {**params, "kind": kind.value, "handle": handle},
@@ -587,8 +611,9 @@ class ConnectionStore:
     ) -> bool:
         """Take the connection's session slot for ``holder`` until
         ``ttl_seconds`` from now: when there is no row, or the row's lease has
-        expired (a takeover). ``False``: somebody else holds it; nothing was
-        changed."""
+        expired and is bound to no session (a takeover). ``False``: somebody
+        else holds it, or a session's row waits for its collection (Decision
+        0096, 2 B); nothing was changed."""
         clock, params = self._clock_cte()
         rows = await self._write(
             f"WITH {clock} INSERT INTO connection_session_leases"
@@ -600,6 +625,9 @@ class ConnectionStore:
             " heartbeat_at = EXCLUDED.heartbeat_at,"
             " expires_at = EXCLUDED.expires_at"
             " WHERE connection_session_leases.expires_at <= EXCLUDED.acquired_at"
+            # A row bound to a Codex session is the collection loop's once it
+            # expired (Decision 0096, 2 B): never taken over here.
+            " AND connection_session_leases.session IS NULL"
             " RETURNING holder",
             {**params, "kind": kind.value, "holder": holder, "ttl": ttl_seconds},
         )
@@ -624,14 +652,183 @@ class ConnectionStore:
 
     async def release_session_slot(
         self, kind: ConnectionKind, holder: uuid.UUID
-    ) -> None:
+    ) -> bool:
         """Give the slot back (``holder``'s row only: a lease taken over in
-        the meantime stays its new holder's)."""
-        await self._write(
+        the meantime stays its new holder's). ``False``: there was no row of
+        ``holder`` (taken over, or gone) and nothing was deleted."""
+        rows = await self._write(
             "DELETE FROM connection_session_leases"
-            " WHERE kind = %(kind)s AND holder = %(holder)s",
+            " WHERE kind = %(kind)s AND holder = %(holder)s RETURNING 1",
             {"kind": kind.value, "holder": holder},
         )
+        return bool(rows)
+
+    async def bind_session_slot(
+        self,
+        kind: ConnectionKind,
+        holder: uuid.UUID,
+        session: uuid.UUID,
+        handle: str,
+        version: int,
+        ttl_seconds: float,
+    ) -> bool:
+        """Record on ``holder``'s unexpired lease the Codex session it runs,
+        the credential handle the session was given and that credential's
+        version (Decision 0096, 2 B: committed BEFORE the login is placed),
+        and renew it. ``False``: the lease is not ``holder``'s any more (or
+        expired), or is bound already; nothing was changed."""
+        clock, params = self._clock_cte()
+        rows = await self._write(
+            f"WITH {clock} UPDATE connection_session_leases"
+            " SET session = %(session)s, secret_handle = %(handle)s,"
+            " expected_version = %(version)s,"
+            " heartbeat_at = (SELECT ts FROM clock),"
+            " expires_at = (SELECT ts FROM clock) + make_interval(secs => %(ttl)s)"
+            " WHERE kind = %(kind)s AND holder = %(holder)s AND session IS NULL"
+            " AND expires_at > (SELECT ts FROM clock) RETURNING 1",
+            {
+                **params,
+                "kind": kind.value,
+                "holder": holder,
+                "session": session,
+                "handle": handle,
+                "version": version,
+                "ttl": ttl_seconds,
+            },
+        )
+        return bool(rows)
+
+    async def record_session_slot_version(
+        self, kind: ConnectionKind, holder: uuid.UUID, version: int
+    ) -> bool:
+        """The immediate write-back stored ``version``: move the lease's
+        ``expected_version`` up to it (never down). ``False``: not
+        ``holder``'s bound lease."""
+        rows = await self._write(
+            "UPDATE connection_session_leases"
+            " SET expected_version = GREATEST(expected_version, %(version)s)"
+            " WHERE kind = %(kind)s AND holder = %(holder)s"
+            " AND session IS NOT NULL RETURNING 1",
+            {"kind": kind.value, "holder": holder, "version": version},
+        )
+        return bool(rows)
+
+    async def keep_session_slot(
+        self, kind: ConnectionKind, holder: uuid.UUID
+    ) -> uuid.UUID | None:
+        """Mark ``holder``'s bound lease ``kept`` (its CLI could not be
+        stopped, Decision 0096, 2 B); the session's UUID, or ``None`` when it
+        is not ``holder``'s bound lease."""
+        rows = await self._write(
+            "UPDATE connection_session_leases SET kept = true"
+            " WHERE kind = %(kind)s AND holder = %(holder)s"
+            " AND session IS NOT NULL RETURNING session",
+            {"kind": kind.value, "holder": holder},
+        )
+        return rows[0][0] if rows else None
+
+    async def session_slots(self) -> tuple[SessionLease, ...]:
+        """Every lease bound to a Codex session, with whether it expired (the
+        collection loop's look, Decision 0096, 1 D: the rows only, never the
+        session directories)."""
+        clock, params = self._clock_cte()
+        rows = await self._fetch(
+            f"WITH {clock} SELECT kind, holder, session, secret_handle,"
+            " expected_version, kept, expires_at <= (SELECT ts FROM clock),"
+            " collected FROM connection_session_leases WHERE session IS NOT NULL"
+            " ORDER BY kind",
+            params,
+        )
+        return tuple(
+            SessionLease(
+                ConnectionKind(row[0]),
+                row[1],
+                row[2],
+                row[3],
+                int(row[4]),
+                bool(row[5]),
+                bool(row[6]),
+                None if row[7] is None else SessionCollection(row[7]),
+            )
+            for row in rows
+        )
+
+    async def record_session_result(
+        self, kind: ConnectionKind, holder: uuid.UUID, result: SessionCollection
+    ) -> bool:
+        """Keep the collection's definite ``result`` on ``holder``'s bound
+        lease, before the session's login is deleted (a retry then finishes
+        with it). ``False``: not ``holder``'s bound lease."""
+        rows = await self._write(
+            "UPDATE connection_session_leases SET collected = %(result)s"
+            " WHERE kind = %(kind)s AND holder = %(holder)s"
+            " AND session IS NOT NULL RETURNING 1",
+            {"kind": kind.value, "holder": holder, "result": result.value},
+        )
+        return bool(rows)
+
+    async def take_over_session_slot(
+        self,
+        kind: ConnectionKind,
+        previous: uuid.UUID,
+        holder: uuid.UUID,
+        ttl_seconds: float,
+    ) -> bool:
+        """The collection loop takes over an expired lease bound to a session
+        (Decision 0096, 2 B: compare-and-swap on the holder, so of two
+        processes that try, one takes it): ``holder`` until ``ttl_seconds``
+        from now, and ``kept``. ``False``: not ``previous``'s expired bound
+        lease any more."""
+        clock, params = self._clock_cte()
+        rows = await self._write(
+            f"WITH {clock} UPDATE connection_session_leases"
+            " SET holder = %(holder)s, kept = true,"
+            " heartbeat_at = (SELECT ts FROM clock),"
+            " expires_at = (SELECT ts FROM clock) + make_interval(secs => %(ttl)s)"
+            " WHERE kind = %(kind)s AND holder = %(previous)s"
+            " AND session IS NOT NULL AND expires_at <= (SELECT ts FROM clock)"
+            " RETURNING 1",
+            {
+                **params,
+                "kind": kind.value,
+                "previous": previous,
+                "holder": holder,
+                "ttl": ttl_seconds,
+            },
+        )
+        return bool(rows)
+
+    async def finish_session_slot(
+        self,
+        kind: ConnectionKind,
+        holder: uuid.UUID,
+        suspicion: CredentialSuspicion | None = None,
+    ) -> bool:
+        """The session was collected (Decision 0096, 2 B's step 5): delete
+        ``holder``'s lease and, with ``suspicion`` (its login could not be read
+        back, Decision 0096, 5), mark the connection in the same transaction
+        while it still points at the handle the session was given (a
+        replaced credential is not the stale one). ``False``: not
+        ``holder``'s lease; nothing was changed."""
+        clock, params = self._clock_cte()
+        rows = await self._write(
+            f"WITH {clock}, gone AS (DELETE FROM connection_session_leases"
+            " WHERE kind = %(kind)s AND holder = %(holder)s"
+            " RETURNING secret_handle), marked AS (UPDATE shared_connections"
+            " SET suspect_at = (SELECT ts FROM clock),"
+            " suspect_reason = %(reason)s::text"
+            " WHERE %(reason)s::text IS NOT NULL AND kind = %(kind)s"
+            " AND secret_handle IN (SELECT g.secret_handle FROM gone g)"
+            " RETURNING 1) SELECT (SELECT count(*) FROM gone),"
+            " (SELECT count(*) FROM marked)",
+            {
+                **params,
+                "kind": kind.value,
+                "holder": holder,
+                "reason": None if suspicion is None else suspicion.value,
+            },
+        )
+        return bool(rows) and rows[0][0] > 0
 
     async def record_health(
         self, kind: ConnectionKind, handle: str, status: ConnectionStatus
@@ -647,6 +844,12 @@ class ConnectionStore:
             f"WITH {clock}, old AS (SELECT id, status FROM shared_connections"
             " WHERE kind = %(kind)s AND secret_handle = %(handle)s FOR UPDATE)"
             " UPDATE shared_connections c SET status = %(status)s,"
+            # A login found working clears a collection's mark (Decision
+            # 0096, 5).
+            " suspect_at = CASE WHEN %(status)s = 'connected'"
+            " THEN NULL ELSE c.suspect_at END,"
+            " suspect_reason = CASE WHEN %(status)s = 'connected'"
+            " THEN NULL ELSE c.suspect_reason END,"
             " checked_at = (SELECT ts FROM clock),"
             " updated_at = (SELECT ts FROM clock) FROM old WHERE c.id = old.id"
             " RETURNING c.id, old.status",

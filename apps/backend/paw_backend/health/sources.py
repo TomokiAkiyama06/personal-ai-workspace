@@ -588,8 +588,18 @@ class MemoryWorkerSource:
 # -- Codex / Claude -------------------------------------------------------------------
 
 _CONNECTIONS = """
-SELECT kind, status, enabled, extract(epoch FROM now() - checked_at)
+SELECT kind, status, enabled, extract(epoch FROM now() - checked_at),
+       suspect_reason
 FROM shared_connections
+"""
+# Decision 0096, 4: the Codex sessions whose slot outlives them (their CLI
+# could not be stopped, or their process ended before they did) until their
+# login was collected. A bound row that is neither is a session that runs.
+_KEPT_SESSIONS = """
+SELECT kind, count(*)
+FROM connection_session_leases
+WHERE session IS NOT NULL AND (kept OR expires_at <= now())
+GROUP BY kind
 """
 _IN_FLIGHT = """
 SELECT kind, count(*), extract(epoch FROM now() - min(started_at))
@@ -606,7 +616,15 @@ class ConnectionSource:
     check or a failed call), the age of that check and the calls in flight. An
     expired credential is an error, an unavailable one a warning, a disabled or
     missing one ``INFO`` (a deployment may use neither). ``available`` is what a
-    general user may see (the UI's "Claude: Available / Unavailable")."""
+    general user may see (the UI's "Claude: Available / Unavailable").
+
+    Decision 0096, 4: a Codex session whose slot is kept until its login was
+    collected (its unit is still to be stopped) is a warning
+    (``unit_running:<kind>``, with ``kept_sessions``); a collection that could
+    not read the login back marks the connection, an error
+    (``collect_failed:<kind>``) until a health check finds it ``connected``
+    or the credential is replaced. Counts and codes only: never a session's
+    UUID (the log has it)."""
 
     component = Component.CONNECTIONS
     max_age_seconds = limits.REPORT_MAX_AGE_SECONDS
@@ -627,6 +645,12 @@ class ConnectionSource:
                 _IN_FLIGHT, timeout_seconds=limits.CHECK_TIMEOUT_SECONDS
             )
         }
+        kept = {
+            kind: int(count)
+            for kind, count in await self._database.fetch_abortable(
+                _KEPT_SESSIONS, timeout_seconds=limits.CHECK_TIMEOUT_SECONDS
+            )
+        }
         stored = {row[0]: row for row in rows}
         parts = []
         reasons: list[str] = []
@@ -643,6 +667,8 @@ class ConnectionSource:
                 "checked_seconds_ago": _seconds(row[3]) if row is not None else None,
                 "in_flight": count,
                 "oldest_in_flight_seconds": _seconds(oldest),
+                "kept_sessions": kept.get(kind.value, 0),
+                "credential_suspect": row[4] if row is not None else None,
             }
             available = (
                 row is not None
@@ -653,6 +679,15 @@ class ConnectionSource:
             parts.append(part)
             metrics[f"{kind.value}_available"] = 1 if available else 0
             metrics[f"{kind.value}_in_flight"] = count
+            metrics[f"{kind.value}_kept_sessions"] = kept.get(kind.value, 0)
+            # Whatever the switch: a kept slot blocks the connection, and a
+            # stale login stays stale.
+            if kept.get(kind.value, 0):
+                severities.append(Severity.WARNING)
+                reasons.append(f"unit_running:{kind.value}")
+            if row is not None and row[4] is not None:
+                severities.append(Severity.ERROR)
+                reasons.append(f"collect_failed:{kind.value}")
             if row is None or not row[2]:
                 continue
             if row[1] == ConnectionStatus.EXPIRED.value:

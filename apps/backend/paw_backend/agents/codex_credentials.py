@@ -33,6 +33,7 @@ import asyncio
 import json
 import logging
 import os
+import secrets
 import stat
 from pathlib import Path
 from typing import Final
@@ -122,17 +123,28 @@ class CodexAuthFile:
 
 
 def _write_new(path: Path, value: str) -> None:
+    """``path`` as a new file, whole or not at all: written aside, then
+    linked in under its name (``FileExistsError`` when it exists). A reader
+    (the collection, Codex review of #292) never sees it empty or half
+    written."""
+    aside = path.with_name(f".{path.name}.{secrets.token_hex(8)}")
     fd = os.open(
-        path,
+        aside,
         os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
         AUTH_MODE,
     )
     try:
-        os.fchmod(fd, AUTH_MODE)  # whatever the umask
-        with os.fdopen(fd, "w", encoding="utf-8", closefd=False) as handle:
-            handle.write(value)
+        try:
+            os.fchmod(fd, AUTH_MODE)  # whatever the umask
+            with os.fdopen(fd, "w", encoding="utf-8", closefd=False) as handle:
+                handle.write(value)
+                handle.flush()
+                os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.link(aside, path, follow_symlinks=False)
     finally:
-        os.close(fd)
+        os.unlink(aside)
 
 
 def _read(path: Path) -> bytes:
