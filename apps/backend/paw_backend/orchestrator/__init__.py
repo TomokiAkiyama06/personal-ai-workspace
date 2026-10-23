@@ -22,6 +22,7 @@ from paw_backend.orchestrator.domain import (
     RunOutcome,
 )
 from paw_backend.orchestrator.errors import (
+    CloudSendRefusedError,
     DagAlreadyExistsError,
     DagNotFoundError,
     DagStateError,
@@ -106,6 +107,7 @@ __all__ = [
     "AttemptRecord",
     "AttemptState",
     "Clock",
+    "CloudSendRefusedError",
     "DagAlreadyExistsError",
     "DagNotFoundError",
     "DagRecord",

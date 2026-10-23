@@ -103,7 +103,6 @@ from paw_backend.orchestrator.limits import MAX_ERROR_CLASS_CHARS
 from paw_backend.orchestrator.placement import NodePlacementHandle, content_digest
 from paw_backend.orchestrator.plan import Plan, refuse_writers
 from paw_backend.orchestrator.plan_calls import (
-    CloudSendRecheck,
     PlanCallPlacementHandle,
     PlanCallStore,
 )
@@ -440,7 +439,6 @@ class Orchestrator:
         worktrees: NodeWorkspaces | None = None,
         connections: SessionService | None = None,
         principals: PrincipalDirectory | None = None,
-        cloud_send_recheck: CloudSendRecheck | None = None,
     ) -> None:
         """Every collaborator is checked here, once, so that a wrong one fails
         loudly at construction (``TypeError``, or ``InvalidOrchestratorArgumentError``
@@ -451,10 +449,9 @@ class Orchestrator:
         lease still holds: otherwise another worker could take the entry over
         while this one still runs its nodes).
 
-        ``cloud_send_recheck`` (Decision 0099, 2 (3)): called inside the
-        transaction that records a planner call's cloud send, before anything is
-        written (``plan_calls.py``); it raises to refuse the send. ``None``: no
-        recheck (the single-user check of ``ConfiguredCloudPolicy`` fills it)."""
+        The planner's calls are recorded with the ``store``'s
+        ``cloud_send_check`` (Decision 0099, 2: the same check of a cloud send in
+        the record's transaction as for a node's attempt)."""
         for name, value, expected in (
             ("tasks", tasks, TaskService),
             ("queue", queue, TaskQueue),
@@ -481,9 +478,6 @@ class Orchestrator:
             require_async_method(principals, "get_principal_by_id", 1)
         self._connections = connections
         self._principals = principals
-        if cloud_send_recheck is not None and not callable(cloud_send_recheck):
-            raise TypeError("cloud_send_recheck must be callable")
-        self._cloud_send_recheck = cloud_send_recheck
         clock = clock or SystemClock()
         if not callable(getattr(clock, "monotonic", None)):
             raise TypeError("clock must have monotonic()")
@@ -513,7 +507,9 @@ class Orchestrator:
         self._budget = budget
         self._loops = loops
         self._store = store
-        self._plan_calls = PlanCallStore(queue.database)
+        self._plan_calls = PlanCallStore(
+            queue.database, cloud_send_check=store.cloud_send_check
+        )
         self._activity = activity
         self._tools = tools
         self._authority = authority
@@ -1937,7 +1933,6 @@ class Orchestrator:
                     upstream={},
                 ),
                 fence=fence,
-                recheck=self._cloud_send_recheck,
             )
         if spec.dag_id is None:
             return None

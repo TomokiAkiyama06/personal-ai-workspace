@@ -283,9 +283,27 @@ Checklist (Decision 0093 5; the human, not an agent):
      `読めないリポジトリを含むため、結果を表示できません` (403 `task_result_forbidden`).
      Nothing is left to cancel.
 
-The CLI runtimes (`[agents.codex]` / `[agents.claude]`) cannot be enabled yet: the names
-are reserved and refused until a `CloudPolicy` Decision and the CLI smoke (Decision
-0093 3).
+The CLI runtimes cannot be enabled yet. [Decision 0099](decisions/0099-claude-planner-and-node-assignment.md)
+7 (issue #297) adds the sections, and the backend now parses and checks them, but the
+assembly does not build the CLI runtimes until the CLI smoke (Decision 0099, "PR の分け方"
+6): **a ladder that names `claude` or `codex` is still refused**
+(`orchestrator.ladders.<role>: cli runtimes are not enabled yet ...`). Leave them out of
+`/etc/paw/runtime.toml` until then. What is checked today:
+
+- `[cloud]`: `enabled` (`true` / `false`, default `false`; the production `CloudPolicy`
+  allows nothing while it is `false`) and `single_user_only` (only `true`: the cloud is
+  used only while the deployment has exactly one active user). `enabled = true` needs
+  `PAW_DATABASE_URL`. The start-up line shows `cloud: enabled single_user` or
+  `cloud: disabled`.
+- `[agents.claude]` / `[agents.codex]`: `model`, `session_base` (a canonical absolute
+  path) and `relay_command` (an argv list; it runs inside the CLI's container, so it is
+  not looked up on the host). No secret: the credential is the connection's.
+- A ladder with a CLI label needs `[cloud] enabled = true` and that label's
+  `[agents.<name>]`; `codex` is never on the planner's ladder.
+- `[orchestrator.assignment]`: each role's `allowed` labels (inside the role's ladder;
+  the worker's never `claude` / `codex`; the reviewer's both `claude` and `codex`) and
+  `default` (one of `allowed`; optional for the reviewer). The start-up line shows
+  `assignment: yes`.
 
 ## Implementation (Issue #54, Decision 0079)
 

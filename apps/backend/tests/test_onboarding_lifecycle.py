@@ -19,6 +19,7 @@ from paw_backend.auth.errors import (
 from paw_backend.authz import Authorizer, InMemoryAuditSink
 from paw_backend.authz.roles import ProjectRole, SystemRole
 from paw_backend.identity import UserStatus
+from paw_backend.identity.single_user import recheck_single_user_in
 from paw_backend.projects import (
     AccountNotActiveError,
     LastManagerError,
@@ -425,6 +426,24 @@ class RestoreTest(OnboardingTestCase):
         await self.auth.login("bob", PASSWORD, self.context())
         summary = await self.audit_summary()
         self.assertEqual(summary[("auth.user.restore", "allow", "restored")], 1)
+
+    async def test_a_restore_waits_for_a_cloud_sends_recount(self):
+        """Decision 0099, 2: making a user active takes the single-user lock
+        exclusively, so it waits for a send's recount (the lock taken shared in
+        the record's transaction) to end, and the other way round."""
+        await self.fake_passkey_step_up(self.owner_auth.record.id)
+        recount = self.new_database()
+        async with recount.engine.connect() as connection:
+            transaction = await connection.begin()
+            # Only the Owner is active (bob is pending deletion).
+            self.assertIs(await recheck_single_user_in(connection), True)
+            restore = asyncio.ensure_future(self.restore())
+            await asyncio.sleep(0.5)
+            self.assertFalse(restore.done())
+            await transaction.commit()
+        self.assertIs(await restore, UserStatus.ACTIVE)
+        async with recount.engine.begin() as connection:
+            self.assertIs(await recheck_single_user_in(connection), False)
 
     async def test_after_30_days_it_is_too_late(self):
         await self.advance(days=30)

@@ -62,6 +62,7 @@ from paw_backend.authz.roles import SystemRole
 from paw_backend.authz.subjects import Principal
 from paw_backend.db import Database
 from paw_backend.identity import UserStatus
+from paw_backend.identity.single_user import lock_user_activation
 
 # REQUIREMENTS.md: a deleted user is kept 30 days; only the Owner restores meanwhile.
 # Counted as 720 hours, like a project's retention: ``interval '30 days'`` on a
@@ -386,6 +387,9 @@ class UserLifecycleService:
     ) -> None:
         if not transition_allowed(old, new):  # a programming error
             raise AccountStateError
+        if new is UserStatus.ACTIVE:
+            # Decision 0099, 2: serialised with the cloud send's recount.
+            await lock_user_activation(session)
         changed = (
             await session.execute(
                 text("SELECT paw_change_user_status(:id, :old, :new, :now, :actor)"),

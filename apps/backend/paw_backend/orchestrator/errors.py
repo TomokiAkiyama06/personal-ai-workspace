@@ -167,6 +167,18 @@ class StalePlanCallError(OrchestratorError):
         super().__init__("The planner call has been superseded")
 
 
+class CloudSendRefusedError(OrchestratorError):
+    """The transaction that records a send to the cloud asked the deployment's
+    policy again (Decision 0099, 2, condition 3: one active user, counted under
+    the single-user lock) and was refused: nothing was written, and nothing may
+    be sent. ``CloudGate`` turns it into ``CLOUD_POLICY_DENIED``."""
+
+    code = "cloud_send_refused"
+
+    def __init__(self) -> None:
+        super().__init__("The cloud policy refused the send when it was recorded")
+
+
 class NodeStateError(OrchestratorError):
     """The node is not in a state that allows the operation."""
 

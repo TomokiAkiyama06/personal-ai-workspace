@@ -11,6 +11,20 @@ reads it and returns a :class:`RuntimeWiring`, the arguments ``create_app`` take
 ``orchestrator_config``). The parser only fills the existing dataclasses; their
 own ``__post_init__`` checks still run.
 
+Decision 0099, 7 (Approved; issue #297) adds the cloud's sections: ``[cloud]``
+(``enabled``, ``single_user_only``: the production ``CloudPolicy``,
+``agents/cloud_policy.py``), ``[agents.claude]`` / ``[agents.codex]`` (the CLI
+runtimes' ``model``, ``session_base`` and ``relay_command``) and
+``[orchestrator.assignment]`` (each role's ``allowed`` agents and ``default``).
+They are parsed and checked (a CLI label on a ladder needs ``[cloud] enabled =
+true`` and its ``[agents.<name>]``; ``codex`` is never a planner's rung;
+``allowed`` stays inside the role's ladder; a worker is never assigned a CLI
+runtime; the reviewer's ``allowed`` holds both ``claude`` and ``codex``), but
+``create_app`` is not given them yet: **a ladder that names a CLI runtime is
+refused** while :data:`CLI_RUNGS_ENABLED` is ``False``, until the CLI smoke
+(Decision 0099, "PR の分け方" 6). ``relay_command`` runs inside the CLI's
+container (Decision 0083, 6), so its ``argv[0]`` is not looked up on this host.
+
 **Whoever can write this file runs commands as the backend's user** (Decision
 0093, 2), so the file and everything it names must be root's alone:
 
@@ -60,6 +74,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 from urllib.parse import urlsplit
 
+from paw_backend.agents.cloud_policy import CLI_AGENT_LABELS, CloudSettings
 from paw_backend.agents.wiring import (
     DEFAULT_AGENT_LABEL,
     DEFAULT_MAIN_DEPLOYMENT,
@@ -119,7 +134,17 @@ _GROUP_NAME = re.compile(r"[a-z_][a-z0-9_-]{0,31}")
 # The keys of each table. A key a Decision fixed is "not settable" (its value is
 # the code's default), any other unknown key is "unknown key".
 _TOP_KEYS = frozenset(
-    {"version", "compute", "local_model", "ssh", "git", "sandbox", "orchestrator"}
+    {
+        "version",
+        "compute",
+        "local_model",
+        "ssh",
+        "git",
+        "sandbox",
+        "orchestrator",
+        "cloud",
+        "agents",
+    }
 )
 _COMPUTE_KEYS = frozenset(
     {"nvidia_smi", "gpu_index", "restore_margin_mib", "deployments"}
@@ -177,7 +202,7 @@ _GIT_KEYS = frozenset({"runner"})
 _SANDBOX_KEYS = frozenset(
     {"runner", "shim_base", "shim_group", "idle_seconds", "wrapper", "wrapper_options"}
 )
-_ORCHESTRATOR_KEYS = frozenset({"ladders"})
+_ORCHESTRATOR_KEYS = frozenset({"ladders", "assignment"})
 _ORCHESTRATOR_FIXED = frozenset(
     {
         "max_parallel_nodes",
@@ -190,6 +215,17 @@ _ORCHESTRATOR_FIXED = frozenset(
     }
 )
 _DEFAULT_IDENTITY_TEMPLATE = "/etc/paw/ssh-keys/{user}.key"
+_CLOUD_KEYS = frozenset({"enabled", "single_user_only"})
+_AGENT_KEYS = frozenset({"model", "session_base", "relay_command"})
+# The runtimes' other arguments: the policy, the toolkit's limits and the node
+# timeout (Decision 0021, 3 / 0083, 8) are the code's.
+_AGENT_FIXED = frozenset({"cloud_policy", "limits", "node_seconds"})
+_ASSIGNMENT_KEYS = frozenset({"allowed", "default"})
+
+#: Whether a ladder may name a CLI runtime. ``False`` until the CLI smoke
+#: (Decision 0099, "PR の分け方" 6): ``create_app`` does not build the CLI
+#: runtimes yet, so a ladder that names one is refused after every other check.
+CLI_RUNGS_ENABLED = False
 
 
 class RuntimeConfigError(Exception):
@@ -263,15 +299,44 @@ class RealHost:
 
 
 @dataclass(frozen=True, slots=True)
+class CliAgentSetup:
+    """An ``[agents.<name>]`` section (Decision 0099, 7): the arguments of
+    ``ClaudeCliRuntime`` / ``CodexCliRuntime`` the file sets. No secret: the
+    credential is the connection's (Decision 0087)."""
+
+    label: str
+    model: str
+    session_base: str
+    relay_command: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class RoleAssignment:
+    """One role of ``[orchestrator.assignment]`` (Decision 0099, 4): the agents
+    a planner may assign a node of the role to, and the one a node without an
+    ``agent`` gets (``None`` for the reviewer: the backend's review nodes name
+    theirs)."""
+
+    allowed: tuple[str, ...]
+    default: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimeWiring:
     """The ``create_app`` arguments the file enables (``None``: not enabled).
-    ``parts`` is the summary of what is enabled, without paths or commands."""
+    ``parts`` is the summary of what is enabled, without paths or commands.
+
+    ``cloud``, ``agents`` and ``assignment`` (Decision 0099, 7) are parsed and
+    checked but not ``create_app`` arguments yet (see the module)."""
 
     compute: ComputeSetup | None = None
     local_model: LocalModelSetup | None = None
     sandbox: SandboxSetup | None = None
     git_runner: GitRunner | None = None
     orchestrator_config: OrchestratorConfig | None = None
+    cloud: CloudSettings | None = None
+    agents: Mapping[str, CliAgentSetup] = field(default_factory=dict)
+    assignment: Mapping[NodeRole, RoleAssignment] | None = None
     parts: tuple[str, ...] = field(default=())
 
     def create_app_arguments(self) -> dict[str, object]:
@@ -410,6 +475,13 @@ def check_environment(wiring: RuntimeWiring, settings: Settings) -> None:
     refuses ``local_runtimes`` without a database). Nothing is connected to."""
     if wiring.orchestrator_config is not None and settings.database_url is None:
         raise RuntimeConfigError("orchestrator", "needs PAW_DATABASE_URL")
+    if (
+        wiring.cloud is not None
+        and wiring.cloud.enabled
+        and settings.database_url is None
+    ):
+        # The policy counts the users and reads the task's project.
+        raise RuntimeConfigError("cloud", "needs PAW_DATABASE_URL")
 
 
 # --- the parser -----------------------------------------------------------------
@@ -670,17 +742,17 @@ class _Parser:
         version = document.get("version")
         if type(version) is not int or version != RUNTIME_CONFIG_VERSION:
             raise RuntimeConfigError("version", "must be 1")
-        if "agents" in document:
-            agents = document["agents"]
-            if isinstance(agents, dict):
-                for name in agents:
-                    if name in ("codex", "claude"):
-                        raise RuntimeConfigError(
-                            f"agents.{name}", "cli runtimes are not available yet"
-                        )
-            raise RuntimeConfigError("agents", "cli runtimes are not available yet")
         _keys("", document, _TOP_KEYS)
         parts: list[str] = []
+        cloud = None
+        if "cloud" in document:
+            cloud = self._cloud(_table("cloud", document["cloud"]))
+            parts.append(
+                "cloud: enabled single_user" if cloud.enabled else "cloud: disabled"
+            )
+        agents: dict[str, CliAgentSetup] = {}
+        if "agents" in document:
+            agents = self._agents(_table("agents", document["agents"]))
 
         compute = None
         if "compute" in document:
@@ -730,26 +802,82 @@ class _Parser:
         if "git" in document:
             parts.append(f"git: {git_kind}")
         orchestrator = None
+        assignment = None
         if "orchestrator" in document:
             # ``create_app`` builds the local agent runtime only with
             # ``local_model``, ``sandbox`` and ``orchestrator_config`` together.
             runtimes: set[str] = set()
             if local_model is not None and sandbox is not None:
                 runtimes.add(local_model.agent_label)
-            orchestrator = self._orchestrator(
-                _table("orchestrator", document["orchestrator"]), runtimes
+            orchestrator, assignment = self._orchestrator(
+                _table("orchestrator", document["orchestrator"]),
+                runtimes,
+                cloud,
+                agents,
             )
             parts.append(
                 "orchestrator: ladders=" + ",".join(sorted(orchestrator.labels))
             )
+            if assignment is not None:
+                parts.append("assignment: yes")
         return RuntimeWiring(
             compute=compute,
             local_model=local_model,
             sandbox=sandbox,
             git_runner=git_runner,
             orchestrator_config=orchestrator,
+            cloud=cloud,
+            agents=agents,
+            assignment=assignment,
             parts=tuple(parts),
         )
+
+    def _cloud(self, table: dict[str, Any]) -> CloudSettings:
+        _keys("cloud", table, _CLOUD_KEYS)
+        enabled = table.get("enabled", False)
+        if type(enabled) is not bool:
+            raise RuntimeConfigError("cloud.enabled", "must be true or false")
+        if table.get("single_user_only", True) is not True:
+            # Decision 0099's point 5 A: only while one user is active.
+            raise RuntimeConfigError(
+                "cloud.single_user_only", "must be true (Decision 0099, 5)"
+            )
+        return CloudSettings(enabled=enabled, single_user_only=True)
+
+    def _agents(self, table: dict[str, Any]) -> dict[str, CliAgentSetup]:
+        _keys("agents", table, frozenset(CLI_AGENT_LABELS))
+        agents: dict[str, CliAgentSetup] = {}
+        for name in CLI_AGENT_LABELS:
+            if name not in table:
+                continue
+            where = f"agents.{name}"
+            section = _table(where, table[name])
+            _keys(where, section, _AGENT_KEYS, _AGENT_FIXED)
+            for key in ("model", "session_base", "relay_command"):
+                if key not in section:
+                    raise RuntimeConfigError(f"{where}.{key}", "is required")
+            model = section["model"]
+            if type(model) is not str or _MODEL.fullmatch(model) is None:
+                raise RuntimeConfigError(f"{where}.model", "invalid value")
+            session_base = _absolute(f"{where}.session_base", section["session_base"])
+            relay = section["relay_command"]
+            if (
+                not isinstance(relay, list)
+                or not 1 <= len(relay) <= 64
+                or not all(
+                    type(part) is str
+                    and part
+                    and "\x00" not in part
+                    and len(part) <= _MAX_PATH
+                    for part in relay
+                )
+            ):
+                raise RuntimeConfigError(
+                    f"{where}.relay_command",
+                    "must be a list of 1 to 64 non-empty strings (no shell)",
+                )
+            agents[name] = CliAgentSetup(name, model, session_base, tuple(relay))
+        return agents
 
     def _compute(
         self, table: dict[str, Any]
@@ -956,6 +1084,11 @@ class _Parser:
             raise RuntimeConfigError(
                 "local_model.agent_label", "must match [a-z][a-z0-9._-]{0,63}"
             )
+        if label in CLI_AGENT_LABELS:
+            # The policy and the ladders' checks tell the runtimes apart by it.
+            raise RuntimeConfigError(
+                "local_model.agent_label", "must not be a cli runtime's label"
+            )
         return _build(
             "local_model",
             lambda: LocalModelSetup(
@@ -1066,8 +1199,12 @@ class _Parser:
         return setup, kind
 
     def _orchestrator(
-        self, table: dict[str, Any], runtimes: set[str]
-    ) -> OrchestratorConfig:
+        self,
+        table: dict[str, Any],
+        runtimes: set[str],
+        cloud: CloudSettings | None,
+        agents: Mapping[str, CliAgentSetup],
+    ) -> tuple[OrchestratorConfig, dict[NodeRole, RoleAssignment] | None]:
         _keys("orchestrator", table, _ORCHESTRATOR_KEYS, _ORCHESTRATOR_FIXED)
         if not runtimes:
             raise RuntimeConfigError(
@@ -1092,12 +1229,106 @@ class _Parser:
                 or not all(type(label) is str for label in ladder)
             ):
                 raise RuntimeConfigError(where, "must be a non-empty list of labels")
-            if any(label not in runtimes for label in ladder):
-                raise RuntimeConfigError(
-                    where, "names a label that is not an enabled agent runtime"
-                )
+            for label in ladder:
+                if label in CLI_AGENT_LABELS:
+                    self._cli_rung(where, role, label, cloud, agents)
+                elif label not in runtimes:
+                    raise RuntimeConfigError(
+                        where, "names a label that is not an enabled agent runtime"
+                    )
             ladders[role] = tuple(ladder)
-        return _build("orchestrator.ladders", lambda: OrchestratorConfig(ladders))
+        assignment = None
+        if "assignment" in table:
+            assignment = self._assignment(
+                _table("orchestrator.assignment", table["assignment"]), ladders
+            )
+        if not CLI_RUNGS_ENABLED:
+            for role in NodeRole:
+                if any(label in CLI_AGENT_LABELS for label in ladders[role]):
+                    raise RuntimeConfigError(
+                        f"orchestrator.ladders.{role.value}",
+                        "cli runtimes are not enabled yet (Decision 0099: after "
+                        "the CLI smoke)",
+                    )
+        config = _build("orchestrator.ladders", lambda: OrchestratorConfig(ladders))
+        return config, assignment
+
+    @staticmethod
+    def _cli_rung(
+        where: str,
+        role: NodeRole,
+        label: str,
+        cloud: CloudSettings | None,
+        agents: Mapping[str, CliAgentSetup],
+    ) -> None:
+        """A CLI runtime on a ladder (Decision 0099, 7)."""
+        if role is NodeRole.PLANNER and label != "claude":
+            raise RuntimeConfigError(
+                where,
+                "names a cli label other than claude (Decision 0099, 3)",
+            )
+        if cloud is None or not cloud.enabled:
+            raise RuntimeConfigError(
+                where, "names a cli runtime's label without [cloud] enabled = true"
+            )
+        if label not in agents:
+            raise RuntimeConfigError(
+                where, f"names a cli runtime's label without its [agents.{label}]"
+            )
+
+    def _assignment(
+        self, table: dict[str, Any], ladders: Mapping[NodeRole, tuple[str, ...]]
+    ) -> dict[NodeRole, RoleAssignment]:
+        """``[orchestrator.assignment]`` (Decision 0099, 4 and 7)."""
+        roles = tuple(role.value for role in NodeRole)
+        _keys("orchestrator.assignment", table, frozenset(roles))
+        assignment: dict[NodeRole, RoleAssignment] = {}
+        for role in NodeRole:
+            where = f"orchestrator.assignment.{role.value}"
+            if role.value not in table:
+                raise RuntimeConfigError(where, "is required")
+            entry = _table(where, table[role.value])
+            _keys(where, entry, _ASSIGNMENT_KEYS)
+            allowed = entry.get("allowed")
+            if (
+                not isinstance(allowed, list)
+                or not allowed
+                or not all(
+                    type(label) is str and _AGENT_LABEL.fullmatch(label) is not None
+                    for label in allowed
+                )
+                or len(set(allowed)) != len(allowed)
+            ):
+                raise RuntimeConfigError(
+                    f"{where}.allowed", "must be a non-empty list of distinct labels"
+                )
+            if any(label not in ladders[role] for label in allowed):
+                raise RuntimeConfigError(
+                    f"{where}.allowed",
+                    f"names a label that is not on orchestrator.ladders.{role.value}",
+                )
+            if role is NodeRole.WORKER and any(
+                label in CLI_AGENT_LABELS for label in allowed
+            ):
+                # A worker runs on the cloud only by an escalation (Decision
+                # 0099, 4: point 4 A).
+                raise RuntimeConfigError(
+                    f"{where}.allowed", "must not name a cli runtime (Decision 0099, 4)"
+                )
+            if role is NodeRole.REVIEWER and not {"claude", "codex"} <= set(allowed):
+                raise RuntimeConfigError(
+                    f"{where}.allowed",
+                    "must include both claude and codex (Decision 0099, 5)",
+                )
+            default = entry.get("default")
+            if default is None and role is not NodeRole.REVIEWER:
+                raise RuntimeConfigError(f"{where}.default", "is required")
+            if default is not None and (
+                type(default) is not str or default not in allowed
+            ):
+                raise RuntimeConfigError(f"{where}.default", "must be one of allowed")
+            assignment[role] = RoleAssignment(tuple(allowed), default)
+        return assignment
 
 
 def _build[T](where: str, make: Callable[[], T]) -> T:
@@ -1113,12 +1344,15 @@ def _build[T](where: str, make: Callable[[], T]) -> T:
 
 
 __all__ = [
+    "CLI_RUNGS_ENABLED",
     "FILE_SETTING",
     "MAX_CONFIG_BYTES",
     "MAX_LINK_HOPS",
     "RUNTIME_CONFIG_VERSION",
+    "CliAgentSetup",
     "Host",
     "RealHost",
+    "RoleAssignment",
     "RuntimeConfigError",
     "RuntimeWiring",
     "check_environment",

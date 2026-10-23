@@ -22,6 +22,7 @@ from types import MappingProxyType
 from unittest import mock
 
 from paw_backend.agents.cloud import CloudGate
+from paw_backend.agents.failures import Failure, RuntimeFailure
 from paw_backend.connections import ConnectionKind
 from paw_backend.orchestrator.audit import (
     CLOUD_PLANNING_REASON,
@@ -32,6 +33,7 @@ from paw_backend.orchestrator.audit import (
 )
 from paw_backend.orchestrator.domain import ExecutionPlacement, NodeRole, RunOutcome
 from paw_backend.orchestrator.errors import (
+    CloudSendRefusedError,
     InvalidOrchestratorArgumentError,
     NodeStopped,
     StopReason,
@@ -46,6 +48,7 @@ from paw_backend.orchestrator.plan_calls import (
 from paw_backend.orchestrator.result import NodeResult
 from paw_backend.orchestrator.runtime import NodeAssignment, NodeOutcome
 from paw_backend.orchestrator.scope import agent_id_of
+from paw_backend.orchestrator.store import DagStore
 from paw_backend.tasks import TaskCommand, TaskRun
 from paw_backend.tools import PostgresTaskActivity, TaskActivity
 
@@ -152,10 +155,11 @@ class PlanCallCase(PostgresOrchestratorTestCase):
             content=CONTENT,
         )
         guard = overrides.pop("guard", None) or RunGuard(entry.task_id, RUN, Active())
-        values.update(overrides)
-        return PlanCallPlacementHandle(
-            guard, PlanCallStore(h.queue.database), h.queue, **values
+        store = PlanCallStore(
+            h.queue.database, cloud_send_check=overrides.pop("check", None)
         )
+        values.update(overrides)
+        return PlanCallPlacementHandle(guard, store, h.queue, **values)
 
     async def expire_the_lease(self) -> None:
         await self.owner_sql(
@@ -399,39 +403,68 @@ class PlanCallRecordTest(PlanCallCase):
         self.assertIsNone(call.placement)
         self.assertEqual(await self.sends_of(task_id), [])
 
-    async def test_the_recheck_runs_in_the_record_transaction_for_the_cloud(self):
-        # Decision 0099, 2 (3): the single-user recheck's call point.
+    async def test_the_cloud_send_check_runs_in_the_record_transaction(self):
+        # Decision 0099, 2 (condition 3): the policy asked again in the
+        # record's transaction (``ConfiguredCloudPolicy.recheck_in``), for a
+        # cloud send only.
         h = self.harness()
         task_id, entry = await self.running(h)
         seen = []
 
-        async def recheck(session):
+        async def check(session):
             seen.append(session.in_transaction())
+            return True
 
         local = await self.start_call(h, entry, "w1")
-        await self.handle(h, entry, "w1", local, recheck=recheck).record(
+        await self.handle(h, entry, "w1", local, check=check).record(
             L.LOCAL_GPU, agent="local", model="main"
         )
         self.assertEqual(seen, [])  # a local call sends nothing
         cloud = await self.start_call(h, entry, "w1", claim_call=2)
-        await self.handle(h, entry, "w1", cloud, recheck=recheck).record(
+        await self.handle(h, entry, "w1", cloud, check=check).record(
             L.CLOUD, agent="claude", model="claude-opus"
         )
         self.assertEqual(seen, [True])
         self.assertEqual(len(await self.sends_of(task_id)), 1)
 
-    async def test_a_refusing_recheck_writes_nothing(self):
+    async def test_a_refusing_cloud_send_check_writes_nothing(self):
         h = self.harness()
         task_id, entry = await self.running(h)
         seq = await self.start_call(h, entry, "w1")
+        for answer in (False, None, "yes"):  # only an exact True allows
+
+            async def check(session, answer=answer):
+                return answer
+
+            with self.subTest(answer=answer), self.assertRaises(CloudSendRefusedError):
+                await self.handle(h, entry, "w1", seq, check=check).record(
+                    L.CLOUD, agent="claude", model="claude-opus"
+                )
+        (call,) = await self.call_rows(task_id)
+        self.assertIsNone(call.placement)
+        self.assertEqual(await self.sends_of(task_id), [])
+
+    async def test_the_gate_refuses_the_send_when_the_check_refuses(self):
+        h = self.harness()
+        task_id, entry = await self.running(h)
+        seq = await self.start_call(h, entry, "w1")
+        sent = []
 
         async def refuse(session):
-            raise NodeStopped(StopReason.TASK_ENDED)
+            return False
 
-        with self.assertRaises(NodeStopped):
-            await self.handle(h, entry, "w1", seq, recheck=refuse).record(
-                L.CLOUD, agent="claude", model="claude-opus"
+        with self.assertRaises(RuntimeFailure) as caught:
+            await CloudGate(Allow()).session(
+                gated_assignment(
+                    task_id, self.handle(h, entry, "w1", seq, check=refuse), sent
+                ),
+                kind=ConnectionKind.CLAUDE,
+                request="the request",
+                agent="claude",
+                model="claude-opus",
             )
+        self.assertIs(caught.exception.failure, Failure.CLOUD_POLICY_DENIED)
+        self.assertEqual(sent, [])
         (call,) = await self.call_rows(task_id)
         self.assertIsNone(call.placement)
         self.assertEqual(await self.sends_of(task_id), [])
@@ -445,39 +478,10 @@ class PlanCallRecordTest(PlanCallCase):
         seq = await self.start_call(h, entry, "w1")
         sent = []
 
-        class Connections:
-            async def execute_session(self, kind, request, *, gate=None):
-                await gate()
-                sent.append(request)
-                return "result"
-
-        class Allow:
-            async def allows(self, assignment):
-                return True
-
-        def assignment(placement):
-            return NodeAssignment(
-                task_id=task_id,
-                node_key="plan",
-                role=NodeRole.PLANNER,
-                title="Fix the parser",
-                goal="Fix the parser",
-                input={},
-                upstream={},
-                agent="claude",
-                attempt=1,
-                approach=0,
-                tools=object(),
-                budget=object(),
-                roots=MappingProxyType({}),
-                placement=placement,
-                connections=Connections(),
-            )
-
         await self.expire_the_lease()
         with self.assertRaises(NodeStopped):
             await CloudGate(Allow()).session(
-                assignment(self.handle(h, entry, "w1", seq)),
+                gated_assignment(task_id, self.handle(h, entry, "w1", seq), sent),
                 kind=ConnectionKind.CLAUDE,
                 request="the request",
                 agent="claude",
@@ -487,6 +491,40 @@ class PlanCallRecordTest(PlanCallCase):
         (call,) = await self.call_rows(task_id)
         self.assertIsNone(call.placement)
         self.assertEqual(await self.sends_of(task_id), [])
+
+
+class Allow:
+    async def allows(self, assignment):
+        return True
+
+
+def gated_assignment(task_id, placement, sent: list) -> NodeAssignment:
+    """A planner call for ``CloudGate`` whose connections run the gate (the
+    record) after the admission and then "send" (``sent``)."""
+
+    class Connections:
+        async def execute_session(self, kind, request, *, gate=None):
+            await gate()
+            sent.append(request)
+            return "result"
+
+    return NodeAssignment(
+        task_id=task_id,
+        node_key="plan",
+        role=NodeRole.PLANNER,
+        title="Fix the parser",
+        goal="Fix the parser",
+        input={},
+        upstream={},
+        agent="claude",
+        attempt=1,
+        approach=0,
+        tools=object(),
+        budget=object(),
+        roots=MappingProxyType({}),
+        placement=placement,
+        connections=Connections(),
+    )
 
 
 class CloudPlanner(FakeRuntime):
@@ -568,6 +606,32 @@ class PlanCallOrchestratorTest(PlanCallCase):
             send["agent_id"],
             agent_id_of(task_id, RUN, PLANNER_IDENTITY, 1, claim=(entry["id"], 1)),
         )
+
+    async def test_the_planner_record_asks_the_dag_stores_cloud_send_check(self):
+        # One check for every cloud send of the task: the orchestrator hands
+        # the DAG store's check to the planner calls' record too.
+        asked = []
+
+        async def refuse(session):
+            asked.append(session.in_transaction())
+            return False
+
+        planner = CloudPlanner(self, "local", script={"plan": GOOD})
+        h = self.harness(
+            runtimes={"local": planner},
+            store=DagStore(self.database, cloud_send_check=refuse),
+        )
+        task_id = await self.prepare(h)
+
+        report = await h.orchestrator.run_once("w1")
+
+        # Each planner call was refused at its record (a failed attempt).
+        self.assertEqual(report.outcome, RunOutcome.PLAN_FAILED)
+        self.assertEqual(asked, [True, True])
+        self.assertEqual(planner.seen, [])
+        rows = await self.call_rows(task_id)
+        self.assertEqual([r.placement for r in rows], [None, None])
+        self.assertEqual(await self.sends_of(task_id), [])
 
     async def test_a_retried_run_numbers_its_calls_without_a_collision(self):
         planner = FakeRuntime(

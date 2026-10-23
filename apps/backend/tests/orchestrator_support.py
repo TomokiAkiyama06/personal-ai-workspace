@@ -280,7 +280,7 @@ class Harness:
         )
         self.budget = options.pop("budget", None) or BudgetTracker(database)
         self.loops = LoopDetector(database)
-        self.store = DagStore(database)
+        self.store = options.pop("store", None) or DagStore(database)
         self.runtimes = options.pop("runtimes", None) or {"local": FakeRuntime()}
         self.authority = options.pop("authority", None) or FakeAuthority()
         self.tools = options.pop("tools", None) or FakeTools()

@@ -35,18 +35,19 @@ row. The start takes the task row, the budget rows and the entry, in that order
 (as ``Orchestrator._start_runtime_with_lease``); nothing locks them the other
 way round.
 
-**Single-user recheck** (Decision 0099, 2, 3): before a cloud send is written,
-the record's transaction must count the deployment's active users again under
-the shared advisory lock that activating a user takes exclusively. That check
-is ``ConfiguredCloudPolicy``'s (another pull request of #297); here it is the
-``recheck`` hook, called inside the record's transaction for ``CLOUD`` only,
-just before anything is written. ``None`` (the default until that pull request
-wires it): no recheck. A hook that refuses raises (``NodeStopped``), which rolls
-the transaction back: nothing is written, nothing is sent.
+**The policy asked again** (Decision 0099, 2, condition 3): before a cloud
+send is written, the record's transaction asks the store's ``cloud_send_check``
+(``ConfiguredCloudPolicy.recheck_in``: the switch, then the active users counted
+under the single-user lock taken shared), the same check as a node attempt's
+placement (``DagStore.record_placement``; the orchestrator hands this store the
+DAG store's check). It is asked for ``CLOUD`` only, after the fencing and before
+anything is written; anything but ``True`` writes nothing and raises
+``CloudSendRefusedError`` (``CloudGate``: ``CLOUD_POLICY_DENIED``). ``None``: no
+check there (the policy's own ``allows`` is then the only one).
 """
 
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -62,6 +63,7 @@ from paw_backend.orchestrator.audit import (
 )
 from paw_backend.orchestrator.domain import ExecutionPlacement
 from paw_backend.orchestrator.errors import (
+    CloudSendRefusedError,
     InvalidOrchestratorArgumentError,
     NodeStopped,
     StalePlanCallError,
@@ -70,6 +72,7 @@ from paw_backend.orchestrator.errors import (
 from paw_backend.orchestrator.gateway import AttemptFence, RunGuard
 from paw_backend.orchestrator.limits import MAX_PLAN_ATTEMPTS
 from paw_backend.orchestrator.models import PlanCallRow
+from paw_backend.orchestrator.store import CloudSendCheck
 from paw_backend.orchestrator.validation import (
     MAX_INT32,
     check_agent_label,
@@ -91,10 +94,6 @@ from paw_backend.tasks.queueing import LeaseLostError, QueueEntry, TaskQueue
 _ENDED_TASK_STATES = frozenset(
     {TaskState.COMPLETED, TaskState.FAILED, TaskState.CANCELLED}
 )
-
-# The hook of the single-user recheck (module docstring): called with the
-# record's session, inside its transaction, before a cloud send is written.
-CloudSendRecheck = Callable[[AsyncSession], Awaitable[None]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,8 +147,16 @@ def _check_run(run: object) -> TaskRun:
 class PlanCallStore:
     """SQL of ``agent_plan_calls`` (no policy; see the module)."""
 
-    def __init__(self, database: Database) -> None:
+    def __init__(
+        self,
+        database: Database,
+        *,
+        cloud_send_check: CloudSendCheck | None = None,
+    ) -> None:
+        if cloud_send_check is not None and not callable(cloud_send_check):
+            raise TypeError("cloud_send_check must be callable")
         self._database = database
+        self._cloud_send_check = cloud_send_check
 
     async def start_in(
         self,
@@ -204,7 +211,6 @@ class PlanCallStore:
         agent: str,
         model: str,
         cloud: CloudSend | None = None,
-        recheck: CloudSendRecheck | None = None,
     ) -> PlanCallRecord:
         """Record where the call ``seq`` of ``run`` runs, in the caller's
         transaction (module docstring). Raises, writing nothing:
@@ -212,9 +218,9 @@ class PlanCallStore:
         ``TaskNotRunningError`` (it is paused or waiting), ``LeaseLostError``
         (``owner`` no longer holds the entry's lease), ``StalePlanCallError``
         (the row is not ``owner``'s, or a later call of the run was made),
-        ``InvalidOrchestratorArgumentError("placement")`` (already recorded),
-        and whatever ``recheck`` raises. The caller rolls the transaction back
-        after any of them."""
+        ``InvalidOrchestratorArgumentError("placement")`` (already recorded)
+        and ``CloudSendRefusedError`` (the ``cloud_send_check`` refused a cloud
+        send). The caller rolls the transaction back after any of them."""
         _check_session(session)
         if not isinstance(queue, TaskQueue):
             raise InvalidOrchestratorArgumentError("queue")
@@ -285,10 +291,12 @@ class PlanCallStore:
         if row.placement is not None:
             raise InvalidOrchestratorArgumentError("placement")
         if cloud is not None:
-            # Decision 0099, 2 (3): the single-user recheck, in this
-            # transaction, before anything is written (module docstring).
-            if recheck is not None:
-                await recheck(session)
+            # Decision 0099, 2: the policy asked again under the single-user
+            # lock (shared) before anything is written; a refusal writes
+            # nothing and nothing is sent (module docstring).
+            check = self._cloud_send_check
+            if check is not None and await check(session) is not True:
+                raise CloudSendRefusedError()
             # The audit row first: the call's columns are set together
             # afterwards (a flush in between would write a cloud placement
             # without its audit id, which the database refuses).
@@ -348,7 +356,6 @@ class PlanCallPlacementHandle:
         agent_id: uuid.UUID,
         content: tuple[str, int],
         fence: AttemptFence | None = None,
-        recheck: CloudSendRecheck | None = None,
         now: Callable[[], datetime] | None = None,
     ) -> None:
         self._guard = guard
@@ -360,7 +367,6 @@ class PlanCallPlacementHandle:
         self._agent_id = agent_id
         self._content = content
         self._fence = fence or AttemptFence()
-        self._recheck = recheck
         self._now = now or (lambda: datetime.now(UTC))
         self._recorded = False
 
@@ -405,7 +411,6 @@ class PlanCallPlacementHandle:
                     agent=agent,
                     model=model,
                     cloud=cloud,
-                    recheck=self._recheck,
                 )
         except StaleRunError:
             await self._guard.refused()

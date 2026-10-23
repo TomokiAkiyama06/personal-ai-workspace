@@ -312,14 +312,19 @@ class BudgetTest(PostgresOrchestratorTestCase):
 
         await h.tasks.execute(task_id, TaskCommand.PAUSE, actor=self.user)
         with self.assertRaises(TaskNotRunningError):
-            await h.orchestrator._start_planner_call(run, both)
+            await h.orchestrator._start_planner_call(run, both, 2)
         consumed = await self.consumed(h, task_id)
         self.assertEqual((consumed["steps"], consumed["retries"]), (0, 0))
+        # Nor is the call's row made (Decision 0099, 3: the same transaction).
+        self.assertEqual(await self.scalar("SELECT count(*) FROM agent_plan_calls"), 0)
 
         await h.tasks.execute(task_id, TaskCommand.RESUME, actor=self.user)
-        await h.orchestrator._start_planner_call(run, both)
+        seq = await h.orchestrator._start_planner_call(run, both, 2)
         consumed = await self.consumed(h, task_id)
         self.assertEqual((consumed["steps"], consumed["retries"]), (1, 1))
+        self.assertEqual(seq, 1)
+        (row,) = await self.rows("SELECT seq, claim_call, owner FROM agent_plan_calls")
+        self.assertEqual(row, {"seq": 1, "claim_call": 2, "owner": "w1"})
 
     async def test_a_node_that_spends_the_budget_stops_every_node_and_tool_call(self):
         tools = FakeTools()

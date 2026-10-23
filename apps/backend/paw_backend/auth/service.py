@@ -107,6 +107,7 @@ from paw_backend.identity import (
     TokenRedeemer,
     normalize_login_name,
 )
+from paw_backend.identity.single_user import lock_user_activation
 
 logger = logging.getLogger(__name__)
 
@@ -1075,6 +1076,9 @@ class AuthService:
         await self._throttle.reset_in(
             session, ThrottleScope.LOGIN_ACCOUNT, tokens.account_key(login_name)
         )
+        # Decision 0099, 2: an activation is serialised with the cloud send's
+        # single-user recount.
+        await lock_user_activation(session)
         await session.execute(
             text("SELECT paw_activate_invited_user(:id, :now)"),
             {"id": user_id, "now": now},
