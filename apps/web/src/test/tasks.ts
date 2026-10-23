@@ -14,6 +14,7 @@ import type {
   TaskDetail,
   TaskGrant,
   TaskList,
+  TaskResult,
   TaskState,
   ToolApproval,
 } from "../tasks/model";
@@ -39,6 +40,7 @@ export function sampleTasks(now = Date.now()): TaskDetail[] {
     retryCount: 0,
     currentStep: null,
     dag: null,
+    result: "none" as const,
     project: "ExampleProject",
   };
   return [
@@ -380,7 +382,11 @@ const AFTER: Partial<Record<ControlCommand, TaskState>> = {
 export function fakeTaskSource(
   tasks: TaskDetail[] = sampleTasks(),
   pullRequests: PullRequestRecord[] = samplePullRequests(),
+  // Read-only results by task id (Decision 0098): an error is thrown as the API's.
+  results: Record<string, TaskResult | ApiError> = {},
 ) {
+  // The task ids whose result was read, in order (the panel reads it once).
+  const resultReads: string[] = [];
   const calls: { id: string; command: ControlCommand; options: ControlOptions }[] = [];
   const created: NewTask[] = [];
   const decisions: { id: string; decision: string }[] = [];
@@ -403,6 +409,13 @@ export function fakeTaskSource(
       // A copy, as a response would be: a test changing the stored task later
       // does not change what the screen already holds.
       return { ...find(id) };
+    },
+    async getTaskResult(id) {
+      resultReads.push(id);
+      const result = results[id];
+      if (result === undefined) throw new ApiError(404, "task_result_not_found", "no result");
+      if (result instanceof ApiError) throw result;
+      return result;
     },
     async createTask(task) {
       created.push(task);
@@ -435,6 +448,7 @@ export function fakeTaskSource(
           },
         ],
         dag: null,
+        result: "none",
       };
       state.unshift(queued);
       return { ...queued };
@@ -521,5 +535,5 @@ export function fakeTaskSource(
       grants = grants.filter((grant) => grant.id !== id);
     },
   };
-  return { source, calls, decisions, revoked, created };
+  return { source, calls, decisions, revoked, created, resultReads };
 }

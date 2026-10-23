@@ -269,6 +269,11 @@ export const tasksJa = {
   "tasks.grants.revoke": "取り消す",
   "tasks.grants.revokeLabel": "取り消す: {tool}",
   "tasks.grants.revoked": "取り消しました: {tool}",
+  "tasks.result.title": "結果",
+  "tasks.result.completedAt": "{time} に完了",
+  "tasks.result.loading": "結果を読み込んでいます…",
+  "tasks.result.empty": "結果に含まれる要約はありません。",
+  "tasks.result.hidden": "読めないリポジトリを含むため、結果を表示できません",
 
   // The task API's errors (apps/backend/paw_backend/api/v1/tasks.py).
   "error.task_not_found": "このタスクは見つかりませんでした。",
@@ -568,6 +573,12 @@ export const tasksEn: Record<keyof typeof tasksJa, string> = {
   "tasks.grants.revoke": "Revoke",
   "tasks.grants.revokeLabel": "Revoke: {tool}",
   "tasks.grants.revoked": "Revoked: {tool}",
+  "tasks.result.title": "Result",
+  "tasks.result.completedAt": "Completed {time}",
+  "tasks.result.loading": "Loading the result…",
+  "tasks.result.empty": "The result has no summaries.",
+  "tasks.result.hidden":
+    "The result cannot be shown because the task includes a repository you cannot read",
 
   "error.task_not_found": "This task was not found.",
   "error.task_conflict": "The task changed. Check its current state and try again.",

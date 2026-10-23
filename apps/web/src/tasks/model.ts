@@ -223,6 +223,30 @@ export interface TaskDetail extends TaskSummary {
   repositories: readonly TaskRepository[];
   /** The nodes of the current DAG in the orchestrator's order; null before planning. */
   dag: readonly DagNode[] | null;
+  /**
+   * Whether the task has a result this person may read (Decision 0098, 7): only
+   * a read-only task that completed has one; `hidden` when its Working Set ever
+   * held a repository the person may not read. The result itself is read apart
+   * (`TaskSource.getTaskResult`): the detail is read again every few seconds.
+   */
+  result: TaskResultState;
+}
+
+export type TaskResultState = "none" | "available" | "hidden";
+
+/** One node of a read-only task's result, in the plan's order (plain text). */
+export interface TaskResultNode {
+  key: string;
+  /** A node role; kept as the Backend's string (an unknown one is shown as is). */
+  role: string;
+  title: string;
+  summary: string;
+}
+
+/** A read-only task's result (`GET /tasks/{id}/result`, Decision 0098). */
+export interface TaskResult {
+  nodes: readonly TaskResultNode[];
+  completedAt: string;
 }
 
 export interface TaskCapacity {

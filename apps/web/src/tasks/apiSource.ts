@@ -32,6 +32,8 @@ import type {
   TaskGrant,
   TaskList,
   TaskRepository,
+  TaskResult,
+  TaskResultState,
   TaskState,
   TaskSummary,
   ToolApproval,
@@ -120,6 +122,12 @@ export interface TaskDetailWire extends TaskSummaryWire {
   } | null;
   repositories: RepositoryWire[];
   dag: DagNodeWire[] | null;
+  result: TaskResultState;
+}
+
+interface TaskResultWire {
+  nodes: { key: string; role: string; title: string; summary: string }[];
+  completed_at: string;
 }
 
 interface PullRequestWire {
@@ -258,6 +266,7 @@ export function taskDetail(wire: TaskDetailWire): TaskDetail {
       : undefined,
     repositories: wire.repositories.map(repository),
     dag: wire.dag ? wire.dag.map(node) : null,
+    result: wire.result,
   };
 }
 
@@ -408,6 +417,18 @@ export const apiTaskSource: TaskSource = {
   },
   async getTask(id: string): Promise<TaskDetail> {
     return taskDetail(await apiRequest<TaskDetailWire>("GET", taskPath(id)));
+  },
+  async getTaskResult(id: string): Promise<TaskResult> {
+    const body = await apiRequest<TaskResultWire>("GET", `${taskPath(id)}/result`);
+    return {
+      nodes: body.nodes.map((entry) => ({
+        key: entry.key,
+        role: entry.role,
+        title: entry.title,
+        summary: entry.summary,
+      })),
+      completedAt: body.completed_at,
+    };
   },
   async createTask(task: NewTask): Promise<TaskDetail> {
     const body = {

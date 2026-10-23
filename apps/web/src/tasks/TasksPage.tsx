@@ -34,6 +34,7 @@ import {
 } from "./model";
 import { CheckMark, nodeTone, StatePill, taskTone, useNow, useTaskStateLabel } from "./parts";
 import { type TaskSource, useTaskSource } from "./source";
+import { TaskResultPanel } from "./TaskResultPanel";
 import "./tasks.css";
 
 export const TASKS_PATH = "/agents";
@@ -604,6 +605,8 @@ function TaskDetailView({
           </ul>
         </section>
       )}
+
+      <TaskResultPanel source={source} taskId={data.id} state={data.result} />
 
       <section className="task-card-panel dag-panel" aria-labelledby="dag-title">
         <div className="panel-head">

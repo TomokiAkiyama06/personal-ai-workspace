@@ -16,12 +16,19 @@ import type {
   TaskDetail,
   TaskGrant,
   TaskList,
+  TaskResult,
   ToolApproval,
 } from "./model";
 
 export interface TaskSource {
   listTasks(): Promise<TaskList>;
   getTask(id: string): Promise<TaskDetail>;
+  /**
+   * The result of a read-only task that completed (Decision 0098): rejects with
+   * 404 `task_result_not_found` without one and 403 `task_result_forbidden` when
+   * the person may not read every repository the task's Working Set ever held.
+   */
+  getTaskResult(id: string): Promise<TaskResult>;
   /** Create a task and put it in the queue; resolves with the queued task. */
   createTask(task: NewTask): Promise<TaskDetail>;
   /** Send an operator control; resolves with the task as the Backend left it. */
