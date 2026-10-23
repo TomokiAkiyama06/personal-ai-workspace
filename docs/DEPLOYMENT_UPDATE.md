@@ -214,6 +214,12 @@ Checklist (Decision 0093 5; the human, not an agent):
   `--sandbox-keep-groups=yes`) and `from="127.0.0.1"`; `/etc/paw/ssh-keys/tomoki.key`
   (owned by `paw`, `0600`); `/etc/paw/ssh_known_hosts` (Decision 0029,
   `apps/backend/deploy/ssh-git-wrapper/README.md`, `apps/backend/deploy/sandbox/README.md`).
+- [ ] `/etc/paw/backend.env` has `PAW_REPOSITORY_EXISTING_ROOTS={home}/workspaces`
+  (`{home}/<PAW_REPOSITORY_WORKSPACE_SUBDIR>` if that is changed). With
+  `[git] runner = "ssh"` the wrapper runs git only below `<home>/workspaces` (its
+  `--root=`), so the backend's default `{home}` would accept an existing repository
+  elsewhere in the home that then fails at its first git command. The default stays
+  `{home}` for the `subprocess` runner (Decision 0097 6, issue #285).
 - [ ] `/usr/local/lib/paw/paw-git-wrapper` knows `paw-sandbox/v2` (the sandbox README's
   checklist item 9); otherwise `PAW_SANDBOX_OOM_STATUS=false`.
 - [ ] `/run/paw-sandbox` (`paw:paw-sandbox 0711`, `tmpfiles.d`) and the group
