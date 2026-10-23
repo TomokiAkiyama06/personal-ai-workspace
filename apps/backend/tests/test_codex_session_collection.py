@@ -359,6 +359,9 @@ class FakeSystemctl:
         self.calls.append(arguments)
         return self.answers(arguments)
 
+    async def query(self, *arguments, timeout_seconds):
+        return await self.systemctl(*arguments)
+
     async def stop_unit(self, unit, attempts=3):
         self.calls.append(("stop", unit, attempts))
 
@@ -451,6 +454,43 @@ class SystemdUnitsTest(unittest.IsolatedAsyncioTestCase):
             FakeSystemctl(lambda arguments: (1, "")), cgroup_root=self.root
         )
         self.assertIsNone(await failing.egress_left_over())
+
+
+class HungSystemctlProbeTest(unittest.IsolatedAsyncioTestCase):
+    """Codex review of #292 (P2): System Health's look at the egress units
+    stays within the check's deadline when systemctl (D-Bus) hangs: bounded
+    by its own short time, and a cancellation is not held for the
+    launcher's ``systemctl_seconds`` (a read-only look sends nothing)."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        hung = self.root / "systemctl"
+        hung.write_text("#!/bin/sh\nexec sleep 60\n")
+        hung.chmod(0o755)
+        # The launcher's bound is far past the health check's 5 seconds.
+        self.launcher = SystemdLauncher(systemctl=(str(hung),), systemctl_seconds=30)
+
+    async def test_a_hung_systemctl_is_not_known_within_the_probe_bound(self):
+        units = SystemdSessionUnits(
+            self.launcher, cgroup_root=self.root, probe_seconds=0.5
+        )
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        with self.assertLogs("paw_backend.agents", "WARNING"):
+            left = await asyncio.wait_for(units.egress_left_over(), 5)
+        self.assertIsNone(left)
+        self.assertLess(loop.time() - started, 3)
+
+    async def test_a_cancelled_probe_is_not_held(self):
+        units = SystemdSessionUnits(
+            self.launcher, cgroup_root=self.root, probe_seconds=30
+        )
+        probing = asyncio.ensure_future(units.egress_left_over())
+        await asyncio.sleep(0.3)  # systemctl list-units runs (and hangs)
+        probing.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await asyncio.wait_for(asyncio.shield(probing), 3)
 
 
 class KeepTest(unittest.IsolatedAsyncioTestCase):

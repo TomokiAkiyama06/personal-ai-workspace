@@ -94,6 +94,10 @@ _OPEN_MODE: Final = 0o700
 #: only once the unit was confirmed stopped (the tombstone).
 _FENCE_OPEN_MODE: Final = 0o750
 _STOPPED_STATES: Final = frozenset({"inactive", "failed"})
+#: System Health's look at the egress units (Decision 0096, 7): well within
+#: the check's 5 seconds (``health.limits.CHECK_TIMEOUT_SECONDS``), with the
+#: connections' database queries (Codex review of #292).
+PROBE_SECONDS: Final = 2.0
 LAUNCH_NAME: Final = "launch.json"
 
 
@@ -109,6 +113,10 @@ class SessionUnits(Protocol):
 
 class Systemctl(Protocol):
     async def systemctl(self, *arguments: str) -> tuple[int, str]: ...
+
+    async def query(
+        self, *arguments: str, timeout_seconds: float
+    ) -> tuple[int, str]: ...
 
     async def stop_unit(self, unit: str, attempts: int = 3) -> None: ...
 
@@ -128,8 +136,10 @@ class SystemdSessionUnits:
         egress_prefix: str = "paw-egress-session@",
         cgroup_root: Path = CGROUP_ROOT,
         egress_socket_dir: Path = EGRESS_SOCKET_DIR,
+        probe_seconds: float = PROBE_SECONDS,
     ) -> None:
         self._systemd = systemd
+        self._probe = float(probe_seconds)
         self._prefix = unit_prefix
         self._egress = egress_prefix
         self._cgroup_root = Path(cgroup_root)
@@ -183,7 +193,9 @@ class SystemdSessionUnits:
     async def egress_left_over(self) -> int | None:
         """System Health's look (Decision 0096, 7): how many sessions have an
         egress unit active while their CLI unit is not. ``None``: systemd
-        could not be asked."""
+        could not be asked, or did not answer within ``probe_seconds`` (a
+        hung systemctl is killed, also on a cancellation: the health check's
+        deadline holds, Codex review of #292)."""
         try:
             code, out = await self._list_units()
         except OSError:
@@ -193,7 +205,7 @@ class SystemdSessionUnits:
         return _left_over(out, self._egress, self._prefix)
 
     async def _list_units(self) -> tuple[int, str]:
-        return await self._systemd.systemctl(
+        return await self._systemd.query(
             "list-units",
             "--all",
             "--plain",
@@ -201,6 +213,7 @@ class SystemdSessionUnits:
             "--no-pager",
             f"{self._egress}*",
             f"{self._prefix}*",
+            timeout_seconds=self._probe,
         )
 
 
@@ -621,6 +634,7 @@ __all__ = [
     "EGRESS_SOCKET_DIR",
     "FENCE_ATTEMPTS",
     "FENCE_MODE",
+    "PROBE_SECONDS",
     "CodexCollectionLoop",
     "CodexLoginCollector",
     "SessionUnits",
