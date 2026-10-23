@@ -170,6 +170,19 @@ class RouteInventoryTest(unittest.TestCase):
         app.include_router(router)
         self.assertEqual(unprotected_routes(app), set())
 
+    def test_the_task_result_needs_project_read_like_the_task(self):
+        # Decision 0098 (1): the guard of ``GET /tasks/{task_id}``; the route
+        # then decides the repositories of the task's Working Set itself.
+        found = {
+            (method, path): capabilities
+            for method, path, capabilities in route_guards(build_app())
+        }
+        for path in ("/api/v1/tasks/{task_id}", "/api/v1/tasks/{task_id}/result"):
+            with self.subTest(path=path):
+                self.assertEqual(
+                    found[("GET", path)], frozenset({Capability.PROJECT_READ})
+                )
+
     def test_the_public_list_has_no_stale_entries(self):
         # Also proves the traversal really sees the routers included by the app.
         found = {(method, path) for method, path, _ in route_guards(build_app())}

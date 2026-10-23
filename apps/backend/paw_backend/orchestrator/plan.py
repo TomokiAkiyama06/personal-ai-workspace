@@ -4,8 +4,10 @@ A planner (an agent runtime in the ``planner`` role) *proposes* the plan; the
 backend orchestrator decides what is accepted. ``Plan`` is validated when it is
 built, so a ``Plan`` object is always acceptable: a cycle, an unknown or repeated
 dependency, too many nodes, edges or levels, a text or an input that is too large,
-a node that asks for more than its role may hold: all raise ``InvalidPlanError``
-with a closed reason, before anything is stored.
+a node that asks for more than its role may hold, a key or a title that
+``redact_text`` would change (Decision 0098, 8: the DAG and the board show them
+unredacted): all raise ``InvalidPlanError`` with a closed reason, before anything
+is stored.
 
 The schema (Decision 0021, section 1)::
 
@@ -66,6 +68,7 @@ from paw_backend.orchestrator.limits import (
     MAX_PLAN_BYTES,
     MAX_TITLE_CHARS,
 )
+from paw_backend.tools.credentials import would_redact
 
 _KEY = re.compile(KEY_PATTERN)
 _SURROGATE = re.compile("[\ud800-\udfff]")
@@ -220,6 +223,10 @@ class PlanNode:
         object.__setattr__(
             self, "goal", _text(self.goal, limit=MAX_GOAL_CHARS, multiline=True)
         )
+        # The DAG and the board show the key and the title as they are (Decision
+        # 0098, 2 C): one that the result redaction would change is refused.
+        if would_redact(self.key) or would_redact(self.title):
+            _refuse(PlanReason.CREDENTIAL_IN_PLAN)
         dependencies = [_key(item) for item in _collection(self.depends_on)]
         if len(dependencies) > MAX_DEPENDENCIES:
             _refuse(PlanReason.TOO_MANY_DEPENDENCIES)

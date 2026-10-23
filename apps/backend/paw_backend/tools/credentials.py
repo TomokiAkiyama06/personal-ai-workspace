@@ -153,6 +153,16 @@ def redact_text(text: str) -> tuple[str, int]:
     return (result, count) if count else (text, 0)
 
 
+def would_redact(text: object) -> bool:
+    """Whether :func:`redact_text` would change ``text``: the rule of the result
+    redaction in one place (Decision 0098, 2 and 8), assignments and flags
+    included. Broader than :func:`contains_credential_plaintext`, which stays the
+    rule that denies a tool argument (Decision 0006)."""
+    if not isinstance(text, str):
+        return False
+    return redact_text(text)[1] > 0
+
+
 def _sensitive_key(key: str) -> bool:
     folded = re.sub(r"[^a-z0-9]", "", key.lower())
     return any(word in folded for word in _SENSITIVE_KEY_WORDS)

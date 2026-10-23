@@ -266,6 +266,40 @@ class RefusedPlansTest(unittest.TestCase):
             with self.subTest(label):
                 self.assertRefused(data, reason)
 
+    def test_a_credential_in_a_key_or_a_title_is_refused(self):
+        # Decision 0098 (2, 8): what ``redact_text`` would change, the
+        # assignment and the flag forms included (``contains_credential_plaintext``
+        # misses those two). Built at run time: no secret-looking literal here.
+        github = "ghp_" + "a1B2" * 9
+        cases = [
+            ("a token in a title", node("a", title=f"Use {github}")),
+            ("an assignment in a title", node("a", title="DB_PASSWORD=hunter2")),
+            ("a flag in a title", node("a", title="--password hunter2")),
+            ("a token as a key", node("sk-" + "a" * 20)),
+            ("the second node's title", node("b", title="export TOKEN=abcdefgh1")),
+        ]
+        for label, bad in cases:
+            with self.subTest(label):
+                self.assertRefused(plan(node("ok"), bad), R.CREDENTIAL_IN_PLAN)
+        # Every role alike (a reader's plan as well as a worker's).
+        for role in NodeRole:
+            with self.subTest(role=role):
+                self.assertRefused(
+                    plan(node("a", role=role.value, title="--token abcdefgh1234")),
+                    R.CREDENTIAL_IN_PLAN,
+                )
+
+    def test_ordinary_titles_with_credential_words_are_accepted(self):
+        for title in (
+            "Refresh the token cache",
+            "Read the password policy",
+            "Check sk-learn usage",
+            "Explain how api keys rotate",
+        ):
+            with self.subTest(title=title):
+                accepted = Plan.from_mapping(plan(node("a", title=title)))
+                self.assertEqual(accepted.nodes[0].title, title)
+
     def test_the_error_message_never_quotes_the_plan(self):
         secret = "sk-secret-node-key-value"
         with self.assertRaises(InvalidPlanError) as caught:

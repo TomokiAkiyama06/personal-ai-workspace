@@ -15,6 +15,7 @@ from paw_backend.tools.credentials import (
     TRUNCATED,
     UNSUPPORTED,
     redact_text,
+    would_redact,
 )
 
 from .tools_support import HANDLE
@@ -586,6 +587,84 @@ class BoundedWorkTest(unittest.TestCase):
         # Takes a fraction of a second; the deadline only catches a regression
         # to super-linear matching.
         self.assertLess(time.monotonic() - started, 30.0)
+
+
+class WouldRedactTest(unittest.TestCase):
+    """``would_redact`` (Decision 0098, 2 and 8) is the rule of ``redact_text``
+    in one place: true exactly when ``redact_text`` replaces something. The
+    inputs are this module's own."""
+
+    def test_it_agrees_with_the_count_of_redact_text(self):
+        texts = [
+            GITHUB,
+            GITHUB_PAT,
+            OPENAI,
+            AWS,
+            SLACK,
+            JWT,
+            PEM,
+            GITLAB,
+            GOOGLE,
+            STRIPE,
+            NPM,
+            SLACK_WEBHOOK,
+            HUGGING_FACE,
+            SENDGRID,
+            AWS_SECRET,
+            "Authorization: Bearer abcdefghijklmnop1234",
+            "basic dXNlcjpwYXNzd29yZA==abcdef",
+            "https://user:hunter2hunter2@example.com/repo.git",
+            GITHUB[:6] + "\u200b" + GITHUB[6:],
+            "\uff47\uff48\uff50_" + "a1B2" * 9,
+            f"MYTOKEN_{GITHUB}",
+            "key_" + AWS,
+            f"OPENAI_API_KEY_{OPENAI}",
+            # Assignments and flags: ``contains_credential_plaintext`` misses them.
+            "password = hunter2hunter2",
+            'API_KEY: "abcd1234efgh"',
+            "export TOKEN=abcdefgh12345",
+            "Authorization: xyz12345678",
+            "DB_PASSWORD=hunter2",
+            "--password hunter2",
+            "curl --password hunter2hunter2 --user bob",
+            "docker login --password-stdin --token abcdefgh12345678",
+            "client_secret = 'abc def ghi'",
+            # Nothing to redact.
+            "def token(): return 1",
+            "password = 'x'",
+            "the api key is stored in the vault",
+            "sk-learn and sk-short",
+            "ghp_short",
+            "See https://github.com/org/repo/issues/1",
+            "git@github.com:org/repo.git",
+            "Bearer",
+            "-----BEGIN CERTIFICATE-----\nabc\n-----END CERTIFICATE-----",
+            HANDLE,
+            f"token: {HANDLE}",
+            "DEBUG=false\nPORT=8080\nname: demo\nmax_tokens = 4096",
+            'api_key: ""',
+            "PWD=/home/user/project",
+            "disk-usage-monitoring-report-final-v2",
+            "xghp_" + "a" * 36,
+            "AKIAABCDEFGH12345678X",
+            "Implement the parser",
+            "",
+            "a" * (MAX_TEXT_CHARS + 1),
+        ]
+        for text in texts:
+            with self.subTest(text=text[:40]):
+                self.assertIs(would_redact(text), redact_text(text)[1] > 0)
+
+    def test_assignments_and_flags_count_though_plaintext_detection_misses_them(self):
+        for text in ("DB_PASSWORD=hunter2", "--password hunter2"):
+            with self.subTest(text=text):
+                self.assertTrue(would_redact(text))
+                self.assertFalse(contains_credential_plaintext(text))
+
+    def test_only_text_is_judged(self):
+        for value in (None, 5, b"ghp_" + b"a" * 36, ["DB_PASSWORD=hunter2"]):
+            with self.subTest(value=value):
+                self.assertFalse(would_redact(value))
 
 
 if __name__ == "__main__":

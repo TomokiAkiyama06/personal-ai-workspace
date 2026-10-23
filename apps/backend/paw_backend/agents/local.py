@@ -120,11 +120,21 @@ Environment: Linux container, Python 3.13, git (read-only: status, diff, log, sh
 
 Do the {role} task given by the user. Explore the repository with the bash tool (ls, rg, sed -n, cat -n ...), then call the submit tool with a summary of what you found. Always use a tool in every turn until you submit."""  # noqa: E501
 
+# What a planner is told about a node's key and title (Decision 0098, 8): the
+# backend refuses a plan with one that the result redaction would change
+# (``tools.credentials.would_redact``), since the DAG and the board show them as
+# they are. Both planner prompts below carry it word for word.
+PLAN_TEXT_RULE = (
+    "Keep each node's key and title a short plain description: never write an "
+    "assignment (NAME=value, name: value), a command-line option with a value "
+    "(--option value) or a secret in them, or the plan is refused."
+)
+
 PLANNER_PROMPT = """You are the planner of an autonomous software engineering team, with read-only access to a Git repository.
 The repository is checked out at {workspace} (the current directory of every command); you cannot change it.
 Environment: Linux container, Python 3.13, git (read-only: status, diff, log, show), ripgrep (rg). There is NO network access.
 
-Break the task given by the user into nodes of a plan and call the submit_plan tool with it: {{"nodes": [{{"key": "impl", "role": "worker", "title": "...", "goal": "...", "depends_on": []}}, ...]}}. Roles: worker (changes the code), researcher, reviewer. Explore the repository with bash first when it helps. Always use a tool in every turn until you submit."""  # noqa: E501
+Break the task given by the user into nodes of a plan and call the submit_plan tool with it: {{"nodes": [{{"key": "impl", "role": "worker", "title": "...", "goal": "...", "depends_on": []}}, ...]}}. Roles: worker (changes the code), researcher, reviewer. Keep each node's key and title a short plain description: never write an assignment (NAME=value, name: value), a command-line option with a value (--option value) or a secret in them, or the plan is refused. Explore the repository with bash first when it helps. Always use a tool in every turn until you submit."""  # noqa: E501
 
 # The planner of a read-only task (issue #279, Decision 0094, 1 A): the backend
 # refuses a plan with a worker node, so the planner is told the roles it may use.
@@ -132,7 +142,7 @@ READ_ONLY_PLANNER_PROMPT = """You are the planner of an autonomous software engi
 The repository is checked out at {workspace} (the current directory of every command); you cannot change it.
 Environment: Linux container, Python 3.13, git (read-only: status, diff, log, show), ripgrep (rg). There is NO network access.
 
-This task only reads: nothing may be changed, and a plan with a worker node is refused. Break the task given by the user into nodes of a plan and call the submit_plan tool with it: {{"nodes": [{{"key": "read", "role": "researcher", "title": "...", "goal": "...", "depends_on": []}}, ...]}}. Roles: researcher (finds and reads), reviewer (checks what was found). Explore the repository with bash first when it helps. Always use a tool in every turn until you submit."""  # noqa: E501
+This task only reads: nothing may be changed, and a plan with a worker node is refused. Break the task given by the user into nodes of a plan and call the submit_plan tool with it: {{"nodes": [{{"key": "read", "role": "researcher", "title": "...", "goal": "...", "depends_on": []}}, ...]}}. Roles: researcher (finds and reads), reviewer (checks what was found). Keep each node's key and title a short plain description: never write an assignment (NAME=value, name: value), a command-line option with a value (--option value) or a secret in them, or the plan is refused. Explore the repository with bash first when it helps. Always use a tool in every turn until you submit."""  # noqa: E501
 
 NUDGE = (
     "Continue. Use the tools to work on the task, and call submit when you are done."

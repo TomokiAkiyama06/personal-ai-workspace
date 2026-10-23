@@ -18,6 +18,13 @@ Who sees what (``project.read``, Decision 0067, 2):
 The decisions are the Authorizer's policy, not audited: allowed reads of
 ``project.read`` are never recorded (``DENIED_ONLY``) and a repository that is
 left out of a list is not a denied request.
+
+The result of a read-only task (issue #290, Decision 0098) is the ``complete``
+event's ``detail.result`` of a read-only task that is ``completed``
+(:func:`stored_result`). It may be shown only to a person who may read every
+repository that was ever in the task's Working Set (:func:`ever_in_working_set`:
+every row of ``task_repositories``, the removed ones and those of an earlier
+attempt included), since the summaries cannot be told apart by repository.
 """
 
 import uuid
@@ -227,6 +234,93 @@ def readable_repositories(
         for repository_id, repository in found.items()
         if may_read_repository(principal, project, repository, policy)
     }
+
+
+def may_read_all(
+    principal: Principal,
+    project: ProjectInfo,
+    repository_ids: Iterable[uuid.UUID],
+    found: Mapping[uuid.UUID, RepositoryInfo],
+    policy: Policy,
+) -> bool:
+    """``project.read`` on every one of ``repository_ids`` (a repository that is
+    not registered any more has no ACL to read: nobody may read it)."""
+    return all(
+        repository_id in found
+        and may_read_repository(principal, project, found[repository_id], policy)
+        for repository_id in repository_ids
+    )
+
+
+async def ever_in_working_set(
+    session: AsyncSession, task_id: uuid.UUID
+) -> list[uuid.UUID]:
+    """Every repository that was ever in the task's Working Set, in the order
+    they first joined: a removed one stays a row (``removed_at``), joining again
+    reuses it, and the rows are kept across Retry and Restart (Decision 0098, 1)."""
+    rows = await session.execute(
+        select(TaskRepositoryRow.repository_id)
+        .where(TaskRepositoryRow.task_id == task_id)
+        .order_by(TaskRepositoryRow.seq)
+    )
+    return list(rows.scalars())
+
+
+@dataclass(frozen=True, slots=True)
+class StoredResult:
+    # The stored ``{"nodes": [...]}`` as it is (the orchestrator wrote it).
+    nodes: list
+    # When the task completed (its ``complete`` event).
+    completed_at: datetime
+
+
+def _result_event(task_id: uuid.UUID, *columns):
+    """The ``complete`` event of a read-only task that is ``completed`` and has
+    a result (at most one: ``completed`` is final)."""
+    return (
+        select(*columns)
+        .join(TaskRow, TaskRow.id == TaskEventRow.task_id)
+        .where(
+            TaskEventRow.task_id == task_id,
+            TaskEventRow.command == TaskCommand.COMPLETE,
+            TaskEventRow.detail.has_key("result"),
+            TaskRow.read_only.is_(True),
+            TaskRow.state == TaskState.COMPLETED,
+        )
+        .order_by(TaskEventRow.seq.desc())
+        .limit(1)
+    )
+
+
+async def has_result(session: AsyncSession, task_id: uuid.UUID) -> bool:
+    """Whether the task has a result (without reading it: the task's detail is
+    read often, the result may be about 1 MiB)."""
+    found = await session.execute(_result_event(task_id, TaskEventRow.seq))
+    return found.scalar_one_or_none() is not None
+
+
+async def stored_result(
+    session: AsyncSession, task_id: uuid.UUID
+) -> StoredResult | None:
+    """The task's result, or ``None``: it is not a read-only task, or it has not
+    completed."""
+    row = (
+        await session.execute(
+            _result_event(
+                task_id,
+                TaskEventRow.detail["result"].label("result"),
+                TaskEventRow.created_at,
+            )
+        )
+    ).one_or_none()
+    if row is None:
+        return None
+    result = row.result
+    nodes = result.get("nodes") if isinstance(result, dict) else None
+    return StoredResult(
+        nodes=nodes if isinstance(nodes, list) else [],
+        completed_at=row.created_at,
+    )
 
 
 async def list_tasks(
