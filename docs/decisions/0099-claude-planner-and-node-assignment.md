@@ -53,7 +53,7 @@ Task
 
 - **推奨:** `paw_backend/agents/cloud_policy.py` に `ConfiguredCloudPolicy`（`CloudPolicy.allows(assignment)` を満たす）を置き、`runtime.toml` の `[cloud]`（下の 7）から組み立てる。`allows` は次をすべて満たすときだけ `True`（どれかが分からなければ `False`。今の `CloudGate` と同じく `True` そのものだけを許可とみなす）。
   1. `[cloud].enabled = true`（全体の Switch。既定は `false`。File は root の持ち物で Admin が変える: Decision 0093 の 2）。
-  2. Assignment の Agent の Label が CLI の Runtime（`claude` / `codex`）で、その Role がその Agent の候補にある（下の 4 の表。Worker を Cloud に送る Policy にはしない）。
+  2. Assignment の Agent の Label が CLI の Runtime（`claude` / `codex`）で、その Agent がその Role の Ladder にある（下の 4 の表の「段」。Planner が始めさせられる候補（`allowed`）より広く、Escalation の行き先を含む。Worker が Cloud で走るのは「決めてほしいこと」4 の A の Escalation のときだけ）。
   3. **配備の有効な User が 1 人だけ**（下の「決めてほしいこと」5 の A。Human の回答 3 の前提「1 人で使う配備」を Policy で確かめる）。2 人目が有効になったら、Admin が決め直すまで `False`。
   4. Task が Project に属し、その Project が削除待ちでない（今の `stop_project_tasks` の対象は送らない）。**Project ごとの許可の一覧は持たない**（Human の回答 3: すべての Project）。
 - **送るもの**: Orchestrator が Node に渡す内容（`title`・`goal`・`input`・直接の依存の `NodeResult`。Planner には Task の `title` と `input`）、CLI が PAW の Tool（MCP の Bridge → Tool Broker）で読んだ Repository の内容（Node の Scope の中だけ）と Tool の出力（Broker の Redact の後）、Role の上限にある `project.memory.use` / `shared_memory.read` で読んだ Project の Memory と共有 Memory。
