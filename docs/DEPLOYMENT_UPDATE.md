@@ -214,6 +214,35 @@ Checklist (Decision 0093 5; the human, not an agent):
   `--sandbox-keep-groups=yes`) and `from="127.0.0.1"`; `/etc/paw/ssh-keys/tomoki.key`
   (owned by `paw`, `0600`); `/etc/paw/ssh_known_hosts` (Decision 0029,
   `apps/backend/deploy/ssh-git-wrapper/README.md`, `apps/backend/deploy/sandbox/README.md`).
+- [ ] Each account's home and checkout root (issue #285; details in
+  `apps/backend/deploy/ssh-git-wrapper/README.md`, "Home と `workspaces` の権限"):
+  - the home is searchable by `paw` and by no other local account: an ACL entry
+    `setfacl -m u:paw:x <home>`, not the other-execute bit (`o+x` / `0751` / `0711` lets
+    every local user traverse to checkouts that `git clone` creates `0755` / `0644`);
+    the mode stays `0750` / `0700`, not writable by group / others. The backend itself
+    `lstat`s the checkout root and every checkout (`namei -l /home/tomoki/workspaces` as
+    `paw` reaches the end; `getfacl -p` shows `user:paw:--x` with an effective `--x`);
+  - `<home>/workspaces` exists, is owned by the account (`0700`) and is searchable by
+    `paw` through the same ACL entry (the wrapper's root, `--root=`, refuses every call
+    with `root_unavailable` while it is missing; a later `chmod` can change the ACL mask,
+    so check again after one);
+  - a repository registered as `既存のディレクトリ` lies below `<home>/workspaces`
+    (the wrapper runs git only there; see the `PAW_REPOSITORY_EXISTING_ROOTS` item
+    below), and every directory on the way is searchable by `paw`.
+- [ ] `GitHub から Clone`, `新規（ローカル）` and `新規（GitHub）` under `git: ssh` create
+  the checkout directory through the wrapper's `paw-dir/v1` as the account (Decision
+  0097, issue #285): install the wrapper that knows `paw-dir/v1` before (or with) the
+  backend that sends it; an older wrapper refuses it with `bad_protocol` (126) and the
+  registration fails as `git_failed` without creating anything. Until both are in, clone
+  by hand as the account from a neutral working directory and register the path as
+  `既存のディレクトリ`: `cd / && sudo -u <user> git clone <url> <home>/workspaces/<dir>/<repo>`
+  (`<dir>` is any directory below `workspaces` that is not `.paw-worktrees`).
+- [ ] `/etc/paw/backend.env` has `PAW_REPOSITORY_EXISTING_ROOTS={home}/workspaces`
+  (`{home}/<PAW_REPOSITORY_WORKSPACE_SUBDIR>` if that is changed). With
+  `[git] runner = "ssh"` the wrapper runs git only below `<home>/workspaces` (its
+  `--root=`), so the backend's default `{home}` would accept an existing repository
+  elsewhere in the home that then fails at its first git command. The default stays
+  `{home}` for the `subprocess` runner (Decision 0097 6, issue #285).
 - [ ] `/usr/local/lib/paw/paw-git-wrapper` knows `paw-sandbox/v2` (the sandbox README's
   checklist item 9); otherwise `PAW_SANDBOX_OOM_STATUS=false`.
 - [ ] `/run/paw-sandbox` (`paw:paw-sandbox 0711`, `tmpfiles.d`) and the group

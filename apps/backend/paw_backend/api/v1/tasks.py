@@ -10,7 +10,23 @@ over HTTP (issue #185, Decision 0067 Approved; the screens of PAW-062, #48).
 * ``GET /tasks/{task_id}`` (``project.read`` on the task's project): the task as
   ``TaskService.restore`` reads it, its Working Set with each repository's state
   in the current attempt, the DAG of the current attempt with every node attempt,
-  the tool calls of the current step and the budget.
+  the tool calls of the current step and the budget, and whether the task has a
+  result to read (``result``: ``none`` / ``available`` / ``hidden``; Decision
+  0098, 7) without the result itself (the detail is read every few seconds).
+* ``GET /tasks/{task_id}/result`` (``project.read`` on the task's project; issue
+  #290, Decision 0098): the result of a read-only task that is ``completed``
+  (``complete`` event's ``detail.result``: the ``key``, ``role``, ``title`` and
+  ``summary`` of each node that succeeded, in the plan's order) and when it
+  completed. Any other task, or one that has not completed, is 404
+  ``task_result_not_found``. Only a person who may read EVERY repository that was
+  ever in the task's Working Set (removed ones and those of an earlier attempt
+  included: a summary cannot be told apart by repository) reads it; anyone else
+  is 403 ``task_result_forbidden``, the repository's refusal audited as every
+  denied ``project.read`` is (the detail says ``hidden``, never which
+  repository). The strings are returned as stored, NOT redacted (Decision 0098,
+  2 C: what the model wrote is shown as it is), with the control characters but
+  tab and line feed made visible (``integration.changes.visible_text``); the
+  stored event is never changed.
 * ``POST /tasks/{task_id}/controls`` (``project.task.run`` on the task's project,
   audited): one operator control of ``TaskService.execute`` (Pause, Resume,
   Cancel, Retry, Restart, Stop Now) with the version the operator saw
@@ -64,7 +80,9 @@ A repository the person may not read (its ACL override) is left out of every
 answer, with its pull request (``task_views``). A task of a project the person
 may not read, or that does not exist, is 403 ``forbidden`` alike (the guard
 cannot tell them apart, so neither can the caller). The answers carry no task
-input, no log line, no node goal or result and no event detail.
+input, no log line, no node goal and no event detail, and no node result but the
+read-only task's result above (Decision 0098 supersedes that part of Decision
+0067, 2).
 """
 
 import logging
@@ -93,6 +111,7 @@ from paw_backend.authz.policy import Policy, decide
 from paw_backend.compute.wiring import ComputeServices
 from paw_backend.db import Database
 from paw_backend.errors import ApiError
+from paw_backend.integration.changes import visible_text
 from paw_backend.orchestrator.composition import TaskExecution
 from paw_backend.orchestrator.records import AttemptRecord, DagRecord
 from paw_backend.orchestrator.store import DagStore
@@ -108,7 +127,7 @@ from paw_backend.tasks import (
     TaskSnapshot,
     WorkingSetEntry,
 )
-from paw_backend.tasks.domain import RepoRole
+from paw_backend.tasks.domain import RepoRole, TaskState
 from paw_backend.tasks.models import TaskEventRow, TaskRow
 from paw_backend.tasks.queueing import BudgetPreset, Priority
 from paw_backend.tasks.queueing.errors import (
@@ -305,6 +324,24 @@ class TaskDetailOut(TaskSummaryOut):
     # The nodes of the current attempt's DAG in the plan's order; ``None`` before
     # a plan was accepted.
     dag: list[DagNodeOut] | None
+    # A read-only task's result (``GET /tasks/{id}/result``, Decision 0098):
+    # ``available``, ``hidden`` (a repository that was in its Working Set may not
+    # be read by this person), or ``none`` (no completed read-only task).
+    result: Literal["none", "available", "hidden"]
+
+
+class TaskResultNodeOut(BaseModel):
+    key: str
+    role: str
+    title: str
+    # What the node's agent wrote, as stored (not redacted, not Markdown).
+    summary: str
+
+
+class TaskResultOut(BaseModel):
+    # The nodes that succeeded, in the plan's order.
+    nodes: list[TaskResultNodeOut]
+    completed_at: datetime
 
 
 class PullRequestOut(BaseModel):
@@ -534,6 +571,7 @@ async def _detail(
         priority = await views.priority_of(session, task_id)
         started = await views.started_at(session, task_id)
         preset = await views.budget_preset(session, task_id)
+        result = await _result_state(session, principal, project, snapshot, policy)
     budget = None
     if preset is not None:
         try:
@@ -618,7 +656,35 @@ async def _detail(
         budget=budget,
         repositories=repositories,
         dag=nodes,
+        result=result,
     )
+
+
+async def _result_state(
+    session: AsyncSession,
+    principal: Principal,
+    project: views.ProjectInfo,
+    snapshot: TaskSnapshot,
+    policy: Policy,
+) -> Literal["none", "available", "hidden"]:
+    """Whether the task has a result this person may read (Decision 0098, 7): a
+    filter of a read the route authorized, decided and not audited (the result's
+    own route audits its refusal)."""
+    if not (snapshot.read_only and snapshot.state is TaskState.COMPLETED):
+        return "none"
+    if not await views.has_result(session, snapshot.id):
+        return "none"
+    ever = await views.ever_in_working_set(session, snapshot.id)
+    found = await views.repositories(session, ever)
+    if views.may_read_all(principal, project, ever, found, policy):
+        return "available"
+    return "hidden"
+
+
+def _shown(value: object) -> str:
+    """A stored string of the result as it may be shown: not redacted (Decision
+    0098, 2 C), control characters but tab and line feed made visible."""
+    return visible_text(value, keep="\t\n") if isinstance(value, str) else ""
 
 
 def _requeue(execution: TaskExecution) -> Callable:
@@ -695,6 +761,71 @@ async def get_task(
     request: Request, task_id: uuid.UUID, principal: _READ
 ) -> TaskDetailOut:
     return await _detail(request, principal, task_id)
+
+
+@router.get(
+    "/tasks/{task_id}/result",
+    response_model=TaskResultOut,
+    summary="The result of a read-only task that completed",
+)
+async def get_task_result(
+    request: Request, task_id: uuid.UUID, principal: _READ
+) -> TaskResultOut:
+    _execution(request)
+    database: Database = request.app.state.database
+    async with database.session() as session, session.begin():
+        await _read_only(session)
+        project = await views.project_of_task(session, task_id)
+        if project is None:  # Deleted since the guard read it
+            raise ApiError(404, "task_not_found", "Task not found")
+        stored = await views.stored_result(session, task_id)
+        if stored is None:
+            raise ApiError(404, "task_result_not_found", "The task has no result")
+        ever = await views.ever_in_working_set(session, task_id)
+        found = await views.repositories(session, ever)
+    authorizer = request.app.state.authorizer
+    for repository_id in ever:
+        repository = found.get(repository_id)
+        resource = (
+            Resource.repository(project.id, project.state, repository.acl)
+            if repository is not None
+            # Not registered any more: no ACL, which the policy refuses
+            # (``repo_acl_unresolved``), audited like any other refusal.
+            else Resource(
+                kind="repository",
+                id=repository_id,
+                project_id=project.id,
+                project_state=project.state,
+                repo_id=repository_id,
+            )
+        )
+        decision = await authorizer.authorize(
+            principal, Capability.PROJECT_READ, resource
+        )
+        if decision.allowed:
+            continue
+        if decision.reason is Reason.AUDIT_UNAVAILABLE:
+            raise ApiError(
+                503, "service_unavailable", "Service temporarily unavailable"
+            )
+        raise ApiError(
+            403,
+            "task_result_forbidden",
+            "The result comes from a repository you may not read",
+        )
+    return TaskResultOut(
+        nodes=[
+            TaskResultNodeOut(
+                key=_shown(node.get("key")),
+                role=_shown(node.get("role")),
+                title=_shown(node.get("title")),
+                summary=_shown(node.get("summary")),
+            )
+            for node in stored.nodes
+            if isinstance(node, dict)
+        ],
+        completed_at=stored.completed_at,
+    )
 
 
 @router.post(

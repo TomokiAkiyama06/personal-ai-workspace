@@ -176,7 +176,7 @@ Database には pgvector が必要です（CI は `pgvector/pgvector:pg18` を�
 | `PAW_SECRET_STORE_DIR` | なし | 共有の Codex / Claude の Connection の Secret Store の Directory（絶対 Path、Backend の User の 0700。例 `/var/lib/paw/secrets`）。主鍵は systemd の Credential `paw-secret-key`（`LoadCredentialEncrypted=`）。未設定なら Store なし。[Secret Store](#secret-storeissue-208decision-0087-の-12段階-4b-の-1)（Decision 0087、Approved） |
 | `PAW_RECOVERY_REPOSITORY_DIR` / `PAW_RECOVERY_GIT_TIMEOUT_SECONDS` | なし / `300` | Recovery Repository（専用の Private Repository）の Clone の場所（絶対 Path。例 `/srv/personal-ai/recovery`）と、git の 1 Command の Timeout。未設定なら `recovery-backup-run` と `recovery-restore` は動かない。Home・Projection と重なる場所、Work Tree の最上位でない場所、Marker がなく空でない Checkout は拒否する。[Recovery Repository](#recovery-repositorybackup--restore)（Decision 0054、Approved） |
 | `PAW_REPOSITORY_WORKSPACE_SUBDIR` | `workspaces` | Backend が作る Checkout の置き場所（`<home>/<この名前>/<project>/<repo>`）。1 つの安全な名前（[Repository 登録](#repository-registration--per-user-checkout)） |
-| `PAW_REPOSITORY_EXISTING_ROOTS` | `{home}` | 既存 Repository を登録してよい Root（Comma 区切り、8 つまで）。各 Root は絶対 Path で `{home}`（先頭だけ）か `{user}` を含む（全員で共有する Directory は拒否） |
+| `PAW_REPOSITORY_EXISTING_ROOTS` | `{home}` | 既存 Repository を登録してよい Root（Comma 区切り、8 つまで）。各 Root は絶対 Path で `{home}`（先頭だけ）か `{user}` を含む（全員で共有する Directory は拒否）。**`[git] runner = "ssh"` の配備では `{home}/workspaces`**（`PAW_REPOSITORY_WORKSPACE_SUBDIR` を変えたときはその名前）にする: SSH の Wrapper は Root（`<home>/workspaces`）の外では git を動かさないので、既定の `{home}` のままだと、Root の外の Repository が登録の検査を通ってから最初の git で失敗する（Decision 0097 の 6、Issue #285）。既定は `subprocess` の配備のために変えない |
 | `PAW_REPOSITORY_CLONE_HOSTS` | `github.com` | Clone してよい Host（Comma 区切り、8 つまで。小文字の DNS 名。IP Address は不可） |
 | `PAW_REPOSITORY_MIN_LINUX_UID` | `1000` | Checkout の持ち主になれる Linux Account の最小の uid（`root` などの System Account を拒否する）。**Account を引くときに実際に適用される唯一の値**（`RepositoryService.from_policy` が同じ Policy から `LoginNameAccountDirectory` を組み立てる） |
 | `PAW_REPOSITORY_GIT_TIMEOUT_SECONDS` / `PAW_REPOSITORY_CLONE_TIMEOUT_SECONDS` | `30` / `900` | git の Command / Clone の Timeout（秒）。超えると Process Group ごと止める。途中の Clone の予約は Clone の Timeout の 2 倍で古いとみなす |
@@ -4874,17 +4874,31 @@ PAW-062 の画面（`/agents`、`/pulls`、Web の `src/tasks/apiSource.ts`）�
 | Endpoint | Capability | 内容 |
 | --- | --- | --- |
 | `GET /api/v1/tasks` | `tasks.list`（User・Admin・Owner。委任不可、読み取り専用） | 読める Project の Task（更新の新しい順、`limit` 1〜200、既定 100）。状態・待機理由・Priority（最後の Queue Entry）・Card の Repository・最後の Start の時刻 |
-| `GET /api/v1/tasks/{task_id}` | Task の Project の `project.read` | `restore` の Task、Working Set と今の Attempt での Branch / Worktree / Review / Evaluation / PR、今の Attempt の DAG と Node の試行（Placement・Agent・Model・Error の種類）、今の Step とそのツール呼び出し、予算（Preset と 6 項目） |
+| `GET /api/v1/tasks/{task_id}` | Task の Project の `project.read` | `restore` の Task、Working Set と今の Attempt での Branch / Worktree / Review / Evaluation / PR、今の Attempt の DAG と Node の試行（Placement・Agent・Model・Error の種類）、今の Step とそのツール呼び出し、予算（Preset と 6 項目）、結果があるか（`result`: `none` / `available` / `hidden`。結果そのものは載せない） |
+| `GET /api/v1/tasks/{task_id}/result` | Task の Project の `project.read` と、Working Set に一度でも入ったすべての Repository の `project.read` | 読み取りだけの `completed` の Task の結果（`{"nodes": [{"key", "role", "title", "summary"}], "completed_at"}`、Plan の順）。下の「読み取りだけの Task の結果」 |
 | `POST /api/v1/tasks/{task_id}/controls` | Task の Project の `project.task.run`（Audit 必須） | `{"command", "expected_version", "reason"?, "agent"?, "model"?}`。遷移表が判定（409 `illegal_transition`）、Version が違えば 409 `task_conflict`、Stop Now の理由なしは 422。Resume / Retry / Restart は作成者だけ（403 `task_creator_only`）で、同じ Transaction で Queue へ戻す。応答は操作後の Task |
 | `GET /api/v1/pull-requests` | `tasks.list` | 読める Project の Task が記録した PR と、Backend の判定の `merge_ready`。Merge の経路はない |
 | `GET /api/v1/pull-requests/{record_id}` | `tasks.list` | PR の記録 1 件（一覧の上限の外の記録を PR 画面で開く）。他 Project・読めない Repository・ない記録は同じ `404 pull_request_not_found` |
 
 - 一覧の Project は Session の Membership から、Project ごとに Policy で `project.read` を判定します。Repository は、その ACL で `project.read` があるものだけを出し、ない Repository は名前も PR も出しません。
 - 存在しない Task と、読めない Project の Task はどちらも 403 です（Guard が区別しない）。
-- Task の入力、Log、Node の Goal / 結果、Event の詳細は返しません。
+- Task の入力、Log、Node の Goal / 結果、Event の詳細は返しません。例外は読み取りだけの Task の結果だけです（[Decision 0098](../../docs/decisions/0098-read-only-task-result-api-and-screen.md) が Decision 0067 の 2 のその部分を Supersede）。
 - 一覧の `capacity` は Compute Scheduler の並列の上限と VRAM です（[Decision 0084](../../docs/decisions/0084-task-list-parallel-limit-and-vram.md)。推奨どおりに実装）。`parallel_limit` は Main Model の GPU で動いている Coding の Lease（`running`）と、Main の最も長い Context（KV Pool の Coding の取り分まで）の Agent をあと何件受け付けるか（動いている Agent も最も長い Context まで伸びるとして数えた残りで。`ComputeScheduler.coding_capacity()`。読むだけで何も予約しない）の和で、Context が埋まるほど下がり、Main が GPU にいない・Probe が古い・Exclusive・縮退の 4 段目以降は `running` だけです。`vram_used_bytes` / `vram_total_bytes` は Probe の最新の読み取り（新しいときだけ）で、System Health の詳細を見られる人（`admin.system_health.view`、Owner / Admin。Decision 0059 の 3）にだけ返し、他は `null` です（判定は Policy だけで Audit しない）。Scheduler のない構成（`create_app(compute=None)`）と Main Model のない構成では `capacity` が `null` で、画面は表示しません。
 
 Test: `tests/test_tasks_api.py`（PostgreSQL。見える範囲、ACL、操作の権限、Version、遷移表、Queue、Merge Ready、並列の上限と VRAM の見える範囲）、`tests/test_compute_scheduler.py` の `CodingCapacityTest`（並列の上限の計算）。
+
+### 読み取りだけの Task の結果（Issue #290、Decision 0098）
+
+方針は [Decision 0098](../../docs/decisions/0098-read-only-task-result-api-and-screen.md)（**Approved**）です。Migration はありません（`task_events` の `(task_id, seq)` の Index で `complete` の Event を読む）。
+
+- 結果があるのは、読み取りだけの Task が `completed` のときだけです（`complete` の Event の `detail.result`）。普通の Task、`completed` でない読み取りだけの Task は 404 `task_result_not_found`、詳細の `result` は `none`。
+- 読めるのは、Task の Project に `project.read` があり、かつ Task の Working Set に**一度でも入ったすべての Repository**（`task_repositories` のその Task の全部の行。`change_working_set` で外した行、入れ直した行、Retry の前の Attempt の行を含む）を今の ACL で `project.read` で読める人です。要約は Repository ごとに分けられないので、1 つでも読めなければ全部を出しません。作成者も同じ条件で、所属しない Owner / Admin は Task そのものが 403 `forbidden`（今までどおり）。登録が消えた Repository は ACL がないので誰も読めません（`repo_acl_unresolved`）。
+- 読めないときは 403 `task_result_forbidden` で、その拒否は他の `project.read` の拒否と同じく Capability の監査（`audit_events`、`resource_kind` は `repository`）に残ります。成功した読み取りは監査しません（`DENIED_ONLY`）。詳細の `result` は `hidden` で、読めない Repository の名前・数はどこにも出しません（読めない Repository が少なくとも 1 つあることだけを開示する。Decision 0098 の 7）。
+- 文字列は**保存したまま返し、`redact_text` に通しません**（Decision 0098 の 2 の C。Human の選択）。Tab と改行以外の制御文字（C0・DEL・C1）だけを `\uXXXX` の見える Escape にします（`integration.changes.visible_text`、PR の差分と同じ関数）。保存した Event の行は変えません。大きさは保存の上限（1 MiB）の中で全部を返し、Page 送りも切り詰めもしません。
+- 詳細（`GET /tasks/{task_id}`）は数秒ごとに読まれる軽い答えなので、`result` の状態だけを載せ、本文は載せません。
+- Plan の受け入れ（`orchestrator/plan.py`）で、`redact_text` に通すと変わる Node の `key` / `title`（高い確度の Token の形に加え、`DB_PASSWORD=...` の代入の形と `--password ...` の Flag の形）を拒みます（`InvalidPlanError` の `credential_in_plan`。Planner の失敗として次の Planner へ。読み取りだけでない Task も同じ）。基準は `tools.credentials.would_redact`（`redact_text` の置き換えの数が 1 以上）で、Tool の引数を拒む `contains_credential_plaintext`（高い確度の形だけ）は変えません。Planner の Prompt にも「Key と Title に代入・Flag・秘密を書かない」（`agents/local.py` の `PLAN_TEXT_RULE`）を足しました。`token: refresh 処理` のような Credential でない題も拒まれうる誤検知は、Decision 0098 の 8 で受け入れています。DAG と Board の `title` は今までどおり Redact せずに返します（受け入れの時だけの規則）。
+
+Test: `tests/test_tasks_result_api.py`（PostgreSQL。結果の形と順・Viewer・`none` / `available` / `hidden`・ACL で拒否された Member（作成者を含む）・外してから完了した Repository・入れ直した Repository・Retry の前の Attempt の Repository・登録の消えた Repository・拒否の監査・Redact しない・制御文字の Escape・最大の結果）、`tests/test_orchestrator_plan.py` と `tests/test_orchestrator_read_only.py`（`credential_in_plan` と次の Planner、Prompt）、`tests/test_tools_credentials.py` の `WouldRedactTest`、`tests/test_authz_routes.py`（Guard）。
 
 ### Task の作成（Issue #274）
 

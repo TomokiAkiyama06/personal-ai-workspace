@@ -73,6 +73,9 @@ class PlanReason(StrEnum):
     NO_REQUIRED_NODE = "no_required_node"
     # A read-only task (issue #279): only the roles that never write.
     WORKER_IN_READ_ONLY_TASK = "worker_in_read_only_task"
+    # A node key or title that ``redact_text`` would change (Decision 0098, 8):
+    # the DAG and the board show them as they are.
+    CREDENTIAL_IN_PLAN = "credential_in_plan"
 
 
 class InvalidPlanError(OrchestratorError):
