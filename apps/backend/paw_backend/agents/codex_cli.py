@@ -436,6 +436,12 @@ class CodexSessionAdapter:
         _write(
             codex_home / CONFIG_NAME, session_config(attachment.spec, attachment.tools)
         )
+        # Checked again right before the login is placed (Codex review of
+        # #292): a session paused after binding whose expired row the
+        # collection took over meanwhile stops here, before it writes into the
+        # directory the collection is fencing and reading.
+        if not await _held(request, attachment):
+            return AgentSessionResult(failure=FailureCode.UNAVAILABLE)
         try:
             attachment.placed.append(True)
             await self._credentials.place(secret, codex_home)
