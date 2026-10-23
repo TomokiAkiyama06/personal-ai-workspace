@@ -767,8 +767,9 @@ class SlotBindingTest(CodexCase):
         self.assertEqual(bind[0], "bind")
         self.assertIsInstance(bind[1], uuid.UUID)
         self.assertEqual(bind[2], 0)  # nothing placed yet
-        # Before the unit starts and before the write-back.
-        self.assertEqual(checks, [("held", 1), ("held", 1)])
+        # Before the login is placed (Codex review of #292), before the unit
+        # starts and before the write-back.
+        self.assertEqual(checks, [("held", 0), ("held", 1), ("held", 1)])
         self.assertEqual(len(self.credentials.collected), 1)
         self.assertEqual(list(self.sessions.iterdir()), [])
 
@@ -782,8 +783,25 @@ class SlotBindingTest(CodexCase):
         self.assertEqual(self.connections.cli_running, [])
         self.assertEqual(list(self.sessions.iterdir()), [])
 
-    async def test_a_slot_lost_before_the_start_starts_nothing(self):
+    async def test_a_slot_lost_before_the_login_is_placed_places_nothing(self):
+        # Codex review of #292: a session paused after binding, whose expired
+        # row the collection took over meanwhile, stops before it writes
+        # ``auth.json`` (the collection is fencing and reading that
+        # directory).
         self.bind(held=[False])
+        with self.assertLogs("paw_backend.agents.codex_cli", "ERROR"):
+            outcome = await self.run_node(self.SUBMIT)
+        self.assertIsNone(outcome.result)
+        self.assertEqual(self.connections.raw.failure, FailureCode.UNAVAILABLE)
+        self.assertEqual(self.credentials.placed, [])
+        self.assertFalse(self.report.exists())  # app-server never started
+        self.assertEqual(self.credentials.collected, [])
+        self.assertEqual(self.connections.cli_running, [])
+        (kept,) = list(self.sessions.iterdir())  # the collection loop's
+        self.assertFalse((kept / "config" / "auth.json").exists())
+
+    async def test_a_slot_lost_before_the_start_starts_nothing(self):
+        self.bind(held=[True, False])
         with self.assertLogs("paw_backend.agents.codex_cli", "ERROR") as logs:
             outcome = await self.run_node(self.SUBMIT)
         self.assertIsNone(outcome.result)
@@ -797,7 +815,7 @@ class SlotBindingTest(CodexCase):
         self.assertIn("left to the collection", "\n".join(logs.output))
 
     async def test_a_slot_lost_before_the_write_back_leaves_the_login(self):
-        self.bind(held=[True, False])
+        self.bind(held=[True, True, False])
         await self.run_node(self.SUBMIT)
         self.assertEqual(self.read_report()["args"][0], "app-server")
         self.assertEqual(self.credentials.collected, [])
