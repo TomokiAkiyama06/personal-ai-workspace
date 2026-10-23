@@ -370,6 +370,25 @@ class _UnitProcess:
         self._result = result
 
 
+#: The systemctl looks killed and not waited for (:meth:`SystemdLauncher.query`):
+#: held until they are reaped.
+_ABANDONED: set[asyncio.Future] = set()
+
+
+def _abandon(process, talking: asyncio.Future) -> None:
+    """Kill a systemctl look and let it be reaped in the background."""
+    with contextlib.suppress(ProcessLookupError):
+        process.kill()
+    _ABANDONED.add(talking)
+
+    def reaped(future: asyncio.Future) -> None:
+        _ABANDONED.discard(future)
+        if not future.cancelled():
+            future.exception()  # retrieved: nobody waits for it
+
+    talking.add_done_callback(reaped)
+
+
 class SystemdLauncher:
     """Production's launcher (Decision 0083, 6): the session's files, then
     ``systemctl start paw-cli-session@<uuid>.service`` (polkit lets the
@@ -423,6 +442,32 @@ class SystemdLauncher:
             raise
         if not finished:
             logger.error("systemctl did not answer in time")
+            return -1, ""
+        out, _ = talking.result()
+        return process.returncode or 0, out.decode("ascii", "replace").strip()
+
+    async def query(self, *arguments: str, timeout_seconds: float) -> tuple[int, str]:
+        """A read-only systemctl (``show``, ``list-units``) for a look with a
+        deadline of its own, System Health's (Codex review of #292): at most
+        ``timeout_seconds`` (``(-1, "")`` past it), and a cancellation kills
+        it at once instead of waiting through :meth:`systemctl`'s bound (a
+        look sends nothing that could come after a stop)."""
+        process = await asyncio.create_subprocess_exec(
+            *self._systemctl,
+            *arguments,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        talking = asyncio.ensure_future(process.communicate())
+        try:
+            done, _ = await asyncio.wait({talking}, timeout=timeout_seconds)
+        except asyncio.CancelledError:
+            _abandon(process, talking)
+            raise
+        if talking not in done:
+            _abandon(process, talking)
+            logger.warning("systemctl did not answer a look in time")
             return -1, ""
         out, _ = talking.result()
         return process.returncode or 0, out.decode("ascii", "replace").strip()

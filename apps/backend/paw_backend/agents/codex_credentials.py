@@ -162,4 +162,11 @@ def _read(path: Path) -> bytes:
     return data
 
 
-__all__ = ["AUTH_MODE", "AUTH_NAME", "CodexAuthFile"]
+def read_login_file(path: Path) -> bytes:
+    """A session's ``auth.json`` as it is (no link followed, a regular file,
+    at most ``MAX_AUTH_BYTES``: ``ValueError`` otherwise); for the late
+    collection too (``codex_collect``, Decision 0096)."""
+    return _read(path)
+
+
+__all__ = ["AUTH_MODE", "AUTH_NAME", "CodexAuthFile", "read_login_file"]

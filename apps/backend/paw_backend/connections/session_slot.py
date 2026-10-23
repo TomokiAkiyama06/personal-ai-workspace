@@ -56,7 +56,7 @@ import contextlib
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
-from typing import Final
+from typing import Final, Protocol
 
 from paw_backend.connections.domain import ConnectionKind
 from paw_backend.connections.store import ConnectionStore
@@ -74,7 +74,15 @@ SLOT_HEARTBEAT_SECONDS: Final = 10.0
 #: when it could not renew: the worst case of stopping the CLI and writing
 #: its credential back (see the module).
 SLOT_STOP_MARGIN_SECONDS: Final = 240.0
+#: Decision 0096, 1 D: how often a kept session's unit is looked at and its
+#: login collected once it stopped (provisional).
+SLOT_COLLECT_SECONDS: Final = 60.0
 _FIRST_RETRY_SECONDS: Final = 0.25
+#: Decision 0096, 1 D: the holders of this process's kept bound slots that
+#: no collector of their own collects (the service that runs the sessions,
+#: the Orchestrator's, has none: Codex review of #292). This process's
+#: collection loop collects them while they are here (:func:`kept_here`).
+_KEPT_HERE: set[uuid.UUID] = set()
 _MAX_RETRY_SECONDS: Final = 2.0
 
 
@@ -108,8 +116,14 @@ class SessionSlot:
         ttl_seconds: float = SLOT_TTL_SECONDS,
         heartbeat_seconds: float = SLOT_HEARTBEAT_SECONDS,
         margin_seconds: float = SLOT_STOP_MARGIN_SECONDS,
+        collector: "SessionCollector | None" = None,
+        collect_seconds: float = SLOT_COLLECT_SECONDS,
     ) -> None:
         self._store = store
+        # Decision 0096, 1 D: who collects a kept session's login, and how
+        # often this holder tries (``None``: renewed only).
+        self._collector = collector
+        self._collect_seconds = float(collect_seconds)
         self._kind = kind
         self._call = call
         self._ttl = float(ttl_seconds)
@@ -328,31 +342,8 @@ class SessionSlot:
                     )
                     return
             if self.session is not None:
-                try:
-                    held = await self._run(
-                        self._store.renew_session_slot(
-                            self._kind, self.holder, self._ttl
-                        )
-                    )
-                except Exception as error:
-                    logger.warning(
-                        "connection session slot not renewed: kind=%s"
-                        " exception_type=%s",
-                        self._kind.value,
-                        log_type_name(error),
-                    )
-                else:
-                    if not held:
-                        logger.error(
-                            "connection session slot of a CLI that could not be"
-                            " stopped is no longer this process's; the collection"
-                            " loop has it: kind=%s session=%s",
-                            self._kind.value,
-                            self.session,
-                        )
-                        return
-                await asyncio.sleep(self._heartbeat)
-                continue
+                await self._keep_bound()
+                return
             try:
                 held = await self._run(
                     self._store.renew_session_slot(self._kind, self.holder, self._ttl)
@@ -372,6 +363,45 @@ class SessionSlot:
                     log_type_name(error),
                 )
             await asyncio.sleep(self._heartbeat)
+
+    async def _keep_bound(self) -> None:
+        """A kept slot bound to a session: renewed, and its login collected
+        every ``collect_seconds`` once its unit stopped (Decision 0096, 1 D),
+        until it was collected or is no longer this holder's."""
+
+        async def renew() -> bool:
+            held = await self._run(
+                self._store.renew_session_slot(self._kind, self.holder, self._ttl)
+            )
+            if not held:
+                logger.error(
+                    "connection session slot of a CLI that could not be stopped"
+                    " is no longer this process's; the collection loop has it:"
+                    " kind=%s session=%s",
+                    self._kind.value,
+                    self.session,
+                )
+            return held
+
+        collect = None
+        if self._collector is not None:
+            collector = self._collector
+
+            async def collect() -> bool:
+                return await collector.collect(self._kind, self.holder)
+
+        else:
+            _KEPT_HERE.add(self.holder)
+        try:
+            await keep_until_collected(
+                renew,
+                collect,
+                heartbeat_seconds=self._heartbeat,
+                interval_seconds=self._collect_seconds,
+                first_at_once=False,
+            )
+        finally:
+            _KEPT_HERE.discard(self.holder)
 
     def keep(self) -> None:
         """The session's CLI could not be stopped (it may still run with the
@@ -465,6 +495,82 @@ class SessionSlot:
             )
 
 
+class SessionCollector(Protocol):
+    """Collects the login of a session whose slot ``holder`` holds (issue
+    #280, Decision 0096): ``True`` once the slot was given back (or is not
+    ``holder``'s any more), ``False`` to be tried again later. Never raises
+    (``agents.codex_collect.CodexLoginCollector``)."""
+
+    async def collect(self, kind: ConnectionKind, holder: uuid.UUID) -> bool: ...
+
+
+async def keep_until_collected(
+    renew: Callable[[], Awaitable[bool]],
+    collect: Callable[[], Awaitable[bool]] | None,
+    *,
+    heartbeat_seconds: float,
+    interval_seconds: float,
+    first_at_once: bool,
+) -> None:
+    """Hold a slot bound to a session (Decision 0096, 1 D and 2 B): renew it
+    every ``heartbeat_seconds`` in a task of its own (a slow round of the
+    collection does not let it expire) and, with ``collect``, try a round
+    every ``interval_seconds`` (the first one at once with
+    ``first_at_once``). Ends once a renewal answers ``False`` (the slot was
+    taken over, given back or expired: never taken again here) or a round
+    ended the collection. A renewal or a round that fails is logged and
+    tried again."""
+    lost = asyncio.Event()
+
+    async def beat() -> None:
+        while True:
+            try:
+                held = await renew()
+            except Exception as error:
+                logger.warning(
+                    "kept session slot not renewed: exception_type=%s",
+                    log_type_name(error),
+                )
+                held = True  # not known to be lost: tried again
+            if not held:
+                lost.set()
+                return
+            await asyncio.sleep(heartbeat_seconds)
+
+    beating = asyncio.ensure_future(beat())
+    try:
+        wait = 0.0 if first_at_once else interval_seconds
+        while True:
+            with contextlib.suppress(TimeoutError):
+                async with asyncio.timeout(wait):
+                    await lost.wait()
+            if lost.is_set():
+                return
+            if collect is not None:
+                try:
+                    done = await collect()
+                except Exception as error:
+                    logger.warning(
+                        "session collection failed for now: exception_type=%s",
+                        log_type_name(error),
+                    )
+                    done = False
+                if done is True:
+                    return
+            wait = interval_seconds
+    finally:
+        beating.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await beating
+
+
+def kept_here() -> frozenset[uuid.UUID]:
+    """The holders of this process's kept bound slots without a collector of
+    their own, renewed by them until their login was collected (Decision
+    0096, 1 D): this process's collection loop collects them."""
+    return frozenset(_KEPT_HERE)
+
+
 async def run_within(slot: SessionSlot, work: Awaitable) -> bool:
     """Run ``work`` while ``slot`` is held. ``True``: it ended by itself (its
     exception passes). ``False``: the slot was lost first; ``work`` was
@@ -506,11 +612,15 @@ async def _to_its_end(task: asyncio.Future) -> bool:
 
 
 __all__ = [
+    "SLOT_COLLECT_SECONDS",
     "SLOT_HEARTBEAT_SECONDS",
     "SLOT_STOP_MARGIN_SECONDS",
     "SLOT_TTL_SECONDS",
     "SLOT_WAIT_SECONDS",
+    "SessionCollector",
     "SessionSlot",
     "check_slot_timing",
+    "kept_here",
+    "keep_until_collected",
     "run_within",
 ]

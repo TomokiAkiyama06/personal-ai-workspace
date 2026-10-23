@@ -273,6 +273,16 @@ class StoreTest(SlotCase):
 class SessionTest(SlotCase):
     """The service binds the slot and keeps it (Decision 0096, 2 B and 4)."""
 
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        self.addAsyncCleanup(self.let_holds_go)
+
+    async def let_holds_go(self):
+        # A kept slot's holder stops once its row is gone: before this test's
+        # loop closes, so no renewal is left half-way for the next test.
+        await asyncio.to_thread(self.clean_leases)
+        await asyncio.sleep(0.3)
+
     def slot_service(self, adapter, **options):
         # A longer lease than the slot tests' (a slow database must not let a
         # confirmation run past it); still a short heartbeat.

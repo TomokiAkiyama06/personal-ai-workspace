@@ -32,6 +32,7 @@ from paw_backend.db import Database
 
 from . import (
     test_connections_admin,
+    test_connections_codex_collection,
     test_connections_concurrency,
     test_connections_execute,
     test_connections_quota_admin,
@@ -199,6 +200,7 @@ def _database_test_classes(module):
 # unprivileged role: one derived class per original class.
 for _module in (
     test_connections_admin,
+    test_connections_codex_collection,
     test_connections_quota_admin,
     test_connections_execute,
     test_connections_quota_enforcement,
