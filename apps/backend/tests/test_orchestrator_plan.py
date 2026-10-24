@@ -320,6 +320,8 @@ class RefusedPlansTest(unittest.TestCase):
                 "input",
                 "capabilities",
                 "repositories",
+                # Decision 0099, 4.
+                "agent",
             },
         )
 

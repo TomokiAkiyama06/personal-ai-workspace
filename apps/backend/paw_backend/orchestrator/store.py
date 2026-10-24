@@ -34,6 +34,7 @@ does) and it does not decide what a failure means (``orchestrator.py``).
 """
 
 import uuid
+from collections.abc import Mapping
 from typing import Protocol
 
 from sqlalchemy import func, select, text
@@ -186,6 +187,7 @@ def _node_record(row: DagNodeRow, depends_on: tuple[str, ...]) -> NodeRecord:
         rung_attempts=row.rung_attempts,
         result=None if row.result is None else NodeResult.from_json(row.result),
         error_class=row.error_class,
+        assigned_agent=row.assigned_agent,
     )
 
 
@@ -303,6 +305,7 @@ class DagStore:
         plan: Plan,
         *,
         run: TaskRun | None = None,
+        start_rungs: Mapping[str, int] | None = None,
     ) -> DagRecord:
         """Store an accepted plan as the DAG of ``attempt`` of the task.
 
@@ -319,6 +322,12 @@ class DagStore:
         the retried run) while the plan was being made cannot let the old run's
         plan become the DAG the new run executes. The DAG records ``run``'s retry
         count (``task_retry_count``), like a take-over.
+
+        A node's ``agent`` (Decision 0099, 4) is stored as its ``assigned_agent``
+        and ``start_rungs`` maps such a node's key to the rung of its role's
+        ladder it starts on (``agent_index``; the orchestrator computes it from
+        its ladders, ``OrchestratorConfig.start_rung``). A node with an agent
+        needs its rung and a node without one has none (it starts on the first).
         """
         check_uuid("task_id", task_id)
         check_int("attempt", attempt, minimum=1, maximum=MAX_INT32)
@@ -326,6 +335,21 @@ class DagStore:
             raise InvalidOrchestratorArgumentError("plan")
         if run is not None and (not isinstance(run, TaskRun) or run.attempt != attempt):
             raise InvalidOrchestratorArgumentError("run")
+        if start_rungs is not None and not isinstance(start_rungs, Mapping):
+            raise InvalidOrchestratorArgumentError("start_rungs")
+        rungs = dict(start_rungs or {})
+        for node in plan.nodes:
+            if (node.agent is None) != (node.key not in rungs):
+                raise InvalidOrchestratorArgumentError("start_rungs")
+            if node.key in rungs:
+                check_int(
+                    "start_rungs",
+                    rungs[node.key],
+                    minimum=0,
+                    maximum=MAX_LADDER_LENGTH - 1,
+                )
+        if len(rungs) != sum(node.agent is not None for node in plan.nodes):
+            raise InvalidOrchestratorArgumentError("start_rungs")
         dag_id = uuid.uuid4()
         views = [
             NodeView(
@@ -370,6 +394,8 @@ class DagStore:
                                 if node.repositories is None
                                 else [str(r) for r in node.repositories]
                             ),
+                            assigned_agent=node.agent,
+                            agent_index=rungs.get(node.key, 0),
                             state=initial[node.key],
                         )
                     )

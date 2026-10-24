@@ -38,6 +38,7 @@ from paw_backend.tools import ApprovalService, PostgresApprovalStore
 from . import (
     test_agents_cloud_policy,
     test_orchestrator_abandon,
+    test_orchestrator_assignment,
     test_orchestrator_authority,
     test_orchestrator_budget,
     test_orchestrator_control,
@@ -423,6 +424,12 @@ class PlanCallOrchestratorAsAppRole(
     pass
 
 
+class AssignedRunAsAppRole(AsAppRole, test_orchestrator_assignment.AssignedRunTest):
+    # Decision 0099, 4: the assignment is written with the node (the table's
+    # INSERT), never updated.
+    pass
+
+
 @requires_postgres
 class TaskEndAsAppRole(AsAppRole, PostgresOrchestratorTestCase):
     """The task-end cleanup and its sweep (issue #125) as the application role:
@@ -652,6 +659,8 @@ class AppRolePrivilegesTest(AsAppRole, PostgresOrchestratorTestCase):
             "UPDATE agent_dag_nodes SET key = 'zz'",
             "UPDATE agent_dag_nodes SET ordinal = 99",
             "UPDATE agent_dag_nodes SET title = 'x'",
+            # The agent the plan assigned (revision 0282, Decision 0099, 4).
+            "UPDATE agent_dag_nodes SET assigned_agent = 'codex'",
             "DELETE FROM agent_dag_nodes",
             "TRUNCATE agent_dag_nodes CASCADE",
             # The dependencies are never edited or removed.

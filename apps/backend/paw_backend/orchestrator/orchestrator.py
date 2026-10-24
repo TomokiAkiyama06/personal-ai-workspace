@@ -74,6 +74,7 @@ from paw_backend.orchestrator.domain import (
     RunOutcome,
 )
 from paw_backend.orchestrator.errors import (
+    ASSIGNMENT_UNAVAILABLE,
     GRANT_ESCALATION,
     INVALID_OUTCOME,
     NODE_TIMEOUT,
@@ -394,6 +395,9 @@ class _Spec:
     # The planning call's ``seq`` in ``agent_plan_calls`` (Decision 0099, 3;
     # ``None`` for a node's attempt).
     plan_call: int | None = None
+    # The node's assigned agent is no longer on its ladder at this rung
+    # (Decision 0099, 4): the attempt fails with ``AssignmentUnavailable``.
+    assignment_unavailable: bool = False
 
 
 @dataclass(slots=True)
@@ -556,7 +560,9 @@ class Orchestrator:
 
         ``plan`` is a ``Plan`` or a planner's mapping (``{"nodes": [...]}``); it is
         judged before anything is stored (``InvalidPlanError``: a cycle, an unknown
-        dependency, too many nodes, ...). ``DagAlreadyExistsError`` when the
+        dependency, too many nodes, an agent the node's role is not allowed,
+        ...), and every node is assigned its agent (Decision 0099, 4:
+        ``OrchestratorConfig.assign``). ``DagAlreadyExistsError`` when the
         attempt has a DAG already. The task must not be finished.
         """
         check_uuid("task_id", task_id)
@@ -571,12 +577,25 @@ class Orchestrator:
             raise DagStateError()
         if snapshot.read_only:
             refuse_writers(plan)  # issue #279: no Worker in a read-only task
+        plan = self._config.assign(plan)
         # Fenced by the run that was read: a Retry or Restart that commits in
         # between refuses the plan (``StaleRunError``) instead of giving it to
         # the new run unseen.
         return await self._store.create(
-            task_id, snapshot.attempt.number, plan, run=snapshot.run
+            task_id,
+            snapshot.attempt.number,
+            plan,
+            run=snapshot.run,
+            start_rungs=self._start_rungs(plan),
         )
+
+    def _start_rungs(self, plan: Plan) -> dict[str, int]:
+        """The rung each node of an assigned plan starts on (Decision 0099, 4)."""
+        return {
+            node.key: self._config.start_rung(node.role, node.agent)
+            for node in plan.nodes
+            if node.agent is not None
+        }
 
     async def run_once(self, worker_id: str) -> RunReport:
         """Claim the next queue entry and run it (``IDLE`` when there is none)."""
@@ -1655,7 +1674,18 @@ class Orchestrator:
     def _spec_of(
         self, dag: DagRecord, node: NodeRecord, attempt: AttemptRecord
     ) -> _Spec:
+        """The attempt's spec. Its agent is the rung ``agent_index`` of the
+        role's ladder. A node the plan assigned an agent (Decision 0099, 4)
+        must find that agent on the ladder at or below that rung (it started on
+        it, and an escalation only moves up): when the ladders were changed so
+        that it is not, the attempt is ``assignment_unavailable`` and fails
+        (``AssignmentUnavailable``) rather than run on another agent."""
         ladder = self._config.ladders[node.role]
+        rung = min(attempt.agent_index, len(ladder) - 1)
+        assigned = node.assigned_agent
+        unavailable = assigned is not None and (
+            assigned not in ladder or ladder.index(assigned) > rung
+        )
         upstream = {
             dependency: dag.node(dependency).result for dependency in node.depends_on
         }
@@ -1666,10 +1696,11 @@ class Orchestrator:
             goal=node.goal,
             input=node.input,
             upstream=upstream,
-            agent=ladder[min(attempt.agent_index, len(ladder) - 1)],
+            agent=ladder[rung],
             attempt=attempt.number,
             approach=attempt.approach,
             node=node,
+            assignment_unavailable=unavailable,
             upstream_workers=tuple(
                 dependency
                 for dependency in node.depends_on
@@ -1798,6 +1829,10 @@ class Orchestrator:
 
     async def _attempt(self, run: _Run, spec: _Spec) -> _Finished:
         """Run one attempt through the agent runtime; only cancellation escapes."""
+        if spec.assignment_unavailable:
+            # Decision 0099, 4: never quietly another agent. Nothing ran, so
+            # trying again cannot help.
+            return _Finished.failure(ASSIGNMENT_UNAVAILABLE, retryable=False)
         fence = AttemptFence()
         try:
             # Fail early on a grant / scope problem.
@@ -1841,6 +1876,13 @@ class Orchestrator:
                 placement=self._placement(run, spec, fence),
                 connections=self._node_connections(run, spec, worktrees, fence),
                 read_only_task=run.task.read_only,
+                agent_choices=(
+                    MappingProxyType(
+                        {role: self._config.allowed_agents(role) for role in NodeRole}
+                    )
+                    if spec.node is None
+                    else None
+                ),
             )
             outcome = await self._with_timeout(
                 self._runtimes[spec.agent].run_node(assignment)
@@ -2344,8 +2386,17 @@ class Orchestrator:
                         # Issue #279 (a): a Worker node is refused like any
                         # other unacceptable plan; the next planner is asked.
                         refuse_writers(accepted)
+                    # Decision 0099, 4: an agent the role does not allow
+                    # refuses the plan like any other unacceptable one (the
+                    # next planner is asked); a node without one gets its
+                    # role's default, stored explicitly.
+                    accepted = self._config.assign(accepted)
                     dag = await self._store.create(
-                        task_id, run.run.attempt, accepted, run=run.run
+                        task_id,
+                        run.run.attempt,
+                        accepted,
+                        run=run.run,
+                        start_rungs=self._start_rungs(accepted),
                     )
                 except DagAlreadyExistsError:
                     # Another worker planned this attempt first: its plan stands.
