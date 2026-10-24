@@ -280,7 +280,7 @@ class Harness:
         )
         self.budget = options.pop("budget", None) or BudgetTracker(database)
         self.loops = LoopDetector(database)
-        self.store = DagStore(database)
+        self.store = options.pop("store", None) or DagStore(database)
         self.runtimes = options.pop("runtimes", None) or {"local": FakeRuntime()}
         self.authority = options.pop("authority", None) or FakeAuthority()
         self.tools = options.pop("tools", None) or FakeTools()
@@ -325,7 +325,7 @@ class PostgresOrchestratorTestCase(PostgresTaskTestCase):
         # use the unprivileged application role (test_orchestrator_grants).
         await self.owner_sql(
             "TRUNCATE " + ", ".join(TABLES) + ", queue_entries, budget_usages,"
-            " loop_failure_signatures, agent_incidents"
+            " loop_failure_signatures, agent_incidents, agent_plan_calls"
         )
         self.store = DagStore(self.database)
 

@@ -21,10 +21,10 @@ What a runtime is given (``NodeAssignment``) and what it is **not** given:
   every charge goes to the parent task's budget;
 * it may get ``placement`` (:class:`NodePlacement`, issue #133) to record where
   the attempt actually runs (the local GPU or CPU, or a cloud agent) and on which
-  agent and model. The orchestrator gives it to every attempt of a DAG node (not
-  to the planner's calls, which have no attempt row); a runtime that may send a
-  node to the cloud must record the placement first and must not send when it
-  cannot (``HybridRuntime``);
+  agent and model. The orchestrator gives it to every attempt of a DAG node
+  and, since Decision 0099 (3), to every call of the planner (recorded in
+  ``agent_plan_calls``); a runtime that may send a node to the cloud must record
+  the placement first and must not send when it cannot (``HybridRuntime``);
 * it never gets the Tool Broker, the runner, a ``TaskContext``, a grant, a scope,
   a database connection or another node's conversation.
 
@@ -149,11 +149,12 @@ class NodeAssignment:
     # (Decision 0083, 6: the sandbox of a call mounts one of these). Paths only:
     # what the node may do there is the Tool Broker's, call by call.
     roots: Mapping[uuid.UUID, str] = field(default_factory=dict)
-    # Where the attempt runs, recorded once (``None``: nothing can be recorded,
-    # such as a planner call: a runtime must then keep the node off the cloud).
+    # Where the attempt runs, recorded once (``None``: nothing can be recorded:
+    # a runtime must then keep the node off the cloud).
     placement: NodePlacement | None = field(default=None, repr=False)
-    # The shared connections of this attempt (Decision 0083, 1; ``None``: the
-    # orchestrator was given none, or the call is the planner's: no CLI session).
+    # The shared connections of this attempt or planner call (Decision 0083, 1,
+    # Decision 0099, 3; ``None``: the orchestrator was given none: no CLI
+    # session).
     connections: NodeConnections | None = field(default=None, repr=False)
     # The task is read-only (issue #279, Decision 0094, 1 A): its plan may have
     # no ``worker`` node (a planner is told so) and no node may write.

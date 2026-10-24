@@ -44,6 +44,7 @@ from paw_backend.orchestrator.errors import (
 )
 from paw_backend.orchestrator.gateway import AttemptFence, RunGuard
 from paw_backend.orchestrator.placement import NodePlacementHandle, content_digest
+from paw_backend.orchestrator.plan_calls import PlanCallPlacementHandle
 from paw_backend.orchestrator.result import NodeResult
 from paw_backend.orchestrator.runtime import NodeOutcome
 from paw_backend.orchestrator.scope import agent_id_of
@@ -580,7 +581,7 @@ class Allow:
 
 @requires_postgres
 class OrchestratorPlacementTest(PlacementStoreCase):
-    async def test_every_node_attempt_gets_a_placement_and_the_planner_none(self):
+    async def test_every_node_attempt_and_planner_call_gets_a_placement(self):
         planner = FakeRuntime("local", script={"plan": PLANNED})
         h = self.harness(runtimes={"local": planner})
         task_id = await self.create_task()
@@ -589,8 +590,10 @@ class OrchestratorPlacementTest(PlacementStoreCase):
         report = await h.orchestrator.run_once("w1")
 
         self.assertEqual(report.outcome, RunOutcome.DAG_SUCCEEDED)
+        # Decision 0099, 3 (superseding Decision 0048, 5): the planner's call is
+        # recorded too, on its own row (``test_orchestrator_plan_calls``).
         (plan_call,) = planner.calls_of("plan")
-        self.assertIsNone(plan_call.placement)
+        self.assertIsInstance(plan_call.placement, PlanCallPlacementHandle)
         (node_call,) = planner.calls_of("a")
         self.assertIsInstance(node_call.placement, NodePlacementHandle)
         # A runtime that reports nothing leaves the placement NULL.

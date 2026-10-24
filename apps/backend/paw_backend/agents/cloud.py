@@ -19,7 +19,7 @@ single-user recount, ``CloudSendRefusedError``): a refusal there is
 
 If any of them refuses, nothing is sent and no placement is recorded (a refused
 placement closes the admitted row ``cancelled``). An attempt without a placement
-or without connections (a planner's call) is refused: fail closed. A refusal is
+or without connections is refused: fail closed. A refusal is
 a :class:`~.failures.RuntimeFailure` of the closed table; the runtime turns it
 into its outcome (``escalate`` on its own rung, ``ComputeUnavailable`` on
 ``HybridRuntime``'s fallback path: ``ErrorClassifier.outcome(failure,

@@ -71,6 +71,7 @@ from paw_backend.orchestrator.limits import (
     MAX_LADDER_LENGTH,
     MAX_MODEL_CHARS,
     MAX_NODES,
+    MAX_PLAN_ATTEMPTS,
     MAX_PLAN_BYTES,
     MODEL_PATTERN,
 )
@@ -84,6 +85,8 @@ TABLE_NAMES = (
 )
 # Revision 0183 (not one of the DAG's tables above).
 INCIDENTS_TABLE = "agent_incidents"
+# Revision 0281 (issue #297, Decision 0099, 3): the calls of the planner.
+PLAN_CALLS_TABLE = "agent_plan_calls"
 
 
 def _enum(enum_class: type[StrEnum], length: int = 16) -> Enum:
@@ -395,4 +398,60 @@ class AgentIncidentRow(Base):
         Index("ix_agent_incidents_occurred_at", "occurred_at"),
         # The usage report of one user: the incidents of the user's tasks.
         Index("ix_agent_incidents_task_id", "task_id"),
+    )
+
+
+class PlanCallRow(Base):
+    """One call of the planner (revision 0281, Decision 0099, 3).
+
+    The planner has no DAG and no attempt row (the DAG is made from the plan it
+    returns), so its calls have their own table: the row is made in the
+    transaction that starts the call (``Orchestrator._start_planner_call``: the
+    task running in this run, its step charged, the worker's queue lease proved),
+    and the call's runtime fills the placement columns once, before it runs
+    anywhere (``PlanCallPlacementHandle``)."""
+
+    __tablename__ = PLAN_CALLS_TABLE
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    task_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tasks.id"))
+    # The task's run (``TaskRun``): a Retry keeps the attempt and raises the
+    # retry count, so both name the run.
+    task_attempt: Mapped[int] = mapped_column(Integer)
+    retry_count: Mapped[int] = mapped_column(Integer)
+    # The call's number within the run, given by the database (the largest of the
+    # run plus one): a worker that took the run over, or a Retry, never collides
+    # with an earlier call.
+    seq: Mapped[int] = mapped_column(Integer)
+    # The call's number within the claim that made it (1 to ``max_plan_attempts``:
+    # the rung of the planner ladder it ran on, Decision 0021, 3).
+    claim_call: Mapped[int] = mapped_column(SmallInteger)
+    # The worker that made the call (the queue lease holder then).
+    owner: Mapped[str] = mapped_column(String(100))
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+    # Where the call ran, as for an attempt (revision 0133). NULL: nothing was
+    # recorded (a runtime that does not report it, or a call fenced off first).
+    placement: Mapped[ExecutionPlacement | None] = mapped_column(
+        _enum(ExecutionPlacement)
+    )
+    placement_agent: Mapped[str | None] = mapped_column(String(64))
+    placement_model: Mapped[str | None] = mapped_column(String(MAX_MODEL_CHARS))
+    placed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    content_fingerprint: Mapped[str | None] = mapped_column(String(71))
+    content_bytes: Mapped[int | None] = mapped_column(Integer)
+    placement_audit_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+
+    __table_args__ = (
+        UniqueConstraint("task_id", "task_attempt", "retry_count", "seq"),
+        CheckConstraint(
+            "task_attempt >= 1 AND retry_count >= 0 AND seq >= 1",
+            name="counters_valid",
+        ),
+        CheckConstraint(
+            f"claim_call BETWEEN 1 AND {MAX_PLAN_ATTEMPTS}",
+            name="claim_call_in_range",
+        ),
+        *placement_checks(),
     )

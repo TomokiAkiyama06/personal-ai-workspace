@@ -46,6 +46,7 @@ from . import (
     test_orchestrator_handover,
     test_orchestrator_lease,
     test_orchestrator_placement,
+    test_orchestrator_plan_calls,
     test_orchestrator_planning,
     test_orchestrator_project_gate,
     test_orchestrator_project_sweep,
@@ -68,8 +69,9 @@ OTHER_ROLE = f"paw_orch_other_{_RUN}"
 ROLE_PASSWORD = "dummy-test-password-orchestrator"
 
 # table -> (table-level privileges, columns the application may UPDATE). The exact
-# copy of the choices (and their reasons) in migration 0034, and in migration 0133
-# for the placement columns of the attempts (issue #133).
+# copy of the choices (and their reasons) in migration 0034, in migration 0133
+# for the placement columns of the attempts (issue #133), and in migration 0281
+# for the record of the planner's calls (issue #297).
 EXPECTED = {
     "agent_dags": (
         {"SELECT", "INSERT"},
@@ -97,6 +99,19 @@ EXPECTED = {
             "error_class",
             "failure_signature",
             "finished_at",
+            "placement",
+            "placement_agent",
+            "placement_model",
+            "placed_at",
+            "content_fingerprint",
+            "content_bytes",
+            "placement_audit_id",
+        },
+    ),
+    # A call is made once and placed once; nothing deletes it (no DELETE).
+    "agent_plan_calls": (
+        {"SELECT", "INSERT"},
+        {
             "placement",
             "placement_agent",
             "placement_model",
@@ -396,6 +411,18 @@ class OrchestratorPlacementAsAppRole(
     pass
 
 
+class PlanCallRecordAsAppRole(
+    AsAppRole, test_orchestrator_plan_calls.PlanCallRecordTest
+):
+    pass
+
+
+class PlanCallOrchestratorAsAppRole(
+    AsAppRole, test_orchestrator_plan_calls.PlanCallOrchestratorTest
+):
+    pass
+
+
 @requires_postgres
 class TaskEndAsAppRole(AsAppRole, PostgresOrchestratorTestCase):
     """The task-end cleanup and its sweep (issue #125) as the application role:
@@ -474,7 +501,8 @@ class AppRolePrivilegesTest(AsAppRole, PostgresOrchestratorTestCase):
             row["tablename"]
             for row in await self.rows(
                 "SELECT tablename FROM pg_tables WHERE schemaname = current_schema()"
-                " AND tablename LIKE 'agent\\_dag%'"
+                " AND (tablename LIKE 'agent\\_dag%'"
+                " OR tablename = 'agent_plan_calls')"
             )
         }
         self.assertEqual(tables, set(EXPECTED))
@@ -545,6 +573,58 @@ class AppRolePrivilegesTest(AsAppRole, PostgresOrchestratorTestCase):
                 )
         (record,) = await self.store.attempts(dag.id, "a")
         self.assertEqual(record.placement_model, "main")
+
+    async def test_the_app_role_cannot_rewrite_or_delete_a_planner_call(self):
+        # Revision 0281 (Decision 0099, 3): the application makes a call's row
+        # and writes its placement once; it never changes who made it, its
+        # number or its run, never rewrites the placement and never deletes it.
+        task_id = await self.create_task()
+        async with self.database.session() as session, session.begin():
+            await session.execute(
+                text(
+                    "INSERT INTO agent_plan_calls (task_id, task_attempt,"
+                    " retry_count, seq, claim_call, owner) VALUES"
+                    " (:task, 1, 0, 1, 1, 'w1')"
+                ),
+                {"task": task_id},
+            )
+            await session.execute(
+                text(
+                    "UPDATE agent_plan_calls SET placement = 'local_gpu',"
+                    " placement_agent = 'local', placement_model = 'main',"
+                    " placed_at = now()"
+                )
+            )
+        for sql, error in (
+            (
+                "UPDATE agent_plan_calls SET placement_model = 'other'",
+                psycopg.errors.RestrictViolation,
+            ),
+            (
+                "UPDATE agent_plan_calls SET seq = 2",
+                psycopg.errors.InsufficientPrivilege,
+            ),
+            (
+                "UPDATE agent_plan_calls SET owner = 'w2'",
+                psycopg.errors.InsufficientPrivilege,
+            ),
+            (
+                "UPDATE agent_plan_calls SET retry_count = 1",
+                psycopg.errors.InsufficientPrivilege,
+            ),
+            ("DELETE FROM agent_plan_calls", psycopg.errors.InsufficientPrivilege),
+            ("TRUNCATE agent_plan_calls", psycopg.errors.InsufficientPrivilege),
+        ):
+            with self.subTest(sql=sql):
+                async with self.database.session() as session:
+                    with self.assertRaises(DBAPIError) as caught:
+                        await session.execute(text(sql))
+                        await session.commit()
+                self.assertIsInstance(caught.exception.orig, error)
+        (row,) = await self.rows(
+            "SELECT seq, owner, placement_model FROM agent_plan_calls"
+        )
+        self.assertEqual(row, {"seq": 1, "owner": "w1", "placement_model": "main"})
 
     async def test_the_app_role_cannot_rewrite_the_plan_history_or_the_schema(self):
         dag = await self.make_dag(diamond())

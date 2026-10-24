@@ -288,6 +288,12 @@ class DagStore:
         self._database = database
         self._cloud_send_check = cloud_send_check
 
+    @property
+    def cloud_send_check(self) -> CloudSendCheck | None:
+        """The check asked in the transaction of a ``CLOUD`` placement (the
+        orchestrator asks it for the planner's calls too: ``plan_calls.py``)."""
+        return self._cloud_send_check
+
     # -- creation and reading -----------------------------------------------
 
     async def create(
