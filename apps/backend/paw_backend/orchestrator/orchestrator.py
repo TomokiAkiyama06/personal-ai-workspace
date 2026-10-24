@@ -1676,15 +1676,27 @@ class Orchestrator:
     ) -> _Spec:
         """The attempt's spec. Its agent is the rung ``agent_index`` of the
         role's ladder. A node the plan assigned an agent (Decision 0099, 4)
-        must find that agent on the ladder at or below that rung (it started on
-        it, and an escalation only moves up): when the ladders were changed so
-        that it is not, the attempt is ``assignment_unavailable`` and fails
-        (``AssignmentUnavailable``) rather than run on another agent."""
+        started on that agent's rung: until it escalates, the rung must still
+        be that agent, and after an escalation (which only moves up) the agent
+        must still be on the ladder at or below the rung. When the ladders were
+        changed so that it is not (the agent removed, or moved up or down the
+        ladder), the attempt is ``assignment_unavailable`` and fails
+        (``AssignmentUnavailable``) rather than run on another agent.
+
+        "Escalated": an escalation raises the ``approach`` and starts the
+        rung's attempt count again, so a node on ``approach`` 0, or whose every
+        attempt was on its current rung, has not escalated (a Retry of the task
+        also starts the count again: such a node is judged by the looser
+        rule)."""
         ladder = self._config.ladders[node.role]
         rung = min(attempt.agent_index, len(ladder) - 1)
         assigned = node.assigned_agent
+        escalated = attempt.approach > 0 and node.rung_attempts != node.attempt_count
         unavailable = assigned is not None and (
-            assigned not in ladder or ladder.index(assigned) > rung
+            assigned not in ladder
+            or (
+                ladder.index(assigned) > rung if escalated else ladder[rung] != assigned
+            )
         )
         upstream = {
             dependency: dag.node(dependency).result for dependency in node.depends_on

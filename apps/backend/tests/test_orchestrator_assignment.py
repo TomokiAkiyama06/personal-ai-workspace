@@ -513,6 +513,9 @@ class AssignedRunTest(PostgresOrchestratorTestCase):
         for label, ladder, agent, rung in (
             ("removed", ("local",), "claude", 1),
             ("moved above its rung", ("claude", "local"), "local", 0),
+            # Codex review (PR #301): an unescalated node never runs on the agent
+            # that took its rung when its own moved down the ladder.
+            ("moved below its rung", ("claude", "local"), "claude", 1),
         ):
             with self.subTest(label):
                 rt = labelled(local={}, claude={})
