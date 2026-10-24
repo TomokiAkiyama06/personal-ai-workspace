@@ -42,6 +42,10 @@ class NodeRecord:
     rung_attempts: int
     result: NodeResult | None
     error_class: str | None
+    # The agent the accepted plan assigned the node (Decision 0099, 4): the
+    # rung it started on. ``None`` for a node stored before revision 0282 (it
+    # starts on the first rung).
+    assigned_agent: str | None = None
 
     def view(self) -> NodeView:
         return NodeView(

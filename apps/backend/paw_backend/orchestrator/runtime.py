@@ -37,6 +37,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from paw_backend.orchestrator.config import RoleAssignment
 from paw_backend.orchestrator.domain import ExecutionPlacement, NodeRole
 from paw_backend.orchestrator.errors import InvalidOrchestratorArgumentError
 from paw_backend.orchestrator.plan import Plan
@@ -159,6 +160,13 @@ class NodeAssignment:
     # The task is read-only (issue #279, Decision 0094, 1 A): its plan may have
     # no ``worker`` node (a planner is told so) and no node may write.
     read_only_task: bool = False
+    # A planner call only (``None`` for a node's attempt): the agents a node of
+    # each role may be assigned and the default (Decision 0099, 4; the
+    # orchestrator's ``[orchestrator.assignment]``). The planner is told them;
+    # the orchestrator checks the plan against the same values.
+    agent_choices: Mapping[NodeRole, RoleAssignment] | None = field(
+        default=None, repr=False
+    )
 
 
 @dataclass(frozen=True, slots=True)

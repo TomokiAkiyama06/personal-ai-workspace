@@ -9,7 +9,12 @@ and the periodic ``ProjectTaskStopLoop``. See ``apps/backend/README.md`` and
 ``docs/decisions/0021-dag-orchestrator-policy.md``.
 """
 
-from paw_backend.orchestrator.config import Clock, OrchestratorConfig, SystemClock
+from paw_backend.orchestrator.config import (
+    Clock,
+    OrchestratorConfig,
+    RoleAssignment,
+    SystemClock,
+)
 from paw_backend.orchestrator.domain import (
     ROLE_CEILING,
     AttemptState,
@@ -153,6 +158,7 @@ __all__ = [
     "ProjectTaskStopLoop",
     "QueueLeaseVerifier",
     "RepositoryIntegration",
+    "RoleAssignment",
     "ResultReason",
     "RunGuard",
     "RunOutcome",

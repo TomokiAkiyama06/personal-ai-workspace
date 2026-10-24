@@ -6,7 +6,10 @@
   adds 1, and every write of a worker must present the epoch it took; a worker
   that was replaced holds an older epoch and is refused (``store.py``).
 * ``agent_dag_nodes``: the nodes, with their state, the agent rung and approach
-  they are on, their attempt counters and the result (bounded JSON).
+  they are on, their attempt counters and the result (bounded JSON). Since
+  revision ``0282`` (issue #297, Decision 0099, 4) also the agent the accepted
+  plan assigned the node (``assigned_agent``: the rung it started on; NULL for
+  a node stored before, which starts on the first rung).
 * ``agent_dag_edges``: ``node_key`` depends on ``depends_on_key`` (insert-only).
 * ``agent_dag_node_attempts``: one row per start of a node (which agent, which
   approach, which epoch started it, how it ended). The text of a failure is never
@@ -214,6 +217,10 @@ class DagNodeRow(Base):
     # What the plan asked for (``None``: the role's ceiling / the whole working set).
     capabilities: Mapped[list[str] | None] = mapped_column(JSONB(none_as_null=True))
     repositories: Mapped[list[str] | None] = mapped_column(JSONB(none_as_null=True))
+    # The agent the accepted plan assigned the node (revision 0282, Decision
+    # 0099, 4): the ladder's rung it started on. NULL: stored before 0282 (the
+    # first rung). Written with the node, never changed.
+    assigned_agent: Mapped[str | None] = mapped_column(String(64))
     state: Mapped[NodeState] = mapped_column(_enum(NodeState))
     # The rung of the escalation ladder and the approach the next attempt uses.
     agent_index: Mapped[int] = mapped_column(
@@ -285,6 +292,10 @@ class DagNodeRow(Base):
         CheckConstraint(
             "repositories IS NULL OR jsonb_typeof(repositories) = 'array'",
             name="repositories_is_a_list",
+        ),
+        CheckConstraint(
+            f"assigned_agent IS NULL OR assigned_agent ~ '^{AGENT_LABEL_PATTERN}$'",
+            name="assigned_agent_format",
         ),
     )
 

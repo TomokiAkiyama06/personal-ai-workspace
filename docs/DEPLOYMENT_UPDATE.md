@@ -303,7 +303,9 @@ assembly does not build the CLI runtimes until the CLI smoke (Decision 0099, "PR
 - `[orchestrator.assignment]`: each role's `allowed` labels (inside the role's ladder;
   the worker's never `claude` / `codex`; the reviewer's both `claude` and `codex`) and
   `default` (one of `allowed`; optional for the reviewer). The start-up line shows
-  `assignment: yes`.
+  `assignment: yes`. The orchestrator checks every plan's `agent` against it and starts
+  each node on its assigned agent's rung (Decision 0099, 4). Without the section every
+  role allows only the first rung of its ladder (the behaviour before).
 
 ## Implementation (Issue #54, Decision 0079)
 

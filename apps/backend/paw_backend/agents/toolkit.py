@@ -128,7 +128,17 @@ READER_SUBMIT_TOOL = _function(
 PLAN_TOOL = _function(
     "submit_plan",
     "Finish with the plan of the task.",
-    {"summary": {"type": "string"}, "plan": {"type": "object"}},
+    {
+        "summary": {"type": "string"},
+        # Decision 0099, 4: a node may name its agent (the system prompt lists
+        # the ones each role may have).
+        "plan": {
+            "type": "object",
+            "description": 'The plan: {"nodes": [...]}. Each node has key, role, '
+            "title, goal, and optionally depends_on, required, input, "
+            "capabilities, repositories and agent.",
+        },
+    },
     ["summary", "plan"],
 )
 
