@@ -74,6 +74,11 @@ ASSIGNMENT = {
 }
 
 
+# The backend's required reviews of a write task with a Worker (Decision 0099,
+# 5): their assigned agent and the rung it is on.
+REVIEWS = {"paw-review-claude": ("claude", 0), "paw-review-codex": ("codex", 1)}
+
+
 def decision_config(**options) -> OrchestratorConfig:
     return OrchestratorConfig(LADDERS, assignment=ASSIGNMENT, **options)
 
@@ -353,14 +358,21 @@ class AssignedRunTest(PostgresOrchestratorTestCase):
 
         self.assertEqual(report.outcome, Out.DAG_SUCCEEDED)
         # Every node's assignment is explicit (the default written in).
+        # The write task's plan also got the backend's two required reviews
+        # (Decision 0099, 5).
         self.assertEqual(
             await self.stored(task_id),
-            {"r": ("claude", 1), "w": ("local", 0), "v": ("codex", 1)},
+            {"r": ("claude", 1), "w": ("local", 0), "v": ("codex", 1), **REVIEWS},
         )
         dag = await self.store.get(task_id, 1)
         self.assertEqual(
             {n.key: n.assigned_agent for n in dag.nodes},
-            {"r": "claude", "w": "local", "v": "codex"},
+            {
+                "r": "claude",
+                "w": "local",
+                "v": "codex",
+                **{key: agent for key, (agent, _) in REVIEWS.items()},
+            },
         )
         self.assertEqual([a.agent for a in rt["claude"].calls_of("r")], ["claude"])
         self.assertEqual(len(rt["local"].calls_of("w")), 1)
@@ -397,8 +409,11 @@ class AssignedRunTest(PostgresOrchestratorTestCase):
         self.assertEqual(report.outcome, Out.DAG_SUCCEEDED)
         self.assertEqual(len(rt["local"].calls_of("plan")), 1)
         self.assertEqual(len(rt["claude"].calls_of("plan")), 1)
-        self.assertEqual(await self.stored(task_id), {"w": ("local", 0)})
-        self.assertEqual(rt["codex"].assignments, [])
+        self.assertEqual(await self.stored(task_id), {"w": ("local", 0), **REVIEWS})
+        # Only the Codex review ran on codex, never the worker.
+        self.assertEqual(
+            [a.node_key for a in rt["codex"].assignments], ["paw-review-codex"]
+        )
         # The refused plan was one failure of the planner.
         self.assertEqual(len(await h.loops.history(task_id)), 1)
 
@@ -428,7 +443,7 @@ class AssignedRunTest(PostgresOrchestratorTestCase):
         )
         self.assertEqual(
             {n.key: (n.assigned_agent, n.agent_index) for n in dag.nodes},
-            {"r": ("claude", 1), "w": ("local", 0)},
+            {"r": ("claude", 1), "w": ("local", 0), **REVIEWS},
         )
 
     async def test_an_assigned_node_escalates_up_its_ladder(self):

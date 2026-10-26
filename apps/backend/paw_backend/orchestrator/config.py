@@ -36,6 +36,7 @@ from paw_backend.orchestrator.limits import (
     MAX_RETRY_BACKOFF_SECONDS,
 )
 from paw_backend.orchestrator.plan import Plan
+from paw_backend.orchestrator.reviews import adds_required_reviews
 from paw_backend.orchestrator.validation import (
     check_agent_label,
     check_int,
@@ -94,9 +95,11 @@ class OrchestratorConfig:
     without one), and an escalation moves it to the next. The labels name the
     runtimes the orchestrator is given. The three roles that judge (the
     Reviewer) or plan should not share an agent with the Worker they check when
-    the ladder allows (``REQUIREMENTS.md``, "Review independence"): that is a
-    matter of how the ladders are written, not something the orchestrator
-    enforces.
+    the ladder allows (``REQUIREMENTS.md``, "Review independence"): for the
+    backend's two required reviews (Decision 0099, 5; ``reviews.py``) the
+    orchestrator enforces it (never the other review's agent nor one that ran
+    an upstream Worker, ``ReviewNotIndependent``); for any other node it is a
+    matter of how the ladders are written.
 
     ``assignment`` (``[orchestrator.assignment]``, Decision 0099, 4) maps every
     role to its :class:`RoleAssignment`: the agents a plan may assign a node of
@@ -255,6 +258,26 @@ class OrchestratorConfig:
             nodes.append(node)
         # Built again: the assignment counts toward the plan's size.
         return Plan(tuple(nodes))
+
+    @property
+    def adds_required_reviews(self) -> bool:
+        """Whether an accepted plan of a task that writes gets the backend's
+        two required reviews (Decision 0099, 5; ``reviews.py``): only when the
+        reviewer role may be assigned both of their agents."""
+        return adds_required_reviews(self._assigned[NodeRole.REVIEWER].allowed)
+
+    def next_rung(
+        self, role: NodeRole, rung: int, *, skip: frozenset[str] = frozenset()
+    ) -> int | None:
+        """The rung of ``role``'s ladder above ``rung`` an escalation moves to:
+        the next one whose agent is not in ``skip`` (Decision 0099, 5: a
+        required review skips the agents it must stay independent of), or
+        ``None`` when there is none."""
+        ladder = self.ladders[role]
+        for index in range(rung + 1, len(ladder)):
+            if ladder[index] not in skip:
+                return index
+        return None
 
     def start_rung(self, role: NodeRole, agent: str) -> int:
         """The rung of ``role``'s ladder a node assigned ``agent`` starts on

@@ -54,6 +54,7 @@ replacement did).
 import asyncio
 import contextlib
 import copy
+import dataclasses
 import logging
 import uuid
 from collections.abc import Awaitable, Mapping
@@ -79,6 +80,7 @@ from paw_backend.orchestrator.errors import (
     INVALID_OUTCOME,
     NODE_TIMEOUT,
     OUT_OF_MEMORY_CLASSES,
+    REVIEW_NOT_INDEPENDENT,
     DagAlreadyExistsError,
     DagStateError,
     InvalidOrchestratorArgumentError,
@@ -108,6 +110,12 @@ from paw_backend.orchestrator.plan_calls import (
     PlanCallStore,
 )
 from paw_backend.orchestrator.records import AttemptRecord, DagRecord, NodeRecord
+from paw_backend.orchestrator.reviews import (
+    add_required_reviews,
+    forbidden_agents,
+    is_required_review,
+    refuse_reserved_keys,
+)
 from paw_backend.orchestrator.runtime import (
     AgentRuntime,
     NodeAssignment,
@@ -398,6 +406,9 @@ class _Spec:
     # The node's assigned agent is no longer on its ladder at this rung
     # (Decision 0099, 4): the attempt fails with ``AssignmentUnavailable``.
     assignment_unavailable: bool = False
+    # A required review (Decision 0099, 5) on an agent it must stay independent
+    # of: the attempt fails with ``ReviewNotIndependent``.
+    review_not_independent: bool = False
 
 
 @dataclass(slots=True)
@@ -473,6 +484,9 @@ class Orchestrator:
         if worktrees is not None:
             require_async_method(worktrees, "prepare_node", 1)
             require_async_method(worktrees, "integrate", 1)
+            # Optional (Decision 0099, 5): the read-only worktree of a Reviewer.
+            if getattr(worktrees, "prepare_review", None) is not None:
+                require_async_method(worktrees, "prepare_review", 1)
         # The shared connections of the attempts (Decision 0083, 1): with the
         # directory of the principals the sessions act for, or not at all.
         if (connections is None) != (principals is None):
@@ -575,9 +589,7 @@ class Orchestrator:
             TaskState.CANCELLED,
         ):
             raise DagStateError()
-        if snapshot.read_only:
-            refuse_writers(plan)  # issue #279: no Worker in a read-only task
-        plan = self._config.assign(plan)
+        plan = self._accepted(plan, read_only=snapshot.read_only, title=snapshot.title)
         # Fenced by the run that was read: a Retry or Restart that commits in
         # between refuses the plan (``StaleRunError``) instead of giving it to
         # the new run unseen.
@@ -588,6 +600,20 @@ class Orchestrator:
             run=snapshot.run,
             start_rungs=self._start_rungs(plan),
         )
+
+    def _accepted(self, plan: Plan, *, read_only: bool, title: str) -> Plan:
+        """The plan a task's DAG is made of (``InvalidPlanError`` when there is
+        none): no key of the backend's (``reserved_key``); no Worker in a
+        read-only task (issue #279); the backend's required reviews added to a
+        task that writes (Decision 0099, 5; when the deployment adds them,
+        ``OrchestratorConfig.adds_required_reviews``); every node assigned its
+        agent (Decision 0099, 4)."""
+        refuse_reserved_keys(plan)
+        if read_only:
+            refuse_writers(plan)
+        elif self._config.adds_required_reviews:
+            plan = add_required_reviews(plan, task_title=title)
+        return self._config.assign(plan)
 
     def _start_rungs(self, plan: Plan) -> dict[str, int]:
         """The rung each node of an assigned plan starts on (Decision 0099, 4)."""
@@ -1667,9 +1693,29 @@ class Orchestrator:
             except (StaleRunError, TaskNotRunningError):
                 return None  # the run is over or quiesces: ``_watch`` says why
             spec = self._spec_of(dag, node, attempt)
+            if is_required_review(node.key):
+                forbidden = await self._review_forbidden(dag, node.key)
+                spec = dataclasses.replace(
+                    spec, review_not_independent=spec.agent in forbidden
+                )
             running[key] = asyncio.create_task(self._attempt(run, spec))
             numbers[key] = attempt.number
         return None
+
+    async def _review_forbidden(self, dag: DagRecord, key: str) -> frozenset[str]:
+        """The agents the required review ``key`` must not run on (Decision
+        0099, 5): the other required review's, and every agent that actually
+        ran an attempt of a Worker node of the DAG (its ``placement_agent``;
+        every Worker, since a required review depends on all of them; a
+        failed attempt counts too, its work stays in the worktree)."""
+        workers = {n.key for n in dag.nodes if n.role is NodeRole.WORKER}
+        attempts = await self._store.attempts(dag.id)
+        ran = {
+            a.placement_agent
+            for a in attempts
+            if a.node_key in workers and a.placement_agent is not None
+        }
+        return forbidden_agents(key, ran)
 
     def _spec_of(
         self, dag: DagRecord, node: NodeRecord, attempt: AttemptRecord
@@ -1845,6 +1891,11 @@ class Orchestrator:
             # Decision 0099, 4: never quietly another agent. Nothing ran, so
             # trying again cannot help.
             return _Finished.failure(ASSIGNMENT_UNAVAILABLE, retryable=False)
+        if spec.review_not_independent:
+            # Decision 0099, 5: never a review by the agent it must be
+            # independent of; nothing ran, and trying again cannot help (the
+            # task fails and the human decides).
+            return _Finished.failure(REVIEW_NOT_INDEPENDENT, retryable=False)
         fence = AttemptFence()
         try:
             # Fail early on a grant / scope problem.
@@ -1932,8 +1983,17 @@ class Orchestrator:
     ) -> Mapping[uuid.UUID, NodeWorktree]:
         """The dedicated worktrees of a Worker node that may write (PAW-035): one
         per repository of its scope that has a checkout and is ``working`` /
-        ``target`` (``gets_worktree``). None for any other node,
-        or when the orchestrator has no ``NodeWorkspaces``."""
+        ``target`` (``gets_worktree``). A Reviewer node that depends on a
+        Worker node gets a read-only worktree with the upstream Workers'
+        branches merged in (Decision 0099, 5: ``NodeWorkspaces.prepare_review``).
+        None for any other node, or when the orchestrator has no
+        ``NodeWorkspaces``."""
+        if (
+            self._worktrees is not None
+            and spec.node is not None
+            and spec.role is NodeRole.REVIEWER
+        ):
+            return await self._prepare_review_worktrees(run, spec, context)
         if (
             self._worktrees is None
             or spec.node is None
@@ -1955,6 +2015,40 @@ class Orchestrator:
         # The scope is derived again with the worktrees: a worktree the
         # implementation made up for a repository outside the node's scope is a
         # ScopeEscalation, never a wider scope.
+        await self._context(run, spec, worktrees)
+        return worktrees
+
+    async def _prepare_review_worktrees(
+        self, run: _Run, spec: _Spec, context: TaskContext
+    ) -> Mapping[uuid.UUID, NodeWorktree]:
+        """The read-only worktrees of a Reviewer node that depends on Worker
+        nodes (Decision 0099, 5): their branches merged into a branch of the
+        reviewer's own, whose review base (``refs/paw/review-base/<branch>``)
+        is the commit before the first merge. Nothing when the reviewer
+        depends on no Worker, no repository gets a worktree, or the
+        ``NodeWorkspaces`` has no ``prepare_review`` (it reads the checkout as
+        before); a worktree that could not be prepared fails the attempt like
+        a Worker's. A worktree that is not read-only is never handed to it."""
+        prepare = getattr(self._worktrees, "prepare_review", None)
+        if (
+            prepare is None
+            or not spec.upstream_workers
+            or not any(gets_worktree(r) for r in context.scope.repositories)
+        ):
+            return {}
+        prepared = await prepare(
+            NodeWorkspaceRequest(
+                task=run.task,
+                run=run.run,
+                node_key=spec.key,
+                upstream_workers=spec.upstream_workers,
+                scope=context.scope,
+            )
+        )
+        worktrees = dict(prepared)
+        # As for a Worker: a worktree of a repository outside the node's scope
+        # is a ScopeEscalation, never a wider scope; so is a reviewer's
+        # worktree that is not read-only (``derive_child_scope``).
         await self._context(run, spec, worktrees)
         return worktrees
 
@@ -2151,8 +2245,14 @@ class Orchestrator:
             if isinstance(error, StaleRunError):
                 raise
             logger.error("Recording a failure failed (%s)", error_class_of(error))
-        ladder = self._config.ladders[node.role]
-        can_escalate = node.agent_index + 1 < len(ladder)
+        skip: frozenset[str] = frozenset()
+        if is_required_review(node.key):
+            # Decision 0099, 5: a required review never escalates to the other
+            # review's agent or to one that ran an upstream Worker (that rung
+            # is skipped; without one above, it does not escalate).
+            skip = await self._review_forbidden(dag, node.key)
+        next_rung = self._config.next_rung(node.role, node.agent_index, skip=skip)
+        can_escalate = next_rung is not None
         # Decision 0007 first, on the budget as it is: a budget that is already
         # used up stops the run whatever the failure says.
         budget = await self._budget.check(run.task.id)
@@ -2167,7 +2267,7 @@ class Orchestrator:
             step, stop = NextStep.HOLD, _Stop(_StopKind.WAIT)
         else:
             step, arguments = self._retry_step(
-                node, decision.action, finished, can_escalate
+                node, decision.action, finished, can_escalate, next_rung
             )
             if step in _RETRYING_STEPS:
                 # A retry is reserved from the budget only for a failure that WILL
@@ -2215,11 +2315,16 @@ class Orchestrator:
         action: NextAction,
         finished: _Finished,
         can_escalate: bool,
+        next_rung: int | None = None,
     ) -> tuple[NextStep, dict[str, int]]:
         """Where a failed node goes for the loop decision ``action`` (before the
         budget is asked for a retry): a retrying step with its arguments, or
         ``GIVE_UP`` for a failure that cannot retry (it said so, the rung is out of
-        attempts, or the approach counter is at its end)."""
+        attempts, or the approach counter is at its end). ``next_rung``: the
+        rung an escalation moves to (``None``: the next one; a required review
+        skips the rungs it must stay independent of, Decision 0099, 5)."""
+        if next_rung is None:
+            next_rung = node.agent_index + 1
         if not finished.retryable:
             return NextStep.GIVE_UP, {}
         next_approach = node.approach + 1
@@ -2237,7 +2342,7 @@ class Orchestrator:
         if action is NextAction.ESCALATE_AGENT:
             if can_escalate and next_approach <= MAX_APPROACH:
                 return NextStep.ESCALATE, {
-                    "agent_index": node.agent_index + 1,
+                    "agent_index": next_rung,
                     "approach": next_approach,
                 }
             return NextStep.GIVE_UP, {}
@@ -2394,15 +2499,16 @@ class Orchestrator:
                         if isinstance(outcome.plan, Plan)
                         else Plan.from_mapping(outcome.plan)
                     )
-                    if run.task.read_only:
-                        # Issue #279 (a): a Worker node is refused like any
-                        # other unacceptable plan; the next planner is asked.
-                        refuse_writers(accepted)
-                    # Decision 0099, 4: an agent the role does not allow
-                    # refuses the plan like any other unacceptable one (the
-                    # next planner is asked); a node without one gets its
-                    # role's default, stored explicitly.
-                    accepted = self._config.assign(accepted)
+                    # Issue #279 (a): a Worker node of a read-only task, a
+                    # key of the backend's (Decision 0099, 5), a plan the
+                    # required reviews push over a limit, and an agent the
+                    # role does not allow (Decision 0099, 4) are refused like
+                    # any other unacceptable plan: the next planner is asked.
+                    # A node without an agent gets its role's default, stored
+                    # explicitly.
+                    accepted = self._accepted(
+                        accepted, read_only=run.task.read_only, title=run.task.title
+                    )
                     dag = await self._store.create(
                         task_id,
                         run.run.attempt,

@@ -36,6 +36,7 @@ from paw_backend.orchestrator.limits import (
 )
 from paw_backend.orchestrator.result import NodeResult
 from paw_backend.orchestrator.runtime import NodeAssignment, NodeOutcome
+from paw_backend.sandbox.gitargs import REVIEW_BASE_REF_PREFIX
 from paw_backend.sandbox.tools import (
     REPO_FILE_STR_REPLACE,
     REPO_FILE_WRITE,
@@ -526,6 +527,9 @@ class _Repository:
     target: str
     writable: bool
     base: str | None = None
+    # A reviewer's review base ref (Decision 0099, 5): where the upstream
+    # Workers' change starts (``None``: not a reviewer's worktree).
+    review_base: str | None = None
 
 
 class _Workspace:
@@ -545,8 +549,16 @@ class _Workspace:
                 repo_id,
                 roots[repo_id],
                 WORKSPACE if single else f"{WORKSPACE}/{repo_id}",
-                worktree is not None,
+                # A reviewer's worktree is read-only (Decision 0099, 5).
+                worktree is not None and not worktree.read_only,
                 None if worktree is None else worktree.base_commit,
+                (
+                    f"{REVIEW_BASE_REF_PREFIX}{worktree.branch}"
+                    if worktree is not None
+                    and worktree.read_only
+                    and worktree.base_commit is not None
+                    else None
+                ),
             )
 
     @property
@@ -555,6 +567,23 @@ class _Workspace:
 
     def first(self) -> _Repository | None:
         return next(iter(self.repositories.values()), None)
+
+    def review_bases(self) -> str:
+        """What a reviewer is told of the change it reviews (Decision 0099,
+        5): each read-only worktree's review base, ``""`` when there is none."""
+        lines = [
+            f"- {r.target}: `git log -p {r.review_base}..HEAD`, "
+            f"`git diff {r.review_base} HEAD`"
+            for r in self.repositories.values()
+            if r.review_base is not None
+        ]
+        if not lines:
+            return ""
+        return (
+            "\n\nThe change to review is the upstream worker nodes' work, merged "
+            "into this checkout: the commits from the review base to HEAD. Read "
+            "it with git:\n" + "\n".join(lines)
+        )
 
     def describe(self) -> str:
         if self.single or not self.repositories:

@@ -36,6 +36,10 @@ WORKTREE_DIRECTORY = ".paw-worktrees"
 #: ``refs/paw/base/<branch>``, written once when the branch is prepared and
 #: never moved, in the ``paw/`` namespace like the branch.
 BASE_REF_PREFIX = "refs/paw/base/"
+#: Where a Reviewer branch's review base is recorded (Decision 0099, 5):
+#: ``refs/paw/review-base/<branch>``, the commit before the first merge of an
+#: upstream Worker branch, written once and never moved.
+REVIEW_BASE_REF_PREFIX = "refs/paw/review-base/"
 #: The trailer a Worker node's commits carry (``PAW-Node: <task>/<node>``):
 #: what tells them apart from the merges of the branches it builds on.
 NODE_TRAILER = "PAW-Node"
@@ -100,6 +104,13 @@ def base_ref(branch: str) -> str:
     if not in_namespace(branch) or branch == BRANCH_NAMESPACE:
         raise ValueError("not a branch of the workspace")
     return BASE_REF_PREFIX + validate_branch(branch)
+
+
+def review_base_ref(branch: str) -> str:
+    """``refs/paw/review-base/<branch>`` of a Reviewer branch (``paw/...``)."""
+    if not in_namespace(branch) or branch == BRANCH_NAMESPACE:
+        raise ValueError("not a branch of the workspace")
+    return REVIEW_BASE_REF_PREFIX + validate_branch(branch)
 
 
 def node_marker(task_id: uuid.UUID, key: str) -> str:

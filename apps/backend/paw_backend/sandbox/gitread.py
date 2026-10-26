@@ -22,7 +22,11 @@ runs on the host as the account's user through the backend's hardened
   worktree, or a worktree whose base is not recorded yet) only the current state
   can be read: ``status``, ``diff`` without revisions, ``log`` by name only from
   ``HEAD``; ``show`` and contents of the history are refused (an excluded file's
-  old content could be in it).
+  old content could be in it). A reviewer's read-only worktree (Decision 0099,
+  5) reads the same way from its review base (``refs/paw/review-base/<branch>``,
+  the commit before the upstream Workers' branches were merged in), so that
+  ``diff`` / ``log -p`` / ``show`` show their commits and merges; nothing is
+  ever committed there (``repo.git.changes`` / ``commit`` refuse it).
 * **which files**: the pathspec is always built here: each path the model gave
   becomes ``:(literal)<path>`` once it passed the broker's scope check (inside
   the repository, not excluded, symbolic links resolved), else ``.``; and every
@@ -47,6 +51,7 @@ from paw_backend.repositories.paths import LinuxAccount
 from paw_backend.sandbox.gitargs import (
     BASE_REF_PREFIX,
     NAMES_ONLY_LOG,
+    REVIEW_BASE_REF_PREFIX,
     GitReadArgs,
     GitReadRefused,
     GitRefusal,
@@ -96,10 +101,22 @@ class RepositoryGit:
     pinned: PinnedWorktree | None = None
     branch: str | None = None
     base: str | None = None
+    # A reviewer's read-only worktree (Decision 0099, 5): its base is the
+    # review base ``refs/paw/review-base/<branch>``, and nothing is ever
+    # committed in it.
+    review: bool = False
 
     @property
     def has_history(self) -> bool:
         return self.pinned is not None and self.base is not None
+
+    @property
+    def base_ref(self) -> str | None:
+        """The ref that records ``base`` (``None``: no branch)."""
+        if self.branch is None:
+            return None
+        prefix = REVIEW_BASE_REF_PREFIX if self.review else BASE_REF_PREFIX
+        return f"{prefix}{self.branch}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,7 +217,20 @@ class GitReader:
         base = await self._worktrees.commit_of(
             pinned, f"{BASE_REF_PREFIX}{branch}", account
         )
-        return RepositoryGit(root, git_dir, common, pinned, branch, base)
+        if base is not None:
+            return RepositoryGit(root, git_dir, common, pinned, branch, base)
+        # A reviewer's branch has a review base instead (Decision 0099, 5:
+        # only the backend writes either ref, a Worker's base for a Worker's
+        # branch and a review base for a reviewer's, never both). Asked only
+        # when there is no Worker base, so a Worker's read asks no more.
+        review_base = await self._worktrees.commit_of(
+            pinned, f"{REVIEW_BASE_REF_PREFIX}{branch}", account
+        )
+        if review_base is not None:
+            return RepositoryGit(
+                root, git_dir, common, pinned, branch, review_base, review=True
+            )
+        return RepositoryGit(root, git_dir, common, pinned, branch, None)
 
     # -- one read --------------------------------------------------------------------
 
@@ -273,8 +303,10 @@ class GitReader:
                 # tree or blob id reads content by id. Refused, never peeled.
                 raise GitReadRefused(GitRefusal.REVISION)
             return text
-        if text.startswith(BASE_REF_PREFIX):
-            if text != f"{BASE_REF_PREFIX}{repository.branch}":
+        if text.startswith((BASE_REF_PREFIX, REVIEW_BASE_REF_PREFIX)):
+            # Only the ref of this worktree's own base (a reviewer's review
+            # base, a Worker's base), never another branch's.
+            if text != repository.base_ref:
                 raise GitReadRefused(GitRefusal.OUT_OF_RANGE)
             assert repository.base is not None
             return repository.base
@@ -358,6 +390,9 @@ async def branch_changes(
     outside the hidden paths (``pathspecs``: ``.`` and the excludes)."""
     if not repository.has_history:
         raise GitReadRefused(GitRefusal.HISTORY)
+    if repository.review:
+        # A Worker's changes only: a reviewer's worktree has none of its own.
+        raise GitReadRefused(GitRefusal.UNAVAILABLE)
     assert repository.base is not None
     head = await reader._commit(repository, "HEAD", account)
     fixed = ["--no-color", "--no-ext-diff", "--no-textconv", "--name-only"]
@@ -392,7 +427,8 @@ async def commit_paths(
 ) -> str:
     """Commit exactly ``paths`` (repository-relative, already checked) of the
     worktree, as the fixed author with the node's trailer; the new ``HEAD``."""
-    if repository.pinned is None or not paths:
+    if repository.pinned is None or repository.review or not paths:
+        # A reviewer's worktree is never committed in (Decision 0099, 5).
         raise GitReadRefused(GitRefusal.UNAVAILABLE)
     specs = [f":(literal){p}" for p in paths]
     added = await reader._run(["add", "-A", "--", *specs], account, repository)

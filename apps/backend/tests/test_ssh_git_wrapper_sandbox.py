@@ -610,6 +610,80 @@ class WorkerFormTest(unittest.TestCase):
         self.assertEqual(wrapper.COMMIT_CONFIG, COMMIT_CONFIG)
 
 
+class ReviewFormTest(unittest.TestCase):
+    """Decision 0099 §5: a reviewer's review base ref, its lost-base history
+    and its revision, as the coordinator and ``gitread.py`` send them."""
+
+    def check(self, args):
+        checker, _ = wrapper.SUBCOMMANDS[args[0]]
+        checker(args[1:], None, None)
+
+    def test_accepted(self):
+        sha = "3" * 40
+        for args in (
+            [
+                "update-ref",
+                "refs/paw/review-base/paw/t/1/paw-review-claude",
+                sha,
+                "0" * 40,
+            ],
+            [
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                "refs/paw/review-base/paw/t/1/paw-review-claude^{commit}",
+            ],
+            ["merge-base", "--is-ancestor", sha, sha],
+        ):
+            self.check(args)
+        self.assertTrue(
+            wrapper.is_base_history(
+                [
+                    "--first-parent",
+                    "--max-count=1000",
+                    "--format=%H %P",
+                    "refs/heads/paw/t/1/paw-review-claude",
+                ]
+            )
+        )
+        self.assertEqual(wrapper.REVIEW_BASE_LOG_FORMAT, "--format=%H %P")
+
+    def test_refused(self):
+        sha = "3" * 40
+        for args in (
+            ["update-ref", "refs/paw/review-base/main", sha, "0" * 40],
+            ["update-ref", "refs/paw/review-base/paw/t/1/r", sha, "1" * 40],
+            ["update-ref", "-d", "refs/paw/review-base/paw/t/1/r"],
+            ["update-ref", "refs/paw/review/paw/t/1/r", sha, "0" * 40],
+            [
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                "refs/paw/review-base/main^{commit}",
+            ],
+        ):
+            with self.assertRaises(wrapper.Rejected, msg=args):
+                self.check(args)
+        for args in (
+            [
+                "--first-parent",
+                "--max-count=1000",
+                "--format=%H %P %B",
+                "refs/heads/paw/t/1/r",
+            ],
+            ["--first-parent", "--max-count=1000", "--format=%H %P", "refs/heads/main"],
+            ["--max-count=1000", "--format=%H %P", "refs/heads/paw/t/1/r", "x"],
+        ):
+            self.assertFalse(wrapper.is_base_history(args), args)
+
+    def test_the_backend_sends_these_forms(self):
+        from paw_backend.integration.layout import REVIEW_BASE_REF_PREFIX
+        from paw_backend.sandbox import gitargs
+
+        self.assertEqual(wrapper.REVIEW_BASE_REF_PREFIX, REVIEW_BASE_REF_PREFIX)
+        self.assertEqual(gitargs.REVIEW_BASE_REF_PREFIX, REVIEW_BASE_REF_PREFIX)
+
+
 @requires_git
 class EndToEndTest(unittest.IsolatedAsyncioTestCase):
     """The real wrapper behind the SSH runners, a fake ``podman``, real git."""
@@ -737,6 +811,36 @@ class EndToEndTest(unittest.IsolatedAsyncioTestCase):
         inspect = [call for call in self.calls() if call[0] == "container"][-1]
         self.assertEqual(inspect[3], "{{.State.Running}} {{.State.CgroupPath}}")
         await self.sandboxes.stop(world.account, SANDBOX)
+
+    async def test_a_reviewers_worktree_through_the_wrapper(self):
+        # Decision 0099, 5: the review base ref, its lost-base history and the
+        # reviewer's reads, each through the real wrapper.
+        from .worktrees_support import commit_file, git
+
+        world = self.world
+        ws = world.ws
+        work = commit_file(world.worktree, "src/a.py", "one\n", "node work")
+        coordinator = ws.coordinator(runner=self.git)
+        request = ws.node_request("paw-review-claude", "a", scope=world.parent)
+        first = (await coordinator.prepare_review(request))[world.repo_id]
+        ref = f"refs/paw/review-base/{first.branch}"
+        self.assertEqual(git("rev-parse", ref, cwd=world.checkout), first.base_commit)
+        git("update-ref", "-d", ref, cwd=world.checkout)
+        again = (await coordinator.prepare_review(request))[world.repo_id]
+        self.assertEqual(again.base_commit, first.base_commit)
+        reader = GitReader(self.git)
+        located = await reader.locate(
+            again.path, account=world.account, checkouts=(world.checkout,)
+        )
+        self.assertTrue(located.review)
+        self.assertEqual(located.base, first.base_commit)
+        answer = await reader.read(
+            located,
+            parse_git_read(["log", "--format=oneline", f"{ref}..HEAD"]),
+            account=world.account,
+            pathspecs=["."],
+        )
+        self.assertIn(work, answer.output)
 
     async def test_the_shims_git_runs_through_the_wrapper(self):
         world = self.world

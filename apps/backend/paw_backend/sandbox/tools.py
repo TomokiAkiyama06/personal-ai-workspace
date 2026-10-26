@@ -312,6 +312,10 @@ class RepoToolExecutor:
         account = await self._account(context)
         assert repository.root is not None
         git = await self._locate(context, repository.root, account)
+        if writable and git.review:
+            # A reviewer's worktree is read-only (Decision 0099, 5), whatever
+            # the grant says.
+            raise SandboxUnavailableError("read_only_worktree")
         plan = plan_sandbox(
             context.scope, repository, git, writable=writable, shim=self._pool.shims
         )
@@ -378,6 +382,9 @@ class RepoToolExecutor:
             )
             if not git.has_history:
                 raise GitReadRefused(GitRefusal.HISTORY)
+            if git.review:
+                # A reviewer's read-only worktree (Decision 0099, 5).
+                raise GitReadRefused(GitRefusal.UNAVAILABLE)
             plan = plan_sandbox(
                 context.scope, repository, git, writable=True, shim=False
             )

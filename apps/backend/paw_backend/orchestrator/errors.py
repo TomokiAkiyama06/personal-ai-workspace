@@ -80,6 +80,10 @@ class PlanReason(StrEnum):
     # ``[orchestrator.assignment]``'s ``allowed``, or not a label at all): the
     # whole plan is refused, never quietly given the role's default.
     AGENT_NOT_ALLOWED = "agent_not_allowed"
+    # A planner's node key starts with ``paw-``: the backend's own nodes (the
+    # required reviews, Decision 0099, 5) have such keys, and a planner can
+    # neither write nor replace one.
+    RESERVED_KEY = "reserved_key"
 
 
 class InvalidPlanError(OrchestratorError):
@@ -279,6 +283,12 @@ GRANT_ESCALATION = "GrantEscalation"
 # plan was accepted): the node fails rather than run on another agent (Decision
 # 0099, 4). The orchestrator's own name: a runtime cannot report it.
 ASSIGNMENT_UNAVAILABLE = "AssignmentUnavailable"
+# One of the backend's required reviews (Decision 0099, 5) would run on the agent
+# of the other required review or on an agent that ran an upstream Worker (a
+# Worker escalated to ``codex``: the Codex review is not independent). The node
+# fails without a retry and the task is left to the human. The orchestrator's
+# own name: a runtime cannot report it.
+REVIEW_NOT_INDEPENDENT = "ReviewNotIndependent"
 
 
 # The failure classes an agent runtime may REPORT (``NodeOutcome.failed``): the

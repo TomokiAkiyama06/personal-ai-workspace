@@ -95,6 +95,8 @@ from paw_backend.compute.runtimes import current_lease
 from paw_backend.orchestrator.config import RoleAssignment
 from paw_backend.orchestrator.domain import NodeRole
 from paw_backend.orchestrator.errors import InvalidNodeResultError
+from paw_backend.orchestrator.limits import MAX_DEPENDENCIES, MAX_NODES
+from paw_backend.orchestrator.reviews import adds_required_reviews
 from paw_backend.orchestrator.runtime import NodeAssignment, NodeOutcome
 from paw_backend.tasks.queueing import BudgetKind
 
@@ -154,6 +156,16 @@ NUDGE = (
 # The roles each planner prompt names, in the order it names them.
 _PLANNED_ROLES = (NodeRole.WORKER, NodeRole.RESEARCHER, NodeRole.REVIEWER)
 _READ_ONLY_PLANNED_ROLES = (NodeRole.RESEARCHER, NodeRole.REVIEWER)
+# Decision 0099, 5: what a planner of a task that writes is told of the reviews
+# the backend adds (``orchestrator/reviews.py``): it neither writes them nor
+# makes room for more than the limits allow.
+REQUIRED_REVIEWS_TEXT = (
+    " The backend adds two independent reviewer nodes of its own after all "
+    "worker nodes (paw-review-claude and paw-review-codex): do not write them, "
+    "a key that starts with paw- refuses the whole plan. Your own reviewer "
+    f"nodes are extra. Keep the plan to at most {MAX_NODES - 2} nodes and "
+    f"{MAX_DEPENDENCIES} worker nodes, so that the reviews fit."
+)
 
 
 def agent_choices_text(
@@ -176,12 +188,20 @@ def agent_choices_text(
         parts.append(f"{role.value}: {allowed}{default}")
     if not parts:
         return ""
-    return (
+    text = (
         '\n\nA node may name the agent that runs it in "agent" (one of the '
         "labels below, as a string); leave it out for its role's default. The "
         "agents each role may have: " + "; ".join(parts) + ". Any other agent "
         "refuses the whole plan."
     )
+    reviewer = choices.get(NodeRole.REVIEWER)
+    if (
+        not read_only
+        and reviewer is not None
+        and adds_required_reviews(reviewer.allowed)
+    ):
+        text += REQUIRED_REVIEWS_TEXT
+    return text
 
 
 @dataclass(frozen=True, slots=True)
@@ -467,7 +487,10 @@ def node_prompts(toolkit: NodeToolkit) -> tuple[str, str]:
     elif toolkit.writes:
         system = WORKER_PROMPT.format(workspace=place)
     else:
-        system = READER_PROMPT.format(workspace=place, role=role.value)
+        system = (
+            READER_PROMPT.format(workspace=place, role=role.value)
+            + toolkit.workspace.review_bases()
+        )
     return system, _task_text(assignment)
 
 

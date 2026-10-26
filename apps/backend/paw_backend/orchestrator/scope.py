@@ -211,9 +211,19 @@ def _checked_worktrees(
         if not isinstance(worktree, NodeWorktree) or worktree.repo_id != repo_id:
             raise TypeError("worktrees must map repository ids to NodeWorktree")
         checked[repo_id] = worktree
-    if checked and role not in ROLES_WITH_CREDENTIALS:
-        # Only a writing role works in a worktree of its own; a read-only role
-        # reads the task's checkout (REQUIREMENTS: an immutable snapshot).
+    if not checked:
+        return checked
+    if role is NodeRole.REVIEWER:
+        # Decision 0099, 5: a Reviewer reads the upstream Workers' change in a
+        # read-only worktree of its own, never in one it may write.
+        if not all(worktree.read_only for worktree in checked.values()):
+            raise ScopeEscalationError()
+    elif role not in ROLES_WITH_CREDENTIALS or any(
+        worktree.read_only for worktree in checked.values()
+    ):
+        # Only a writing role works in a worktree of its own; another
+        # read-only role reads the task's checkout (REQUIREMENTS: an immutable
+        # snapshot).
         raise ScopeEscalationError()
     return checked
 

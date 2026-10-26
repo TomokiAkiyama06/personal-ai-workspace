@@ -11,6 +11,10 @@ admission -> placement -> the adapter). The answer is the bridge's: the
 ``submit``'s outcome, or the failure that ended the attempt; a session that
 ended without either is ``no_submission``. A session the adapter refused
 (``invalid_response``) is never the bridge's outcome, even after a ``submit``.
+A planner call (Decision 0099, 3) runs the same way, with the planner's tools
+(the read-only ``bash`` and ``submit_plan``): its ``submit_plan`` is the
+outcome, and its placement and connections are its row of
+``agent_plan_calls`` (without them the gate refuses it).
 
 :class:`ClaudeSessionAdapter` is the connection's session adapter
 (``ConnectionService(session_adapters={CLAUDE: ...})``). It starts the CLI
@@ -381,11 +385,12 @@ class ClaudeCliRuntime:
             return ErrorClassifier.from_error(error)
 
     async def _run(self, assignment: NodeAssignment, *, fallback: bool) -> NodeOutcome:
-        if assignment.role is NodeRole.PLANNER:
-            # Decision 0083, 1: a CLI is never on the planner's ladder.
-            return ErrorClassifier.outcome(
-                Failure.CLOUD_POLICY_DENIED, fallback=fallback
-            )
+        # Decision 0099, 3: Claude Code may plan. A planner call is sent like a
+        # node's attempt, only through the gate (its placement is the planner
+        # call's row in ``agent_plan_calls``, its connections fenced by the
+        # run and the queue lease); a call without either is refused there.
+        # Its tools are the planner's: the read-only ``bash`` and
+        # ``submit_plan`` (``NodeToolkit``), which the bridge hands back here.
         toolkit = NodeToolkit(assignment, self._limits)
         system, task = node_prompts(toolkit)
         spec = create_session(

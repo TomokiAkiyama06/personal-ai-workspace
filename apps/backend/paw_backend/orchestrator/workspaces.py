@@ -13,6 +13,14 @@ is the implementation), it asks it for two things and nothing else:
   を使用する"). The node's scope then points at the worktree, not at the user's
   own checkout (``scope.derive_child_scope(worktrees=...)``), and the runtime is
   told where it is (``NodeAssignment.worktrees``).
+* :meth:`NodeWorkspaces.prepare_review` (optional; Decision 0099, 5), before an
+  attempt of a **Reviewer** node that depends on Worker nodes: a **read-only**
+  worktree per such repository, on a branch of the reviewer's own with the
+  upstream Workers' branches merged in, and its review base
+  (``refs/paw/review-base/<branch>``: the commit before the first merge), so
+  that the reviewer reads the Workers' change itself (``git diff`` from the
+  review base to ``HEAD``), not only their summaries. The reviewer is never
+  given a tool that writes, and its sandbox mounts the worktree read-only.
 * :meth:`NodeWorkspaces.integrate`, once the DAG succeeded and before the task
   goes to evaluation: the branches of the Worker nodes are merged into a
   task-owned **integration branch / worktree** per repository, never into the
@@ -110,8 +118,13 @@ class NodeWorktree:
     # The branch's starting point (Decision 0083, 10): the commit after the
     # upstream Worker branches were first merged in, recorded once as
     # ``refs/paw/base/<branch>`` and read back by every later attempt. The node
-    # reads and commits only from here on (``None``: not known).
+    # reads and commits only from here on (``None``: not known). For a
+    # reviewer's read-only worktree (``read_only``): its review base,
+    # ``refs/paw/review-base/<branch>`` (Decision 0099, 5).
     base_commit: str | None = None
+    # A Reviewer's worktree (Decision 0099, 5): read, never written to or
+    # committed in by the node.
+    read_only: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,6 +218,17 @@ class NodeWorkspaces(Protocol):
         worktree back, with its partial work). Raises
         :class:`WorktreeUnavailableError` or :class:`WorktreeConflictError`."""
         ...
+
+    # Optional (Decision 0099, 5; ``Orchestrator`` asks for it only when the
+    # implementation has it):
+    #
+    #   async def prepare_review(self, request: NodeWorkspaceRequest)
+    #       -> Mapping[uuid.UUID, NodeWorktree]
+    #
+    # The read-only worktree (``NodeWorktree.read_only``) of a Reviewer node,
+    # for each repository of ``request.scope`` that gets one: the branches of
+    # ``request.upstream_workers`` merged into a branch of the reviewer's own,
+    # ``base_commit`` its review base. Raises like ``prepare_node``.
 
     async def integrate(self, request: IntegrationRequest) -> IntegrationReport:
         """Merge the Worker branches into each repository's integration branch

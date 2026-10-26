@@ -15,7 +15,8 @@ guessed or passed through:
   ``--git-dir``, ``--work-tree``, ``--exec-path`` and everything else not in a
   table are refused. ``--format`` / ``--pretty`` take only the named formats;
 * a revision is ``HEAD``, ``HEAD~<n>`` (``HEAD^`` / ``HEAD~`` as their
-  ``HEAD~<n>``), the node's base ref (``refs/paw/base/<branch>``) or a full
+  ``HEAD~<n>``), the node's base ref (``refs/paw/base/<branch>``, or a
+  reviewer's ``refs/paw/review-base/<branch>``, Decision 0099, 5) or a full
   40 / 64 character object id, alone, as ``A..B`` or (``log``) ``^A``;
   ``<rev>:<path>``, ``A...B``, ``@{...}``, branch names and abbreviated ids are
   refused. Whether a revision lies in the node's range is decided on the host
@@ -202,6 +203,8 @@ _OBJECT_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 _HEAD = re.compile(r"HEAD(?:~(?P<tilde>[0-9]{0,5})|(?P<carets>\^{1,8}))?")
 _BRANCH = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,199}")
 BASE_REF_PREFIX = "refs/paw/base/"
+#: A reviewer's review base (Decision 0099, 5).
+REVIEW_BASE_REF_PREFIX = "refs/paw/review-base/"
 _NUMBER = re.compile(r"[0-9]{1,6}")
 
 
@@ -253,10 +256,9 @@ def canonical_revision(word: str) -> str | None:
         if not 0 <= depth <= MAX_HEAD_DEPTH:
             return None
         return "HEAD" if depth == 0 else f"HEAD~{depth}"
-    if word.startswith(BASE_REF_PREFIX) and valid_branch(
-        word.removeprefix(BASE_REF_PREFIX)
-    ):
-        return word
+    for prefix in (BASE_REF_PREFIX, REVIEW_BASE_REF_PREFIX):
+        if word.startswith(prefix) and valid_branch(word.removeprefix(prefix)):
+            return word
     return None
 
 
