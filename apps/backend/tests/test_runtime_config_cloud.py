@@ -135,6 +135,10 @@ class TheDecisionsFileTest(Refused):
         self.assertEqual(
             wiring.orchestrator_config.ladders[NodeRole.PLANNER], ("claude", "local")
         )
+        # Decision 0099, 4: the orchestrator checks the plans against it.
+        config = wiring.orchestrator_config
+        self.assertEqual(dict(config.assignment), wiring.assignment)
+        self.assertEqual(config.allowed_agents(NodeRole.REVIEWER).default, "claude")
         summary = wiring.summary()
         self.assertIn("cloud: enabled single_user", summary)
         self.assertIn("assignment: yes", summary)
@@ -157,6 +161,8 @@ class TheDecisionsFileTest(Refused):
         self.assertTrue(wiring.cloud.enabled)
         self.assertEqual(set(wiring.agents), {"claude", "codex"})
         self.assertIsNone(wiring.assignment)
+        # Without an assignment every role allows only its first rung.
+        self.assertIsNone(wiring.orchestrator_config.assignment)
         self.assertIn("cloud: enabled single_user", wiring.summary())
         self.assertNotIn("assignment", wiring.summary())
 

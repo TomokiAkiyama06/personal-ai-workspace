@@ -8,13 +8,19 @@ wall clock (lease expiry and runtime are the database's, ``TaskQueue`` /
 """
 
 import asyncio
+import dataclasses
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Protocol
 
 from paw_backend.orchestrator.domain import NodeRole
-from paw_backend.orchestrator.errors import InvalidOrchestratorArgumentError
+from paw_backend.orchestrator.errors import (
+    InvalidOrchestratorArgumentError,
+    InvalidPlanError,
+    PlanReason,
+)
 from paw_backend.orchestrator.limits import (
     DEFAULT_MAX_ATTEMPTS_PER_RUNG,
     DEFAULT_MAX_PARALLEL_NODES,
@@ -29,6 +35,7 @@ from paw_backend.orchestrator.limits import (
     MAX_PLAN_ATTEMPTS,
     MAX_RETRY_BACKOFF_SECONDS,
 )
+from paw_backend.orchestrator.plan import Plan
 from paw_backend.orchestrator.validation import (
     check_agent_label,
     check_int,
@@ -55,16 +62,48 @@ class SystemClock:
 
 
 @dataclass(frozen=True, slots=True)
+class RoleAssignment:
+    """One role of ``[orchestrator.assignment]`` (Decision 0099, 4): the agents
+    a planner may assign a node of the role to (``allowed``, each on the role's
+    ladder), and the one a node without an ``agent`` gets (``default``; ``None``
+    for the reviewer, whose nodes without one start on the first rung of its
+    ladder that ``allowed`` names)."""
+
+    allowed: tuple[str, ...]
+    default: str | None = None
+
+    def __post_init__(self) -> None:
+        allowed = self.allowed
+        if isinstance(allowed, str | bytes) or not isinstance(allowed, Sequence):
+            raise InvalidOrchestratorArgumentError("assignment")
+        labels = tuple(check_agent_label("assignment", label) for label in allowed)
+        if not labels or len(set(labels)) != len(labels):
+            raise InvalidOrchestratorArgumentError("assignment")
+        if self.default is not None and self.default not in labels:
+            raise InvalidOrchestratorArgumentError("assignment")
+        object.__setattr__(self, "allowed", labels)
+
+
+@dataclass(frozen=True, slots=True)
 class OrchestratorConfig:
     """Everything the orchestrator is told, checked when it is built.
 
     ``ladders`` maps every role to the agents that can take a node of that role,
-    weakest first (Decision 0021, section 3): a node starts on the first, and an
-    escalation moves it to the next. The labels name the runtimes the
-    orchestrator is given. The three roles that judge (the Reviewer) or plan
-    should not share an agent with the Worker they check when the ladder allows
-    (``REQUIREMENTS.md``, "Review independence"): that is a matter of how the
-    ladders are written, not something the orchestrator enforces.
+    weakest first (Decision 0021, section 3): a node starts on the rung of the
+    agent it was assigned (Decision 0099, 4; the first rung for a node stored
+    without one), and an escalation moves it to the next. The labels name the
+    runtimes the orchestrator is given. The three roles that judge (the
+    Reviewer) or plan should not share an agent with the Worker they check when
+    the ladder allows (``REQUIREMENTS.md``, "Review independence"): that is a
+    matter of how the ladders are written, not something the orchestrator
+    enforces.
+
+    ``assignment`` (``[orchestrator.assignment]``, Decision 0099, 4) maps every
+    role to its :class:`RoleAssignment`: the agents a plan may assign a node of
+    the role to (each on the role's ladder, or the configuration is refused) and
+    the default. ``None`` (no assignment configured): every role allows only the
+    first rung of its ladder, which is also its default, so a plan cannot move a
+    node off the first rung (what the orchestrator did before Decision 0099).
 
     ``max_parallel_nodes``: the most nodes that run at once (an upper bound; the
     Resource Scheduler of PAW-036 will decide the real number).
@@ -87,7 +126,11 @@ class OrchestratorConfig:
     retry_backoff_seconds: float = DEFAULT_RETRY_BACKOFF_SECONDS
     max_attempts_per_rung: int = DEFAULT_MAX_ATTEMPTS_PER_RUNG
     max_plan_attempts: int = DEFAULT_MAX_PLAN_ATTEMPTS
+    assignment: Mapping[NodeRole, RoleAssignment] | None = None
     _labels: frozenset[str] = field(init=False, repr=False, default=frozenset())
+    _assigned: Mapping[NodeRole, RoleAssignment] = field(
+        init=False, repr=False, default_factory=dict
+    )
 
     def __post_init__(self) -> None:
         if not isinstance(self.ladders, Mapping) or set(self.ladders) != set(NodeRole):
@@ -145,6 +188,34 @@ class OrchestratorConfig:
             "_labels",
             frozenset(label for ladder in ladders.values() for label in ladder),
         )
+        object.__setattr__(self, "_assigned", self._check_assignment(ladders))
+
+    def _check_assignment(
+        self, ladders: Mapping[NodeRole, tuple[str, ...]]
+    ) -> Mapping[NodeRole, RoleAssignment]:
+        if self.assignment is None:
+            return MappingProxyType(
+                {
+                    role: RoleAssignment((ladder[0],), ladder[0])
+                    for role, ladder in ladders.items()
+                }
+            )
+        if not isinstance(self.assignment, Mapping) or set(self.assignment) != set(
+            NodeRole
+        ):
+            raise InvalidOrchestratorArgumentError("assignment")
+        assigned: dict[NodeRole, RoleAssignment] = {}
+        for role in NodeRole:
+            entry = self.assignment[role]
+            if not isinstance(entry, RoleAssignment):
+                raise InvalidOrchestratorArgumentError("assignment")
+            # Decision 0099, 4 (1): an assignment is a rung of the role's ladder.
+            if not set(entry.allowed) <= set(ladders[role]):
+                raise InvalidOrchestratorArgumentError("assignment")
+            assigned[role] = entry
+        assigned_view = MappingProxyType(assigned)
+        object.__setattr__(self, "assignment", assigned_view)
+        return assigned_view
 
     @classmethod
     def uniform(cls, ladder: Sequence[str], **options) -> "OrchestratorConfig":
@@ -155,6 +226,40 @@ class OrchestratorConfig:
     def labels(self) -> frozenset[str]:
         """Every agent label some ladder names."""
         return self._labels
+
+    def allowed_agents(self, role: NodeRole) -> RoleAssignment:
+        """What a plan may assign a node of ``role`` to (see the class); the
+        default filled in (the first allowed rung of the ladder for a role
+        configured without one)."""
+        entry = self._assigned[role]
+        if entry.default is not None:
+            return entry
+        first = next(label for label in self.ladders[role] if label in entry.allowed)
+        return RoleAssignment(entry.allowed, first)
+
+    def assign(self, plan: Plan) -> Plan:
+        """``plan`` with every node's agent assigned (Decision 0099, 4): a node's
+        own ``agent`` when its role allows it, its role's default when it has
+        none. ``InvalidPlanError`` (``AGENT_NOT_ALLOWED``) when a node names an
+        agent its role does not allow: the whole plan is refused, never quietly
+        given the default."""
+        if not isinstance(plan, Plan):
+            raise InvalidOrchestratorArgumentError("plan")
+        nodes = []
+        for node in plan.nodes:
+            entry = self.allowed_agents(node.role)
+            if node.agent is None:
+                node = dataclasses.replace(node, agent=entry.default)
+            elif node.agent not in entry.allowed:
+                raise InvalidPlanError(PlanReason.AGENT_NOT_ALLOWED)
+            nodes.append(node)
+        # Built again: the assignment counts toward the plan's size.
+        return Plan(tuple(nodes))
+
+    def start_rung(self, role: NodeRole, agent: str) -> int:
+        """The rung of ``role``'s ladder a node assigned ``agent`` starts on
+        (Decision 0099, 4 (4): the absolute position on the ladder)."""
+        return self.ladders[role].index(agent)
 
     def backoff(self, rung_attempts: int) -> float:
         """The wait before the next attempt, after ``rung_attempts`` on the rung."""

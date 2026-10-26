@@ -147,13 +147,22 @@ class StoreArgumentTest(unittest.IsolatedAsyncioTestCase):
         # method -> (valid keyword arguments, {argument: wrong values})
         return {
             "create": (
-                {"task_id": GOOD_ID, "attempt": 1, "plan": plan, "run": run},
+                {
+                    "task_id": GOOD_ID,
+                    "attempt": 1,
+                    "plan": plan,
+                    "run": run,
+                    "start_rungs": None,
+                },
                 {
                     "task_id": not_a_uuid(),
                     "attempt": not_an_int(1, big - 1) + [0],
                     "plan": [None, {"nodes": []}, CANARY, plan.to_mapping(), object()],
                     # Not a run, or a run of another attempt.
                     "run": [(1, 0), 1, CANARY, object(), TaskRun(2, 0)],
+                    # Decision 0099, 4: a rung for a node without an agent, for
+                    # a node that is not in the plan, or not a mapping.
+                    "start_rungs": [{"a": 0}, {"zz": 0}, CANARY, 5, [("a", 0)]],
                 },
             ),
             "get": (

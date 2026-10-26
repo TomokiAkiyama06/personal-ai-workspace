@@ -20,13 +20,19 @@ The schema (Decision 0021, section 1)::
          "required": true,           # must succeed for the task to succeed (optional)
          "input": {...},             # bounded JSON passed to the node (optional)
          "capabilities": ["project.read"],  # narrower than the role (optional)
-         "repositories": ["<uuid>"]}        # a subset of the working set (optional)
+         "repositories": ["<uuid>"],        # a subset of the working set (optional)
+         "agent": "local"}                  # the agent it starts on (optional)
     ]}
 
 Unknown fields are refused (a misspelled ``depend_on`` must not silently mean "no
-dependency"). The planner never chooses the agent, the permissions, the
-worktrees or the parallelism: those are the orchestrator's
-(``REQUIREMENTS.md``, "Logical roles").
+dependency"). The planner never decides the permissions, the worktrees or the
+parallelism: those are the orchestrator's (``REQUIREMENTS.md``, "Logical
+roles"). ``agent`` (Decision 0099, 4, which adds it to Decision 0021's schema) is
+only a *proposal* among the agents the backend allows for the node's role: here
+it is checked for its form (an agent label); the orchestrator's
+``OrchestratorConfig.assign`` checks it against ``[orchestrator.assignment]``
+(``agent_not_allowed`` refuses the whole plan) and gives every node without one
+its role's default before the plan is stored.
 
 The nodes of an accepted ``Plan`` are in a **deterministic topological order**
 (Kahn's algorithm; among the nodes that can go next, the one that came first in
@@ -55,6 +61,7 @@ from paw_backend.orchestrator.jsonvalue import (
     thaw_json,
 )
 from paw_backend.orchestrator.limits import (
+    AGENT_LABEL_PATTERN,
     KEY_PATTERN,
     MAX_DEPENDENCIES,
     MAX_DEPTH,
@@ -71,6 +78,7 @@ from paw_backend.orchestrator.limits import (
 from paw_backend.tools.credentials import would_redact
 
 _KEY = re.compile(KEY_PATTERN)
+_AGENT = re.compile(AGENT_LABEL_PATTERN)
 _SURROGATE = re.compile("[\ud800-\udfff]")
 # A title is one line; a goal may have several (newline and tab are allowed).
 _TITLE_FORBIDDEN = re.compile(r"[\x00-\x1f\x7f]")
@@ -87,6 +95,7 @@ NODE_FIELDS = frozenset(
         "input",
         "capabilities",
         "repositories",
+        "agent",
     }
 )
 _REQUIRED_NODE_FIELDS = ("key", "role", "title", "goal")
@@ -157,6 +166,17 @@ def _capabilities(value: object, role: NodeRole) -> tuple[Capability, ...] | Non
     return tuple(sorted(found, key=lambda capability: capability.value))
 
 
+def _agent(value: object) -> str | None:
+    if value is None:
+        return None
+    if type(value) is not str:
+        _refuse(PlanReason.BAD_TYPE)
+    if _AGENT.fullmatch(value) is None:
+        # Not an agent label: no role may be assigned it.
+        _refuse(PlanReason.AGENT_NOT_ALLOWED)
+    return value
+
+
 def _repositories(value: object) -> tuple[uuid.UUID, ...] | None:
     if value is None:
         return None
@@ -200,7 +220,9 @@ class PlanNode:
     ``role`` is a ``NodeRole`` or its exact value; ``depends_on`` a collection of
     keys (sorted, duplicates refused); ``capabilities`` (``None``: the role's
     ceiling) a subset of the role's ceiling; ``repositories`` (``None``: the whole
-    working set) ids; ``input`` is copied.
+    working set) ids; ``input`` is copied; ``agent`` (``None``: not assigned yet)
+    an agent label (Decision 0099, 4: whether the role may have it is
+    ``OrchestratorConfig.assign``'s).
     """
 
     key: str
@@ -212,6 +234,7 @@ class PlanNode:
     input: Mapping[str, Any] = field(default_factory=dict)
     capabilities: tuple[Capability, ...] | None = None
     repositories: tuple[uuid.UUID, ...] | None = None
+    agent: str | None = None
 
     def __post_init__(self) -> None:
         role = _role(self.role)
@@ -238,6 +261,7 @@ class PlanNode:
         object.__setattr__(self, "input", _input(self.input))
         object.__setattr__(self, "capabilities", _capabilities(self.capabilities, role))
         object.__setattr__(self, "repositories", _repositories(self.repositories))
+        object.__setattr__(self, "agent", _agent(self.agent))
 
     @classmethod
     def from_mapping(cls, data: object) -> "PlanNode":
@@ -250,8 +274,10 @@ class PlanNode:
         return cls(**dict(data))
 
     def to_mapping(self) -> dict[str, Any]:
-        """The node as JSON-friendly data (``from_mapping`` reads it back)."""
-        return {
+        """The node as JSON-friendly data (``from_mapping`` reads it back).
+        ``agent`` is there only when the node has one (it counts toward the
+        plan's size, Decision 0099, 4)."""
+        mapping: dict[str, Any] = {
             "key": self.key,
             "role": self.role.value,
             "title": self.title,
@@ -270,6 +296,9 @@ class PlanNode:
                 else [str(repository) for repository in self.repositories]
             ),
         }
+        if self.agent is not None:
+            mapping["agent"] = self.agent
+        return mapping
 
 
 def _topological_order(nodes: list[PlanNode]) -> list[PlanNode]:

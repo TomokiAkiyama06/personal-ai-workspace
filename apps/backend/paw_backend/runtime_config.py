@@ -90,7 +90,7 @@ from paw_backend.compute.limits import DEFAULT_MAX_CONTEXT_TOKENS
 from paw_backend.compute.probe import DEFAULT_NVIDIA_SMI, NvidiaSmiProbe
 from paw_backend.compute.wiring import ComputeSetup
 from paw_backend.config import Settings
-from paw_backend.orchestrator.config import OrchestratorConfig
+from paw_backend.orchestrator.config import OrchestratorConfig, RoleAssignment
 from paw_backend.orchestrator.domain import NodeRole
 from paw_backend.orchestrator.limits import AGENT_LABEL_PATTERN, MODEL_PATTERN
 from paw_backend.repositories.git import GitRunner
@@ -311,23 +311,14 @@ class CliAgentSetup:
 
 
 @dataclass(frozen=True, slots=True)
-class RoleAssignment:
-    """One role of ``[orchestrator.assignment]`` (Decision 0099, 4): the agents
-    a planner may assign a node of the role to, and the one a node without an
-    ``agent`` gets (``None`` for the reviewer: the backend's review nodes name
-    theirs)."""
-
-    allowed: tuple[str, ...]
-    default: str | None
-
-
-@dataclass(frozen=True, slots=True)
 class RuntimeWiring:
     """The ``create_app`` arguments the file enables (``None``: not enabled).
     ``parts`` is the summary of what is enabled, without paths or commands.
 
-    ``cloud``, ``agents`` and ``assignment`` (Decision 0099, 7) are parsed and
-    checked but not ``create_app`` arguments yet (see the module)."""
+    ``cloud`` and ``agents`` (Decision 0099, 7) are parsed and checked but not
+    ``create_app`` arguments yet (see the module). ``assignment`` is also in
+    ``orchestrator_config`` (Decision 0099, 4: the plan's ``agent`` is checked
+    against it)."""
 
     compute: ComputeSetup | None = None
     local_model: LocalModelSetup | None = None
@@ -1250,7 +1241,10 @@ class _Parser:
                         "cli runtimes are not enabled yet (Decision 0099: after "
                         "the CLI smoke)",
                     )
-        config = _build("orchestrator.ladders", lambda: OrchestratorConfig(ladders))
+        config = _build(
+            "orchestrator.ladders",
+            lambda: OrchestratorConfig(ladders, assignment=assignment),
+        )
         return config, assignment
 
     @staticmethod

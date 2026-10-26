@@ -76,6 +76,10 @@ class PlanReason(StrEnum):
     # A node key or title that ``redact_text`` would change (Decision 0098, 8):
     # the DAG and the board show them as they are.
     CREDENTIAL_IN_PLAN = "credential_in_plan"
+    # A node's ``agent`` is not one its role may be assigned (Decision 0099, 4:
+    # ``[orchestrator.assignment]``'s ``allowed``, or not a label at all): the
+    # whole plan is refused, never quietly given the role's default.
+    AGENT_NOT_ALLOWED = "agent_not_allowed"
 
 
 class InvalidPlanError(OrchestratorError):
@@ -270,6 +274,11 @@ OUT_OF_MEMORY_CLASSES = frozenset({AGENT_OUT_OF_MEMORY, MemoryError.__name__})
 NODE_TIMEOUT = "NodeTimeout"
 INVALID_OUTCOME = "InvalidNodeOutcome"
 GRANT_ESCALATION = "GrantEscalation"
+# A node's assigned agent (``agent_dag_nodes.assigned_agent``) is no longer on its
+# role's ladder at the rung it would run on (the ladders were changed since the
+# plan was accepted): the node fails rather than run on another agent (Decision
+# 0099, 4). The orchestrator's own name: a runtime cannot report it.
+ASSIGNMENT_UNAVAILABLE = "AssignmentUnavailable"
 
 
 # The failure classes an agent runtime may REPORT (``NodeOutcome.failed``): the

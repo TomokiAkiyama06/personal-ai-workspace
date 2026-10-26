@@ -92,6 +92,7 @@ from paw_backend.compute.domain import Refusal
 from paw_backend.compute.errors import ComputeUnavailableError
 from paw_backend.compute.limits import BYTES_PER_TOKEN_ESTIMATE
 from paw_backend.compute.runtimes import current_lease
+from paw_backend.orchestrator.config import RoleAssignment
 from paw_backend.orchestrator.domain import NodeRole
 from paw_backend.orchestrator.errors import InvalidNodeResultError
 from paw_backend.orchestrator.runtime import NodeAssignment, NodeOutcome
@@ -147,6 +148,40 @@ This task only reads: nothing may be changed, and a plan with a worker node is r
 NUDGE = (
     "Continue. Use the tools to work on the task, and call submit when you are done."
 )
+
+# Decision 0099, 4: the planner may name the agent each node starts on, among
+# the ones the backend allows for its role (``NodeAssignment.agent_choices``).
+# The roles each planner prompt names, in the order it names them.
+_PLANNED_ROLES = (NodeRole.WORKER, NodeRole.RESEARCHER, NodeRole.REVIEWER)
+_READ_ONLY_PLANNED_ROLES = (NodeRole.RESEARCHER, NodeRole.REVIEWER)
+
+
+def agent_choices_text(
+    choices: Mapping[NodeRole, RoleAssignment] | None, *, read_only: bool
+) -> str:
+    """The planner prompt's paragraph on a node's ``agent`` (Decision 0099, 4):
+    the agents each role the prompt names may be assigned and its default
+    (``""`` without choices). The same text for every planner runtime (the CLI
+    runtimes use :func:`node_prompts` too)."""
+    if not choices:
+        return ""
+    roles = _READ_ONLY_PLANNED_ROLES if read_only else _PLANNED_ROLES
+    parts = []
+    for role in roles:
+        entry = choices.get(role)
+        if entry is None:
+            continue
+        allowed = " or ".join(entry.allowed)
+        default = f" (default {entry.default})" if entry.default else ""
+        parts.append(f"{role.value}: {allowed}{default}")
+    if not parts:
+        return ""
+    return (
+        '\n\nA node may name the agent that runs it in "agent" (one of the '
+        "labels below, as a string); leave it out for its role's default. The "
+        "agents each role may have: " + "; ".join(parts) + ". Any other agent "
+        "refuses the whole plan."
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -422,9 +457,13 @@ def node_prompts(toolkit: NodeToolkit) -> tuple[str, str]:
     role = assignment.role
     place = toolkit.workspace.describe()
     if role is NodeRole.PLANNER and assignment.read_only_task:
-        system = READ_ONLY_PLANNER_PROMPT.format(workspace=place)
+        system = READ_ONLY_PLANNER_PROMPT.format(workspace=place) + agent_choices_text(
+            assignment.agent_choices, read_only=True
+        )
     elif role is NodeRole.PLANNER:
-        system = PLANNER_PROMPT.format(workspace=place)
+        system = PLANNER_PROMPT.format(workspace=place) + agent_choices_text(
+            assignment.agent_choices, read_only=False
+        )
     elif toolkit.writes:
         system = WORKER_PROMPT.format(workspace=place)
     else:
