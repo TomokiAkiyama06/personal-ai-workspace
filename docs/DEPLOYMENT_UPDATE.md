@@ -316,8 +316,21 @@ Order (root, the human; the agent never does this):
    `agent_plan_calls` shows `cloud` / `claude`, the attempts' placements, the
    `orchestrator.cloud_send` rows of `audit_events` and `connection_usage`.
 
-To stop every send: `[cloud] enabled = false` and restart; at once: disable the
-connection (`/admin/connections`). What is checked:
+Stopping the sends:
+
+- **At once, no restart**: disable the Claude / Codex connection in
+  `/admin/connections` (Decision 0099, 2's Kill Switch (1); a refused node escalates or
+  stops by the usual rules).
+- **For good (rollback to step 3)**: restore step 3's local-only `[orchestrator]`
+  (`[orchestrator.ladders]` all `["local"]`, and no `[orchestrator.assignment]`, or one
+  inside those ladders), then run `runtime-config-check` and restart. `[cloud]` and
+  `[agents.*]` may stay (`enabled = false` or removed). **Do not only set
+  `[cloud] enabled = false` while a ladder still names `claude` / `codex`**: that file
+  is refused at start (`orchestrator.ladders.<role>: names a cli runtime's label without
+  [cloud] enabled = true`), so the backend would not start at all — HTTP and the local
+  runtime included.
+
+What is checked:
 
 - `[cloud]`: `enabled` (`true` / `false`, default `false`; the production `CloudPolicy`
   allows nothing while it is `false`) and `single_user_only` (only `true`: the cloud is

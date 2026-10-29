@@ -103,7 +103,8 @@ reviewer = ["local"]
 # Replace the step 3 [orchestrator] above with this one; uncomment to enable.
 #
 # [cloud]
-# enabled = true                     # false + restart stops every send
+# enabled = true                     # to stop: see docs/DEPLOYMENT_UPDATE.md
+#                                    # (false alone with CLI ladders: no start)
 # single_user_only = true
 #
 # [agents.claude]
