@@ -32,10 +32,13 @@ from unittest.mock import patch
 
 from paw_backend.agents.cli_session import UnitNotStoppedError
 from paw_backend.agents.codex_app_server import (
+    MCP_RESOURCE_TOOLS,
     VERIFIED_VERSIONS,
     CodexStream,
     StreamRefused,
     Turn,
+    model_tool_names,
+    tool_check,
     version_of,
 )
 from paw_backend.agents.codex_cli import (
@@ -267,6 +270,10 @@ class SubmitTest(CodexCase):
         self.assertTrue(paw["required"])
         self.assertEqual(paw["enabled_tools"], ["submit"])
         self.assertEqual(paw["default_tools_approval_mode"], "approve")
+        # Issue #305: the PAW tools are offered directly (not behind
+        # tool_search), and the orchestrator's skills namespace is off.
+        self.assertEqual(paw["omit_tools_from"], ["deferred", "code_mode"])
+        self.assertIs(config["orchestrator"]["skills"]["enabled"], False)
         self.assertEqual(report["listed"], ["submit"])
         # The credential: in auth.json only (and taken back), nowhere else.
         self.assertEqual(report["auth_length"], len(TOKEN))
@@ -330,6 +337,24 @@ class TotalsTest(CodexCase):
         raw = self.connections.raw
         self.assertEqual((raw.input_tokens, raw.output_tokens), (105, 11))
         self.assertEqual(self.connections.turns, [(100, 10), (5, 1)])
+
+    async def test_a_resource_call_before_the_submit_keeps_the_totals(self):
+        # Decision 0101, 3: the bridge does not count a resource call, so it
+        # does not stand for the submit's call.
+        resource = {"type": "mcpToolCall", "id": "r", "server": "paw"}
+        await self.run_node(
+            [
+                {"usage": [100, 10]},
+                {"item": dict(resource, tool="list_mcp_resources")},
+                {"usage": [7, 2]},
+                {"call": "submit", "arguments": {"summary": "done"}},
+                {"usage": [5, 1]},
+                {"sleep": 30},
+            ]
+        )
+        raw = self.connections.raw
+        self.assertIsNone(raw.failure)
+        self.assertEqual((raw.input_tokens, raw.output_tokens), (112, 13))
 
     async def test_a_submit_whose_call_was_not_counted_leaves_them_unknown(self):
         await self.run_node(
@@ -477,6 +502,36 @@ class StopTest(CodexCase):
 
     async def test_another_servers_tool_stops_the_cli(self):
         item = {"type": "mcpToolCall", "id": "i", "server": "other", "tool": "submit"}
+        await self.assert_stopped([{"item": item}])
+
+    async def test_a_resource_call_that_names_paw_passes(self):
+        # Decision 0101, 3: it reaches only the bridge (Method not found).
+        for tool in MCP_RESOURCE_TOOLS:
+            with self.subTest(tool=tool):
+                item = {"type": "mcpToolCall", "id": "r", "server": "paw", "tool": tool}
+                await self.run_node(
+                    [
+                        {"usage": [3, 1]},
+                        {"item": item},
+                        {"usage": [5, 2]},
+                        {"complete": "completed"},
+                    ]
+                )
+                raw = self.connections.raw
+                self.assertIsNone(raw.failure)
+                self.assertEqual((raw.input_tokens, raw.output_tokens), (8, 3))
+
+    async def test_a_resource_call_of_another_server_stops_the_cli(self):
+        # Without "server" the item says "codex": refused as any other.
+        for server in ("codex", "other", None):
+            with self.subTest(server=server):
+                item = {"type": "mcpToolCall", "id": "r", "tool": "read_mcp_resource"}
+                if server is not None:
+                    item["server"] = server
+                await self.assert_stopped([{"item": item}])
+
+    async def test_a_paw_call_of_an_unknown_tool_stops_the_cli(self):
+        item = {"type": "mcpToolCall", "id": "r", "server": "paw", "tool": "bash"}
         await self.assert_stopped([{"item": item}])
 
     async def test_a_request_from_the_server_stops_the_cli(self):
@@ -907,6 +962,106 @@ class BoundaryTest(CodexCase):
             executable=("codex",),
             verified_versions=frozenset({VERSION}),
         )
+
+
+def _function(name, properties, required=None):
+    parameters = {
+        "type": "object",
+        "properties": {key: {"type": "string"} for key in properties},
+        "additionalProperties": False,
+    }
+    if required is not None:
+        parameters["required"] = required
+    return {
+        "type": "function",
+        "name": name,
+        "description": "d",
+        "parameters": parameters,
+    }
+
+
+#: The request's tools of the 0.156.1 smoke (#305, run 06), descriptions cut.
+RESOURCE_TOOLS = [
+    _function("list_mcp_resources", ["cursor", "server"]),
+    _function("list_mcp_resource_templates", ["cursor", "server"]),
+    _function("read_mcp_resource", ["server", "uri"], ["server", "uri"]),
+]
+PAW_NAMESPACE = {
+    "type": "namespace",
+    "name": "mcp__paw",
+    "description": "Tools in the mcp__paw namespace.",
+    "tools": [_function("submit", ["summary"], ["summary"])],
+}
+
+
+class ToolCheckTest(unittest.TestCase):
+    """Decision 0101, 1 (the smoke test's check of a request's tools)."""
+
+    def check(self, tools, paw=("submit",), servers=("paw",)):
+        return tool_check(tools, paw, servers)
+
+    def test_the_paw_tools_with_the_resource_tools_pass(self):
+        self.assertEqual(self.check([*RESOURCE_TOOLS, PAW_NAMESPACE]), ())
+        self.assertEqual(
+            model_tool_names([*RESOURCE_TOOLS, PAW_NAMESPACE]),
+            [*MCP_RESOURCE_TOOLS, "mcp__paw__submit"],
+        )
+
+    def test_some_or_none_of_the_resource_tools_pass(self):
+        self.assertEqual(self.check([PAW_NAMESPACE]), ())
+        self.assertEqual(self.check([RESOURCE_TOOLS[2], PAW_NAMESPACE]), ())
+
+    def test_every_paw_tool_is_needed_once(self):
+        two = dict(
+            PAW_NAMESPACE, tools=[*PAW_NAMESPACE["tools"], _function("bash", [])]
+        )
+        self.assertEqual(self.check([two], paw=("submit", "bash")), ())
+        self.assertTrue(self.check([PAW_NAMESPACE], paw=("submit", "bash")))
+        self.assertTrue(self.check([PAW_NAMESPACE, PAW_NAMESPACE]))
+        # Deferred behind tool_search (#305): submit is missing.
+        self.assertTrue(
+            self.check([*RESOURCE_TOOLS, {"type": "tool_search", "description": "d"}])
+        )
+
+    def test_any_other_tool_fails(self):
+        for extra in (
+            _function("apply_patch", ["input"]),  # 0.165.0
+            {"type": "tool_search", "execution": "client"},
+            {"type": "web_search"},
+            {"type": "namespace", "name": "skills", "tools": [_function("list", [])]},
+            {"type": "namespace", "name": "mcp__other", "tools": [_function("x", [])]},
+            _function("exec_command", ["cmd"]),
+        ):
+            with self.subTest(extra=extra.get("name") or extra["type"]):
+                problems = self.check([*RESOURCE_TOOLS, PAW_NAMESPACE, extra])
+                self.assertEqual(len(problems), 1, problems)
+                self.assertIn("extra tool", problems[0])
+
+    def test_a_resource_tool_must_keep_its_recorded_shape(self):
+        nested = {"type": "namespace", "name": "mcp", "tools": [RESOURCE_TOOLS[0]]}
+        for changed in (
+            _function("read_mcp_resource", ["server", "uri"], ["uri"]),
+            _function(
+                "read_mcp_resource", ["server", "uri", "host"], ["server", "uri"]
+            ),
+            _function("list_mcp_resources", ["cursor"]),
+            dict(RESOURCE_TOOLS[0], type="custom"),
+        ):
+            with self.subTest(changed=changed):
+                self.assertTrue(self.check([changed, PAW_NAMESPACE]))
+        self.assertTrue(self.check([nested, PAW_NAMESPACE]))  # mcp__list_mcp_...
+        self.assertTrue(
+            self.check([RESOURCE_TOOLS[0], RESOURCE_TOOLS[0], PAW_NAMESPACE])
+        )
+
+    def test_paw_must_be_the_only_mcp_server(self):
+        self.assertTrue(self.check([PAW_NAMESPACE], servers=("paw", "other")))
+        self.assertTrue(self.check([PAW_NAMESPACE], servers=()))
+
+    def test_malformed_tools_fail(self):
+        self.assertTrue(self.check(None))
+        self.assertTrue(self.check([PAW_NAMESPACE, "x"]))
+        self.assertTrue(self.check([dict(PAW_NAMESPACE, tools=None)]))
 
 
 class ReprTest(unittest.TestCase):

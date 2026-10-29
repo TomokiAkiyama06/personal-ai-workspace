@@ -57,6 +57,11 @@ _PARSE_ERROR = -32700
 _INVALID_REQUEST = -32600
 _METHOD_NOT_FOUND = -32601
 _INVALID_PARAMS = -32602
+#: Unserved methods the log names (Decision 0101, 3: the MCP resource tools of
+#: Codex ask these); any other method is logged without its name.
+_NAMED_UNSERVED = frozenset(
+    {"resources/list", "resources/templates/list", "resources/read"}
+)
 
 ENDED_TEXT = "Tool error: the task has ended; no further tools run."
 
@@ -222,6 +227,12 @@ class McpBridge:
             if not isinstance(name, str) or not isinstance(arguments, dict):
                 return _error(request_id, _INVALID_PARAMS, "Invalid params")
             return _result(request_id, await self._call(name, arguments))
+        # Decision 0101, 3: no resources are served (Codex's resource tools
+        # reach here). One fixed line: a known method by name, else none.
+        logger.info(
+            "MCP bridge: method %s is not served",
+            method if method in _NAMED_UNSERVED else "(other)",
+        )
         return _error(request_id, _METHOD_NOT_FOUND, "Method not found")
 
     def _initialize(self, params: Mapping[str, Any]) -> dict[str, Any]:
