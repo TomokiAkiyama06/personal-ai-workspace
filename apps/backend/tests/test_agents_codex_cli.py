@@ -267,6 +267,10 @@ class SubmitTest(CodexCase):
         self.assertTrue(paw["required"])
         self.assertEqual(paw["enabled_tools"], ["submit"])
         self.assertEqual(paw["default_tools_approval_mode"], "approve")
+        # Issue #305: the PAW tools are offered directly (not behind
+        # tool_search), and the orchestrator's skills namespace is off.
+        self.assertEqual(paw["omit_tools_from"], ["deferred", "code_mode"])
+        self.assertIs(config["orchestrator"]["skills"]["enabled"], False)
         self.assertEqual(report["listed"], ["submit"])
         # The credential: in auth.json only (and taken back), nowhere else.
         self.assertEqual(report["auth_length"], len(TOKEN))
