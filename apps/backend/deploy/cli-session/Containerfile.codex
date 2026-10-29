@@ -2,16 +2,20 @@
 # digest as codex_image in /etc/paw/cli-session.toml:
 #   podman build -t localhost/paw-codex-cli -f Containerfile.codex ..
 #   podman image inspect --format '{{.Digest}}' localhost/paw-codex-cli
-# Pin the base image's digest and Codex's version before building; the version
-# must be one the backend verified (VERIFIED_VERSIONS, after the fake CLI's
-# stream check and the smoke test of Decision 0089, 2).
+# Pin the base image's digest before building. Codex's version must be one the
+# backend verified (VERIFIED_VERSIONS: the feature-list comparison, the fake
+# CLI's stream check and the recorder smoke of Decision 0101, 4). 0.156.1 is
+# verified (issue #305, 2026-10-29). 0.165.0 is not: it offers apply_patch
+# with environments: []. To change the version, redo those steps for the new
+# one first (Decision 0101, 5); a --build-arg alone starts nothing.
 FROM docker.io/library/node:22-bookworm-slim
-ARG CODEX_VERSION
+ARG CODEX_VERSION=0.156.1
 RUN test -n "$CODEX_VERSION" \
     && apt-get update && apt-get install -y --no-install-recommends python3 \
     && rm -rf /var/lib/apt/lists/* \
     && npm install --global "@openai/codex@${CODEX_VERSION}" \
-    && npm cache clean --force
+    && npm cache clean --force \
+    && codex --version | grep -qx "codex-cli ${CODEX_VERSION}"
 COPY cli-session/start-codex cli-session/paw_mcp_relay.py egress/paw_egress.py /opt/paw/
 # No entry point: the backend names /opt/paw/start-codex as the command
 # (CodexSessionAdapter(executable=("/opt/paw/start-codex",))).

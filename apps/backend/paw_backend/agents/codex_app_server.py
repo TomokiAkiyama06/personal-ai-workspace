@@ -17,7 +17,7 @@ rpc.rs`` of ``rust-v0.162.1``). A session is:
 
 * the ``initialize`` answer's ``userAgent`` carries the CLI's version; a
   version that is not in the verified list is refused (``version``: Decision
-  0089, 2. The list starts empty: no version has passed the smoke test yet);
+  0089, 2 and Decision 0101, 4: only versions whose smoke test passed);
 * ``thread/tokenUsage/updated``: the growth of ``total`` since the last one is
   one :class:`Turn` (a repeated notification, sent again with a rate-limit
   update, adds nothing; a ``total`` that shrinks is refused, ``usage``);
@@ -25,7 +25,11 @@ rpc.rs`` of ``rust-v0.162.1``). A session is:
   parts of them: Decision 0089, 3);
 * ``item/started`` / ``item/completed``: the item's ``type`` against the closed
   table of Decision 0089, 2 (a non-tool item passes; a PAW MCP call passes; an
-  item that can execute, or a type not in the table, is refused, ``item``);
+  MCP resource call that names ``paw`` passes, Decision 0101, 3; an item that
+  can execute, or a type not in the table, is refused, ``item``);
+
+:func:`tool_check` is the smoke test's check of one model request's ``tools``
+(Decision 0101, 1: the PAW tools, and only the MCP resource tools besides).
 * ``error`` that will not be retried, and ``turn/completed``'s status and
   error: their ``codexErrorInfo`` (``unauthorized`` is an expired credential,
   ``usageLimitExceeded`` / ``rateLimitExceeded`` a rate limit);
@@ -41,10 +45,23 @@ from typing import Any, Final
 
 from paw_backend.agents.claude_stream import PAW_SERVER
 
-#: The CLI versions whose tool list passed the smoke test (Decision 0089, 2:
-#: the request's ``tools`` were exactly the PAW tools). Empty until then: no
-#: session is started with any version.
-VERIFIED_VERSIONS: Final[frozenset[str]] = frozenset()
+#: The CLI versions whose tool list passed the smoke test (Decision 0089, 2 and
+#: Decision 0101: every request's ``tools`` passed :func:`tool_check`). No
+#: session is started with any other version. ``0.156.1``: issue #305
+#: (2026-10-29; the feature list compared, the fake's shapes checked against
+#: its ``app-server-protocol``, the recorder smoke passed).
+VERIFIED_VERSIONS: Final[frozenset[str]] = frozenset({"0.156.1"})
+
+#: The MCP resource tools Codex offers whenever an MCP server is configured
+#: (``add_mcp_resource_tools``; no setting removes them), allowed by Decision
+#: 0101 while ``paw`` is the only MCP server: each tool's argument names and
+#: required ones as recorded from ``rust-v0.156.1`` (the description is not
+#: compared).
+MCP_RESOURCE_TOOLS: Final[Mapping[str, tuple[frozenset[str], frozenset[str]]]] = {
+    "list_mcp_resources": (frozenset({"cursor", "server"}), frozenset()),
+    "list_mcp_resource_templates": (frozenset({"cursor", "server"}), frozenset()),
+    "read_mcp_resource": (frozenset({"server", "uri"}), frozenset({"server", "uri"})),
+}
 
 #: Item types that execute nothing (Decision 0089, 2): ``userMessage`` comes
 #: with every ``turn/start``, ``contextCompaction`` with an automatic
@@ -160,6 +177,95 @@ def version_of(user_agent: object) -> str | None:
     return match.group(1) if match else None
 
 
+def model_tool_names(tools: Iterable[object]) -> list[str]:
+    """The names the model can call in a request's ``tools``: a namespace's
+    tools as ``<namespace>__<name>`` (an MCP server's namespace is
+    ``mcp__<server>``), every other tool by its ``name``, or its ``type`` when
+    it has none (``tool_search``, ``web_search``, ...)."""
+    names: list[str] = []
+    for tool in tools:
+        if not isinstance(tool, dict):
+            names.append("?")
+        elif tool.get("type") == "namespace":
+            inner = tool.get("tools")
+            for item in inner if isinstance(inner, list) else [None]:
+                name = item.get("name") if isinstance(item, dict) else None
+                names.append(f"{tool.get('name')}__{name}")
+        else:
+            names.append(str(tool.get("name") or tool.get("type")))
+    return names
+
+
+def tool_check(
+    tools: object, paw_tools: Iterable[str], mcp_servers: Iterable[str]
+) -> tuple[str, ...]:
+    """Decision 0101, 1: the problems of one model request's ``tools`` (none:
+    it passes). ``paw_tools`` are the session's ``enabled_tools``,
+    ``mcp_servers`` the session config's MCP servers.
+
+    Every PAW tool (``mcp__paw__<name>``) once; besides them only the MCP
+    resource tools (any of them), each a top-level function whose argument
+    names and required ones are the recorded ones; and ``paw`` the only MCP
+    server. Anything else fails (``apply_patch``, ``tool_search``, a skills
+    namespace, another server's tools, a resource tool inside a namespace).
+    """
+    problems: list[str] = []
+    servers = sorted(set(mcp_servers))
+    if servers != [PAW_SERVER]:
+        problems.append(f"mcp servers {servers}, not only {PAW_SERVER}")
+    if not isinstance(tools, list):
+        return (*problems, "tools is not a list")
+    names = model_tool_names(tools)
+    expected = sorted(f"mcp__{PAW_SERVER}__{name}" for name in set(paw_tools))
+    for name in expected:
+        count = names.count(name)
+        if count != 1:
+            problems.append(f"{name} offered {count} times")
+    seen: set[str] = set()
+    for tool, name in zip(_flat(tools), names, strict=True):
+        if name in expected:
+            continue
+        shape = MCP_RESOURCE_TOOLS.get(name)
+        if shape is None:
+            problems.append(f"extra tool {name}")
+        elif name in seen:
+            problems.append(f"{name} offered more than once")
+        elif tool is None or not _shaped(tool, *shape):
+            problems.append(f"{name} is not the recorded top-level function")
+        seen.add(name)
+    return tuple(problems)
+
+
+def _flat(tools: list[object]) -> list[dict[str, Any] | None]:
+    """The tools in :func:`model_tool_names`' order: a top-level tool itself,
+    ``None`` for each tool inside a namespace (never a resource tool)."""
+    flat: list[dict[str, Any] | None] = []
+    for tool in tools:
+        if isinstance(tool, dict) and tool.get("type") == "namespace":
+            inner = tool.get("tools")
+            flat.extend([None] * (len(inner) if isinstance(inner, list) else 1))
+        else:
+            flat.append(tool if isinstance(tool, dict) else None)
+    return flat
+
+
+def _shaped(
+    tool: Mapping[str, Any], names: frozenset[str], required: frozenset[str]
+) -> bool:
+    parameters = tool.get("parameters")
+    if tool.get("type") != "function" or not isinstance(parameters, dict):
+        return False
+    properties = parameters.get("properties")
+    wanted = parameters.get("required", [])
+    return (
+        isinstance(properties, dict)
+        and frozenset(properties) == names
+        and isinstance(wanted, list)
+        and frozenset(wanted) == required
+        and len(wanted) == len(required)
+    )
+
+
 class CodexStream:
     """Reads the server's lines of one session (see the module)."""
 
@@ -180,6 +286,7 @@ class CodexStream:
         self._seen = 0
         self._last_call: int | None = None
         self._call_ids: set[object] = set()
+        self._resource_ids: set[object] = set()
         self._last_report = 0
 
     @property
@@ -309,6 +416,23 @@ class CodexStream:
                 self._seen += 1
                 self._last_call = self._seen
             return
+        if (
+            kind == MCP_ITEM
+            and item.get("server") == PAW_SERVER
+            and item.get("tool") in MCP_RESOURCE_TOOLS
+        ):
+            # Decision 0101, 3: a resource call that names ``paw`` reaches
+            # only the bridge, which serves no resources (``Method not
+            # found``). The model answers it with another call, so it orders
+            # the reports as a tool call does, but the bridge does not count
+            # it (``calls_seen``). Without ``server`` the item says ``codex``:
+            # refused below, as any other server.
+            ident = item.get("id")
+            if ident not in self._resource_ids:
+                self._resource_ids.add(ident)
+                self._seen += 1
+                self._last_call = self._seen
+            return
         # Everything else can execute something (a command, a file change,
         # another agent, a search, an image), or is a type this table does
         # not know: refused (Decision 0089, 2).
@@ -338,6 +462,7 @@ def _error_info(error: object) -> str | None:
 __all__ = [
     "CREDENTIAL_ERRORS",
     "MAX_LINE_BYTES",
+    "MCP_RESOURCE_TOOLS",
     "PASSING_ITEMS",
     "RATE_ERRORS",
     "VERIFIED_VERSIONS",
@@ -348,8 +473,10 @@ __all__ = [
     "StreamRefused",
     "Turn",
     "initialize",
+    "model_tool_names",
     "notification",
     "thread_start",
+    "tool_check",
     "turn_start",
     "version_of",
 ]

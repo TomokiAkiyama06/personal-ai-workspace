@@ -11,12 +11,14 @@ attempt); a session that ended without either is ``no_submission``.
 :class:`CodexSessionAdapter` is the connection's session adapter
 (``ConnectionService(session_adapters={CODEX: ...})``). It writes the session's
 ``$CODEX_HOME/config.toml`` (Decision 0089, 2: every default-on tool feature
-off, web search off, the PAW relay as the only MCP server with its tools
-approved: the Tool Broker approves each call), starts ``codex app-server`` and
+off, web search off, the orchestrator's skills off, the PAW relay as the only
+MCP server with its tools approved: the Tool Broker approves each call; and
+offered directly, never deferred behind ``tool_search``: issue #305), starts
+``codex app-server`` and
 talks to it (``codex_app_server.py``):
 
-* a version that is not in the verified list sends nothing (the list is empty
-  until the smoke test of Decision 0089, 2 passes for a version);
+* a version that is not in the verified list sends nothing (a version is
+  listed once its recorder smoke passed: Decision 0089, 2; Decision 0101, 4);
 * every growth of the thread's tokens is reported at once (``on_usage``); when
   the service answers ``False`` the CLI is stopped;
 * an item that can execute (or that the table does not know), a request from
@@ -106,10 +108,11 @@ logger = logging.getLogger(__name__)
 AGENT = "codex"
 CONFIG_NAME = "config.toml"
 CLIENT_VERSION = "1"
-#: The default-on features of ``rust-v0.162.1`` that offer the model a tool or
-#: reach out (``features/src/lib.rs``), all off (Decision 0089, 2). A version
-#: is verified only after its own list was compared and the smoke test saw
-#: exactly the PAW tools in the request.
+#: The default-on features of ``rust-v0.162.1`` and ``rust-v0.156.1`` that
+#: offer the model a tool, run something or reach out (``features/src/lib.rs``
+#: and ``codex features list``), all off (Decision 0089, 2). A version is
+#: verified only after its own list was compared and the smoke test's
+#: requests passed ``tool_check`` (Decision 0101, 4).
 DISABLED_FEATURES: Final = (
     "shell_tool",
     "unified_exec",
@@ -135,6 +138,15 @@ DISABLED_FEATURES: Final = (
     "auth_elicitation",
     "code_mode_host",
     "realtime_conversation",
+    # Compared with 0.156.1 (#305): a shell snapshot runs a shell at the
+    # start; the others share plugins, make worktrees or dependencies, or
+    # retry outside the configured proxy.
+    "shell_snapshot",
+    "unified_exec_tty",
+    "plugin_sharing",
+    "worktrees",
+    "workspace_dependencies",
+    "system_proxy_fallback",
 )
 #: A PAW tool call runs at most 300 seconds (Decision 0083, 8); the CLI waits
 #: a little longer for its answer.
@@ -297,6 +309,9 @@ def session_config(spec: CliSessionSpec, tools: Iterable[str]) -> str:
         "required": True,
         "enabled_tools": sorted(tools),
         "default_tools_approval_mode": "approve",
+        # Issue #305: the PAW tools go in the request's tool list itself, not
+        # behind ``tool_search`` (deferred loading) or a Code Mode script.
+        "omit_tools_from": ["deferred", "code_mode"],
         "startup_timeout_sec": STARTUP_TIMEOUT_SECONDS,
         "tool_timeout_sec": TOOL_TIMEOUT_SECONDS,
     }
@@ -309,6 +324,9 @@ def session_config(spec: CliSessionSpec, tools: Iterable[str]) -> str:
         ("history", {"persistence": "none"}),
         ("tools.update_plan", {"enabled": False}),
         ("tools.experimental_request_user_input", {"enabled": False}),
+        # Issue #305: with ``environments: []`` the orchestrator's skills are
+        # available, offered as the ``skills`` namespace (``list``, ``read``).
+        ("orchestrator.skills", {"enabled": False}),
         ("features", {name: False for name in DISABLED_FEATURES}),
         ("mcp_servers.paw", paw),
     ]
@@ -343,8 +361,8 @@ def _toml_value(value: object) -> str:
 
 class CodexSessionAdapter:
     """See the module. ``verified_versions``: the CLI versions that may run
-    (:data:`~.codex_app_server.VERIFIED_VERSIONS`, empty, unless a test or a
-    later verified release says otherwise)."""
+    (:data:`~.codex_app_server.VERIFIED_VERSIONS` unless a test says
+    otherwise)."""
 
     kind = ConnectionKind.CODEX
     # One session per connection at a time (Decision 0083, 6): the ChatGPT

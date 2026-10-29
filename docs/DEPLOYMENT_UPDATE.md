@@ -292,9 +292,11 @@ the sections; since its "PR の分け方" 6 a ladder that names `claude` / `code
 CLIs' session units (`paw-cli-session@<uuid>.service`, image entry
 `/opt/paw/start-claude` / `start-codex`, egress `127.0.0.1:3128`). They also need
 `PAW_SECRET_STORE_DIR` and `session_base = PAW_CLI_SESSION_DIR` (both checked at start).
-**Codex sends nothing** until its CLI version is verified (`VERIFIED_VERSIONS`, Decision
-0089; the 2026-10-29 smoke found 0.156.1 offers non-PAW tools), so every Codex review
-fails, and so does every writing task, until then (the human decides how to handle this).
+**Codex sends nothing** unless its CLI version is verified (`VERIFIED_VERSIONS`, Decisions
+0089 and 0101). Only `0.156.1` is (#305). The Codex image (`Containerfile.codex`,
+`CODEX_VERSION=0.156.1`) must be built and its digest pinned as `codex_image` first;
+until then every Codex review fails, and so does every writing task. Before enabling,
+the token-breakdown check and the egress allowlist of Decision 0089, 3 remain.
 
 Order (root, the human; the agent never does this):
 
