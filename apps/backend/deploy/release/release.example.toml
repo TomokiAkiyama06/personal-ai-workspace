@@ -9,7 +9,9 @@ state_dir = "/var/lib/paw/deploy"
 # The database restore points (0700; never inside the Recovery Repository).
 restore_point_dir = "/var/lib/paw/restore-points"
 # PAW_MIGRATION_DATABASE_URL, PAW_DATABASE_URL (the application role, for
-# recovery-backup-run), PAW_RECOVERY_REPOSITORY_DIR, PAW_DEPLOY_ADMIN_DATABASE_URL
+# recovery-backup-run), PAW_RECOVERY_REPOSITORY_DIR, PAW_DEPLOY_ADMIN_DATABASE_URL,
+# PAW_DEPLOY_RESTORE_TEMPLATE (the superuser-made template with vector that the
+# restore points are restored into, Issue #312; apps/backend/README.md)
 # ...: given only to the backend commands of a release. chmod 600, root.
 env_file = "/etc/paw/deploy.env"
 # The backend commands run as paw-maint (Decision 0031 6), not as root.
