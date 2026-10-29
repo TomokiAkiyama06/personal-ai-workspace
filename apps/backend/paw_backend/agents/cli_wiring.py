@@ -27,6 +27,17 @@ Nothing is sent by building them: every send still goes through ``CloudGate``
 (policy -> admission -> placement record -> adapter). Codex sends nothing until
 its CLI's version is verified (``codex_app_server.VERIFIED_VERSIONS``, Decision
 0089, 2).
+
+The health probes (Decision 0100, 4 and 11; issue #306): with ``[cloud]
+enabled = true``, every configured ``[agents.claude]`` gives the Claude
+connection a :class:`~.claude_probe.ClaudeProbeAdapter` (one short session
+with a fixed prompt and no tools, on the same launcher, image and egress) —
+whether a ladder names the CLI or not, so that the connection is checked
+before it is used. :func:`build_probe_adapters` builds them; they are
+registered in this orchestrator's ``ConnectionService`` and in the HTTP
+layer's (``connections/wiring.py``), each built with ``PROBE_TIMEOUT_SECONDS``
+as its ``health_timeout_seconds``. Codex gets its probe after its CLI's
+version is verified (issue #305).
 """
 
 from collections.abc import Mapping
@@ -34,7 +45,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from paw_backend.agents.claude_cli import ClaudeCliRuntime, ClaudeSessionAdapter
-from paw_backend.agents.cli_session import SystemdLauncher
+from paw_backend.agents.claude_probe import ClaudeProbeAdapter
+from paw_backend.agents.cli_session import CliLauncher, SystemdLauncher
 from paw_backend.agents.cloud_policy import (
     CLI_AGENT_LABELS,
     CloudSettings,
@@ -50,7 +62,7 @@ from paw_backend.agents.codex_collect import CodexLoginCollector, SystemdSession
 from paw_backend.agents.codex_credentials import CodexAuthFile
 from paw_backend.auth.principals import DatabasePrincipalDirectory
 from paw_backend.authz import Authorizer, PostgresAuditSink
-from paw_backend.connections import ConnectionKind
+from paw_backend.connections import PROBE_TIMEOUT_SECONDS, ConnectionKind
 from paw_backend.connections.adapter import AdapterRegistry
 from paw_backend.connections.service import ConnectionService
 from paw_backend.db import Database
@@ -158,17 +170,21 @@ def build_cli_services(
             executable=CODEX_EXECUTABLE,
             proxy_url=EGRESS_PROXY_URL,
         )
+    probes = AdapterRegistry()
+    for probe in build_probe_adapters(setup, launcher=launcher):
+        probes.register(probe)
     connections = ConnectionService(
         database,
         authorizer,
         PostgresAuditSink(database),
-        AdapterRegistry(),
+        probes,
         secret_store,
         budget=budget,
         lease=QueueLeaseVerifier(queue),
         session_adapters=adapters,
         credential_store=secret_store,
         database_timeout_seconds=database_timeout_seconds,
+        health_timeout_seconds=PROBE_TIMEOUT_SECONDS,
     )
     if "codex" in used:
         # Decision 0096, 1 D: a slot this process keeps for a session whose CLI
@@ -201,6 +217,30 @@ def build_cli_services(
     )
 
 
+def build_probe_adapters(
+    setup: CliSetup | None, *, launcher: CliLauncher | None = None
+) -> tuple[ClaudeProbeAdapter, ...]:
+    """The connections' health probe adapters (Decision 0100, 4 and 11): none
+    without ``setup`` or with the cloud disabled (nothing is sent then);
+    Claude's when ``[agents.claude]`` is written (its model and session
+    directory), on production's launcher by default. Codex has none yet
+    (issue #305)."""
+    if setup is None or setup.cloud.enabled is not True:
+        return ()
+    claude = setup.agents.get("claude")
+    if claude is None:
+        return ()
+    return (
+        ClaudeProbeAdapter(
+            launcher if launcher is not None else SystemdLauncher(),
+            model=claude.model,
+            session_base=Path(claude.session_base),
+            executable=CLAUDE_EXECUTABLE,
+            proxy_url=EGRESS_PROXY_URL,
+        ),
+    )
+
+
 __all__ = [
     "CLAUDE_EXECUTABLE",
     "CODEX_EXECUTABLE",
@@ -209,4 +249,5 @@ __all__ = [
     "CliServices",
     "CliSetup",
     "build_cli_services",
+    "build_probe_adapters",
 ]
