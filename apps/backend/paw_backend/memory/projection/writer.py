@@ -135,13 +135,25 @@ class ProjectionBusyError(Exception):
 
 
 def system_home_directories(min_uid: int = 1000) -> tuple[str, ...]:
-    """``/home`` and the home directory of every account with ``uid >= min_uid``."""
+    """``/home`` and the home directory of every account with ``uid >= min_uid``.
+
+    A home that is (or resolves to) ``/`` is left out: it would contain every
+    path, so nothing could be accepted. ``pwd.getpwall()`` also returns systemd
+    DynamicUsers through ``nss-systemd`` (``chrony-wait``, home ``/``; issue
+    #309), which are not people and have no checkout. Every other home stays
+    protected, a missing one (``/nonexistent``) included: protecting it refuses
+    nothing that is in use, and a home made later is then already covered.
+    """
     import pwd
 
     homes = {"/home"}
     for entry in pwd.getpwall():
-        if entry.pw_uid >= min_uid and os.path.isabs(entry.pw_dir):
-            homes.add(os.path.normpath(entry.pw_dir))
+        if entry.pw_uid < min_uid or not os.path.isabs(entry.pw_dir):
+            continue
+        home = os.path.normpath(entry.pw_dir)
+        if home == "/" or os.path.realpath(home) == "/":
+            continue
+        homes.add(home)
     return tuple(sorted(homes))
 
 
