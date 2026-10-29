@@ -28,6 +28,20 @@ start. Here:
   into a new database also removes what a failed migration created, which
   ``pg_restore --clean`` would leave behind.
 
+**Extensions** (Issue #312): the dump creates the extensions the database uses
+(``vector``, which only a superuser may create), and the restoring role is not
+a superuser. With a **restore template** (``PAW_DEPLOY_RESTORE_TEMPLATE``: a
+database a superuser made once, ``IS_TEMPLATE``, with those extensions and
+nothing else) the scratch / restore databases are copies of it, and
+``pg_restore --use-list`` leaves out the dump's ``EXTENSION`` and ``COMMENT -
+EXTENSION`` entries (the template has them; commenting on an extension needs
+its owner). Before the restore the copy must have every extension the dump
+creates, no other (``plpgsql`` aside) and no table; after it, every extension
+the dump creates must be there. Without a template the scratch database is a
+copy of ``template0`` and the dump is restored whole, which needs a role that
+may create its extensions: when it may not, the restore is refused
+(``extension_needs_restore_template``) before ``pg_restore`` runs.
+
 Credentials go to ``pg_dump`` / ``pg_restore`` in their environment (``PGHOST``,
 ``PGUSER``, ``PGPASSWORD``, ...), never on the command line, and nothing printed
 contains them. ``pg_dump`` / ``pg_restore`` must be of the server's major version
@@ -42,6 +56,7 @@ import re
 import secrets
 import stat
 import subprocess
+import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -52,6 +67,12 @@ from sqlalchemy.engine import URL, Engine
 
 FORMAT_VERSION = 1
 LABEL_PATTERN = r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}"
+TEMPLATE_PATTERN = r"[A-Za-z_][A-Za-z0-9_]{0,62}"
+# In every database made from template0 (CREATE DATABASE copies it), never in
+# a dump.
+_BUILT_IN_EXTENSIONS = frozenset({"plpgsql"})
+# A TOC entry of ``pg_restore --list``: "<id>; <catalog oid> <oid> <what>".
+_TOC_ENTRY = re.compile(r"\d+; +\d+ +\d+ +(.*)")
 _IDENTIFIER_MAX = 63
 # The URL query keys passed on to libpq's environment.
 _QUERY_ENVIRONMENT = {
@@ -181,10 +202,14 @@ class RestorePoints:
         runner: Runner = subprocess.run,
         engine: Callable[..., Engine] = create_engine,
         timeout_seconds: float = 6 * 3600,
+        template: str | None = None,
     ) -> None:
         directory = Path(directory)
         if not directory.is_absolute():
             raise RestorePointError("directory_not_absolute")
+        if template is not None and not re.fullmatch(TEMPLATE_PATTERN, template):
+            raise RestorePointError("invalid_restore_template")
+        self._template = template
         self._directory = directory
         self._recovery = (
             Path(recovery_directory) if recovery_directory is not None else None
@@ -447,13 +472,26 @@ class RestorePoints:
             raise RestorePointError("revision_unreadable")
         return str(rows[0][0])
 
-    def _scalar(self, url: URL, sql: str, **parameters):
+    def _scalar(
+        self, url: URL, sql: str, *, code: str = "database_unreadable", **parameters
+    ):
         engine = self._engine(url)
         try:
             with engine.connect() as connection:
                 return connection.execute(text(sql), parameters).scalar_one()
         except Exception:
-            raise RestorePointError("database_unreadable") from None
+            raise RestorePointError(code) from None
+        finally:
+            engine.dispose()
+
+    def _extensions(self, url: URL, code: str) -> set[str]:
+        engine = self._engine(url)
+        try:
+            with engine.connect() as connection:
+                rows = connection.execute(text("SELECT extname FROM pg_extension"))
+                return {str(row[0]) for row in rows}
+        except Exception:
+            raise RestorePointError(code) from None
         finally:
             engine.dispose()
 
@@ -462,9 +500,26 @@ class RestorePoints:
         return _Connection(engine)
 
     def _create_like(self, admin_url: URL, source: str, name: str) -> str:
-        """Create ``name`` with the owner and encoding of ``source``; its owner."""
+        """Create ``name`` with the owner and encoding of ``source`` (a copy of
+        the restore template, else of ``template0``); its owner."""
+        template = self._template or "template0"
+        if template == source:
+            raise RestorePointError("restore_template_is_the_database")
         try:
             with self._admin(admin_url) as connection:
+                if self._template is not None:
+                    # Not connected to: a connection would stop the copy.
+                    marked = connection.execute(
+                        text(
+                            "SELECT datistemplate FROM pg_database"
+                            " WHERE datname = :name"
+                        ),
+                        {"name": template},
+                    ).scalar_one_or_none()
+                    if marked is None:
+                        raise RestorePointError("restore_template_missing")
+                    if not marked:
+                        raise RestorePointError("restore_template_not_a_template")
                 row = connection.execute(
                     text(
                         "SELECT pg_get_userbyid(datdba) AS owner,"
@@ -477,7 +532,7 @@ class RestorePoints:
                     raise RestorePointError("source_database_missing")
                 connection.execute(
                     text(
-                        f"CREATE DATABASE {_quote(name)} TEMPLATE template0"
+                        f"CREATE DATABASE {_quote(name)} TEMPLATE {_quote(template)}"
                         f" OWNER {_quote(row.owner)}"
                         f" ENCODING '{row.encoding}'"
                     )
@@ -499,22 +554,45 @@ class RestorePoints:
 
     def _restore_into(self, point: RestorePoint, url: URL, database: str) -> int:
         """Restore the dump into ``database`` and check it; its table count."""
-        self._run(
-            [
-                self._pg_restore,
-                "--exit-on-error",
-                "--single-transaction",
-                "--no-owner",
-                "--no-password",
-                f"--dbname={database}",
-                str(point.dump_path),
-            ],
-            pg_environment(url, database=database),
-            "restore_failed",
-        )
-        if self._revision(_sync_url(url, database)) != point.revision:
+        target = _sync_url(url, database)
+        # The TOC listings sit beside the dump (the private directory).
+        with tempfile.TemporaryDirectory(
+            prefix=".toc-", dir=point.dump_path.parent
+        ) as scratch:
+            listing = Path(scratch) / "toc.list"
+            self._run(
+                [self._pg_restore, "--list", f"--file={listing}", str(point.dump_path)],
+                {},
+                "dump_unreadable",
+            )
+            selected, extensions = _read_toc(listing)
+            use_list = []
+            if self._template is not None:
+                self._check_template_copy(target, extensions)
+                chosen = Path(scratch) / "toc.selected"
+                _write_private(chosen, "".join(line + "\n" for line in selected))
+                use_list = [f"--use-list={chosen}"]
+            elif extensions:
+                self._check_extensions_creatable(target, extensions)
+            self._run(
+                [
+                    self._pg_restore,
+                    "--exit-on-error",
+                    "--single-transaction",
+                    "--no-owner",
+                    "--no-password",
+                    *use_list,
+                    f"--dbname={database}",
+                    str(point.dump_path),
+                ],
+                pg_environment(url, database=database),
+                "restore_failed",
+            )
+        if not extensions <= self._extensions(target, "restored_database_unreadable"):
+            raise RestorePointError("restored_extension_missing")
+        if self._revision(target) != point.revision:
             raise RestorePointError("restored_revision_differs")
-        engine = self._engine(_sync_url(url, database))
+        engine = self._engine(target)
         try:
             with engine.connect() as connection:
                 tables = connection.execute(
@@ -530,6 +608,73 @@ class RestorePoints:
         if tables < 1:
             raise RestorePointError("restored_database_empty")
         return int(tables)
+
+    def _check_template_copy(self, url: URL, required: set[str]) -> None:
+        """The fresh copy of the restore template: the dump's extensions, no
+        other and no table (what the template holds would be in the restore)."""
+        present = self._extensions(url, "restore_template_unreadable")
+        if not required <= present:
+            raise RestorePointError("restore_template_extension_missing")
+        if present - required - _BUILT_IN_EXTENSIONS:
+            raise RestorePointError("restore_template_unexpected_extension")
+        if self._scalar(
+            url,
+            "SELECT count(*) FROM pg_tables WHERE schemaname NOT IN"
+            " ('pg_catalog', 'information_schema')",
+            code="restore_template_unreadable",
+        ):
+            raise RestorePointError("restore_template_not_empty")
+
+    def _check_extensions_creatable(self, url: URL, required: set[str]) -> None:
+        """Without a restore template the dump creates its extensions: refused
+        before ``pg_restore`` when the role may not create one of them (it is
+        not a superuser and the extension is not trusted, or not installed)."""
+        blocked = self._scalar(
+            url,
+            "SELECT count(*) FROM unnest(CAST(:names AS text[])) AS wanted(name)"
+            " WHERE NOT (SELECT rolsuper FROM pg_roles"
+            " WHERE rolname = current_user)"
+            " AND NOT EXISTS (SELECT 1 FROM pg_available_extension_versions v"
+            " JOIN pg_available_extensions a ON a.name = v.name"
+            " AND a.default_version = v.version"
+            " WHERE v.name = wanted.name AND (NOT v.superuser OR v.trusted))",
+            code="restored_database_unreadable",
+            names=sorted(required),
+        )
+        if blocked:
+            raise RestorePointError("extension_needs_restore_template")
+
+
+def _read_toc(listing: Path) -> tuple[list[str], set[str]]:
+    """``pg_restore --list``'s output: its lines for a restore into a copy of
+    the restore template (the extensions and their comments commented out) and
+    the extensions the dump creates."""
+    try:
+        lines = listing.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        raise RestorePointError("dump_unreadable") from None
+    entries = 0
+    selected: list[str] = []
+    extensions: set[str] = set()
+    for line in lines:
+        match = _TOC_ENTRY.fullmatch(line.rstrip())
+        if match is None:
+            if line.strip() and not line.lstrip().startswith(";"):
+                raise RestorePointError("dump_unreadable")
+            selected.append(line)
+            continue
+        entries += 1
+        words = match.group(1).split()
+        if words[:2] == ["EXTENSION", "-"] and len(words) >= 3:
+            extensions.add(words[2])
+            selected.append(";" + line)
+        elif words[:3] == ["COMMENT", "-", "EXTENSION"]:
+            selected.append(";" + line)
+        else:
+            selected.append(line)
+    if entries == 0:
+        raise RestorePointError("dump_unreadable")
+    return selected, extensions
 
 
 class _Connection:

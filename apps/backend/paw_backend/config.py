@@ -86,6 +86,12 @@ class Settings(BaseSettings):
     # database (typically the migration role, connected to the ``postgres``
     # database). Only ``deploy-restore-point-verify`` / ``-restore`` use it.
     deploy_admin_database_url: SecretStr | None = None
+    # The database the restore points' scratch / restore databases are copies of
+    # (Issue #312): made once by a superuser, ``IS_TEMPLATE``, with the
+    # extensions the workspace database uses (``vector``), which the
+    # non-superuser restoring role cannot create. Unset: ``template0``, and the
+    # dump creates its extensions itself (only a superuser can for ``vector``).
+    deploy_restore_template: str | None = None
     # The role the application connects as. The audit migration grants it
     # INSERT and SELECT on ``audit_events`` (and nothing else on it). Migration
     # ``0021`` grants it only what redeeming an Owner token needs (SELECT, and
@@ -312,6 +318,7 @@ class Settings(BaseSettings):
         "database_url",
         "migration_database_url",
         "deploy_admin_database_url",
+        "deploy_restore_template",
         "operator_database_url",
         "app_database_role",
         "operator_database_role",

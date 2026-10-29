@@ -285,7 +285,11 @@ mechanism. Operator steps are in the
 - **Restore point**: only for an update with a migration, after every writer stopped:
   `pg_dump` to a private directory outside the Recovery Repository, verified by restoring it
   into a scratch database; restored into a new database that then takes the workspace
-  database's name (the replaced one is kept). A restore is refused when a user was deleted
+  database's name (the replaced one is kept). Both databases are copies of a template a
+  superuser prepared once with the extensions the dump needs (`PAW_DEPLOY_RESTORE_TEMPLATE`,
+  Issue #312): the restoring role is not a superuser and cannot create `vector`, so the dump's
+  `EXTENSION` / `COMMENT - EXTENSION` entries are left out and the extensions are checked
+  before and after the restore. A restore is refused when a user was deleted
   after the point was taken; `user-erasure-run` runs after a restore. Points are deleted
   after 7 days (after every update and rollback, and daily by `paw-release-prune.timer`).
 - **Known-good rollback**: a failed migration, start or health check rolls back automatically
@@ -309,6 +313,27 @@ the workspace later:
    `paw-release update` is refused until a recovery backup has succeeded.
 3. Before each update, `paw-release precheck` must pass: it runs `audit-retention-check`'s
    coverage check (partitions to the end of next month) and checks that the timers are enabled.
+4. Before the first update with a migration, a human creates the restore template once as
+   `postgres` and sets `PAW_DEPLOY_RESTORE_TEMPLATE=paw_restore_template` in
+   `/etc/paw/deploy.env` (Issue #312; the commands are in the backend README, "復旧点の
+   Template"):
+
+   ```bash
+   sudo -u postgres psql -v ON_ERROR_STOP=1 -d postgres <<'SQL'
+   CREATE DATABASE paw_restore_template TEMPLATE template0 ENCODING 'UTF8';
+   \c paw_restore_template
+   CREATE EXTENSION vector WITH SCHEMA public;
+   \c postgres
+   ALTER DATABASE paw_restore_template WITH IS_TEMPLATE true;
+   REVOKE CONNECT, TEMPORARY ON DATABASE paw_restore_template FROM PUBLIC;
+   SQL
+   ```
+
+   Use the encoding, locale and `vector` version of the workspace database, and repeat the
+   change on the template whenever a migration adds an extension or `vector` is updated.
+   The restore point commands of an update run with the **current** release: while it does
+   not have this fix, verification still fails, so first switch to a release that has it with
+   an update without a migration.
 
 ## Open implementation choice
 
