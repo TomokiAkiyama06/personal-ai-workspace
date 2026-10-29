@@ -1,8 +1,8 @@
 # CLI の Connection（Claude・Codex）の Health check を、本物の短い Probe の Session にする（固定の Prompt と受け入れる答え、Timeout、記録と Audit、`CloudPolicy` との関係、同時実行、状態の変化の影響、Admin の「再確認」の Route、繰り返しの抑え、Test、PR の分け方）
 
-- Status: Proposed
-- Approval: 未（Human の承認を待つ。方針の案 A は Human が 2026-10-29 に Issue #306 で選んだもの。この Decision はその詳細と、案 A が決めていない点の推奨）
-- Date: 2026-10-29
+- Status: Approved
+- Approval: 2026-10-29、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで「両方推奨で」と回答して承認（PR #308 の [comment](https://github.com/TomokiAkiyama06/personal-ai-workspace/pull/308#issuecomment-6487666748) に記録。approved as recommended, all 7 points: 1 は A（Probe の記録は新しい `connection_probes`。User の Quota と `connection_usage` には入れない）、2 は A（成功の `result` で答えが `PAW_PROBE_OK` を含むときだけ `connected`）、3 は A（Admin が無効にした Connection は Probe しない。409 `connection_disabled`）、4 は A（0099 の「有効な User がちょうど 1 人」は当てず、`[cloud].enabled` と `[agents.*]` と Connection の `enabled` だけを条件にする）、5 は A（再確認の Route は 202 の非同期で、結果は `last_probe` で読む）、6 は A（成功の後 60 秒、続けて失敗するたびに倍、上限 15 分。成功か差し替えで戻す。自動の Probe は抑えない）、7 は A（Codex の枠が 60 秒で空かなければ `busy` で、状態を変えない）。「Human に確かめてほしいこと」の 3 つの前提（Provider の規約、Probe ごとに数百 Token、step 4 の推奨の順番）も同じ日に問題なしと確認（PR #308 の comment）。方針の案 A は Human が同じ日に Issue #306 で選んだもの。Codex review（f4a4aab）は指摘なし。末尾の「承認時の決定」）
+- Date: 2026-10-29（承認 2026-10-29）
 - Scope: Issue [#306](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/306)（PR #303 の Codex review（0ad6a7f、P1）で見つかった。`runtime.toml` の step 4（CLI の段）を有効にする前に必須）。この Decision は設計だけで、コードは承認の後の下の「PR の分け方」の PR で書く。関係する既存の口: `apps/backend/paw_backend/connections/adapter.py`（`ConnectionAdapter.check_health`・`AdapterRegistry`。「No adapter ships in this package」）、`connections/service.py`（`check_health`・`_probe`・`_store_health`・`connect`・`replace_credential`・`execute_session` の Session の枠）、`connections/store.py`（`record_health`）、`connections/wiring.py`（HTTP 側の `ConnectionService`。空の `AdapterRegistry()` と `NoSecretStore`）、`connections/limits.py`（`DEFAULT_HEALTH_TIMEOUT_SECONDS = 30`）、`connections/session_slot.py`、`api/v1/connections.py`（`/admin/connections` の Route・`_require_step_up`・`_audit_refusal`）、`agents/claude_cli.py`（`ClaudeSessionAdapter`）、`agents/claude_stream.py`（`ClaudeStream.check_init`）、`agents/cli_session.py`（`SystemdLauncher`）、PR #303 の `agents/cli_wiring.py`（Orchestrator 側の `ConnectionService`。これも空の `AdapterRegistry()`）、`orchestrator/connection_reaper.py`
 - Refines / Supersedes（一部）:
   - [Decision 0016](0016-shared-connection-adapter-policy.md)（Approved）の 8 の最後の点「Health Check を動かす頻度 … は Orchestrator / 通知の Issue」のうち **頻度** を、下の 6（attach と replace の直後に 1 回と、Admin の「再確認」。定期の Loop はしない）で決める。通知の規則は決めない（未決）。0016 の 8 の状態の意味（新しい・差し替えた Connection は確認まで `unavailable`、Health Check が `connected` にする、`expired`、`enabled` は Health Check が変えない、User には利用可 / 不可だけ）は変えない。
@@ -163,7 +163,7 @@ ID と Enum だけ（Prompt・答え・Model 名・Credential・Handle を書か
 - 確認をせず、attach / replace の時点で `connected` にする（0016 の 8 を緩める）: 誤った Credential が `connected` になり、最初の Task で失敗する。
 - 定期の Loop: 今はしない（Human の回答）。後続で足すときは、この Decision の `check_health(kind)` と抑えを使う。
 
-## Human の判断点（推奨つき）
+## Human の判断点（承認の時の説明。決定は上の「提案」と Approval の行）
 
 案 A が決めていない、本当に選ぶ点だけを挙げる。それ以外（2 の Flag と Prompt の文、5 の状態の条件、6 の背景の Task と掃除、7 のエラーの形、9 の Event、11 の登録）は、上の推奨のとおりでよいかを一括で確かめる。
 
@@ -248,7 +248,21 @@ ID と Enum だけ（Prompt・答え・Model 名・Credential・Handle を書か
 
 ## 承認後の扱い
 
-承認されたら Status を Approved に改め、承認の内容を Approval の行と「承認時の決定」に記録する。Refine / Supersede する Decision（0016・0099）の本文は書き換えず、README の表に記す。
+2026-10-29 に承認され、Status を Approved に改め、承認の内容を Approval の行と「承認時の決定」に記録した。Refine / Supersede する Decision（0016・0099）の本文は書き換えず、README の表に記す。
 実装は「PR の分け方」の 2〜6 の PR で行う（どれも「Refs #306」）。step 4 を有効にするのは 5 の Smoke の後で、本番の `/etc/paw/runtime.toml` の変更は Human が行う。
 方針を変えるときは、この Decision を書き換えず、新しい Decision から `Supersedes` する。
 [REQUIREMENTS.md](../../REQUIREMENTS.md) の原文は書き換えない。
+
+## 承認時の決定（2026-10-29）
+
+Human は、作業 Session で判断点ごとの説明（推奨つき）を受け、「両方推奨で」と回答して承認した（PR #308 の [comment](https://github.com/TomokiAkiyama06/personal-ai-workspace/pull/308#issuecomment-6487666748)。すべての判断点を推奨どおり。設計の変更はない）。上の「提案」の各節の「推奨」が承認された方針で、「代替」と「採らなかった案」は採らなかった案として残す。
+
+1. **Probe の使用量の記録**: A。新しい `connection_probes` に記録し、User の Quota・`connection_usage`・`orchestrator.cloud_send` には入れない（3）。
+2. **受け入れる答え**: A。`result` が成功で、Model の呼び出しがちょうど 1 回で、答えが `PAW_PROBE_OK` を含むときだけ `connected`（2）。
+3. **無効な Connection**: A。Admin が無効にした Connection は Probe しない（自動は走らせず、再確認は 409 `connection_disabled`。4 の 3）。
+4. **有効な User の数**: A。0099 の「有効な User がちょうど 1 人」は当てず、`[cloud].enabled = true` と `[agents.*]` と Connection の `enabled` だけを条件にする（4）。
+5. **再確認の Route**: A。`POST /admin/connections/{kind}/health-check` は 202 の非同期で、結果は `GET /admin/connections` の `last_probe` で読む（7）。
+6. **繰り返しの抑え**: A。成功の後 60 秒、続けて `expired` / `unavailable` のたびに倍、上限 15 分。`connected` か Credential の差し替えで戻す。自動の Probe は抑えない（8）。
+7. **Codex の枠が空かないとき**: A。60 秒待って空かなければ `busy` で、状態を変えない（10。#305 の後の PR で使う）。
+
+「Human に確かめてほしいこと」の 3 つの前提も同じ日に確認された: Provider の規約（Headless・Tool なしの固定の Prompt の使い方）は問題なし、Probe ごとに数百 Token の消費は問題なし、step 4 は推奨の順番（`[cloud]` と `[agents.claude]` を書いて Ladder は Local のまま再起動 → attach して自動の Probe で `connected` を確かめる → Ladder に `claude` を入れて再起動）で行う。
