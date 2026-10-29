@@ -4,7 +4,7 @@
 
 [Decision 0083](../../../../docs/decisions/0083-agent-runtime-adapters.md) の 6 と [Decision 0087](../../../../docs/decisions/0087-cli-secret-store-and-egress.md) の 3・4（どちらも Approved）。
 Backend の側は `paw_backend/agents/cli_session.py` の `SystemdLauncher`、`claude_cli.py` の `ClaudeSessionAdapter` / `ClaudeCliRuntime`、`codex_cli.py` の `SystemdCodexLauncher` / `CodexSessionAdapter` / `CodexCliRuntime`（[Decision 0089](../../../../docs/decisions/0089-codex-cli-runtime-route.md)）、`bridge.py` の `McpBridge`。
-CLI の段は `/etc/paw/runtime.toml` の Ladder が `claude` / `codex` を名指したときだけ組み立てます（Decision 0099 の「PR の分け方」6。手順は `docs/DEPLOYMENT_UPDATE.md` の「The CLI runtimes」）。この Directory の File は、有効にする前に Human が配備して確かめるためのものです。Codex は `VERIFIED_VERSIONS` が空の間は何も送りません。
+CLI の段は `/etc/paw/runtime.toml` の Ladder が `claude` / `codex` を名指したときだけ組み立てます（Decision 0099 の「PR の分け方」6。手順は `docs/DEPLOYMENT_UPDATE.md` の「The CLI runtimes」）。この Directory の File は、有効にする前に Human が配備して確かめるためのものです。Codex は確かめた版（`VERIFIED_VERSIONS`。今は `0.156.1`）以外では何も送りません。
 
 ## 流れ
 
