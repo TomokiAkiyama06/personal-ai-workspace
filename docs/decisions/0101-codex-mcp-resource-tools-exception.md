@@ -1,8 +1,8 @@
 # Codex CLI の Tool の検査で、MCP の Resource の 3 つの Tool（`list_mcp_resources`・`list_mcp_resource_templates`・`read_mcp_resource`）だけを例外として許す（許す Tool の集合、`paw` だけが MCP の Server であること、検査の仕方、版の確かめ方と上げ方、Session の中の呼び出しの扱い）
 
-- Status: Proposed
-- Approval: 未（Human の承認を待つ。例外として許す方針（#307 の報告の案 2）は Human が 2026-10-29 に選んだ。この Decision はその詳細と、方針が決めていない点の推奨）
-- Date: 2026-10-29
+- Status: Approved
+- Approval: 2026-10-29、Humanが作業Session内で、判断点ごとの説明（推奨つき）を受けたうえで「推奨でいいです」と回答して承認（approved as recommended, all 5 points: Human の判断点の 1〜5 をすべて A。記録は [PR #310 の Comment](https://github.com/TomokiAkiyama06/personal-ai-workspace/pull/310#issuecomment-6488046690)。例外として許す方針（#307 の報告の案 2）は同じ日に Human が選んだもの。末尾の「承認時の決定」）
+- Date: 2026-10-29（承認 2026-10-29）
 - Scope: Issue [#305](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/305)（[#297](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/297) の 6 の CLI の Smoke で見つかった）。この Decision は設計だけで、コードは承認の後の PR で書く。関係する既存の口: `apps/backend/paw_backend/agents/codex_app_server.py`（`VERIFIED_VERSIONS`・`PASSING_ITEMS`・`mcpToolCall` の検出）、`agents/codex_cli.py`（`session_config`・`DISABLED_FEATURES`）、`deploy/cli-session/paw_mcp_relay.py`（`initialize`・`ping`・`tools/list`・`tools/call` だけに答え、他は `Method not found`）、`deploy/cli-session/Containerfile.codex`、PR [#307](https://github.com/TomokiAkiyama06/personal-ai-workspace/pull/307)（`omit_tools_from` と `[orchestrator.skills]`）。
 - Supersedes（一部）:
   - [Decision 0089](0089-codex-cli-runtime-route.md)（Approved）の 2 の「推奨（確かめる）」のうち **「PAW の MCP の Tool … と過不足なく一致することを確かめる。一致した版だけを … 確かめた版の一覧に入れる」** を、下の 1 の「許す集合」との一致に置き換える。0089 の 2 の他の部分（止める設定、記録用の Server での取り方、確かめた版の一覧にない版は何も送らない、Item の検出を二重の守りにする）は **変えず**、下の 3・4 で具体化する。
@@ -63,7 +63,7 @@
 - 古い版は、新しい版が一覧に入り Image が切り替わった後の PR で一覧から外す（同時に 2 つの版を残すのは切り替えの間だけ）。
 - この例外は **3 つの名前と記録した形** に限る。版が 3 つの Tool の名前・置き場所（namespace）・引数の形を変えたら、その版は不合格で、例外を広げるなら新しい Decision が要る。
 
-## Human の判断点（それぞれ推奨つき）
+## Human の判断点（承認の時の説明。決定は末尾の「承認時の決定」と Approval の行）
 
 1. **Session の中で 3 つの Tool が呼ばれたとき**（3）: (A) `server == "paw"` を名指した呼び出しは通し、Relay の `Method not found` を Model に返す。`server` を省いた・`paw` 以外は止める。(B) 今のまま、どの呼び出しでも止める。**推奨: A。** 宛先は PAW の Relay だけで、Relay は Resource を持たず何も読めない。B では Model の 1 回の呼び出しで必須の Codex の Review が失敗する。
 2. **3 つが Request に揃っていなくてもよいか**（1 の 2）: (A) 3 つのうち 0〜3 つを許す（ない版はより狭いので通す）。(B) 3 つがちょうど揃っていることを求める。**推奨: A。** 少ない方は安全側で、B は版の小さな変更で不要に落ちる。
@@ -99,6 +99,17 @@
 
 ## 承認後の扱い
 
-承認されたら `Approval` に記録し、Status を Approved に改める。Supersede する 0089 の本文は書き換えず、この Decision が 0089 の 2 の一部を Supersede することを README の表に記す。
+2026-10-29 に承認され、Status を Approved に改め、承認の内容を Approval の行と「承認時の決定」に記録した。Supersede する 0089 の本文は書き換えず、この Decision が 0089 の 2 の一部を Supersede することを README の表に記した。
+実装は「PR の分け方」の 2・3 の PR で行う（どちらも「Refs #297」「Refs #305」）。`VERIFIED_VERSIONS` に版を入れるのは 3 の PR だけで、Image の Build と Digest の固定（`/etc/paw/cli-session.toml` の `codex_image`）は Human が行う。
 方針を変えるときは、この Decision を書き換えず、新しい Decision から `Supersedes` する。
 [REQUIREMENTS.md](../../REQUIREMENTS.md) の原文は書き換えない。
+
+## 承認時の決定（2026-10-29）
+
+Human は、作業 Session で判断点ごとの説明（推奨つき）を受け、「推奨でいいです」と回答して承認した（すべての判断点を推奨どおり。設計の変更はない。記録は [PR #310 の Comment](https://github.com/TomokiAkiyama06/personal-ai-workspace/pull/310#issuecomment-6488046690)）。
+
+1. **Session の中で 3 つの Tool が呼ばれたとき**: A。`mcpToolCall` で `server == "paw"` を名指し、`tool` が 3 つのどれかなら通し、Relay の `Method not found` を Model に返す。`server` を省いた（`"codex"`）・`paw` 以外の呼び出しは止める（3）。
+2. **3 つが揃っていなくてもよいか**: A。3 つのうち 0〜3 つを許す（1 の 2）。
+3. **3 つの Tool の形も比べるか**: A。名前に加え、Top-level の `function` であることと、`parameters` の `properties` の Key と `required` を記録した形と比べる。説明の文は比べない（1 の 3）。
+4. **検査の処理と Smoke の Script の置き場所**: A。比べる処理を `codex_app_server.py` の関数にして単体の Test を付け、記録用の Server の Smoke の Script を `apps/backend/deploy/cli-session/` の下に入れる（4）。
+5. **固定する版**: A を今、B を後続。4 の手順を通れば `0.156.1` を確かめた版にし、Image をその版で Build して Digest で固定する。0.162.1〜0.164.x は後で 5 の手順で調べる（5）。
