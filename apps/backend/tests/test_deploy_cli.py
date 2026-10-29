@@ -315,3 +315,27 @@ class RestorePointCommandTest(unittest.TestCase):
         self.assertIn("The replaced database is kept as", err)
         # This scratch workspace has no audit_events: said, not fatal.
         self.assertIn("could not be recorded", err)
+
+    def test_the_restore_template_comes_from_the_environment(self):
+        # Issue #312: PAW_DEPLOY_RESTORE_TEMPLATE names the template the
+        # scratch database is a copy of; a bad name is refused, a missing
+        # database stops the verification before anything is restored.
+        code, _, err = self.command("deploy-restore-point-create")
+        self.assertEqual(code, cli.EXIT_OK, err)
+        admin = {"PAW_DEPLOY_ADMIN_DATABASE_URL": TEST_DATABASE_URL}
+        code, _, err = self.command(
+            "deploy-restore-point-verify",
+            PAW_DEPLOY_RESTORE_TEMPLATE='x"; DROP',
+            **admin,
+        )
+        self.assertEqual(code, cli.EXIT_ENVIRONMENT, err)
+        self.assertIn("invalid_restore_template", err)
+        code, _, err = self.command(
+            "deploy-restore-point-verify",
+            PAW_DEPLOY_RESTORE_TEMPLATE=f"{self.name}_absent",
+            **admin,
+        )
+        self.assertEqual(code, cli.EXIT_FAILED, err)
+        self.assertIn("FAILED: restore_template_missing.", err)
+        self.assertIn("PAW_DEPLOY_RESTORE_TEMPLATE names a template", err)
+        self.assertNotIn("pawtest", err)

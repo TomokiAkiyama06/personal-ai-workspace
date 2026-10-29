@@ -440,12 +440,17 @@ def _restore_point(
     arguments: argparse.Namespace, settings: Settings, out: TextIO, err: TextIO
 ) -> int:
     url = make_url(settings.migration_database_url.get_secret_value())
-    points = RestorePoints(
-        arguments.dir,
-        recovery_directory=settings.recovery_repository_dir,
-        pg_dump=arguments.pg_dump,
-        pg_restore=arguments.pg_restore,
-    )
+    try:
+        points = RestorePoints(
+            arguments.dir,
+            recovery_directory=settings.recovery_repository_dir,
+            pg_dump=arguments.pg_dump,
+            pg_restore=arguments.pg_restore,
+            template=settings.deploy_restore_template,
+        )
+    except RestorePointError as error:
+        _say(err, f"Refused: {error.code} (PAW_DEPLOY_RESTORE_TEMPLATE).")
+        return EXIT_ENVIRONMENT
     command = arguments.command
     admin = None
     if command != CREATE_COMMAND:
@@ -489,6 +494,15 @@ def _restore_point(
     except RestorePointError as error:
         code = EXIT_REFUSED if error.code in _REFUSALS else EXIT_FAILED
         _say(err, f"FAILED: {error.code}.")
+        if error.code == "extension_needs_restore_template" or error.code.startswith(
+            "restore_template_"
+        ):
+            _say(
+                err,
+                "The dump creates extensions (vector) that only a superuser may "
+                "create: PAW_DEPLOY_RESTORE_TEMPLATE names a template database a "
+                "superuser prepared with them (apps/backend/README.md, Deploy).",
+            )
         return code
     except OSError as error:
         # The directory or a file of the restore point (no path is shown).
