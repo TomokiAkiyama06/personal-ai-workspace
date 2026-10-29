@@ -160,6 +160,11 @@ class VerdictTest(ProbeCase):
         for name, actions, scenario, code in (
             ("a rate limit", [{"retry": "rate_limit"}, {"turn": [5, 1]}, error_result],
              {}, FailureCode.RATE_LIMITED),
+            # Codex review of #317: no model call completed.
+            ("a rate limit before any call", [{"retry": "rate_limit"}, error_result],
+             {}, FailureCode.RATE_LIMITED),
+            ("a rate limit and no result", [{"retry": "rate_limit"}, {"exit": 1}],
+             {}, FailureCode.RATE_LIMITED),
             ("no token in the answer",
              [GOOD[0], {"result": {**GOOD[1]["result"], "result": "Hello"}}],
              {}, FailureCode.INVALID_RESPONSE),

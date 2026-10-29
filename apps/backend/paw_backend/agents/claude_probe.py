@@ -285,17 +285,17 @@ def _report(stream: ClaudeStream, reading: _Reading, model: str) -> ProbeReport:
         return report(ProbeOutcome.EXPIRED, FailureCode.EXPIRED)
     if failure is not None:
         return report(ProbeOutcome.UNAVAILABLE, failure)
+    if reading.retry in RATE_ERRORS and (totals is None or totals.is_error):
+        # The provider's limit, whether or not a model call completed: it
+        # says nothing about the credential (the status is kept; Codex review
+        # of #317).
+        return report(ProbeOutcome.UNAVAILABLE, FailureCode.RATE_LIMITED)
     if not stream.initialized or len(reading.turns) != 1:
         return report(ProbeOutcome.UNAVAILABLE, FailureCode.INVALID_RESPONSE)
     if totals is None:
         return report(ProbeOutcome.UNAVAILABLE, FailureCode.INTERNAL_ERROR)
     if totals.is_error:
-        code = (
-            FailureCode.RATE_LIMITED
-            if reading.retry in RATE_ERRORS
-            else FailureCode.INTERNAL_ERROR
-        )
-        return report(ProbeOutcome.UNAVAILABLE, code)
+        return report(ProbeOutcome.UNAVAILABLE, FailureCode.INTERNAL_ERROR)
     answer = stream.answer
     stream.answer = None  # read for the check only
     if answer is None or PROBE_ANSWER not in answer:
