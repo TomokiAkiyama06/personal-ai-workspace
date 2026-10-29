@@ -469,6 +469,20 @@ class ProbeTest(PostgresConnectionTestCase):
         result = await self.service.wait_probe(ticket.id)
         self.assertEqual(result.outcome, ProbeOutcome.CANCELLED)
 
+    async def test_a_probe_stopped_before_its_task_ran_is_finished(self):
+        # Codex review of #316: no yield between the start and the stop.
+        ticket = await self.service.start_probe(self.admin_principal, CLAUDE, ATTACH)
+        await self.service.stop_probes()
+
+        (probe,) = self.probe_rows()
+        self.assertEqual((probe["state"], probe["outcome"]), ("finished", "cancelled"))
+        self.assertEqual(self.claude.health_checks, 0)
+        result = await self.service.wait_probe(ticket.id)
+        self.assertEqual(result.outcome, ProbeOutcome.CANCELLED)
+        # The credential can be probed again at once.
+        _, again = await self.probe(REPLACE)
+        self.assertEqual(again.outcome, ProbeOutcome.CONNECTED)
+
     async def test_a_stop_while_the_end_is_written_still_writes_it(self):
         # Codex review of #316: the probe ended, its end waits for the
         # connection's lock, and the shutdown comes then.

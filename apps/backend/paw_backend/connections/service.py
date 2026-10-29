@@ -645,6 +645,7 @@ class ConnectionService:
         # Decision 0100, 6: the probes this process runs in the background,
         # and the results of the latest ones (for ``wait_probe``).
         self._probe_tasks: dict[uuid.UUID, asyncio.Task] = {}
+        self._probe_tickets: dict[uuid.UUID, ProbeTicket] = {}
         self._probe_results: dict[uuid.UUID, ProbeResult] = {}
 
     # --- connections (Owner / Admin) -----------------------------------------
@@ -1310,7 +1311,13 @@ class ConnectionService:
         )
         task = asyncio.create_task(self._run_probe(ticket, adapter))
         self._probe_tasks[probe_id] = task
-        task.add_done_callback(lambda _: self._probe_tasks.pop(probe_id, None))
+        self._probe_tickets[probe_id] = ticket
+
+        def forget(_: asyncio.Task) -> None:
+            self._probe_tasks.pop(probe_id, None)
+            self._probe_tickets.pop(probe_id, None)
+
+        task.add_done_callback(forget)
         logger.info(
             "connection probe started: kind=%s trigger=%s probe_id=%s",
             kind.value,
@@ -1332,12 +1339,22 @@ class ConnectionService:
         """Cancel the probes this process runs (the backend's shutdown); each
         stops its CLI (the adapter's cancellation) and finishes its row
         ``cancelled`` before this returns. The connections' status is not
-        changed."""
-        tasks = list(self._probe_tasks.values())
-        for task in tasks:
+        changed. A probe cancelled before its task first ran (it never
+        reached its own handler: Codex review of #316) is finished here."""
+        running = [
+            (task, self._probe_tickets[probe_id])
+            for probe_id, task in self._probe_tasks.items()
+            if probe_id in self._probe_tickets
+        ]
+        for task, _ in running:
             task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+        if not running:
+            return
+        await asyncio.gather(*(task for task, _ in running), return_exceptions=True)
+        for _, ticket in running:
+            if ticket.id not in self._probe_results:
+                end = _ProbeEnd(ProbeOutcome.CANCELLED, None)
+                await self._shielded(self._finish_probe(ticket, end))
 
     async def _refuse_probe(
         self,
