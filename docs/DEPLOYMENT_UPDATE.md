@@ -283,12 +283,41 @@ Checklist (Decision 0093 5; the human, not an agent):
      `読めないリポジトリを含むため、結果を表示できません` (403 `task_result_forbidden`).
      Nothing is left to cancel.
 
-The CLI runtimes cannot be enabled yet. [Decision 0099](decisions/0099-claude-planner-and-node-assignment.md)
-7 (issue #297) adds the sections, and the backend now parses and checks them, but the
-assembly does not build the CLI runtimes until the CLI smoke (Decision 0099, "PR の分け方"
-6): **a ladder that names `claude` or `codex` is still refused**
-(`orchestrator.ladders.<role>: cli runtimes are not enabled yet ...`). Leave them out of
-`/etc/paw/runtime.toml` until then. What is checked today:
+### The CLI runtimes (step 4, Decision 0099)
+
+[Decision 0099](decisions/0099-claude-planner-and-node-assignment.md) 7 (issue #297) adds
+the sections; since its "PR の分け方" 6 a ladder that names `claude` / `codex` makes
+`create_app` build the CLI runtimes (`agents/cli_wiring.py`): the production
+`CloudPolicy`, the orchestrator's own `ConnectionService` on the secret store, and the
+CLIs' session units (`paw-cli-session@<uuid>.service`, image entry
+`/opt/paw/start-claude` / `start-codex`, egress `127.0.0.1:3128`). They also need
+`PAW_SECRET_STORE_DIR` and `session_base = PAW_CLI_SESSION_DIR` (both checked at start).
+**Codex sends nothing** until its CLI version is verified (`VERIFIED_VERSIONS`, Decision
+0089; the 2026-10-29 smoke found 0.156.1 offers non-PAW tools), so every Codex review
+fails, and so does every writing task, until then (the human decides how to handle this).
+
+Order (root, the human; the agent never does this):
+
+1. Install the SSH git wrapper of #302 **before** releasing a backend that contains it
+   (the backend sends the new `refs/paw/review-base/...` forms; an older wrapper refuses
+   them): `sudo install -o root -g root -m 0755 apps/backend/deploy/ssh-git-wrapper/paw_git_wrapper.py /usr/local/lib/paw/paw-git-wrapper`
+   from the release's commit (no restart; `apps/backend/deploy/ssh-git-wrapper/README.md`).
+2. Release the backend (`paw-release update <version>`) with the step 3 file unchanged:
+   it runs as before (local ladders only).
+3. The provider terms decision (the PR of Decision 0099's 6) and the checks of
+   `apps/backend/deploy/cli-session/README.md` ("確かめること"): the Claude image's
+   digest in `/etc/paw/cli-session.toml`, the egress units, the Claude connection
+   registered with a `claude setup-token` credential in the secret store.
+4. Edit `/etc/paw/runtime.toml`: uncomment step 4 of the example in place of step 3's
+   `[orchestrator]`; run `runtime-config-check` (it lists `cloud: enabled single_user`,
+   `ladders=claude,codex,local` and `assignment: yes`), then
+   `systemctl restart paw-backend.service` with `PAW_ORCHESTRATOR_WORKERS=0` first.
+5. With the human's go-ahead, `PAW_ORCHESTRATOR_WORKERS=1` and one small writing task:
+   `agent_plan_calls` shows `cloud` / `claude`, the attempts' placements, the
+   `orchestrator.cloud_send` rows of `audit_events` and `connection_usage`.
+
+To stop every send: `[cloud] enabled = false` and restart; at once: disable the
+connection (`/admin/connections`). What is checked:
 
 - `[cloud]`: `enabled` (`true` / `false`, default `false`; the production `CloudPolicy`
   allows nothing while it is `false`) and `single_user_only` (only `true`: the cloud is

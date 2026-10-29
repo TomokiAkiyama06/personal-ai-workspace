@@ -16,8 +16,8 @@
   (development and the tests with the fake CLI). Production's
   :class:`SystemdLauncher` starts it in its own container through a systemd
   template unit (``start``: Claude, the prompt as stdin; ``start_interactive``:
-  Codex, the stream socket as stdin too). The CLI rung stays disabled at
-  assembly.
+  Codex, the stream socket as stdin too). The assembly uses it for
+  the CLI runtimes (``agents/cli_wiring.py``).
 * :func:`log_session_start`: the one line a session adapter writes as it
   starts a session (Decision 0091, 4): the session's UUID (the egress proxy's
   ``session=``, the units' instance) with its task, node, connection and CLI.

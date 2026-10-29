@@ -36,9 +36,8 @@ the service runs one session per connection at a time (its session slot, a
 database lease taken before the admission). Without a handler a session is
 refused before anything starts.
 
-The CLI rung stays disabled at assembly (Decision 0083, 11's 4: until the
-``CloudPolicy`` Decision; the provider's terms are still being confirmed by the
-human; and no version is verified). :class:`InteractiveSubprocessLauncher`
+The assembly builds it only when a ladder names it (Decision 0099, "PR
+の分け方" 6: ``agents/cli_wiring.py``). :class:`InteractiveSubprocessLauncher`
 runs the CLI as a child process for development and the tests;
 :class:`SystemdCodexLauncher` is production's (the session's unit of
 ``cli_session.SystemdLauncher``, whose stream socket carries the CLI's stdin

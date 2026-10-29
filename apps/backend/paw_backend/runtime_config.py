@@ -19,11 +19,13 @@ runtimes' ``model``, ``session_base`` and ``relay_command``) and
 They are parsed and checked (a CLI label on a ladder needs ``[cloud] enabled =
 true`` and its ``[agents.<name>]``; ``codex`` is never a planner's rung;
 ``allowed`` stays inside the role's ladder; a worker is never assigned a CLI
-runtime; the reviewer's ``allowed`` holds both ``claude`` and ``codex``), but
-``create_app`` is not given them yet: **a ladder that names a CLI runtime is
-refused** while :data:`CLI_RUNGS_ENABLED` is ``False``, until the CLI smoke
-(Decision 0099, "PR の分け方" 6). ``relay_command`` runs inside the CLI's
-container (Decision 0083, 6), so its ``argv[0]`` is not looked up on this host.
+runtime; the reviewer's ``allowed`` holds both ``claude`` and ``codex``), and
+``create_app`` is given them as ``cli`` (a ``CliSetup``: Decision 0099, "PR の分け方"
+6, after the CLI smoke) when a ladder names a CLI runtime; the CLI runtimes then
+need ``PAW_SECRET_STORE_DIR`` and an ``[agents.<name>].session_base`` that is
+``PAW_CLI_SESSION_DIR`` (:func:`check_environment`). ``relay_command`` runs
+inside the CLI's container (Decision 0083, 6), so its ``argv[0]`` is not looked
+up on this host.
 
 **Whoever can write this file runs commands as the backend's user** (Decision
 0093, 2), so the file and everything it names must be root's alone:
@@ -74,6 +76,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 from urllib.parse import urlsplit
 
+from paw_backend.agents.cli_wiring import CliAgentSetup, CliSetup
 from paw_backend.agents.cloud_policy import CLI_AGENT_LABELS, CloudSettings
 from paw_backend.agents.wiring import (
     DEFAULT_AGENT_LABEL,
@@ -222,11 +225,6 @@ _AGENT_KEYS = frozenset({"model", "session_base", "relay_command"})
 _AGENT_FIXED = frozenset({"cloud_policy", "limits", "node_seconds"})
 _ASSIGNMENT_KEYS = frozenset({"allowed", "default"})
 
-#: Whether a ladder may name a CLI runtime. ``False`` until the CLI smoke
-#: (Decision 0099, "PR の分け方" 6): ``create_app`` does not build the CLI
-#: runtimes yet, so a ladder that names one is refused after every other check.
-CLI_RUNGS_ENABLED = False
-
 
 class RuntimeConfigError(Exception):
     """The file cannot be used. ``where`` is ``<section>.<key>`` (or the
@@ -299,26 +297,14 @@ class RealHost:
 
 
 @dataclass(frozen=True, slots=True)
-class CliAgentSetup:
-    """An ``[agents.<name>]`` section (Decision 0099, 7): the arguments of
-    ``ClaudeCliRuntime`` / ``CodexCliRuntime`` the file sets. No secret: the
-    credential is the connection's (Decision 0087)."""
-
-    label: str
-    model: str
-    session_base: str
-    relay_command: tuple[str, ...]
-
-
-@dataclass(frozen=True, slots=True)
 class RuntimeWiring:
     """The ``create_app`` arguments the file enables (``None``: not enabled).
     ``parts`` is the summary of what is enabled, without paths or commands.
 
-    ``cloud`` and ``agents`` (Decision 0099, 7) are parsed and checked but not
-    ``create_app`` arguments yet (see the module). ``assignment`` is also in
-    ``orchestrator_config`` (Decision 0099, 4: the plan's ``agent`` is checked
-    against it)."""
+    ``cloud`` and ``agents`` (Decision 0099, 7) become ``create_app``'s ``cli``
+    when a ladder names a CLI runtime (:meth:`cli_setup`). ``assignment`` is
+    also in ``orchestrator_config`` (Decision 0099, 4: the plan's ``agent`` is
+    checked against it)."""
 
     compute: ComputeSetup | None = None
     local_model: LocalModelSetup | None = None
@@ -339,11 +325,38 @@ class RuntimeWiring:
             "git_runner",
             "orchestrator_config",
         )
-        return {
+        arguments: dict[str, object] = {
             name: getattr(self, name)
             for name in names
             if getattr(self, name) is not None
         }
+        cli = self.cli_setup()
+        if cli is not None:
+            arguments["cli"] = cli
+        return arguments
+
+    def cli_labels(self) -> frozenset[str]:
+        """The CLI runtimes the orchestrator's ladders name."""
+        if self.orchestrator_config is None:
+            return frozenset()
+        return frozenset(
+            label
+            for ladder in self.orchestrator_config.ladders.values()
+            for label in ladder
+            if label in CLI_AGENT_LABELS
+        )
+
+    def cli_setup(self) -> CliSetup | None:
+        """``create_app``'s ``cli`` (Decision 0099): only when a ladder names a
+        CLI runtime (the parser then made sure ``[cloud]`` is enabled and that
+        runtime's ``[agents.<name>]`` is there)."""
+        labels = self.cli_labels()
+        if not labels or self.cloud is None:
+            return None
+        return CliSetup(
+            self.cloud,
+            {label: self.agents[label] for label in sorted(labels)},
+        )
 
     def summary(self) -> str:
         """One line for the start-up log, e.g. ``compute: deployments=main
@@ -473,6 +486,18 @@ def check_environment(wiring: RuntimeWiring, settings: Settings) -> None:
     ):
         # The policy counts the users and reads the task's project.
         raise RuntimeConfigError("cloud", "needs PAW_DATABASE_URL")
+    labels = wiring.cli_labels()
+    if labels and settings.secret_store_dir is None:
+        # The CLIs' credentials are the connections' (Decision 0087, 1).
+        raise RuntimeConfigError("agents", "needs PAW_SECRET_STORE_DIR")
+    for label in sorted(labels):
+        agent = wiring.agents.get(label)
+        if agent is not None and agent.session_base != str(settings.cli_session_dir):
+            # The session units (``paw-cli-session@.service``) and the Codex
+            # login collection look for the sessions there.
+            raise RuntimeConfigError(
+                f"agents.{label}.session_base", "must be PAW_CLI_SESSION_DIR"
+            )
 
 
 # --- the parser -----------------------------------------------------------------
@@ -1233,14 +1258,6 @@ class _Parser:
             assignment = self._assignment(
                 _table("orchestrator.assignment", table["assignment"]), ladders
             )
-        if not CLI_RUNGS_ENABLED:
-            for role in NodeRole:
-                if any(label in CLI_AGENT_LABELS for label in ladders[role]):
-                    raise RuntimeConfigError(
-                        f"orchestrator.ladders.{role.value}",
-                        "cli runtimes are not enabled yet (Decision 0099: after "
-                        "the CLI smoke)",
-                    )
         config = _build(
             "orchestrator.ladders",
             lambda: OrchestratorConfig(ladders, assignment=assignment),
@@ -1338,7 +1355,6 @@ def _build[T](where: str, make: Callable[[], T]) -> T:
 
 
 __all__ = [
-    "CLI_RUNGS_ENABLED",
     "FILE_SETTING",
     "MAX_CONFIG_BYTES",
     "MAX_LINK_HOPS",

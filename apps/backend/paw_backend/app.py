@@ -13,6 +13,7 @@ from fastapi import FastAPI
 
 from paw_backend import __version__
 from paw_backend.agents.cli_session import SystemdLauncher
+from paw_backend.agents.cli_wiring import CliSetup
 from paw_backend.agents.codex_collect import (
     SystemdSessionUnits,
     build_codex_collection,
@@ -109,6 +110,7 @@ def create_app(
     gh_runner: GhRunner | None = None,
     local_model: LocalModelSetup | None = None,
     sandbox: SandboxSetup | None = None,
+    cli: CliSetup | None = None,
 ) -> FastAPI:
     """Build the FastAPI application.
 
@@ -152,6 +154,12 @@ def create_app(
     ``INTERACTIVE`` lease of the scheduler (without one, or without
     ``local_model``, the rule interpreter answers). Its client is closed at
     shutdown.
+
+    ``cli`` (with ``orchestrator_config``, a database and the secret store;
+    Decision 0099, the runtime configuration's ``[cloud]`` and ``[agents.*]``)
+    adds the CLI runtimes, Claude Code and Codex, to the orchestrator
+    (``agents/cli_wiring.py``): every send goes through the production
+    ``CloudPolicy`` and the orchestrator's own ``ConnectionService``.
     """
     settings = settings or Settings()
     # The secret store of the shared connections (Decision 0087, 1), when one is
@@ -168,6 +176,8 @@ def create_app(
         raise TypeError("local_model needs compute")
     if sandbox is not None and not isinstance(sandbox, SandboxSetup):
         raise TypeError("sandbox must be a SandboxSetup")
+    if cli is not None and not isinstance(cli, CliSetup):
+        raise TypeError("cli must be a CliSetup")
     compute_services: ComputeServices | None = None
     if compute is not None:
         scheduler, vram_warnings = build_compute(compute)
@@ -445,9 +455,13 @@ def create_app(
             scheduler=None if compute_services is None else compute_services.scheduler,
             local_runtimes=local_runtimes,
             sandbox=sandbox,
+            cli=cli,
+            secret_store=secret_store,
         )
     elif local_runtimes is not None:
         raise TypeError("local_runtimes need a database")
+    elif cli is not None:
+        raise TypeError("the cli runtimes need a database")
     app.state.task_execution = task_execution
     # The project / repository services of the HTTP routes (issue #184).
     app.state.projects = None

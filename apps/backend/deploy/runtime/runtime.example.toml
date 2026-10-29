@@ -92,3 +92,39 @@ planner = ["local"]
 worker = ["local"]
 researcher = ["local"]
 reviewer = ["local"]
+
+# --- step 4: the CLI runtimes (Decision 0099, 7; issue #297) -----------------
+# Only after the human's provider-terms decision and the deployment checks of
+# deploy/cli-session/README.md (docs/DEPLOYMENT_UPDATE.md, "The CLI runtimes").
+# They need PAW_SECRET_STORE_DIR (the connections' credentials) and a
+# session_base equal to PAW_CLI_SESSION_DIR (default /run/paw-cli). Codex sends
+# nothing until its CLI version is verified (VERIFIED_VERSIONS, Decision 0089):
+# until then every Codex review fails, and so does every writing task.
+# Replace the step 3 [orchestrator] above with this one; uncomment to enable.
+#
+# [cloud]
+# enabled = true                     # false + restart stops every send
+# single_user_only = true
+#
+# [agents.claude]
+# model = "claude-opus-5-5"          # the 2026-10-29 smoke's model
+# session_base = "/run/paw-cli"
+# relay_command = ["python3", "-I", "/opt/paw/paw_mcp_relay.py"]   # in the image
+#
+# [agents.codex]
+# model = "gpt-5.5-codex"
+# session_base = "/run/paw-cli"
+# relay_command = ["python3", "-I", "/opt/paw/paw_mcp_relay.py"]
+#
+# [orchestrator]
+# [orchestrator.ladders]
+# planner = ["claude", "local"]
+# worker = ["local", "codex"]
+# researcher = ["local", "claude"]
+# reviewer = ["claude", "codex"]
+#
+# [orchestrator.assignment]
+# worker = { allowed = ["local"], default = "local" }
+# researcher = { allowed = ["local", "claude"], default = "local" }
+# reviewer = { allowed = ["claude", "codex"] }
+# planner = { allowed = ["local"], default = "local" }
