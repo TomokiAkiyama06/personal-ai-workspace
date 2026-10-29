@@ -35,6 +35,7 @@ from . import (
     test_connections_codex_collection,
     test_connections_concurrency,
     test_connections_execute,
+    test_connections_probe,
     test_connections_quota_admin,
     test_connections_quota_enforcement,
     test_connections_report,
@@ -98,6 +99,21 @@ EXPECTED = {
             "expected_version",
             "kept",
             "collected",
+        },
+    ),
+    # The health probes (revision 0306, Decision 0100): started, finished or
+    # abandoned once, never deleted.
+    "connection_probes": (
+        {"SELECT", "INSERT"},
+        {
+            "state",
+            "outcome",
+            "failure_code",
+            "model",
+            "input_tokens",
+            "output_tokens",
+            "finished_at",
+            "duration_ms",
         },
     ),
 }
@@ -203,6 +219,7 @@ for _module in (
     test_connections_codex_collection,
     test_connections_quota_admin,
     test_connections_execute,
+    test_connections_probe,
     test_connections_quota_enforcement,
     test_connections_report,
     test_connections_concurrency,
@@ -277,7 +294,8 @@ class AppRolePrivilegesTest(PostgresConnectionTestCase):
             for row in self.rows(
                 "SELECT tablename FROM pg_tables WHERE schemaname = current_schema()"
                 " AND tablename IN ('shared_connections', 'connection_quotas',"
-                " 'connection_usage', 'connection_session_leases')"
+                " 'connection_usage', 'connection_session_leases',"
+                " 'connection_probes')"
             )
         }
         self.assertEqual(tables, set(EXPECTED))

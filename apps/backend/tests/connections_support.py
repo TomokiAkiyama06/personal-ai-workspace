@@ -94,7 +94,10 @@ class PostgresConnectionTestCase(unittest.IsolatedAsyncioTestCase):
     def clean_tables(cls) -> None:
         with cls.engine.begin() as connection:
             connection.execute(
-                text("TRUNCATE connection_usage, connection_quotas, shared_connections")
+                text(
+                    "TRUNCATE connection_usage, connection_quotas, shared_connections,"
+                    " connection_probes"
+                )
             )
             connection.execute(text("TRUNCATE tasks CASCADE"))
             connection.execute(text("TRUNCATE users CASCADE"))

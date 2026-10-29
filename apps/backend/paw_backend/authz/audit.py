@@ -141,6 +141,35 @@ def build_event(
     )
 
 
+#: The ``INSERT`` of one event, with the named parameters of :func:`audit_values`
+#: (for a caller that writes an event in a transaction of its own, on a psycopg
+#: connection: Decision 0100, 9's record of a probe).
+AUDIT_INSERT_SQL = _INSERT
+
+
+def audit_values(event: AuditEvent) -> dict[str, object]:
+    """The parameters of :data:`AUDIT_INSERT_SQL` for ``event``."""
+    return {
+        "id": event.event_id,
+        "correlation_id": event.correlation_id,
+        "occurred_at": event.occurred_at,
+        "actor_id": event.actor_id,
+        "actor_role": event.actor_role,
+        "agent_id": event.agent_id,
+        "action": event.action,
+        "resource_kind": event.resource_kind,
+        "resource_id": event.resource_id,
+        "project_id": event.project_id,
+        "repo_id": event.repo_id,
+        "repo_acl": event.repo_acl,
+        "decision": event.decision,
+        "reason": event.reason,
+        "old_role": event.old_role,
+        "new_role": event.new_role,
+        "client_request_id": event.client_request_id,
+    }
+
+
 class AuditSink(Protocol):
     """Where audit events go. ``record`` raises when the event was not stored."""
 
@@ -168,25 +197,7 @@ class PostgresAuditSink:
         self._database = database
 
     async def record(self, event: AuditEvent) -> None:
-        values = {
-            "id": event.event_id,
-            "correlation_id": event.correlation_id,
-            "occurred_at": event.occurred_at,
-            "actor_id": event.actor_id,
-            "actor_role": event.actor_role,
-            "agent_id": event.agent_id,
-            "action": event.action,
-            "resource_kind": event.resource_kind,
-            "resource_id": event.resource_id,
-            "project_id": event.project_id,
-            "repo_id": event.repo_id,
-            "repo_acl": event.repo_acl,
-            "decision": event.decision,
-            "reason": event.reason,
-            "old_role": event.old_role,
-            "new_role": event.new_role,
-            "client_request_id": event.client_request_id,
-        }
+        values = audit_values(event)
         # Its own short autocommit statement on a connection that is shut down at
         # the deadline: a database that accepts the connection but stalls must not
         # hold a required audit write past its limit (see ``fetch_abortable``).

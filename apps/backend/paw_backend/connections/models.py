@@ -61,6 +61,7 @@ from paw_backend.connections.limits import (
     MAX_QUOTA_LIMIT,
     MAX_TOKENS_PER_CALL,
 )
+from paw_backend.connections.probe import ProbeOutcome, ProbeState, ProbeTrigger
 from paw_backend.db import Base
 from paw_backend.identity.models import UserRow  # noqa: F401  (FK target)
 from paw_backend.tasks.models import TaskRow  # noqa: F401  (FK target)
@@ -291,3 +292,118 @@ class ConnectionSessionLeaseRow(Base):
     expected_version: Mapped[int | None] = mapped_column(BigInteger)
     kept: Mapped[bool] = mapped_column(Boolean, server_default=false())
     collected: Mapped[str | None] = mapped_column(Text)
+
+
+#: The table of the connections' health probes (revision ``0306``, Decision 0100).
+PROBE_TABLE = "connection_probes"
+
+
+class ConnectionProbeRow(Base):
+    """One health probe of a connection's credential (Decision 0100, 3): a
+    short CLI session with a fixed prompt and no tools, which belongs to no
+    task and no user (it is not a ``connection_usage`` row and is counted into
+    no quota). Written with its ``connection.probe`` audit event, in one
+    transaction, before anything is sent; finished when the probe ended (or
+    ``abandoned`` by the reaper when its process died).
+
+    ``connection_id`` is a plain UUID (the probes stay as history after the
+    connection is removed); ``secret_handle`` is the credential that was
+    checked (an opaque handle, never the credential; not in the audit) and
+    ``credential_version`` the secret store's version of it when the probe
+    started. ``actor_id`` is the Admin who caused the probe (the recheck, or
+    the attach / replace it followed). No column holds a prompt, an answer or a
+    credential. At most one probe of a credential runs at a time (the partial
+    unique index)."""
+
+    __tablename__ = PROBE_TABLE
+    __table_args__ = (
+        _in("kind", ConnectionKind, "kind_valid"),
+        _in("trigger", ProbeTrigger, "trigger_valid"),
+        _in("state", ProbeState, "state_valid"),
+        CheckConstraint(
+            "outcome IS NULL OR outcome IN ("
+            + ", ".join(f"'{member.value}'" for member in ProbeOutcome)
+            + ")",
+            name="outcome_valid",
+        ),
+        CheckConstraint(
+            "failure_code IS NULL OR failure_code IN ("
+            + ", ".join(f"'{member.value}'" for member in FailureCode)
+            + ")",
+            name="failure_code_valid",
+        ),
+        CheckConstraint(f"secret_handle ~ '{HANDLE_SQL_PATTERN}'", name="handle_shape"),
+        CheckConstraint(
+            f"model IS NULL OR model ~ '{MODEL_SQL_PATTERN}'", name="model_shape"
+        ),
+        # An outcome exactly when the probe finished; an end exactly when it is
+        # not running any more.
+        CheckConstraint(
+            "(state = 'finished') = (outcome IS NOT NULL)",
+            name="outcome_matches_state",
+        ),
+        CheckConstraint(
+            "(state = 'running') = (finished_at IS NULL)",
+            name="finished_matches_state",
+        ),
+        CheckConstraint(
+            "(finished_at IS NULL) = (duration_ms IS NULL)",
+            name="duration_matches_finish",
+        ),
+        CheckConstraint(
+            "failure_code IS NULL OR (outcome IS NOT NULL AND outcome <> 'connected')",
+            name="failure_only_when_not_connected",
+        ),
+        CheckConstraint(
+            "finished_at IS NULL OR finished_at >= started_at",
+            name="finish_after_start",
+        ),
+        CheckConstraint(
+            f"duration_ms IS NULL OR duration_ms BETWEEN 0 AND {MAX_DURATION_MS}",
+            name="duration_range",
+        ),
+        CheckConstraint(
+            f"input_tokens IS NULL OR input_tokens BETWEEN 0 AND {MAX_TOKENS_PER_CALL}",
+            name="input_tokens_range",
+        ),
+        CheckConstraint(
+            "output_tokens IS NULL OR output_tokens BETWEEN 0 AND "
+            f"{MAX_TOKENS_PER_CALL}",
+            name="output_tokens_range",
+        ),
+        CheckConstraint(
+            "credential_version IS NULL OR credential_version >= 1",
+            name="version_positive",
+        ),
+        # One running probe per credential (Decision 0100, 3 and 7).
+        Index(
+            "uq_connection_probes_running",
+            "connection_id",
+            "secret_handle",
+            unique=True,
+            postgresql_where=text("state = 'running'"),
+        ),
+        # The spacing of rechecks: a credential's latest probes.
+        Index(
+            "ix_connection_probes_connection_id_started_at",
+            "connection_id",
+            "started_at",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    connection_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    kind: Mapped[str] = mapped_column(Text)
+    secret_handle: Mapped[str] = mapped_column(Text)
+    credential_version: Mapped[int | None] = mapped_column(BigInteger)
+    trigger: Mapped[str] = mapped_column(Text)
+    actor_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    model: Mapped[str | None] = mapped_column(Text)
+    state: Mapped[str] = mapped_column(Text)
+    outcome: Mapped[str | None] = mapped_column(Text)
+    failure_code: Mapped[str | None] = mapped_column(Text)
+    input_tokens: Mapped[int | None] = mapped_column(BigInteger)
+    output_tokens: Mapped[int | None] = mapped_column(BigInteger)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    duration_ms: Mapped[int | None] = mapped_column(BigInteger)
