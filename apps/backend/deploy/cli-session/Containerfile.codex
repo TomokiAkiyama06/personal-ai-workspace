@@ -4,7 +4,10 @@
 #   podman image inspect --format '{{.Digest}}' localhost/paw-codex-cli
 # Pin the base image's digest and Codex's version before building; the version
 # must be one the backend verified (VERIFIED_VERSIONS, after the fake CLI's
-# stream check and the smoke test of Decision 0089, 2).
+# stream check and the smoke test of Decision 0089, 2). Issue #305 (2026-10-29):
+# no version is verified yet. 0.156.1 and 0.165.0 offer list_mcp_resources,
+# list_mcp_resource_templates and read_mcp_resource whenever an MCP server is
+# configured, and 0.165.0 also apply_patch with environments: [].
 FROM docker.io/library/node:22-bookworm-slim
 ARG CODEX_VERSION
 RUN test -n "$CODEX_VERSION" \
