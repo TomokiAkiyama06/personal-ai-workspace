@@ -469,6 +469,30 @@ class ProbeTest(PostgresConnectionTestCase):
         result = await self.service.wait_probe(ticket.id)
         self.assertEqual(result.outcome, ProbeOutcome.CANCELLED)
 
+    async def test_a_stop_while_the_end_is_written_still_writes_it(self):
+        # Codex review of #316: the probe ended, its end waits for the
+        # connection's lock, and the shutdown comes then.
+        gate = self.hold_checks()
+        ticket = await self.service.start_probe(self.admin_principal, CLAUDE, ATTACH)
+        await self.wait_for(lambda: self.claude.started_checks, "the probe to start")
+        _, transaction = self.hold_row_lock(
+            "SELECT 1 FROM shared_connections WHERE id = :id FOR UPDATE",
+            id=self.connection_id,
+        )
+        gate.set()
+        await self.wait_for_lock_waiters(1)
+        stopping = self.spawn(self.service.stop_probes())
+        await asyncio.sleep(0.1)
+        self.assertFalse(stopping.done())
+        transaction.rollback()
+        await stopping
+
+        (probe,) = self.probe_rows()
+        self.assertEqual((probe["state"], probe["outcome"]), ("finished", "connected"))
+        self.assertEqual(self.connection_row(CLAUDE)["status"], "connected")
+        result = await self.service.wait_probe(ticket.id)
+        self.assertEqual(result.outcome, ProbeOutcome.CONNECTED)
+
     async def test_an_abandoned_probe_is_closed_by_the_reaper(self):
         now = self.scalar("SELECT clock_timestamp()")
         old = self.seed_probe(
