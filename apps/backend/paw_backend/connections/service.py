@@ -1374,7 +1374,16 @@ class ConnectionService:
             end.input_tokens = end.output_tokens = None
             await self._shielded(self._finish_probe(ticket, end))
             raise
-        return await self._finish_probe(ticket, end)
+        # The probe ended: its end is written even when a cancellation (the
+        # backend's shutdown) comes while it is being written (Codex review
+        # of #316): a row left ``running`` would refuse the next probe of the
+        # credential until the reaper closes it.
+        finishing = asyncio.ensure_future(self._finish_probe(ticket, end))
+        try:
+            return await asyncio.shield(finishing)
+        except asyncio.CancelledError:
+            await self._shielded(finishing)
+            raise
 
     async def _probe_once(
         self, ticket: ProbeTicket, adapter: object, end: "_ProbeEnd"
