@@ -19,10 +19,18 @@ made by the real ``GitWorktreeCoordinator``; its base is
 import asyncio
 import os
 import unittest
+from dataclasses import replace
 
+from paw_backend.orchestrator.domain import NodeRole
+from paw_backend.orchestrator.scope import derive_child_scope
 from paw_backend.repositories import SubprocessGitRunner
 from paw_backend.sandbox.gitargs import GitReadRefused, GitRefusal, parse_git_read
-from paw_backend.sandbox.gitread import GitReader, pathspecs
+from paw_backend.sandbox.gitread import (
+    GitReader,
+    branch_changes,
+    commit_paths,
+    pathspecs,
+)
 from paw_backend.sandbox.plan import plan_sandbox, repository_of
 from paw_backend.tools.scope import RealpathResolver
 
@@ -221,6 +229,100 @@ class CheckoutTest(GitReadTestCase):
         with self.assertRaises(GitReadRefused) as caught:
             self.locate()
         self.assertIs(caught.exception.code, GitRefusal.UNAVAILABLE)
+
+
+class ReviewWorktreeTest(GitReadTestCase):
+    """A reviewer's read-only worktree (Decision 0099, 5): its range starts at
+    its review base, before the upstream Worker's branch was merged in."""
+
+    def setUp(self):
+        super().setUp()
+        world = self.world
+        assert world.worktree is not None
+        self.work = commit_file(world.worktree, "src/a.py", "one\n", "node work")
+        commit_file(world.worktree, "secret/key.txt", "changed-secret\n", "secret")
+        prepared = run(
+            world.ws.coordinator().prepare_review(
+                world.ws.node_request("paw-review-codex", "a", scope=world.parent)
+            )
+        )
+        review = prepared[world.repo_id]
+        self.review = review
+        scope = derive_child_scope(
+            world.parent,
+            role=NodeRole.REVIEWER,
+            repositories=None,
+            worktrees=prepared,
+        )
+        # The worktree's copy of the excluded directory is excluded too.
+        world.scope = replace(
+            scope, excluded_paths=(*scope.excluded_paths, f"{review.path}/secret")
+        )
+        world.worktree = review.path
+
+    def test_the_review_worktree_has_its_review_base(self):
+        located = self.locate()
+        self.assertTrue(located.review)
+        self.assertEqual(located.branch, self.review.branch)
+        self.assertEqual(located.base, self.review.base_commit)
+        self.assertEqual(located.base_ref, f"refs/paw/review-base/{located.branch}")
+        # Before the Worker's merge: HEAD is not the review base.
+        head = git("rev-parse", "HEAD", cwd=self.review.path)
+        self.assertNotEqual(located.base, head)
+
+    def test_the_diff_from_the_review_base_is_the_workers_change(self):
+        base = f"refs/paw/review-base/{self.review.branch}"
+        diff = self.read("diff", f"{base}..HEAD")
+        self.assertIn("+one", diff)
+        self.assertNotIn("secret", diff)
+        log = self.read("log", "-p", f"{base}..HEAD")
+        self.assertIn(self.work, log)
+        self.assertNotIn("changed-secret", log)
+        self.assertIn("+one", self.read("show", self.work))
+        self.assertNotIn("changed-secret", self.read("log", "-p"))
+        self.assertNotIn(self.world.old_commit, self.read("log", "--format=oneline"))
+
+    def test_other_bases_and_the_shared_history_are_out_of_range(self):
+        self.refused(
+            "show", f"refs/paw/base/{self.world.branch}", code=GitRefusal.OUT_OF_RANGE
+        )
+        self.refused(
+            "show",
+            f"refs/paw/review-base/{self.world.branch}",
+            code=GitRefusal.OUT_OF_RANGE,
+        )
+        self.refused("show", self.world.old_commit, code=GitRefusal.OUT_OF_RANGE)
+        self.refused("diff", "--", "secret/key.txt", code=GitRefusal.PATH)
+
+    def test_nothing_is_ever_committed_in_it(self):
+        located = self.locate()
+        account = self.world.account
+        with self.assertRaises(GitReadRefused) as caught:
+            run(commit_paths(self.reader, located, ["x"], account=account, marker="m"))
+        self.assertIs(caught.exception.code, GitRefusal.UNAVAILABLE)
+        with self.assertRaises(GitReadRefused):
+            run(branch_changes(self.reader, located, account=account, pathspecs=["."]))
+
+    def test_a_workers_read_never_asks_for_a_review_base(self):
+        # A Worker's branch has its base: the review base is not even asked
+        # (a wrapper that does not know the ref yet still serves Workers).
+        asked = []
+        commit_of = self.reader._worktrees.commit_of
+
+        async def recording(where, revision, account):
+            asked.append(revision)
+            return await commit_of(where, revision, account)
+
+        self.reader._worktrees.commit_of = recording
+        located = run(
+            self.reader.locate(
+                f"{self.world.ws.worktree(self.world.repo_id, 'a')}",
+                account=self.world.account,
+                checkouts=self.world.scope.excluded_paths,
+            )
+        )
+        self.assertFalse(located.review)
+        self.assertFalse(any("review-base" in r for r in asked))
 
 
 class UnprotectedWorktreeTest(GitReadTestCase):

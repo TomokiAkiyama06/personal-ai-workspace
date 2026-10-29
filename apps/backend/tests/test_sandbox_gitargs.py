@@ -143,7 +143,16 @@ class RevisionTest(unittest.TestCase):
         self.assertEqual(
             canonical_revision("refs/paw/base/paw/t/1/a"), "refs/paw/base/paw/t/1/a"
         )
+        # A reviewer's review base (Decision 0099, 5).
+        review = "refs/paw/review-base/paw/t/1/paw-review-claude"
+        self.assertEqual(canonical_revision(review), review)
+        self.assertEqual(
+            parse_git_read(["diff", f"{review}..HEAD"]).revisions,
+            (Revision(review, negated=True), Revision("HEAD")),
+        )
         for word in (
+            "refs/paw/review-base/../x",
+            "refs/paw/review/paw/t/1/a",
             "main",
             "origin/main",
             "HEAD@{1}",

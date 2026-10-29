@@ -95,6 +95,30 @@ class FakeWorkspaces:
         )
 
 
+class ReviewWorkspaces(FakeWorkspaces):
+    """A ``NodeWorkspaces`` that also prepares a Reviewer's worktree."""
+
+    def __init__(self, *, read_only=True, **options):
+        super().__init__(**options)
+        self.reviewed: list = []
+        self.read_only = read_only
+
+    async def prepare_review(self, request):
+        self.reviewed.append(request)
+        return {
+            repository.repo_id: NodeWorktree(
+                repository.repo_id,
+                f"/srv/paw-orch/trees/{request.node_key}",
+                f"paw/t/1/{request.node_key}",
+                protected=(repository.root,),
+                base_commit="b" * 40,
+                read_only=self.read_only,
+            )
+            for repository in request.scope.repositories
+            if gets_worktree(repository)
+        }
+
+
 class WorktreeTestCase(PostgresOrchestratorTestCase):
     async def asyncSetUp(self):
         await super().asyncSetUp()
@@ -178,6 +202,64 @@ class NodeWorktreeTest(WorktreeTestCase):
             # A node without a worktree reads the checkout.
             self.assertNotIn("/srv/paw-orch/trees", "".join(assignment.roots.values()))
             self.assertEqual(len(assignment.roots), 1)
+
+    async def test_a_reviewer_of_workers_gets_a_read_only_worktree(self):
+        # Decision 0099, 5: with ``prepare_review``, a Reviewer that depends on
+        # Worker nodes reads their merged branches in a read-only worktree.
+        runtime = FakeRuntime("local")
+        workspaces = ReviewWorkspaces()
+        h = self.harness(
+            runtimes={"local": runtime},
+            authority=self.authority(),
+            worktrees=workspaces,
+        )
+        plan = make_plan(
+            node("research", role="researcher"),
+            node("a", "research"),
+            node("b", "research"),
+            node("review", "a", "b", "research", role="reviewer"),
+            node("lone", "research", role="reviewer"),
+        )
+        await self.prepare(h, plan)
+
+        report = await h.orchestrator.run_once("w1")
+
+        self.assertEqual(report.outcome, Out.DAG_SUCCEEDED)
+        (request,) = workspaces.reviewed
+        self.assertEqual(request.node_key, "review")
+        self.assertEqual(request.upstream_workers, ("a", "b"))
+        self.assertEqual(
+            {r.node_key for r in workspaces.prepared}, {"a", "b"}
+        )  # Workers only
+        (assignment,) = runtime.calls_of("review")
+        (worktree,) = assignment.worktrees.values()
+        self.assertTrue(worktree.read_only)
+        (root,) = assignment.roots.values()
+        self.assertEqual(root, worktree.path)
+        # A reviewer of no Worker reads the checkout as before.
+        (lone,) = runtime.calls_of("lone")
+        self.assertEqual(dict(lone.worktrees), {})
+
+    async def test_a_reviewers_worktree_that_may_be_written_is_refused(self):
+        runtime = FakeRuntime("local")
+        workspaces = ReviewWorkspaces(read_only=False)
+        h = self.harness(
+            runtimes={"local": runtime},
+            authority=self.authority(),
+            worktrees=workspaces,
+        )
+        task_id = await self.prepare(
+            h, make_plan(node("a"), node("review", "a", role="reviewer"))
+        )
+
+        report = await h.orchestrator.run_once("w1")
+
+        self.assertEqual(report.outcome, Out.DAG_FAILED)
+        dag = await self.store.get(task_id, 1)
+        # A writable worktree is a wider scope than a reviewer may have.
+        self.assertEqual(dag.node("review").error_class, "ScopeEscalation")
+        self.assertEqual(dag.node("review").attempt_count, 1)  # never retried
+        self.assertEqual(runtime.calls_of("review"), [])
 
     async def test_a_conflict_between_upstream_branches_fails_the_node_at_once(self):
         runtime = FakeRuntime("local")

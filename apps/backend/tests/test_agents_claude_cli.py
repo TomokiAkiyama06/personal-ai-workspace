@@ -10,8 +10,9 @@ what ``execute_session`` does around the adapter (the gate, ``on_usage``).
   is the node's outcome;
 * a built-in tool left on, a missing PAW server, a turn without its output
   count and an authentication failure stop the CLI with their failures;
-* no ``submit`` is ``no_submission``; a planner is never sent; the session's
-  directory is gone afterwards.
+* no ``submit`` is ``no_submission``; a planner's ``submit_plan`` is its
+  outcome (Decision 0099, 3), and a planner call without its placement is
+  never sent; the session's directory is gone afterwards.
 """
 
 import asyncio
@@ -221,11 +222,71 @@ class SubmitTest(ClaudeCase):
         raw = self.connections.raw
         self.assertEqual((raw.input_tokens, raw.output_tokens), (7, 3))
 
-    async def test_a_planner_is_never_sent(self):
-        outcome = await self.run_node([], role=NodeRole.PLANNER)
-        self.assertEqual(self.placement.recorded, [])
-        self.assertFalse(self.report.exists())
+    async def test_a_planner_submits_its_plan(self):
+        # Decision 0099, 3: Claude Code plans, through the gate like a node
+        # (its placement recorded before the send), with the planner's tools.
+        plan = {
+            "nodes": [
+                {
+                    "key": "impl",
+                    "role": "worker",
+                    "title": "Fix it",
+                    "goal": "Fix the parser",
+                }
+            ]
+        }
+        outcome = await self.run_node(
+            [
+                {"turn": [50, 5]},
+                {
+                    "call": "submit_plan",
+                    "arguments": {"summary": "One node", "plan": plan},
+                },
+                {"sleep": 30},
+            ],
+            role=NodeRole.PLANNER,
+        )
+        self.assertTrue(outcome.ok)
+        self.assertEqual(outcome.plan, plan)
+        self.assertEqual(len(self.placement.recorded), 1)
+        report = self.read_report()
+        # No repository: no bash; never a write tool or ``submit``.
+        self.assertEqual(report["listed"], ["submit_plan"])
+        flags = report["flags"]
+        self.assertIn("planner", flags[flags.index("--system-prompt") + 1])
+        self.assertEqual(list(self.sessions.iterdir()), [])
+
+    async def test_a_planner_without_a_placement_is_never_sent(self):
+        # The gate refuses a planner call without its record (fail closed).
+        self.scenario.write_text(json.dumps({"actions": []}))
+        runtime = ClaudeCliRuntime(
+            model="claude-sonnet-5",
+            session_base=self.sessions,
+            relay_command=(sys.executable, "-I", str(RELAY)),
+            cloud_policy=Policy(),
+        )
+        assignment = NodeAssignment(
+            task_id=uuid.uuid4(),
+            node_key="plan",
+            role=NodeRole.PLANNER,
+            title="Fix the parser",
+            goal="Fix the parser",
+            input={},
+            upstream={},
+            agent="claude",
+            attempt=1,
+            approach=0,
+            tools=None,
+            budget=None,
+            worktrees={},
+            roots={},
+            placement=None,
+            connections=None,
+        )
+        outcome = await asyncio.wait_for(runtime.run_node(assignment), 60)
+        self.assertFalse(outcome.ok)
         self.assertTrue(outcome.escalate)
+        self.assertFalse(self.report.exists())
 
 
 class StopTest(ClaudeCase):

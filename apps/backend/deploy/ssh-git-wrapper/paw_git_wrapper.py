@@ -139,6 +139,8 @@ _BRANCH = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,199}")
 _HEAD_DEPTH = re.compile(r"HEAD~[1-9][0-9]{0,4}")
 #: Where a writing node's base commit is recorded (Decision 0083 §10).
 BASE_REF_PREFIX = "refs/paw/base/"
+#: Where a reviewer's review base is recorded (Decision 0099 §5).
+REVIEW_BASE_REF_PREFIX = "refs/paw/review-base/"
 _OBJECT_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 _PROTOCOL = re.compile(r"[a-z][a-z0-9+.-]{0,15}")
 _HOST = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,62})(?:\.[a-z0-9](?:[a-z0-9-]{0,62}))*")
@@ -596,7 +598,8 @@ def _paw_ref(value: str) -> bool:
 def _commit_revision(value: str) -> bool:
     """``<rev>^{commit}`` for the revisions the backend asks about: Decision
     0036's, and the sandbox git shim's (Decision 0083 §2: ``HEAD~<n>``, an
-    object id, a node's base ``refs/paw/base/paw/...``)."""
+    object id, a node's base ``refs/paw/base/paw/...``; Decision 0099 §5: a
+    reviewer's ``refs/paw/review-base/paw/...``)."""
     if not value.endswith("^{commit}"):
         return False
     revision = value.removesuffix("^{commit}")
@@ -604,8 +607,9 @@ def _commit_revision(value: str) -> bool:
         return True
     if _HEAD_DEPTH.fullmatch(revision):
         return True
-    if revision.startswith(BASE_REF_PREFIX):
-        return _paw_branch(revision.removeprefix(BASE_REF_PREFIX))
+    for prefix in (BASE_REF_PREFIX, REVIEW_BASE_REF_PREFIX):
+        if revision.startswith(prefix):
+            return _paw_branch(revision.removeprefix(prefix))
     for prefix in ("refs/heads/", "refs/remotes/origin/"):
         if revision.startswith(prefix):
             return _branch(revision.removeprefix(prefix))
@@ -1000,15 +1004,19 @@ _COMMIT_MESSAGE = re.compile(
 #: How the worktree's preparation finds a lost base again (Decision 0083 §10):
 #: the first-parent history of a ``paw/`` branch with its node trailers.
 BASE_LOG_FORMAT = "--format=%H %(trailers:key=PAW-Node,valueonly,separator=%x2C)"
+#: How a reviewer's lost review base is found again (Decision 0099 §5): the
+#: first-parent history of a ``paw/`` branch with each commit's parents.
+REVIEW_BASE_LOG_FORMAT = "--format=%H %P"
 
 
 def is_base_history(args: Sequence[str]) -> bool:
-    """``log --first-parent --max-count=<n> <BASE_LOG_FORMAT> refs/heads/paw/<b>``."""
+    """``log --first-parent --max-count=<n> <BASE_LOG_FORMAT> refs/heads/paw/<b>``
+    (or ``<REVIEW_BASE_LOG_FORMAT>``)."""
     return (
         len(args) == 4
         and args[0] == "--first-parent"
         and re.fullmatch(r"--max-count=[1-9][0-9]{0,4}", args[1]) is not None
-        and args[2] == BASE_LOG_FORMAT
+        and args[2] in (BASE_LOG_FORMAT, REVIEW_BASE_LOG_FORMAT)
         and _paw_ref(args[3])
     )
 
@@ -1022,15 +1030,17 @@ def _literal_paths(words: Sequence[str]) -> bool:
 
 def _check_update_ref(args: list[str], places: Places, config: Config) -> None:
     """Create a Worker branch's base ref once (Decision 0083 §10): ``update-ref
-    refs/paw/base/paw/<b> <id> <zero id>`` (the zero id: only if absent)."""
-    if (
-        len(args) == 3
-        and args[0].startswith("refs/paw/base/")
-        and _paw_branch(args[0].removeprefix("refs/paw/base/"))
-        and _OBJECT_ID.fullmatch(args[1])
-        and args[2] == "0" * len(args[1])
-    ):
-        return
+    refs/paw/base/paw/<b> <id> <zero id>`` (the zero id: only if absent); or a
+    reviewer branch's ``refs/paw/review-base/paw/<b>`` (Decision 0099 §5)."""
+    if len(args) == 3:
+        for prefix in (BASE_REF_PREFIX, REVIEW_BASE_REF_PREFIX):
+            if (
+                args[0].startswith(prefix)
+                and _paw_branch(args[0].removeprefix(prefix))
+                and _OBJECT_ID.fullmatch(args[1])
+                and args[2] == "0" * len(args[1])
+            ):
+                return
     raise Rejected("bad_arguments")
 
 

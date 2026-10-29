@@ -341,6 +341,22 @@ class WorktreeGit:
             raise GitCommandError("merge-base", GitFailure.NONZERO_EXIT)
         return result.returncode == 0
 
+    async def commit_is_ancestor(
+        self, path: str, ancestor: str, descendant: str, account: LinuxAccount
+    ) -> bool:
+        """Whether commit ``ancestor`` is contained in commit ``descendant``
+        (both full object ids)."""
+        if _OBJECT_ID.fullmatch(ancestor) is None or (
+            _OBJECT_ID.fullmatch(descendant) is None
+        ):
+            raise ValueError("not a commit id")
+        result = await self._run(
+            ["merge-base", "--is-ancestor", ancestor, descendant], account, path
+        )
+        if result.returncode not in (0, 1):
+            raise GitCommandError("merge-base", GitFailure.NONZERO_EXIT)
+        return result.returncode == 0
+
     async def check_merge(
         self, path: Where, into: str, branch: str, account: LinuxAccount
     ) -> MergeCheck:
@@ -374,12 +390,13 @@ class WorktreeGit:
     async def create_ref(
         self, path: str, ref: str, commit: str, account: LinuxAccount
     ) -> bool:
-        """Create ``ref`` (``refs/paw/base/paw/...``) at ``commit`` only when it
-        does not exist (``update-ref`` with the zero id as the old value):
-        ``False`` when it exists already (never moved)."""
+        """Create ``ref`` (``refs/paw/base/paw/...``, or a reviewer's
+        ``refs/paw/review-base/paw/...``, Decision 0099, 5) at ``commit`` only
+        when it does not exist (``update-ref`` with the zero id as the old
+        value): ``False`` when it exists already (never moved)."""
         if _OBJECT_ID.fullmatch(commit) is None:
             raise ValueError("commit must be a commit id")
-        if not ref.startswith("refs/paw/base/paw/"):
+        if not ref.startswith(("refs/paw/base/paw/", "refs/paw/review-base/paw/")):
             raise ValueError("not a base ref")
         result = await self._run(
             ["update-ref", ref, commit, "0" * len(commit)], account, path
@@ -411,6 +428,36 @@ class WorktreeGit:
                 raise GitCommandError("log", GitFailure.UNSAFE_OUTPUT)
             values = tuple(v.strip() for v in trailers.split(",") if v.strip())
             history.append((commit, values))
+        return history
+
+    async def first_parent_parents(
+        self, path: str, branch: str, account: LinuxAccount, *, limit: int = 1000
+    ) -> list[tuple[str, tuple[str, ...]]]:
+        """The first-parent history of ``branch`` (newest first, at most
+        ``limit`` commits): each commit and its parents, the first parent
+        first (Decision 0099, 5: where a reviewer's lost review base is found
+        again)."""
+        result = await self._run(
+            [
+                "log",
+                "--first-parent",
+                f"--max-count={limit}",
+                "--format=%H %P",
+                _ref(branch),
+            ],
+            account,
+            path,
+        )
+        if result.returncode != 0:
+            raise GitCommandError("log", GitFailure.NONZERO_EXIT)
+        history = []
+        for line in result.stdout.splitlines():
+            # A root commit has no parent: ``<id> ``.
+            commit, _, rest = line.partition(" ")
+            parents = tuple(rest.split(" ")) if rest else ()
+            if any(_OBJECT_ID.fullmatch(c) is None for c in (commit, *parents)):
+                raise GitCommandError("log", GitFailure.UNSAFE_OUTPUT)
+            history.append((commit, tuple(parents)))
         return history
 
     async def add_worktree(

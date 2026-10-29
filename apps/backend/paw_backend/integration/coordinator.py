@@ -22,6 +22,12 @@ worktrees lie in ``<home>/<workspace_subdir>/.paw-worktrees``)::
   branches of the Worker nodes it depends on directly (in node order), so that
   a node sees the work it builds on. A conflict there fails the node without a
   retry (``WorktreeConflictError``).
+* A **Reviewer branch** (Decision 0099, 5; :meth:`GitWorktreeCoordinator.
+  prepare_review`) is made like a Worker branch, but its review base
+  ``refs/paw/review-base/<branch>`` is written right after the branch is made,
+  BEFORE the upstream Worker branches are merged in, so that the reviewer
+  reads their change from there to ``HEAD``. The worktree is read-only to the
+  node (``NodeWorktree.read_only``) and is never integrated.
 * **Integration** (after the DAG succeeded) merges every Worker branch into the
   integration branch in node order, ``--no-ff``, inside the integration worktree.
   ``merge-tree`` judges each merge first, so a conflict never leaves the
@@ -64,6 +70,7 @@ from paw_backend.integration.layout import (
     branch_name,
     in_namespace,
     node_marker,
+    review_base_ref,
     worktree_base,
     worktree_path,
 )
@@ -183,6 +190,31 @@ class GitWorktreeCoordinator:
             async with self._lock(request.task.id, request.run, repository.repo_id):
                 prepared[repository.repo_id] = await self._git_errors(
                     self._prepare(account, base, request, repository)
+                )
+        return prepared
+
+    async def prepare_review(
+        self, request: NodeWorkspaceRequest
+    ) -> dict[uuid.UUID, NodeWorktree]:
+        """The read-only worktree of a Reviewer node (Decision 0099, 5): for
+        each repository that gets a worktree, a branch of the reviewer's own
+        (``paw/<task>/<attempt>/<node>``) that starts at the integration
+        branch, its review base ``refs/paw/review-base/<branch>`` written
+        before anything is merged into it, then the branches of
+        ``request.upstream_workers`` merged in (as for a Worker). The node
+        never writes there: ``NodeWorktree.read_only``."""
+        if not isinstance(request, NodeWorkspaceRequest):
+            raise TypeError("request must be a NodeWorkspaceRequest")
+        repositories = [r for r in request.scope.repositories if gets_worktree(r)]
+        prepared: dict[uuid.UUID, NodeWorktree] = {}
+        if not repositories:
+            return prepared
+        account = await self._account(request.task)
+        base = worktree_base(account, self._subdir)
+        for repository in repositories:
+            async with self._lock(request.task.id, request.run, repository.repo_id):
+                prepared[repository.repo_id] = await self._git_errors(
+                    self._prepare_review(account, base, request, repository)
                 )
         return prepared
 
@@ -387,21 +419,9 @@ class GitWorktreeCoordinator:
         existed = await self._git.branch_commit(checkout, place.branch, account)
         start = await self._git.branch_commit(checkout, integration.branch, account)
         pinned = await self._ensure(checkout, place, account, start=start)
-        # The work of the Worker nodes this one builds on (idempotent: a branch
-        # already contained is not merged again, so a later attempt changes
-        # nothing it already has).
-        for upstream in request.upstream_workers:
-            branch = branch_name(task_id, run.attempt, upstream)
-            if await self._git.branch_commit(checkout, branch, account) is None:
-                continue  # the upstream node wrote nothing to this repository
-            if await self._git.is_ancestor(checkout, branch, place.branch, account):
-                continue
-            check = await self._git.check_merge(checkout, place.branch, branch, account)
-            if not check.clean:
-                raise WorktreeConflictError()
-            if not await self._git.merge(pinned, branch, account):
-                # merge-tree said it merges: git failed otherwise (a Retry).
-                raise GitCommandError("merge", GitFailure.NONZERO_EXIT)
+        # The work of the Worker nodes this one builds on.
+        upstream = await self._upstream_branches(checkout, request, account)
+        await self._merge_upstream(checkout, place, pinned, upstream, account)
         base_commit = await self._base(
             checkout, place.branch, account, task_id, request.node_key, existed
         )
@@ -415,6 +435,152 @@ class GitWorktreeCoordinator:
             protected=(checkout, integration.path, base, f"{place.path}/.git"),
             base_commit=base_commit,
         )
+
+    async def _upstream_branches(
+        self, checkout: str, request: NodeWorkspaceRequest, account: LinuxAccount
+    ) -> list[tuple[str, str]]:
+        """The branches of ``request.upstream_workers`` that exist in
+        ``checkout`` (an upstream node that wrote nothing to this repository
+        has none), in node order, each with its commit."""
+        found = []
+        for upstream in request.upstream_workers:
+            branch = branch_name(request.task.id, request.run.attempt, upstream)
+            commit = await self._git.branch_commit(checkout, branch, account)
+            if commit is not None:
+                found.append((branch, commit))
+        return found
+
+    async def _merge_upstream(
+        self,
+        checkout: str,
+        place: _Place,
+        pinned: PinnedWorktree,
+        upstream: list[tuple[str, str]],
+        account: LinuxAccount,
+    ) -> None:
+        """Merge the ``upstream`` branches into ``place``'s branch (idempotent:
+        a branch already contained is not merged again, so a later attempt
+        changes nothing it already has). A conflict is
+        ``WorktreeConflictError``: the merge is never made."""
+        for branch, _commit in upstream:
+            if await self._git.is_ancestor(checkout, branch, place.branch, account):
+                continue
+            check = await self._git.check_merge(checkout, place.branch, branch, account)
+            if not check.clean:
+                raise WorktreeConflictError()
+            if not await self._git.merge(pinned, branch, account):
+                # merge-tree said it merges: git failed otherwise (a Retry).
+                raise GitCommandError("merge", GitFailure.NONZERO_EXIT)
+
+    async def _prepare_review(
+        self,
+        account: LinuxAccount,
+        base: str,
+        request: NodeWorkspaceRequest,
+        repository: ScopedRepository,
+    ) -> NodeWorktree:
+        checkout = repository.root
+        assert checkout is not None
+        task_id, run = request.task.id, request.run
+        integration, _ = await self._integration(
+            account, base, task_id, run, repository
+        )
+        place = self._place(base, task_id, run, repository, request.node_key)
+        existed = await self._git.branch_commit(checkout, place.branch, account)
+        start = await self._git.branch_commit(checkout, integration.branch, account)
+        pinned = await self._ensure(checkout, place, account, start=start)
+        upstream = await self._upstream_branches(checkout, request, account)
+        # The review base first: the commit before any upstream merge (Decision
+        # 0099, 5; the Worker's own base is the commit AFTER its merges, and a
+        # review from there would show nothing).
+        review_base = await self._review_base(
+            checkout, place.branch, account, existed, upstream, integration.branch
+        )
+        await self._merge_upstream(checkout, place, pinned, upstream, account)
+        return NodeWorktree(
+            repository.repo_id,
+            place.path,
+            place.branch,
+            protected=(checkout, integration.path, base, f"{place.path}/.git"),
+            base_commit=review_base,
+            read_only=True,
+        )
+
+    async def _review_base(
+        self,
+        checkout: str,
+        branch: str,
+        account: LinuxAccount,
+        existed: str | None,
+        upstream: list[tuple[str, str]],
+        integration: str,
+    ) -> str:
+        """A Reviewer branch's review base (Decision 0099, 5):
+        ``refs/paw/review-base/<branch>``, made when the branch is new, before
+        any upstream merge, at its first commit, and never moved. A branch made
+        earlier whose ref is missing (the process ended between the two) gets
+        it back from its first-parent history: below the merges of upstream
+        Worker branches at its top, the first commit that is not one, which
+        must be in the integration branch (where the branch started). None
+        found: not guessed (``BASE_UNKNOWN``)."""
+        ref = review_base_ref(branch)
+        recorded = await self._git.commit_of(checkout, ref, account)
+        if recorded is not None:
+            return recorded
+        if existed is None:
+            commit = await self._git.branch_commit(checkout, branch, account)
+        else:
+            commit = await self._lost_review_base(
+                checkout, branch, account, upstream, integration
+            )
+        if commit is None:
+            raise WorktreeUnavailableError(WorktreeProblem.BASE_UNKNOWN)
+        if not await self._git.create_ref(checkout, ref, commit, account):
+            # Made meanwhile by another process: that one is the review base.
+            recorded = await self._git.commit_of(checkout, ref, account)
+            if recorded is None:
+                raise GitCommandError("update-ref", GitFailure.NONZERO_EXIT)
+            return recorded
+        return commit
+
+    async def _lost_review_base(
+        self,
+        checkout: str,
+        branch: str,
+        account: LinuxAccount,
+        upstream: list[tuple[str, str]],
+        integration: str,
+    ) -> str | None:
+        """See :meth:`_review_base`: the first parent of the first upstream
+        merge on ``branch``'s first-parent history (its own first commit when
+        nothing was merged yet), or ``None`` when it cannot be told."""
+        tips = [commit for _branch, commit in upstream]
+        start = await self._git.branch_commit(checkout, integration, account)
+        if start is None:
+            return None
+
+        async def ancestor(commit: str, of: str) -> bool:
+            return await self._git.commit_is_ancestor(checkout, commit, of, account)
+
+        async def from_upstream(commit: str) -> bool:
+            for tip in tips:
+                if await ancestor(commit, tip):
+                    return True
+            return False
+
+        history = await self._git.first_parent_parents(checkout, branch, account)
+        for commit, parents in history:
+            if await ancestor(commit, start):
+                # In the integration branch, where the branch started: the
+                # history below the upstream merges.
+                return commit
+            merged = parents[1:]
+            if not merged or not all([await from_upstream(p) for p in merged]):
+                # Something the backend did not make (a commit by hand): a
+                # review base above it would hide the merges below it.
+                return None
+            # An upstream Worker's merge: the review base lies below it.
+        return None
 
     async def _base(
         self,
