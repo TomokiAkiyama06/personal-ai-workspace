@@ -11,8 +11,10 @@ attempt); a session that ended without either is ``no_submission``.
 :class:`CodexSessionAdapter` is the connection's session adapter
 (``ConnectionService(session_adapters={CODEX: ...})``). It writes the session's
 ``$CODEX_HOME/config.toml`` (Decision 0089, 2: every default-on tool feature
-off, web search off, the PAW relay as the only MCP server with its tools
-approved: the Tool Broker approves each call), starts ``codex app-server`` and
+off, web search off, the orchestrator's skills off, the PAW relay as the only
+MCP server with its tools approved: the Tool Broker approves each call; and
+offered directly, never deferred behind ``tool_search``: issue #305), starts
+``codex app-server`` and
 talks to it (``codex_app_server.py``):
 
 * a version that is not in the verified list sends nothing (the list is empty
@@ -298,6 +300,9 @@ def session_config(spec: CliSessionSpec, tools: Iterable[str]) -> str:
         "required": True,
         "enabled_tools": sorted(tools),
         "default_tools_approval_mode": "approve",
+        # Issue #305: the PAW tools go in the request's tool list itself, not
+        # behind ``tool_search`` (deferred loading) or a Code Mode script.
+        "omit_tools_from": ["deferred", "code_mode"],
         "startup_timeout_sec": STARTUP_TIMEOUT_SECONDS,
         "tool_timeout_sec": TOOL_TIMEOUT_SECONDS,
     }
@@ -310,6 +315,9 @@ def session_config(spec: CliSessionSpec, tools: Iterable[str]) -> str:
         ("history", {"persistence": "none"}),
         ("tools.update_plan", {"enabled": False}),
         ("tools.experimental_request_user_input", {"enabled": False}),
+        # Issue #305: with ``environments: []`` the orchestrator's skills are
+        # available, offered as the ``skills`` namespace (``list``, ``read``).
+        ("orchestrator.skills", {"enabled": False}),
         ("features", {name: False for name in DISABLED_FEATURES}),
         ("mcp_servers.paw", paw),
     ]
