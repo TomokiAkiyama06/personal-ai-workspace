@@ -25,7 +25,9 @@ Authorization (the existing capabilities of Decision 0004; none is added)
   owned by the user the call is for, so an Owner does not read or spend another
   user's;
 * ``check_health``: backend-internal (a scheduler), no actor, like
-  ``ProjectService.purge_expired``.
+  ``ProjectService.purge_expired``;
+* ``start_probe`` (Decision 0100): ``admin.config.manage`` (the Admin's
+  recheck, and the probe that follows an attach / replace).
 
 Every method takes the acting :class:`~paw_backend.authz.Principal` first (only
 ``user_id`` and ``system_role`` are taken from it; the authentication layer resolved
@@ -143,6 +145,7 @@ from paw_backend.connections.domain import (
     ConnectionStatus,
     CredentialSuspicion,
     FailureCode,
+    ProbeRefusal,
     QuotaMetric,
     QuotaPeriod,
     RefusalReason,
@@ -160,6 +163,7 @@ from paw_backend.connections.errors import (
     CredentialNotStoredError,
     InputProblem,
     InvalidConnectionInputError,
+    ProbeRefusedError,
     QuotaExceededError,
     SessionSlotBusyError,
     StaleConnectionCredentialError,
@@ -174,6 +178,17 @@ from paw_backend.connections.limits import (
     MAX_HEALTH_TIMEOUT_SECONDS,
     MAX_RESULT_CHARS,
     MAX_TOKENS_PER_CALL,
+)
+from paw_backend.connections.probe import (
+    ACTION_PROBE,
+    ACTION_PROBE_RESULT,
+    ProbeOutcome,
+    ProbeReport,
+    ProbeResult,
+    ProbeTicket,
+    ProbeTrigger,
+    changes_status,
+    validate_probe_report,
 )
 from paw_backend.connections.records import (
     ConnectionAvailability,
@@ -217,6 +232,8 @@ from paw_backend.connections.session_slot import (
 from paw_backend.connections.store import (
     Admitted,
     ConnectionStore,
+    ProbeDenied,
+    ProbeStarted,
     Refused,
     SessionLease,
     SessionTurn,
@@ -290,6 +307,21 @@ _TASK_REFUSALS = {
     RefusalReason.LEASE_LOST,
     RefusalReason.LEASE_UNAVAILABLE,
 }
+
+
+#: How many results of finished probes ``wait_probe`` can still answer.
+_KEPT_PROBE_RESULTS = 64
+
+
+@dataclass(slots=True)
+class _ProbeEnd:
+    """What one probe came to (in memory; set by ``_probe_once``)."""
+
+    outcome: ProbeOutcome = ProbeOutcome.UNAVAILABLE
+    failure: FailureCode | None = FailureCode.INTERNAL_ERROR
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    model: str | None = None
 
 
 @dataclass(slots=True)
@@ -610,6 +642,11 @@ class ConnectionService:
         self._lease_timeout = float(database_timeout_seconds)
         self._health_timeout = float(health_timeout_seconds)
         self._audit_timeout = 3.0
+        # Decision 0100, 6: the probes this process runs in the background,
+        # and the results of the latest ones (for ``wait_probe``).
+        self._probe_tasks: dict[uuid.UUID, asyncio.Task] = {}
+        self._probe_tickets: dict[uuid.UUID, ProbeTicket] = {}
+        self._probe_results: dict[uuid.UUID, ProbeResult] = {}
 
     # --- connections (Owner / Admin) -----------------------------------------
 
@@ -1191,6 +1228,281 @@ class ConnectionService:
                 ACTION_STATUS, status.value, True, None, uuid.uuid4(),
                 _RESOURCE_CONNECTION, change.connection_id,
             )  # fmt: skip
+
+    # --- health probes (Decision 0100) ---------------------------------------
+
+    async def start_probe(
+        self, principal: Principal, kind: ConnectionKind, trigger: ProbeTrigger
+    ) -> ProbeTicket:
+        """Start a health probe of the connection of ``kind`` in the background
+        (Decision 0100, 1, 6 and 7) and return its ticket at once.
+
+        ``admin.config.manage`` (Owner / Admin): the Admin's recheck
+        (``manual``) or the probe that follows the Admin's attach / replace.
+        Before anything is sent, the probe's row and its ``connection.probe``
+        audit event are committed together (no record, no send). Refused
+        (``ProbeRefusedError``, nothing recorded or sent): no probe adapter is
+        registered for the kind (``probe_not_configured``), the connection is
+        disabled (``connection_disabled``), a probe of the same credential is
+        running (``probe_running``), or a manual recheck came before the
+        spacing of Decision 0100, 8 passed (``probe_cooldown``, with the
+        seconds left); the probes after an attach / replace are not spaced. A
+        refused recheck is audited (``connection.probe``, denied, the reason);
+        a refused automatic probe is logged. ``ConnectionNotFoundError`` when
+        none is configured.
+
+        The probe resolves the credential, asks the adapter (``check_health``)
+        under ``health_timeout_seconds`` and finishes its row; the verdict is
+        written to the connection's status when it says something about the
+        credential and no newer verdict was recorded meanwhile (Decision 0100,
+        5). It belongs to no task and no user: no admission, quota, budget or
+        usage row. :meth:`wait_probe` waits for it; :meth:`stop_probes` stops
+        the running ones (the backend's shutdown).
+        """
+        self._actor(principal)
+        kind = validate_enum("kind", kind, ConnectionKind)
+        trigger = validate_enum("trigger", trigger, ProbeTrigger)
+        correlation_id = uuid.uuid4()
+        await self._authorize(
+            principal,
+            Capability.ADMIN_CONFIG_MANAGE,
+            _connection_resource(),
+            correlation_id,
+        )
+        adapter = self._adapters.find(kind)
+        if adapter is None:
+            await self._refuse_probe(
+                principal, trigger, ProbeRefusal.PROBE_NOT_CONFIGURED, None
+            )
+        credential = None
+        handle = await self._call_store(self._store.read_handle(kind))
+        if handle is not None:
+            credential = (handle, (await self._stored_version(handle, kind))[1])
+        probe_id = uuid.uuid4()
+        started = await self._call_store(
+            self._store.start_probe(
+                kind,
+                probe_id=probe_id,
+                trigger=trigger,
+                actor_id=principal.user_id,
+                actor_role=principal.system_role.value,
+                credential=credential,
+                enforce_spacing=trigger is ProbeTrigger.MANUAL,
+            )
+        )
+        if isinstance(started, ProbeDenied):
+            if started.reason is None:
+                raise ConnectionNotFoundError()
+            await self._refuse_probe(
+                principal,
+                trigger,
+                started.reason,
+                started.connection_id,
+                started.retry_after_seconds,
+            )
+        assert isinstance(started, ProbeStarted)
+        ticket = ProbeTicket(
+            probe_id,
+            started.connection_id,
+            kind,
+            trigger,
+            started.started_at,
+            started.secret_handle,
+        )
+        task = asyncio.create_task(self._run_probe(ticket, adapter))
+        self._probe_tasks[probe_id] = task
+        self._probe_tickets[probe_id] = ticket
+
+        def forget(_: asyncio.Task) -> None:
+            self._probe_tasks.pop(probe_id, None)
+            self._probe_tickets.pop(probe_id, None)
+
+        task.add_done_callback(forget)
+        logger.info(
+            "connection probe started: kind=%s trigger=%s probe_id=%s",
+            kind.value,
+            trigger.value,
+            probe_id,
+        )
+        return ticket
+
+    async def wait_probe(self, probe_id: uuid.UUID) -> ProbeResult | None:
+        """The result of a probe this process started, once it ended (``None``
+        when it is not known here any more, or was cancelled)."""
+        task = self._probe_tasks.get(probe_id)
+        if task is not None:
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.shield(task)
+        return self._probe_results.get(probe_id)
+
+    async def stop_probes(self) -> None:
+        """Cancel the probes this process runs (the backend's shutdown); each
+        stops its CLI (the adapter's cancellation) and finishes its row
+        ``cancelled`` before this returns. The connections' status is not
+        changed. A probe cancelled before its task first ran (it never
+        reached its own handler: Codex review of #316) is finished here."""
+        running = [
+            (task, self._probe_tickets[probe_id])
+            for probe_id, task in self._probe_tasks.items()
+            if probe_id in self._probe_tickets
+        ]
+        for task, _ in running:
+            task.cancel()
+        if not running:
+            return
+        await asyncio.gather(*(task for task, _ in running), return_exceptions=True)
+        for _, ticket in running:
+            if ticket.id not in self._probe_results:
+                end = _ProbeEnd(ProbeOutcome.CANCELLED, None)
+                await self._shielded(self._finish_probe(ticket, end))
+
+    async def _refuse_probe(
+        self,
+        principal: Principal,
+        trigger: ProbeTrigger,
+        reason: ProbeRefusal,
+        connection_id: uuid.UUID | None,
+        retry_after_seconds: int | None = None,
+    ) -> NoReturn:
+        """A recheck's refusal is audited (Decision 0100, 9); an automatic
+        probe's is logged (Decision 0100, 4: it runs nothing and stays
+        ``unavailable``)."""
+        if trigger is ProbeTrigger.MANUAL:
+            await self._audit(
+                ACTION_PROBE, reason.value, False, principal, uuid.uuid4(),
+                _RESOURCE_CONNECTION, connection_id,
+            )  # fmt: skip
+        else:
+            logger.warning(
+                "connection probe not started: trigger=%s reason=%s",
+                trigger.value,
+                reason.value,
+            )
+        raise ProbeRefusedError(reason, retry_after_seconds)
+
+    async def _run_probe(
+        self, ticket: ProbeTicket, adapter: object
+    ) -> ProbeResult | None:
+        end = _ProbeEnd()
+        try:
+            await self._probe_once(ticket, adapter, end)
+        except asyncio.CancelledError:
+            end.outcome, end.failure = ProbeOutcome.CANCELLED, None
+            end.input_tokens = end.output_tokens = None
+            await self._shielded(self._finish_probe(ticket, end))
+            raise
+        # The probe ended: its end is written even when a cancellation (the
+        # backend's shutdown) comes while it is being written (Codex review
+        # of #316): a row left ``running`` would refuse the next probe of the
+        # credential until the reaper closes it.
+        finishing = asyncio.ensure_future(self._finish_probe(ticket, end))
+        try:
+            return await asyncio.shield(finishing)
+        except asyncio.CancelledError:
+            await self._shielded(finishing)
+            raise
+
+    async def _probe_once(
+        self, ticket: ProbeTicket, adapter: object, end: "_ProbeEnd"
+    ) -> None:
+        """Resolve the credential and ask the adapter, under one deadline;
+        whatever went wrong is ``unavailable`` (``expired`` for the
+        provider's refusal of the credential), logged by type only."""
+        try:
+            async with asyncio.timeout(self._health_timeout):
+                secret = await self._resolve(ticket.secret_handle)
+                verdict = await adapter.check_health(secret)  # type: ignore[attr-defined]
+        except Exception as error:  # the resolver's or the adapter's: type only
+            code = _failure_code_of(error)
+            logger.warning(
+                "connection probe failed: kind=%s code=%s exception_type=%s",
+                ticket.kind.value,
+                code.value,
+                log_type_name(error),
+            )
+            end.outcome = (
+                ProbeOutcome.EXPIRED
+                if code is FailureCode.EXPIRED
+                else ProbeOutcome.UNAVAILABLE
+            )
+            end.failure = code
+            return
+        if type(verdict) is ConnectionStatus:
+            end.outcome, end.failure = ProbeOutcome(verdict.value), None
+            return
+        if type(verdict) is ProbeReport:
+            try:
+                validate_probe_report(verdict)
+            except (ValueError, TypeError):
+                pass
+            else:
+                end.outcome = verdict.outcome
+                end.failure = verdict.failure
+                end.input_tokens = verdict.input_tokens
+                end.output_tokens = verdict.output_tokens
+                end.model = verdict.model
+                return
+        logger.warning("connection probe returned an invalid verdict")
+        end.outcome, end.failure = (
+            ProbeOutcome.UNAVAILABLE,
+            FailureCode.INVALID_RESPONSE,
+        )
+
+    async def _finish_probe(
+        self, ticket: ProbeTicket, end: "_ProbeEnd"
+    ) -> ProbeResult | None:
+        """Finish the probe's row and write its verdict; never raises (a
+        failure is logged by type: the row stays ``running`` until the reaper
+        marks it ``abandoned``). Audits the end (``connection.probe_result``)
+        and a change of status (``connection.status``)."""
+        status = (
+            ConnectionStatus(end.outcome.value)
+            if changes_status(end.outcome, end.failure)
+            else None
+        )
+        try:
+            finished = await self._store.finish_probe(
+                ticket.id,
+                outcome=end.outcome,
+                failure=end.failure,
+                input_tokens=end.input_tokens,
+                output_tokens=end.output_tokens,
+                model=end.model,
+                status=status,
+            )
+        except Exception as error:
+            logger.error(
+                "connection probe could not be finished: probe_id=%s exception_type=%s",
+                ticket.id,
+                log_type_name(error),
+            )
+            return None
+        if finished is None:
+            logger.warning(
+                "connection probe was no longer running: probe_id=%s", ticket.id
+            )
+            return None
+        await self._audit(
+            ACTION_PROBE_RESULT, end.outcome.value, True, None, ticket.id,
+            _RESOURCE_CONNECTION, ticket.connection_id,
+        )  # fmt: skip
+        change = finished.change
+        if change is not None and status is not None and change.previous is not status:
+            await self._audit(
+                ACTION_STATUS, status.value, True, None, uuid.uuid4(),
+                _RESOURCE_CONNECTION, change.connection_id,
+            )  # fmt: skip
+        result = ProbeResult(ticket.id, end.outcome, end.failure, change is not None)
+        self._probe_results[ticket.id] = result
+        while len(self._probe_results) > _KEPT_PROBE_RESULTS:
+            self._probe_results.pop(next(iter(self._probe_results)))
+        logger.info(
+            "connection probe finished: kind=%s outcome=%s status_written=%s",
+            ticket.kind.value,
+            end.outcome.value,
+            change is not None,
+        )
+        return result
 
     # --- quotas --------------------------------------------------------------
 
