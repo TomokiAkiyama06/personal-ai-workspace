@@ -243,6 +243,32 @@ class ExampleTest(unittest.TestCase):
             wiring.orchestrator_config.ladders, expected.orchestrator_config.ladders
         )
 
+    def test_the_commented_step_4_enables_the_cli_runtimes(self):
+        # Decision 0099, 7: step 4 replaces step 3's [orchestrator].
+        text = (DEPLOY / "runtime.example.toml").read_text()
+        head, marker, step4 = text.partition("# --- step 4")
+        self.assertTrue(marker)
+        head = head[: head.index("[orchestrator]\n")]
+        enabled = "\n".join(
+            line[2:] if line.startswith("# [") or line.startswith("# ") else line
+            for line in step4.splitlines()
+            if line.startswith("# ")
+            and not line.startswith("# ---")
+            and ("=" in line or line.startswith("# ["))
+        )
+        host = standard_host()
+        host.file("/etc/paw/runtime.toml", head + enabled + "\n", mode=0o640)
+        wiring = load_runtime_config(
+            "/etc/paw/runtime.toml",
+            make_settings(),
+            host=host,
+            python_executable=PYTHON,
+        )
+        cli = wiring.create_app_arguments()["cli"]
+        self.assertTrue(cli.cloud.enabled)
+        self.assertEqual(sorted(cli.agents), ["claude", "codex"])
+        self.assertIn("assignment: yes", wiring.summary())
+
     def test_the_polkit_rule(self):
         rule = (DEPLOY / "50-paw-llm-main.rules").read_text()
         self.assertIn('subject.user !== "paw"', rule)

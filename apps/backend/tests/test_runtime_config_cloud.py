@@ -3,19 +3,17 @@
 ``[cloud]``, ``[agents.claude]`` / ``[agents.codex]`` and
 ``[orchestrator.assignment]`` are parsed and checked, and every start-up refusal
 of the Decision's section 7 has a test here (at least one each, as Decision
-0093, 6 asks of the other sections). The CLI rungs stay disabled in the
-assembly (``CLI_RUNGS_ENABLED``) until the CLI smoke (Decision 0099, "PR の分け方"
-6): a test that needs a ladder with a CLI runtime turns the flag on itself.
+0093, 6 asks of the other sections). Since the CLI smoke (Decision 0099, "PR の分け方"
+6) a ladder that names a CLI runtime is given to ``create_app`` as ``cli``.
 """
 
 import unittest
-from unittest import mock
 
 from paw_backend.agents.cloud_policy import CloudSettings
 from paw_backend.orchestrator.domain import NodeRole
 from paw_backend.runtime_config import (
-    CLI_RUNGS_ENABLED,
     CliAgentSetup,
+    CliSetup,
     RoleAssignment,
     RuntimeConfigError,
     RuntimeWiring,
@@ -77,10 +75,6 @@ def load(text: str, host: FakeHost | None = None) -> RuntimeWiring:
     )
 
 
-def cli_rungs(enabled: bool = True):
-    return mock.patch("paw_backend.runtime_config.CLI_RUNGS_ENABLED", enabled)
-
-
 class Refused(unittest.TestCase):
     def assertRefused(self, text, where, *, reason=None):
         with self.assertRaises(RuntimeConfigError) as caught:
@@ -92,19 +86,42 @@ class Refused(unittest.TestCase):
 
 
 class TheDecisionsFileTest(Refused):
-    def test_the_cli_rungs_are_disabled_in_the_assembly(self):
-        self.assertFalse(CLI_RUNGS_ENABLED)
-        # Every other check passes: the first ladder with a CLI runtime is
-        # refused (the planner's).
-        self.assertRefused(
-            decision_text(),
-            "orchestrator.ladders.planner",
-            reason="cli runtimes are not enabled yet",
-        )
+    def test_the_cli_runtimes_are_a_create_app_argument(self):
+        # Decision 0099, "PR の分け方" 6: after the CLI smoke the assembly
+        # builds the CLI runtimes the ladders name.
+        wiring = load(decision_text())
+        cli = wiring.create_app_arguments()["cli"]
+        self.assertIsInstance(cli, CliSetup)
+        self.assertEqual(cli.cloud, CloudSettings(enabled=True))
+        self.assertEqual(sorted(cli.agents), ["claude", "codex"])
+        self.assertEqual(cli.agents, wiring.agents)
+        self.assertEqual(wiring.cli_labels(), frozenset({"claude", "codex"}))
 
-    def test_the_decisions_file_parses_when_the_rungs_are_enabled(self):
-        with cli_rungs():
-            wiring = load(decision_text())
+    def test_the_environment_of_the_cli_runtimes(self):
+        wiring = load(decision_text())
+        url = "postgresql+psycopg://paw@localhost/paw"
+        check_environment(
+            wiring,
+            make_settings(database_url=url, secret_store_dir="/var/lib/paw/secrets"),
+        )
+        with self.assertRaises(RuntimeConfigError) as caught:
+            check_environment(wiring, make_settings(database_url=url))
+        self.assertEqual(caught.exception.where, "agents")
+        self.assertIn("PAW_SECRET_STORE_DIR", caught.exception.reason)
+        with self.assertRaises(RuntimeConfigError) as caught:
+            check_environment(
+                wiring,
+                make_settings(
+                    database_url=url,
+                    secret_store_dir="/var/lib/paw/secrets",
+                    cli_session_dir="/run/other",
+                ),
+            )
+        self.assertEqual(caught.exception.where, "agents.claude.session_base")
+        self.assertNotIn("/run", str(caught.exception))
+
+    def test_the_decisions_file_parses(self):
+        wiring = load(decision_text())
         self.assertEqual(wiring.cloud, CloudSettings(enabled=True))
         self.assertEqual(
             wiring.agents,
@@ -144,15 +161,22 @@ class TheDecisionsFileTest(Refused):
         self.assertIn("assignment: yes", summary)
         self.assertNotIn("/run/paw-cli", summary)
         self.assertNotIn("paw_mcp_relay", summary)
-        # Not create_app arguments yet (the CLI runtimes are built in PR 6).
+        # The CLI runtimes are built from ``cli`` (Decision 0099, PR 6).
         self.assertEqual(
             set(wiring.create_app_arguments()),
-            {"compute", "local_model", "sandbox", "git_runner", "orchestrator_config"},
+            {
+                "compute",
+                "local_model",
+                "sandbox",
+                "git_runner",
+                "orchestrator_config",
+                "cli",
+            },
         )
 
     def test_the_sections_without_a_cli_rung_load_today(self):
         # [cloud], [agents.*] and an assignment inside local-only ladders: no
-        # CLI rung, so nothing is refused with the flag off.
+        # CLI rung, so no CLI runtime is built.
         text = decision_text(
             ladders=LOCAL_LADDERS,
             assignment="",
@@ -165,6 +189,8 @@ class TheDecisionsFileTest(Refused):
         self.assertIsNone(wiring.orchestrator_config.assignment)
         self.assertIn("cloud: enabled single_user", wiring.summary())
         self.assertNotIn("assignment", wiring.summary())
+        self.assertIsNone(wiring.cli_setup())
+        self.assertNotIn("cli", wiring.create_app_arguments())
 
     def test_cloud_disabled_and_absent(self):
         text = decision_text(cloud="[cloud]\n", ladders=LOCAL_LADDERS, assignment="")
@@ -280,7 +306,7 @@ class LadderChecksTest(Refused):
 
     def test_a_cli_rung_needs_the_cloud_enabled(self):
         for cloud in ("", "[cloud]\nenabled = false\n"):
-            with self.subTest(cloud=cloud), cli_rungs():
+            with self.subTest(cloud=cloud):
                 self.assertRefused(
                     decision_text(cloud=cloud),
                     "orchestrator.ladders.planner",
@@ -289,21 +315,20 @@ class LadderChecksTest(Refused):
 
     def test_a_cli_rung_needs_its_agents_section(self):
         claude_only = AGENTS.split("[agents.codex]")[0]
-        with cli_rungs():
-            self.assertRefused(
-                decision_text(agents=claude_only),
-                "orchestrator.ladders.worker",
-                reason="[agents.codex]",
-            )
-            self.assertRefused(
-                decision_text(agents=""),
-                "orchestrator.ladders.planner",
-                reason="[agents.claude]",
-            )
+        self.assertRefused(
+            decision_text(agents=claude_only),
+            "orchestrator.ladders.worker",
+            reason="[agents.codex]",
+        )
+        self.assertRefused(
+            decision_text(agents=""),
+            "orchestrator.ladders.planner",
+            reason="[agents.claude]",
+        )
 
     def test_codex_is_never_a_planners_rung(self):
         for planner in ('["codex", "local"]', '["local", "codex"]'):
-            with self.subTest(planner=planner), cli_rungs():
+            with self.subTest(planner=planner):
                 self.assertRefused(
                     decision_text(
                         ladders=LADDERS.replace(
@@ -319,12 +344,11 @@ class AssignmentTest(Refused):
     """Decision 0099, 4 and 7: ``[orchestrator.assignment]``."""
 
     def refused(self, assignment, where, reason=None, ladders=LADDERS):
-        with cli_rungs():
-            return self.assertRefused(
-                decision_text(assignment=assignment, ladders=ladders),
-                where,
-                reason=reason,
-            )
+        return self.assertRefused(
+            decision_text(assignment=assignment, ladders=ladders),
+            where,
+            reason=reason,
+        )
 
     def entry(self, role: str, value: str) -> str:
         lines = ASSIGNMENT.splitlines(keepends=True)
@@ -389,15 +413,14 @@ class AssignmentTest(Refused):
             self.entry("reviewer", '{ allowed = ["claude", "codex"], default = "x" }'),
             "orchestrator.assignment.reviewer.default",
         )
-        with cli_rungs():
-            wiring = load(
-                decision_text(
-                    assignment=self.entry(
-                        "reviewer",
-                        '{ allowed = ["claude", "codex"], default = "claude" }',
-                    )
+        wiring = load(
+            decision_text(
+                assignment=self.entry(
+                    "reviewer",
+                    '{ allowed = ["claude", "codex"], default = "claude" }',
                 )
             )
+        )
         self.assertEqual(wiring.assignment[NodeRole.REVIEWER].default, "claude")
 
     def test_the_shape(self):
@@ -458,7 +481,7 @@ class NoValueInErrorsTest(unittest.TestCase):
             ),
         )
         for text in cases:
-            with self.subTest(text=text[-60:]), cli_rungs():
+            with self.subTest(text=text[-60:]):
                 with self.assertRaises(RuntimeConfigError) as caught:
                     load(text)
                 self.assertNotIn(mark, str(caught.exception))

@@ -39,11 +39,11 @@ launcher, never in an argument or a log), the task on stdin, and reads its
 Stopping is SIGTERM, five seconds, SIGKILL (the launcher). Nothing of the
 conversation is kept or logged.
 
-The CLI rung stays disabled at assembly (Decision 0083, 11's 4: until the
-``CloudPolicy`` Decision; and the provider's terms are still being confirmed
-by the human). Production's launcher (a container under a systemd template
-unit) is a later change; :class:`~.cli_session.SubprocessLauncher` runs a CLI
-as a child process for development and the tests.
+The assembly builds it only when a ladder names it (Decision 0099, "PR
+の分け方" 6: ``agents/cli_wiring.py``), on production's launcher
+(:class:`~.cli_session.SystemdLauncher`: a container under a systemd template
+unit); :class:`~.cli_session.SubprocessLauncher` runs a CLI as a child process
+for development and the tests.
 """
 
 import asyncio

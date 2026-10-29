@@ -41,7 +41,13 @@ objects that run tasks, each wired to the others the way production needs:
   task (also late, through ``TrackerLateGpuCharge`` on the same
   ``BudgetTracker``); every local call is recorded in ``local_usage``
   (``PostgresLocalUsage``, Decision 0077). No ``CloudPolicy`` is injected
-  (Decision 0037, 14);
+  there (Decision 0037, 14): the local runtimes never fall back to the cloud;
+* with a ``CliSetup`` (the runtime configuration's ``[cloud]`` and
+  ``[agents.*]``, Decision 0099, 7) and only with it, the CLI runtimes
+  (``agents/cli_wiring.py``): the production ``CloudPolicy``, whose
+  ``recheck_in`` is the ``DagStore``'s ``cloud_send_check``, the orchestrator's
+  ``ConnectionService`` with the CLIs' session adapters on the deployment's
+  secret store, and the principals the sessions act for;
 * what the maintenance loop (``freshness_loop.build_freshness_loop``) runs: the
   freshness jobs and the task-end sweep (the application's lifespan starts it).
 
@@ -52,6 +58,7 @@ interface (the queue lease of issue #126, Decision 0046) touches one place.
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from paw_backend.agents.cli_wiring import CliSetup, build_cli_services
 from paw_backend.authz import Authorizer, PostgresAuditSink
 from paw_backend.compute import (
     ComputeScheduler,
@@ -236,6 +243,8 @@ def build_task_execution(
     scheduler: ComputeScheduler | None = None,
     local_runtimes: Mapping[str, LocalRuntime] | None = None,
     sandbox: SandboxSetup | None = None,
+    cli: CliSetup | None = None,
+    secret_store=None,
 ) -> TaskExecution:
     """Build the task execution of the application (module docstring).
 
@@ -251,7 +260,10 @@ def build_task_execution(
     whether or not an orchestrator is built (``TypeError``). ``sandbox``
     (Decision 0083, 2 and 6) adds the repository tools to the Tool Broker, run in
     sandboxes as the task creator's account (the same account directory), with
-    the tool runner's limit at 300 seconds (Decision 0083, 8)."""
+    the tool runner's limit at 300 seconds (Decision 0083, 8). ``cli``
+    (Decision 0099) adds the CLI runtimes under their labels (it needs the
+    ``orchestrator_config`` and ``secret_store``, the deployment's
+    ``FileSecretStore``: ``TypeError``)."""
     if not isinstance(database, Database):
         raise TypeError("database must be a Database")
     if not isinstance(authorizer, Authorizer):
@@ -263,6 +275,13 @@ def build_task_execution(
             raise TypeError("local_runtimes need an orchestrator_config")
     elif (runtimes is None) != (orchestrator_config is None):
         raise TypeError("runtimes and orchestrator_config come together")
+    if cli is not None:
+        if not isinstance(cli, CliSetup):
+            raise TypeError("cli must be a CliSetup")
+        if orchestrator_config is None:
+            raise TypeError("the cli runtimes need an orchestrator_config")
+        if secret_store is None:
+            raise TypeError("the cli runtimes need the secret store")
     if scheduler is not None and not isinstance(scheduler, ComputeScheduler):
         raise TypeError("scheduler must be a ComputeScheduler")
     gate = project_gate if project_gate is not None else ProjectStateGate()
@@ -332,6 +351,25 @@ def build_task_execution(
         runtimes = _with_local_runtimes(
             runtimes, local_runtimes, scheduler, budget, database
         )
+    cli_services = None
+    if cli is not None and orchestrator_config is not None:
+        cli_services = build_cli_services(
+            cli,
+            database=database,
+            authorizer=authorizer,
+            budget=budget,
+            queue=queue,
+            ladders=orchestrator_config.ladders,
+            node_seconds=orchestrator_config.node_timeout_seconds,
+            secret_store=secret_store,
+            database_timeout_seconds=settings.database_timeout_seconds,
+        )
+        combined = dict(runtimes or {})
+        for label, runtime in cli_services.runtimes.items():
+            if label in combined:
+                raise TypeError("a runtime label is given twice")
+            combined[label] = runtime
+        runtimes = combined
     if runtimes is not None and orchestrator_config is not None:
         worktrees = build_worktrees(
             settings, database, git_runner=git_runner, accounts=accounts
@@ -341,13 +379,20 @@ def build_task_execution(
             queue=queue,
             budget=budget,
             loops=LoopDetector(database),
-            store=DagStore(database),
+            store=DagStore(
+                database,
+                cloud_send_check=(
+                    None if cli_services is None else cli_services.policy.recheck_in
+                ),
+            ),
             activity=PostgresTaskActivity(database),
             tools=tools,
             authority=authority,
             runtimes=runtimes,
             config=orchestrator_config,
             worktrees=worktrees,
+            connections=None if cli_services is None else cli_services.connections,
+            principals=None if cli_services is None else cli_services.principals,
         )
     return TaskExecution(
         tasks=tasks,
