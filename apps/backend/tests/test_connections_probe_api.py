@@ -64,6 +64,9 @@ class HeldProbe(FakeAdapter):
 class ProbeHttpCase(ConnectionsHttpCase):
     def setUp(self) -> None:
         super().setUp()
+        # The history outlives the users and the connections (no foreign key).
+        with self.engine.begin() as connection:
+            connection.exec_driver_sql("TRUNCATE connection_probes")
         self.fake_passkey_step_up(self.admin)
 
     def use_probes(self, *probes):
