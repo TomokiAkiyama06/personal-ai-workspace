@@ -179,6 +179,26 @@ class ProtocolTest(BridgeCase):
         self.assertEqual(tool["name"], "bash")
         self.assertEqual(tool["inputSchema"]["required"], ["command"])
 
+    async def test_resources_are_not_served_and_reach_no_tool(self):
+        # Decision 0101, 3: Codex's MCP resource tools ask the bridge; it
+        # serves no resources, runs no tool, and logs the method only.
+        reader, writer = await self.connect()
+        with self.assertLogs("paw_backend.agents.bridge", "INFO") as logs:
+            for method, params in (
+                ("resources/list", {}),
+                ("resources/templates/list", {"cursor": "c"}),
+                ("resources/read", {"uri": "file:///etc/c4nary"}),
+                ("x/c4nary", {}),
+            ):
+                answer = await self.call(reader, writer, method, params)
+                self.assertEqual(answer["error"]["code"], -32601)
+        self.assertEqual(self.bridge.calls, 0)
+        self.assertEqual(len(logs.output), 4)
+        self.assertIn("resources/read", logs.output[2])
+        self.assertIn("(other)", logs.output[3])
+        for line in logs.output:
+            self.assertNotIn("c4nary", line)
+
     async def test_json_rpc_errors(self):
         reader, writer = await self.connect()
         self.assertEqual(
