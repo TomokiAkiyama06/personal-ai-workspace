@@ -29,6 +29,7 @@ from paw_backend.connections import (
     ConnectionUnavailableError,
     InputProblem,
     InvalidConnectionInputError,
+    ProbeTrigger,
     QuotaMetric,
     QuotaPeriod,
     SessionRequest,
@@ -203,6 +204,10 @@ CASES: dict[str, tuple[dict[str, Any], dict[str, list[Any]]]] = {
             "expected_revision": [1, b"0" * 32, ["0" * 32]],
         },
     ),
+    "start_probe": (
+        {"kind": ConnectionKind.CLAUDE, "trigger": ProbeTrigger.MANUAL},
+        {"kind": not_a_member("claude"), "trigger": not_a_member("manual")},
+    ),
     "disable": ({"kind": ConnectionKind.CODEX}, {"kind": not_a_member("codex")}),
     "enable": ({"kind": ConnectionKind.CODEX}, {"kind": not_a_member("codex")}),
     "disconnect": ({"kind": ConnectionKind.CODEX}, {"kind": not_a_member("codex")}),
@@ -349,6 +354,10 @@ class EveryArgumentIsCheckedTest(unittest.IsolatedAsyncioTestCase):
                 "write_collected_login",
                 "record_collection",
                 "finish_session",
+                # The probes this process runs in the background (Decision
+                # 0100, 6): no actor, nothing of a caller is looked at.
+                "wait_probe",
+                "stop_probes",
             },
         )
 

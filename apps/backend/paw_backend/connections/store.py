@@ -50,6 +50,7 @@ allow_explicit_clock=True)`` is a TEST SEAM that stands in for it so that a test
 moves time without sleeping; production code builds ``ConnectionStore(database)``.
 """
 
+import math
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -60,6 +61,7 @@ from typing import Any
 import psycopg
 from sqlalchemy import text
 
+from paw_backend.authz.audit import AUDIT_INSERT_SQL, AuditEvent, audit_values
 from paw_backend.connections.domain import (
     DEFAULT_PERIOD_TIMEZONE,
     UNLIMITED,
@@ -67,6 +69,7 @@ from paw_backend.connections.domain import (
     ConnectionStatus,
     CredentialSuspicion,
     FailureCode,
+    ProbeRefusal,
     QuotaMetric,
     QuotaPeriod,
     RefusalReason,
@@ -83,7 +86,17 @@ from paw_backend.connections.limits import (
     DEFAULT_DATABASE_TIMEOUT_SECONDS,
     MAX_CALL_TIMEOUT_SECONDS,
     MAX_DATABASE_TIMEOUT_SECONDS,
+    MAX_DURATION_MS,
     MAX_REAPED_PER_CYCLE,
+)
+from paw_backend.connections.probe import (
+    ACTION_PROBE,
+    PROBE_ABANDONED_AGE_SECONDS,
+    PROBE_HISTORY_ROWS,
+    PROBE_RESOURCE_KIND,
+    ProbeOutcome,
+    ProbeTrigger,
+    probe_available_at,
 )
 from paw_backend.connections.records import (
     ConnectionInfo,
@@ -292,6 +305,37 @@ class StatusChange:
 
     connection_id: uuid.UUID
     previous: ConnectionStatus
+
+
+@dataclass(frozen=True, slots=True)
+class ProbeStarted:
+    """A probe's row and its ``connection.probe`` audit event were committed
+    (Decision 0100, 3 and 9): the connection, the credential that will be
+    checked (not in the ``repr``) and the start (the database's clock)."""
+
+    connection_id: uuid.UUID
+    started_at: datetime
+    secret_handle: str = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class ProbeDenied:
+    """A probe was not started and nothing was written. ``reason`` ``None``:
+    no connection of that kind; ``retry_after_seconds`` with ``probe_cooldown``
+    (Decision 0100, 8)."""
+
+    reason: ProbeRefusal | None
+    connection_id: uuid.UUID | None = None
+    retry_after_seconds: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ProbeFinished:
+    """A probe's row was finished; ``change`` when its verdict was written to
+    the connection's status (``previous``: the status before)."""
+
+    connection_id: uuid.UUID
+    change: StatusChange | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -858,6 +902,254 @@ class ConnectionStore:
         if not rows:
             return None
         return StatusChange(rows[0][0], ConnectionStatus(rows[0][1]))
+
+    # --- health probes (Decision 0100) ---------------------------------------------
+
+    async def start_probe(
+        self,
+        kind: ConnectionKind,
+        *,
+        probe_id: uuid.UUID,
+        trigger: ProbeTrigger,
+        actor_id: uuid.UUID,
+        actor_role: str,
+        credential: tuple[str, int | None] | None = None,
+        enforce_spacing: bool,
+    ) -> ProbeStarted | ProbeDenied:
+        """Record a probe of the connection of ``kind`` and its ``connection.
+        probe`` audit event in ONE transaction (Decision 0100, 3 and 9: what
+        is not recorded is not sent), or say why not (nothing is written).
+
+        1. the connection's row ``FOR SHARE`` (none: ``ProbeDenied(None)``;
+           disabled: ``connection_disabled``, Decision 0100, 4's 3);
+        2. a running probe of the same credential: ``probe_running`` (the
+           partial unique index decides between two that start together);
+        3. the clock, read once; with ``enforce_spacing`` (a manual recheck)
+           the spacing after the credential's latest finished probe
+           (``probe_available_at``): ``probe_cooldown`` with the seconds left;
+        4. the ``running`` row and the audit event (``allow``, the trigger as
+           the reason, the probe's id as the correlation id).
+
+        ``credential``: the handle and the secret store's version the caller
+        read; the version is written only when the handle is still the
+        connection's (else NULL).
+        """
+
+        # One instant, read after the connection's lock (``_instant``): the
+        # start of the row, of the audit event and of the spacing's check.
+        async def work(
+            connection: psycopg.AsyncConnection,
+        ) -> ProbeStarted | ProbeDenied:
+            cursor = await connection.execute(
+                "SELECT id, secret_handle, enabled FROM shared_connections"
+                " WHERE kind = %(kind)s FOR SHARE",
+                {"kind": kind.value},
+            )
+            row = await cursor.fetchone()
+            if row is None:
+                return ProbeDenied(None)
+            connection_id, handle, enabled = row
+            if not enabled:
+                return ProbeDenied(ProbeRefusal.CONNECTION_DISABLED, connection_id)
+            cursor = await connection.execute(
+                "SELECT 1 FROM connection_probes WHERE connection_id = %(id)s"
+                " AND secret_handle = %(handle)s AND state = 'running' LIMIT 1",
+                {"id": connection_id, "handle": handle},
+            )
+            if await cursor.fetchone() is not None:
+                return ProbeDenied(ProbeRefusal.PROBE_RUNNING, connection_id)
+            now = await self._instant(connection)
+            if enforce_spacing:
+                cursor = await connection.execute(
+                    "SELECT outcome, finished_at FROM connection_probes"
+                    " WHERE connection_id = %(id)s AND secret_handle = %(handle)s"
+                    " AND state = 'finished'"
+                    " ORDER BY finished_at DESC, started_at DESC LIMIT %(rows)s",
+                    {"id": connection_id, "handle": handle, "rows": PROBE_HISTORY_ROWS},
+                )
+                history = [
+                    (ProbeOutcome(outcome), finished)
+                    for outcome, finished in await cursor.fetchall()
+                ]
+                available = probe_available_at(history)
+                if available is not None and now < available:
+                    wait = math.ceil((available - now).total_seconds())
+                    return ProbeDenied(
+                        ProbeRefusal.PROBE_COOLDOWN, connection_id, max(1, wait)
+                    )
+            version = None
+            if credential is not None and credential[0] == handle:
+                version = credential[1]
+            await connection.execute(
+                "INSERT INTO connection_probes (id, connection_id, kind,"
+                " secret_handle, credential_version, trigger, actor_id, state,"
+                " started_at) VALUES (%(id)s, %(connection)s, %(kind)s,"
+                " %(handle)s, %(version)s, %(trigger)s, %(actor)s, 'running',"
+                " %(now)s)",
+                {
+                    "id": probe_id,
+                    "connection": connection_id,
+                    "kind": kind.value,
+                    "handle": handle,
+                    "version": version,
+                    "trigger": trigger.value,
+                    "actor": actor_id,
+                    "now": now,
+                },
+            )
+            event = AuditEvent(
+                event_id=uuid.uuid4(),
+                correlation_id=probe_id,
+                occurred_at=now,
+                actor_id=actor_id,
+                actor_role=actor_role,
+                action=ACTION_PROBE,
+                resource_kind=PROBE_RESOURCE_KIND,
+                resource_id=connection_id,
+                decision="allow",
+                reason=trigger.value,
+            )
+            await connection.execute(AUDIT_INSERT_SQL, audit_values(event))
+            return ProbeStarted(connection_id, now, handle)
+
+        try:
+            return await self._database.transact_abortable(
+                work, timeout_seconds=self._timeout
+            )
+        except psycopg.errors.UniqueViolation:
+            # Another probe of the same credential started at the same time
+            # (the partial unique index): nothing of this one was committed.
+            return ProbeDenied(ProbeRefusal.PROBE_RUNNING)
+
+    async def finish_probe(
+        self,
+        probe_id: uuid.UUID,
+        *,
+        outcome: ProbeOutcome,
+        failure: FailureCode | None,
+        input_tokens: int | None,
+        output_tokens: int | None,
+        model: str | None,
+        status: ConnectionStatus | None,
+    ) -> ProbeFinished | None:
+        """Finish a ``running`` probe and, with ``status``, write its verdict
+        to the connection (one transaction). ``None``: the probe is not
+        running any more (the reaper closed it), nothing was changed.
+
+        The verdict is written only while the connection still points at the
+        credential that was checked AND no other verdict was recorded after the
+        probe started (``checked_at < started_at``, both the database's clock:
+        Decision 0100, 5). A session that found the credential expired while
+        the probe ran wins over the probe's later ``connected``. A ``connected``
+        verdict clears a collection's mark (Decision 0096, 5), as
+        ``record_health`` does.
+
+        Locks: the connection's row first (``FOR UPDATE``), then the probe's,
+        the order of ``start_probe`` (the connection ``FOR SHARE``, then the
+        probe's insert), so the two never wait for each other in a cycle.
+        """
+
+        async def work(connection: psycopg.AsyncConnection) -> ProbeFinished | None:
+            cursor = await connection.execute(
+                "SELECT connection_id, secret_handle, started_at"
+                " FROM connection_probes WHERE id = %(id)s",
+                {"id": probe_id},
+            )
+            row = await cursor.fetchone()
+            if row is None:
+                return None
+            connection_id, handle, started_at = row
+            await connection.execute(
+                "SELECT 1 FROM shared_connections WHERE id = %(id)s FOR UPDATE",
+                {"id": connection_id},
+            )
+            now = await self._instant(connection)
+            cursor = await connection.execute(
+                "UPDATE connection_probes SET state = 'finished',"
+                " outcome = %(outcome)s, failure_code = %(failure)s,"
+                " model = COALESCE(%(model)s, model),"
+                " input_tokens = %(input)s, output_tokens = %(output)s,"
+                " finished_at = GREATEST(%(now)s::timestamptz, started_at),"
+                " duration_ms = LEAST(%(max_ms)s, GREATEST(0, floor(extract(epoch"
+                " FROM (%(now)s::timestamptz - started_at)) * 1000))::bigint)"
+                " WHERE id = %(id)s AND state = 'running' RETURNING id",
+                {
+                    "id": probe_id,
+                    "outcome": outcome.value,
+                    "failure": None if failure is None else failure.value,
+                    "model": model,
+                    "input": input_tokens,
+                    "output": output_tokens,
+                    "now": now,
+                    "max_ms": MAX_DURATION_MS,
+                },
+            )
+            if await cursor.fetchone() is None:
+                return None
+            change = None
+            if status is not None:
+                cursor = await connection.execute(
+                    "WITH old AS (SELECT id, status FROM shared_connections"
+                    " WHERE id = %(id)s AND secret_handle = %(handle)s"
+                    " AND (checked_at IS NULL OR checked_at < %(started)s)"
+                    " FOR UPDATE)"
+                    " UPDATE shared_connections c SET status = %(status)s,"
+                    " suspect_at = CASE WHEN %(status)s = 'connected'"
+                    " THEN NULL ELSE c.suspect_at END,"
+                    " suspect_reason = CASE WHEN %(status)s = 'connected'"
+                    " THEN NULL ELSE c.suspect_reason END,"
+                    " checked_at = %(now)s, updated_at = %(now)s"
+                    " FROM old WHERE c.id = old.id RETURNING c.id, old.status",
+                    {
+                        "id": connection_id,
+                        "handle": handle,
+                        "started": started_at,
+                        "status": status.value,
+                        "now": now,
+                    },
+                )
+                written = await cursor.fetchone()
+                if written is not None:
+                    change = StatusChange(written[0], ConnectionStatus(written[1]))
+            return ProbeFinished(connection_id, change)
+
+        return await self._database.transact_abortable(
+            work, timeout_seconds=self._timeout
+        )
+
+    async def reap_abandoned_probes(
+        self, *, limit: int = MAX_REAPED_PER_CYCLE
+    ) -> tuple[uuid.UUID, ...]:
+        """Mark ``abandoned`` the probes still ``running`` more than
+        ``PROBE_ABANDONED_AGE_SECONDS`` after they started (the database's
+        clock: their process died, Decision 0100, 6), at most ``limit``,
+        oldest first; return their ids. The connections' status is not
+        touched. ``SKIP LOCKED`` and ``state = 'running'``: a concurrent reaper
+        or a late finish changes each row at most once."""
+        if isinstance(limit, bool) or not isinstance(limit, int):
+            raise InvalidConnectionInputError("limit", InputProblem.NOT_AN_INTEGER)
+        if not 1 <= limit <= MAX_REAPED_PER_CYCLE:
+            raise InvalidConnectionInputError("limit", InputProblem.OUT_OF_RANGE)
+        clock, params = self._clock_cte()
+        rows = await self._write(
+            f"WITH {clock}, doomed AS (SELECT id FROM connection_probes"
+            " WHERE state = 'running' AND started_at <"
+            " (SELECT ts FROM clock) - make_interval(secs => %(age)s)"
+            " ORDER BY started_at LIMIT %(limit)s FOR UPDATE SKIP LOCKED)"
+            " UPDATE connection_probes SET state = 'abandoned',"
+            " finished_at = GREATEST((SELECT ts FROM clock), started_at),"
+            " duration_ms = LEAST(%(max_ms)s, GREATEST(0, floor(extract(epoch FROM"
+            " ((SELECT ts FROM clock) - started_at)) * 1000))::bigint)"
+            " WHERE id IN (SELECT id FROM doomed) AND state = 'running'"
+            " RETURNING id",
+            {
+                **params,
+                "age": PROBE_ABANDONED_AGE_SECONDS,
+                "limit": limit,
+                "max_ms": MAX_DURATION_MS,
+            },
+        )
+        return tuple(row[0] for row in rows)
 
     # --- quotas ---------------------------------------------------------------------
 

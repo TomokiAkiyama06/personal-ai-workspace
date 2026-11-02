@@ -23,6 +23,7 @@ from paw_backend.authz.policy import Reason
 from paw_backend.connections.domain import (
     ConnectionKind,
     FailureCode,
+    ProbeRefusal,
     QuotaMetric,
     QuotaPeriod,
     RefusalReason,
@@ -222,6 +223,31 @@ class SessionSlotBusyError(ConnectionBusyError):
 
     def __init__(self) -> None:
         ConnectionsError.__init__(self, "The connection's session slot stayed taken")
+
+
+class ProbeRefusedError(ConnectionsError):
+    """A health probe was not started (Decision 0100, 7): the connection is
+    disabled, no probe adapter is configured for its kind, a probe of the same
+    credential is running, or (a manual recheck) the spacing of rechecks has
+    not passed (``retry_after_seconds``, at least 1). Nothing was recorded and
+    nothing was sent. ``code`` is the reason (the API's error code)."""
+
+    def __init__(
+        self, reason: ProbeRefusal, retry_after_seconds: int | None = None
+    ) -> None:
+        refusal = ProbeRefusal(reason)
+        if (retry_after_seconds is not None) != (
+            refusal is ProbeRefusal.PROBE_COOLDOWN
+        ):
+            raise ValueError("retry_after_seconds")
+        if retry_after_seconds is not None and (
+            type(retry_after_seconds) is not int or retry_after_seconds < 1
+        ):
+            raise ValueError("retry_after_seconds")
+        self.reason = refusal
+        self.code = refusal.value  # type: ignore[misc]
+        self.retry_after_seconds = retry_after_seconds
+        super().__init__(f"The probe was not started: {refusal.value}")
 
 
 _ADAPTER_MEMBERS = frozenset({"kind", "check_health", "run"})

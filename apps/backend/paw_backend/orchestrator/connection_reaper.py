@@ -22,6 +22,10 @@ What a reaped row says (the safe choice where the Decision is silent; README):
   ago (the longest call plus an hour for its settlement), by the database's clock,
   so a live call is never reaped.
 
+Each cycle also closes the health probes (Decision 0100, 6) that are still
+``running`` ten minutes after they started (``abandoned``; the connection's
+status is not changed; logged, not audited: the probe's row is the record).
+
 Every reaped row is audited (``connection.usage.abandon``, the ``system`` role, the
 usage row as the resource, its project). The audit is written after the settlement
 committed, best effort (a failure is logged by type): the usage row itself is the
@@ -146,8 +150,27 @@ class AbandonedCallReaper:
             await self._audit(correlation_id, usage.id, usage.project_id)
         if reaped:
             logger.warning("Settled %d abandoned connection call(s)", len(reaped))
+        await self._reap_probes()
         await self._collect_credentials()
         return len(reaped)
+
+    async def _reap_probes(self) -> None:
+        """The health probes left ``running`` by a process that died (Decision
+        0100, 6): ``abandoned`` ten minutes after they started; the
+        connections' status is not changed. Best effort: a failure is logged by
+        type and tried again next cycle."""
+        try:
+            abandoned = await self._store.reap_abandoned_probes(
+                limit=MAX_REAPED_PER_CYCLE
+            )
+        except Exception as error:
+            logger.error(
+                "Closing abandoned connection probes failed (%s)",
+                error_class_of(error),
+            )
+            return
+        if abandoned:
+            logger.warning("Closed %d abandoned connection probe(s)", len(abandoned))
 
     async def _collect_credentials(self) -> None:
         """The secret store's cleanup (Decision 0087, 1): the stored credentials

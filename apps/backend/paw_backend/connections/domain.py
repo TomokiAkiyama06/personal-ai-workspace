@@ -146,6 +146,16 @@ class Unlimited(StrEnum):
 UNLIMITED = Unlimited.UNLIMITED
 
 
+class ProbeRefusal(StrEnum):
+    """Why a health probe was not started (Decision 0100, 7: the API's error
+    codes and the reason of the ``connection.probe`` denial)."""
+
+    CONNECTION_DISABLED = "connection_disabled"
+    PROBE_NOT_CONFIGURED = "probe_not_configured"
+    PROBE_RUNNING = "probe_running"
+    PROBE_COOLDOWN = "probe_cooldown"
+
+
 class RefusalReason(StrEnum):
     """Why a use of a connection was refused before it started.
 

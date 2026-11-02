@@ -43,6 +43,7 @@ from paw_backend.connections.errors import (
     DuplicateAdapterError,
     InputProblem,
     InvalidConnectionInputError,
+    ProbeRefusedError,
     QuotaExceededError,
     SessionSlotBusyError,
     StaleConnectionCredentialError,
@@ -50,6 +51,15 @@ from paw_backend.connections.errors import (
     TaskBudgetError,
     TaskNotUsableError,
     UnknownAdapterError,
+)
+from paw_backend.connections.probe import (
+    PROBE_TIMEOUT_SECONDS,
+    ProbeOutcome,
+    ProbeRefusal,
+    ProbeReport,
+    ProbeResult,
+    ProbeTicket,
+    ProbeTrigger,
 )
 from paw_backend.connections.records import (
     ConnectionAvailability,
@@ -127,6 +137,14 @@ __all__ = [
     "FailureCode",
     "InputProblem",
     "InvalidConnectionInputError",
+    "PROBE_TIMEOUT_SECONDS",
+    "ProbeOutcome",
+    "ProbeRefusal",
+    "ProbeRefusedError",
+    "ProbeReport",
+    "ProbeResult",
+    "ProbeTicket",
+    "ProbeTrigger",
     "Quota",
     "QuotaExceededError",
     "QuotaMetric",

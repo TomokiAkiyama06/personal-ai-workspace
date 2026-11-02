@@ -2036,6 +2036,17 @@ class ConnectionAdapter(Protocol):
 Health Check の結果は、確認した Credential（Handle）がまだ現在のものであるときだけ保存します（差し替え中に終わった古い確認が、新しい Credential を `expired` にしません）。
 一般の User には `availability` が種類ごとの `available`（有効・確認済み・Adapter あり）だけを返します（理由は見せません）。
 
+### Health の Probe（Issue #306、[Decision 0100](../../docs/decisions/0100-cli-connection-health-probe.md)）
+
+`connections/probe.py`・`ConnectionService.start_probe`・Migration `0306`（`connection_probes`）です。CLI の Connection を、固定の Prompt で Tool のない短い Session（Probe の Adapter の `check_health`。Claude の Adapter は後続の PR）で確かめます。
+
+- `start_probe(principal, kind, trigger)`（`admin.config.manage`）: `trigger` は `attach` / `replace`（Admin の結び付け・差し替えの直後に 1 回）か `manual`（Admin の再確認）。**送る前に** `connection_probes` の `running` の行と `audit_events` の `connection.probe`（`allow`、理由は `trigger`、相関 ID は Probe の ID）を 1 つの Transaction で書き、書けなければ何も送りません。Probe は Process の中の背景の Task で走り、`start_probe` はすぐ `ProbeTicket` を返します（`wait_probe` で待つ。`stop_probes` は Shutdown で取り消し、行を `cancelled` で閉じる）。
+- 断る理由（`ProbeRefusedError`、何も書かず何も送らない）: Probe の Adapter がない（`probe_not_configured`）、Connection が無効（`connection_disabled`）、同じ Credential の Probe が走っている（`probe_running`。部分 Unique Index `uq_connection_probes_running` が同時の開始を 1 つにする）、手動の再確認の間隔（`probe_cooldown`。同じ Credential の直前の Probe の終わりから 60 秒、続けて `expired` / `unavailable` のたびに倍、上限 900 秒。`busy` / `cancelled` は数えない。自動の Probe には当てない）。手動の拒否は `connection.probe` の `deny` で Audit し、自動の拒否は Log だけ。Connection がなければ `ConnectionNotFoundError`。
+- 結果: `connected` / `expired`（`AdapterFailure(EXPIRED)`）/ `unavailable`（期限 `health_timeout_seconds`・その他の失敗・不正な答え）/ `busy`（Adapter の `ProbeReport`）/ `cancelled`。Adapter は `ConnectionStatus` か `ProbeReport`（結果・失敗の Code・Token・Model）を返せます。行には Token と Model と時間（DB の時計）が残り、Prompt・答え・Credential は残りません。**`connection_usage`・Quota・Task の Budget には入りません**（Task にも User にも属さない）。
+- 状態に書くのは `connected` / `expired` / `unavailable`（Rate Limit を除く）だけで、`busy` / `cancelled` / Rate Limit は状態も `checked_at` も変えません。書くのは、Connection がまだ確かめた Credential を指し、**Probe の開始の後に別の判定が記録されていない**（`checked_at < started_at`）ときだけです（Probe の途中で Session が `expired` を記録したら、それが残る）。終わりは `connection.probe_result`（System、理由は結果）、状態の変化は今までどおり `connection.status`。
+- 落ちた Process が残した `running` の行は、`AbandonedCallReaper` が開始から 10 分で `abandoned` にします（状態は変えない）。
+- Actor のない `check_health(kind)` は今までどおり（行を作らない Backend 内部の確認）で、本番で呼ぶ所はありません。
+
 ### Quota
 
 1 つの Quota は `(User, Connection の種類, 指標, 期間)` ごとの上限で、数値（0 以上 10^12 以下）か **`UNLIMITED`**（DB では `NULL`）です。**`None` や 0 は Unlimited ではありません。**
