@@ -4,7 +4,7 @@
 
 [Decision 0083](../../../../docs/decisions/0083-agent-runtime-adapters.md) の 6 と [Decision 0087](../../../../docs/decisions/0087-cli-secret-store-and-egress.md) の 3・4（どちらも Approved）。
 Backend の側は `paw_backend/agents/cli_session.py` の `SystemdLauncher`、`claude_cli.py` の `ClaudeSessionAdapter` / `ClaudeCliRuntime`、`codex_cli.py` の `SystemdCodexLauncher` / `CodexSessionAdapter` / `CodexCliRuntime`（[Decision 0089](../../../../docs/decisions/0089-codex-cli-runtime-route.md)）、`bridge.py` の `McpBridge`。
-CLI の段は `/etc/paw/runtime.toml` の Ladder が `claude` / `codex` を名指したときだけ組み立てます（Decision 0099 の「PR の分け方」6。手順は `docs/DEPLOYMENT_UPDATE.md` の「The CLI runtimes」）。この Directory の File は、有効にする前に Human が配備して確かめるためのものです。Codex は `VERIFIED_VERSIONS` が空の間は何も送りません。
+CLI の段は `/etc/paw/runtime.toml` の Ladder が `claude` / `codex` を名指したときだけ組み立てます（Decision 0099 の「PR の分け方」6。手順は `docs/DEPLOYMENT_UPDATE.md` の「The CLI runtimes」）。この Directory の File は、有効にする前に Human が配備して確かめるためのものです。Codex は確かめた版（`VERIFIED_VERSIONS`。今は `0.156.1`）以外では何も送りません。
 
 ## 流れ
 
@@ -35,7 +35,7 @@ Egress（[Decision 0091](../../../../docs/decisions/0091-egress-per-session-sock
 
 Memory 不足（[Decision 0092](../../../../docs/decisions/0092-runtime-oom-kill-detection.md) の 4、Issue #251）: Unit は `OOMPolicy=stop`・`MemoryAccounting=yes` で、Program は `podman run --cgroups=split` で Container の cgroup を Unit の cgroup の下に置く。Container の中の OOM Kill で Unit 全体が止まり、`Result=oom-kill` で終わる。`systemctl stop` でその `Result` は消えうるので、Backend（`_UnitProcess.stop()`）は止める**前に** `ActiveState`・`Result`・`ExecMainStatus` を読んで覚える（CLI が自分で終わった後なら、Unit が `active` から離れるのを最大 10 秒待つ）。`submit` の前に OOM で終わった Session は `AgentOutOfMemory`。Session の Directory は終わりに Backend が消す（Token の File も一緒に消える）。
 
-## Codex の版を確かめる（Decision 0101 の 4。PR #310）
+## Codex の版を確かめる（[Decision 0101](../../../../docs/decisions/0101-codex-mcp-resource-tools-exception.md) の 4）
 
 `smoke_codex_recorder.py` は、本物の `CodexCliRuntime` → `CodexSessionAdapter`（`codex app-server`）→ Bridge → Relay を 1 つの Reviewer の Node で動かし、Session の `config.toml`（Backend の `session_config`）に `127.0.0.1` の記録用の Model Provider を 1 つ足す。`auth.json` は Dummy で、**OpenAI には何も送らない**。本物の Login（`~/.codex/auth.json` など）は使わない。`paw` ではなく開発する User で、確かめる版の `codex` を Scratch に置いて動かす（User の `codex` を上書きしない）:
 

@@ -427,10 +427,12 @@ class TotalsTest(CodexCase):
 
 
 class VersionTest(CodexCase):
-    def test_no_version_is_verified_yet(self):
-        self.assertEqual(VERIFIED_VERSIONS, frozenset())
+    def test_only_the_smoke_tested_version_is_verified(self):
+        # Decision 0101, 4 (#305): 0.156.1 passed the recorder smoke.
+        self.assertEqual(VERIFIED_VERSIONS, frozenset({"0.156.1"}))
 
-    async def test_the_shipped_list_starts_nothing_with_the_credential(self):
+    async def test_the_shipped_list_starts_nothing_with_another_version(self):
+        self.assertNotIn(VERSION, VERIFIED_VERSIONS)
         outcome = await self.run_node(
             [{"usage": [1, 1]}], adapter=self.adapter(verified=VERIFIED_VERSIONS)
         )
@@ -439,6 +441,16 @@ class VersionTest(CodexCase):
         self.assertEqual(self.credentials.placed, [])
         self.assertEqual(self.connections.raw.failure.value, "invalid_response")
         self.assertEqual(outcome.error_class, "ValueError")
+
+    async def test_the_shipped_list_runs_the_verified_version(self):
+        outcome = await self.run_node(
+            [{"call": "submit", "arguments": {"summary": "ok"}}, {"usage": [3, 1]}],
+            adapter=self.adapter(verified=VERIFIED_VERSIONS),
+            version="0.156.1",
+        )
+        self.assertEqual(outcome.result.summary, "ok")
+        self.assertEqual(len(self.credentials.placed), 1)
+        self.assertIsNone(self.connections.raw.failure)
 
     async def test_another_version_is_refused(self):
         await self.run_node([{"usage": [1, 1]}], version="0.163.0")

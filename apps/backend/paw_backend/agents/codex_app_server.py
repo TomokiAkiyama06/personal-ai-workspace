@@ -17,7 +17,7 @@ rpc.rs`` of ``rust-v0.162.1``). A session is:
 
 * the ``initialize`` answer's ``userAgent`` carries the CLI's version; a
   version that is not in the verified list is refused (``version``: Decision
-  0089, 2. The list starts empty: no version has passed the smoke test yet);
+  0089, 2 and Decision 0101, 4: only versions whose smoke test passed);
 * ``thread/tokenUsage/updated``: the growth of ``total`` since the last one is
   one :class:`Turn` (a repeated notification, sent again with a rate-limit
   update, adds nothing; a ``total`` that shrinks is refused, ``usage``);
@@ -46,9 +46,11 @@ from typing import Any, Final
 from paw_backend.agents.claude_stream import PAW_SERVER
 
 #: The CLI versions whose tool list passed the smoke test (Decision 0089, 2 and
-#: Decision 0101: every request's ``tools`` passed :func:`tool_check`). Empty
-#: until then: no session is started with any version.
-VERIFIED_VERSIONS: Final[frozenset[str]] = frozenset()
+#: Decision 0101: every request's ``tools`` passed :func:`tool_check`). No
+#: session is started with any other version. ``0.156.1``: issue #305
+#: (2026-10-29; the feature list compared, the fake's shapes checked against
+#: its ``app-server-protocol``, the recorder smoke passed).
+VERIFIED_VERSIONS: Final[frozenset[str]] = frozenset({"0.156.1"})
 
 #: The MCP resource tools Codex offers whenever an MCP server is configured
 #: (``add_mcp_resource_tools``; no setting removes them), allowed by Decision
