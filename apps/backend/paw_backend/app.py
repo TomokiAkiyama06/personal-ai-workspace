@@ -39,6 +39,8 @@ from paw_backend.compute.wiring import (
     build_compute,
 )
 from paw_backend.config import Settings
+from paw_backend.connections.probe import PROBE_SHUTDOWN_WAIT_SECONDS
+from paw_backend.connections.service import ConnectionService
 from paw_backend.connections.wiring import (
     build_connection_service,
     build_secret_store,
@@ -83,6 +85,26 @@ def _retrieve(task: asyncio.Task) -> None:
     """Read a finished task's result (so that no "never retrieved" warning)."""
     if task.done() and not task.cancelled():
         task.exception()
+
+
+async def stop_connection_probes(
+    service: ConnectionService | None, timeout_seconds: float
+) -> None:
+    """Stop the health probes the HTTP layer started (Decision 0100, 6), while
+    the database still works: each stops its CLI and closes its row
+    ``cancelled``. The wait is bounded: a probe that takes longer is given up on
+    (its row stays ``running`` until the reaper marks it ``abandoned``)."""
+    if service is None:
+        return
+    stopping = asyncio.create_task(service.stop_probes())
+    _, pending = await asyncio.wait({stopping}, timeout=timeout_seconds)
+    if pending:
+        logger.warning("The connection probes did not stop within their wait")
+        stopping.add_done_callback(_retrieve)
+    elif not stopping.cancelled() and (error := stopping.exception()) is not None:
+        logger.warning(
+            "The connection probes could not be stopped (%s)", type(error).__name__
+        )
 
 
 def worker_ids(count: int) -> list[str]:
@@ -370,6 +392,10 @@ def create_app(
                         _retrieve(worker)
                     else:
                         worker.add_done_callback(_retrieve)
+            await stop_connection_probes(
+                app.state.connections,
+                max(settings.shutdown_timeout_seconds, PROBE_SHUTDOWN_WAIT_SECONDS),
+            )
             if compute_services is not None and compute_services.full_gpu is not None:
                 # A start in progress is abandoned: the scheduler goes back to
                 # normal, the models it unloaded are loaded again and the held

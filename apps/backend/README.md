@@ -266,7 +266,7 @@ Endpoint は `/api/v1` 以下です。OpenAPI Schema は `/api/v1/openapi.json` 
 | `/api/v1/memory/*` | Memory 画面の Scope の木と件数・一覧（検索）・履歴・出典、編集と復元（`expected_version`、衝突は 409 `memory_version_conflict`）。入口は本人の Memory への `memory.read`。[Memory の HTTP API](#memory-の-http-apiissue-186decision-0068approved) |
 | `/api/v1/memory/preferences/*` | Inferred Preference の候補と根拠・推奨 Scope、確認（`acknowledge_high_risk` なしの高リスクは 409）・保存しない・自由入力の構造化プレビュー。入口は本人の Memory への `memory.read`。[Inferred Preference の確認 Flow](#inferred-preference-の確認-flowissue-38paw-044decision-0081) |
 | `/api/v1/usage`、`/api/v1/quotas/me`、`/api/v1/users/{id}/quotas*`、`/api/v1/admin/users` | 使用状況の集計、Quota の閲覧と変更（Passkey Step-up）、User の一覧。[使用状況と Quota の HTTP API](#使用状況と-quota-の-http-apiissue-187decision-0069approved) |
-| `/api/v1/admin/connections*` | 共有の Codex / Claude の Connection の状態と、Secret Store の Credential の Handle の結び付け・差し替え（Compare-and-swap）・切断（`admin.config.manage` + Passkey Step-up）。[Connection の Credential の HTTP API](#connection-の-credential-の-http-apiissue-277) |
+| `/api/v1/admin/connections*` | 共有の Codex / Claude の Connection の状態と、Secret Store の Credential の Handle の結び付け・差し替え（Compare-and-swap）・切断、Health の再確認（`admin.config.manage` + Passkey Step-up）。[Connection の Credential の HTTP API](#connection-の-credential-の-http-apiissue-277) |
 
 Readiness は 200 または 503 で、Body の形は同じです。
 
@@ -2038,7 +2038,7 @@ Health Check の結果は、確認した Credential（Handle）がまだ現在�
 
 ### Health の Probe（Issue #306、[Decision 0100](../../docs/decisions/0100-cli-connection-health-probe.md)）
 
-`connections/probe.py`・`ConnectionService.start_probe`・Migration `0306`（`connection_probes`）・`agents/claude_probe.py` です。CLI の Connection を、固定の Prompt で Tool のない短い Session（Probe の Adapter の `check_health`）で確かめます。
+`connections/probe.py`・`ConnectionService.start_probe`・Migration `0306`（`connection_probes`）・`agents/claude_probe.py`・`api/v1/connections.py`（Route は [Connection の Credential の HTTP API](#connection-の-credential-の-http-apiissue-277)）です。CLI の Connection を、固定の Prompt で Tool のない短い Session（Probe の Adapter の `check_health`）で確かめます。
 
 - **Claude の Probe の Adapter**（`ClaudeProbeAdapter`）: Node の Session と同じ Launcher・Image・Egress（本番は `SystemdLauncher`、`/opt/paw/start-claude`、`127.0.0.1:3128`）で、`--tools ""`・空の MCP の設定（`--strict-mcp-config`）・`--allowedTools` なし・`--max-turns 1`・固定の System Prompt と標準入力（`PROBE_SYSTEM_PROMPT`・`PROBE_PROMPT`。Task・User の値を含まない）。`system/init` に Tool も MCP の Server もなく、Model の呼び出しがちょうど 1 回、`result` が成功で、答えが `PAW_PROBE_OK` を含むときだけ `connected`。認証の `api_retry` は `expired`、それ以外は `unavailable`（Rate Limit は `rate_limited`、形の違いは `invalid_response`、結果のない終わりは `internal_error`）。答えは判定にだけ使い、残しません。`run` は何も起動せず失敗します。
 - **登録**（`agents/cli_wiring.py` の `build_probe_adapters`）: `[cloud] enabled = true` で `[agents.claude]` があれば、**Ladder が `claude` を名指さなくても**、Orchestrator の `ConnectionService` と HTTP 側の `ConnectionService`（`connections/wiring.py`。このときだけ Resolver が Secret Store）の両方に登録し、どちらも `health_timeout_seconds` は `PROBE_TIMEOUT_SECONDS`（120 秒）。そのため `runtime.toml` は、Orchestrator があり `[cloud] enabled = true` と `[agents.*]` があれば `create_app` の `cli` を渡し（CLI の Runtime は Ladder が名指したものだけ）、起動の検査はそのとき `PAW_SECRET_STORE_DIR` と `session_base = PAW_CLI_SESSION_DIR` を求めます。Codex の Probe は #305 の後。
@@ -2177,17 +2177,24 @@ CHECK 制約が、状態と終了・時間・Token・失敗の種類の対応（
 
 | Endpoint | 認可 | 内容 |
 | --- | --- | --- |
-| `GET /api/v1/admin/connections` | `admin.config.manage` | 種類ごと（`codex`・`claude`、未設定も）に、状態（`connected` / `unavailable` / `expired`）・有効・最後の確認・Credential（Store が持つか `stored`、版 `version`）・`revision`。値も Handle も返さない |
+| `GET /api/v1/admin/connections` | `admin.config.manage` | 種類ごと（`codex`・`claude`、未設定も）に、状態（`connected` / `unavailable` / `expired`）・有効・最後の確認・Credential（Store が持つか `stored`、版 `version`）・`revision`・`last_probe`・`probe_available_at`。値も Handle も返さない |
 | `POST /api/v1/admin/connections/{kind}` | 同上 + **Passkey Step-up** | Body `{"secret_handle": "cred_..."}`。Connection を作る（201）。既にあれば 409 `connection_exists` |
 | `PUT /api/v1/admin/connections/{kind}/credential` | 同上 | Body `{"secret_handle", "expected_revision"}`。`GET` の `revision` の Credential のままのときだけ差し替える（同じ文の条件。違えば 409 `stale_connection_credential`。読み直す） |
 | `DELETE /api/v1/admin/connections/{kind}` | 同上 | Connection を消す（使用量の履歴は残る）。参照されなくなった Credential は消える |
+| `POST /api/v1/admin/connections/{kind}/health-check` | 同上 | Body なし。Health の Probe を 1 回、背景で始める（202 `{"probe": {"id", "trigger": "manual", "state": "running", "started_at"}}`）。終わりは `GET` の `last_probe` で読む。下の「Health の再確認」 |
 
-- Store がその種類の Credential として持っていない Handle（無い・消えた・別の種類）は 422 `credential_not_stored`。Handle の形でない値は 422 `validation_error`（値は返さない）。Secret Store が設定されていない構成（`PAW_SECRET_STORE_DIR` なし）は、Handle を確かめられないので、結び付けと差し替えを 503 `secret_store_not_configured` で断る。
+- Store がその種類の Credential として持っていない Handle（無い・消えた・別の種類）は 422 `credential_not_stored`。Handle の形でない値は 422 `validation_error`（値は返さない）。Secret Store が設定されていない構成（`PAW_SECRET_STORE_DIR` なし）は、Handle を確かめられないので、結び付けと差し替えを 503 `secret_store_not_configured` で断る（再確認も同じ）。
 - `revision` は Connection の ID と Handle の一方向の Digest（Handle は読み戻せない）。差し替えと Connection の作り直しで変わり、Rotation（同じ Credential の Refresh）と Health Check では変わらない。
-- Audit: `connection.connect` / `.replace` / `.disconnect`（成功は `succeeded`、古い `revision` は `.replace` の Deny `stale_connection_credential`、Step-up の拒否は各 Action の Deny `step_up_required` / `step_up_method_insufficient`）。ID と Enum だけで、Handle も値も入れない。
+- Audit: `connection.connect` / `.replace` / `.disconnect` / `.probe`（成功は `succeeded`（`.probe` は `trigger`）、古い `revision` は `.replace` の Deny `stale_connection_credential`、Step-up の拒否は各 Action の Deny `step_up_required` / `step_up_method_insufficient`）。ID と Enum だけで、Handle も値も入れない。
 - Step-up: Decision 0016 は Credential の差し替え・削除を PAW-023 の後に Step-up の対象にすると承認している。結び付け（初めての登録）も Credential を扱う変更なので同じにした。
-- 結び付けた・差し替えた Connection は、Health Check が確かめるまで `unavailable`（Decision 0016）。Health Check を動かすのは Codex / Claude の Runtime の側（`CloudPolicy` の承認の後）。
-- Test: `tests/test_connections_api.py`（HTTP、権限なし・Step-up なしの拒否、存在しない・別の種類の Handle、CAS、Audit、値と Handle が答え・Audit・Log に出ないこと）、`tests/test_connections_credential_store.py`（Service の状態と CAS）。
+- 結び付けた・差し替えた Connection は、Probe が確かめるまで `unavailable`（Decision 0016）。結び付け・差し替えが Commit した後、Route が Probe を 1 回、背景で始める（`trigger` は `attach` / `replace`。新しい Step-up も間隔の抑えもない。[Decision 0100](../../docs/decisions/0100-cli-connection-health-probe.md) の 6）。応答（201 / 200）は Probe を待たず、Commit した内容から作るので `last_probe` と `probe_available_at` は null。始められなかった Probe（Adapter がない・無効・同じ Credential の Probe が走っている・DB の失敗）は変更を失敗にせず、Log に出るだけで、状態は `unavailable` のまま。
+- Test: `tests/test_connections_api.py`（HTTP、権限なし・Step-up なしの拒否、存在しない・別の種類の Handle、CAS、Audit、値と Handle が答え・Audit・Log に出ないこと）、`tests/test_connections_credential_store.py`（Service の状態と CAS）、`tests/test_connections_probe_api.py`（自動の Probe、再確認、`last_probe`、Shutdown）。
+
+#### Health の再確認（Decision 0100 の 7、8）
+
+- 拒否（何も記録せず何も送らない。`connection.probe` の Deny の Audit）: 404 `not_found`（Connection がない）、409 `connection_disabled`（Admin が無効にしている）、409 `probe_not_configured`（その種類の Probe の Adapter がない: `[cloud] enabled = true` と `[agents.claude]` がない配備、Codex は #305 の後の PR まで。Connection の有無より先に見る）、409 `probe_running`（同じ Credential の Probe が走っている）、429 `probe_cooldown`（`Retry-After` の Header に秒）。
+- 読み取り: `last_probe` は **いま結び付いている Credential** の最新の Probe（`{"trigger", "state", "outcome", "started_at", "finished_at"}`。`state` は `running` / `finished` / `abandoned`、`outcome` は `running` と `abandoned` の間は null。なければ null）。差し替えの前の Credential の判定は見せない。答えの文・Token・Handle・`failure_code` は出さない。`probe_available_at` は次に再確認できる時刻で、いまできるなら null（間隔は上の「Health の Probe」）。
+- Shutdown: Lifespan は Worker を止めた後、DB を閉じる前に `stop_probes` を呼ぶ（CLI を止め、行を `cancelled` で閉じる。状態は変えない）。待つのは `PROBE_SHUTDOWN_WAIT_SECONDS`（20 秒。`PAW_SHUTDOWN_TIMEOUT_SECONDS` の方が長ければそちら）までで、それを超えた Probe の行は Reaper が 10 分で `abandoned` にする。
 
 ### Test
 

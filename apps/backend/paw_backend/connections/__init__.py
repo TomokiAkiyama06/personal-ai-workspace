@@ -60,6 +60,7 @@ from paw_backend.connections.probe import (
     ProbeResult,
     ProbeTicket,
     ProbeTrigger,
+    ProbeView,
 )
 from paw_backend.connections.records import (
     ConnectionAvailability,
@@ -145,6 +146,7 @@ __all__ = [
     "ProbeResult",
     "ProbeTicket",
     "ProbeTrigger",
+    "ProbeView",
     "Quota",
     "QuotaExceededError",
     "QuotaMetric",

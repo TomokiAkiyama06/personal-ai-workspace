@@ -16,18 +16,27 @@ are Security-sensitive and take the Step-up once PAW-023 exists).
   otherwise: read the status again).
 * ``DELETE /admin/connections/{kind}``: detach it (the connection goes, its
   usage history stays; a credential nothing refers to any more is deleted).
+* ``POST /admin/connections/{kind}/health-check``: the Admin's recheck (Decision
+  0100, 7): one health probe in the background (202 with the probe; its end is
+  read from ``GET /admin/connections``). 409 ``connection_disabled`` /
+  ``probe_not_configured`` / ``probe_running``, 429 ``probe_cooldown`` with
+  ``Retry-After``.
 
 Every route needs ``admin.config.manage`` (Owner / Admin), and the service
 authorizes again and audits (``connection.connect`` / ``.replace`` /
-``.disconnect``, ids and enums only). The three changes need a recent
-**Passkey Step-up** of the session, as the quota changes (Decision 0069, 5):
-a refusal is audited as a denial of the action with the step-up reason. A
-handle the store does not hold for that kind is 422 ``credential_not_stored``.
+``.disconnect`` / ``.probe``, ids and enums only). The changes and the recheck
+need a recent **Passkey Step-up** of the session, as the quota changes (Decision
+0069, 5): a refusal is audited as a denial of the action with the step-up reason.
+A handle the store does not hold for that kind is 422 ``credential_not_stored``.
 Without a configured secret store (``PAW_SECRET_STORE_DIR``) a handle could
-not be checked: attaching and replacing answer 503
+not be checked: attaching, replacing and rechecking answer 503
 ``secret_store_not_configured``.
 A newly attached or replaced credential is ``unavailable`` until a health
-check verifies it (Decision 0016). No route here takes or shows a plaintext.
+check verifies it (Decision 0016): once either change committed, one probe
+starts in the background (Decision 0100, 6; no further Step-up, no spacing) and
+the answer does not wait for it. A probe that could not start never turns the
+committed change into an error: the status stays ``unavailable`` and the Admin
+rechecks. No route here takes or shows a plaintext.
 """
 
 import asyncio
@@ -62,8 +71,13 @@ from paw_backend.connections import (
     ConnectionService,
     CredentialNotStoredError,
     InvalidConnectionInputError,
+    ProbeRefusal,
+    ProbeRefusedError,
+    ProbeTrigger,
+    ProbeView,
     StaleConnectionCredentialError,
 )
+from paw_backend.connections.probe import ACTION_PROBE
 from paw_backend.connections.service import (
     ACTION_CONNECT,
     ACTION_DISCONNECT,
@@ -71,6 +85,7 @@ from paw_backend.connections.service import (
 )
 from paw_backend.db import DatabaseDisposedError
 from paw_backend.errors import ApiError
+from paw_backend.research.providers.broker import log_type_name
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +99,13 @@ _RESOURCE_CONNECTION = "connection"
 _AUDIT_TIMEOUT_SECONDS = 3.0
 # ``cred_`` and 32 hex digits; the service checks the shape (and never echoes it).
 _HANDLE = Annotated[StrictStr, Field(min_length=1, max_length=64)]
+# The fixed message of a refused recheck (Decision 0100, 7).
+_PROBE_REFUSALS = {
+    ProbeRefusal.CONNECTION_DISABLED: "The connection is disabled",
+    ProbeRefusal.PROBE_NOT_CONFIGURED: "No health probe is configured for this kind",
+    ProbeRefusal.PROBE_RUNNING: "A health probe of this credential is running",
+    ProbeRefusal.PROBE_COOLDOWN: "Too soon after the last health probe",
+}
 
 
 # -- models ---------------------------------------------------------------------------
@@ -111,6 +133,18 @@ class CredentialOut(BaseModel):
     version: int | None
 
 
+class ProbeOut(BaseModel):
+    """The latest probe of the attached credential: never its answer, tokens,
+    handle or failure code (Decision 0100, 7)."""
+
+    trigger: Literal["attach", "replace", "manual"]
+    state: Literal["running", "finished", "abandoned"]
+    # null while running, and for a probe its process never finished.
+    outcome: Literal["connected", "expired", "unavailable", "busy", "cancelled"] | None
+    started_at: datetime
+    finished_at: datetime | None
+
+
 class ConnectionOut(BaseModel):
     kind: Literal["codex", "claude"]
     configured: bool
@@ -124,10 +158,26 @@ class ConnectionOut(BaseModel):
     credential: CredentialOut | None = None
     # The compare-and-swap token of a replacement (not the handle).
     revision: str | None = None
+    # The latest probe and when the next recheck may start (null: now). Only the
+    # list reads them: the answer of an attach / replace comes from what was
+    # committed, so null there (Decision 0100, 7).
+    last_probe: ProbeOut | None = None
+    probe_available_at: datetime | None = None
 
 
 class ConnectionsResponse(BaseModel):
     connections: list[ConnectionOut]
+
+
+class ProbeStartedOut(BaseModel):
+    id: uuid.UUID
+    trigger: Literal["manual"]
+    state: Literal["running"]
+    started_at: datetime
+
+
+class HealthCheckAccepted(BaseModel):
+    probe: ProbeStartedOut
 
 
 # -- helpers --------------------------------------------------------------------------
@@ -160,6 +210,15 @@ def _errors() -> Iterator[None]:
         raise ApiError(403, "forbidden", "Permission denied") from None
     except ConnectionNotFoundError:
         raise ApiError(404, "not_found", "Not Found") from None
+    except ProbeRefusedError as error:
+        if error.retry_after_seconds is not None:
+            raise ApiError(
+                429,
+                error.code,
+                _PROBE_REFUSALS[error.reason],
+                headers={"Retry-After": str(error.retry_after_seconds)},
+            ) from None
+        raise ApiError(409, error.code, _PROBE_REFUSALS[error.reason]) from None
     except ConnectionExistsError:
         raise ApiError(
             409, "connection_exists", "A connection of this kind already exists"
@@ -191,6 +250,18 @@ def _errors() -> Iterator[None]:
         ) from None
 
 
+def _probe_out(probe: ProbeView | None) -> ProbeOut | None:
+    if probe is None:
+        return None
+    return ProbeOut(
+        trigger=probe.trigger.value,
+        state=probe.state.value,
+        outcome=None if probe.outcome is None else probe.outcome.value,
+        started_at=probe.started_at,
+        finished_at=probe.finished_at,
+    )
+
+
 def _out(
     kind: ConnectionKind, found: ConnectionCredentialStatus | None
 ) -> ConnectionOut:
@@ -208,6 +279,8 @@ def _out(
         updated_at=info.updated_at,
         credential=CredentialOut(stored=found.stored, version=found.version),
         revision=found.revision,
+        last_probe=_probe_out(found.last_probe),
+        probe_available_at=found.probe_available_at,
     )
 
 
@@ -270,6 +343,29 @@ async def _audit_refusal(
         logger.error("connection step-up audit write failed (%s)", type(error).__name__)
 
 
+async def _probe_after_change(
+    service: ConnectionService,
+    principal: Principal,
+    kind: ConnectionKind,
+    trigger: ProbeTrigger,
+) -> None:
+    """Start the probe that follows a committed attach / replace (Decision 0100,
+    6). The change stands whatever happens here: a refusal is the service's log
+    line, any other failure is logged by type, and the connection stays
+    ``unavailable`` until the Admin rechecks."""
+    try:
+        await service.start_probe(principal, kind, trigger)
+    except ProbeRefusedError:
+        return
+    except Exception as error:
+        logger.warning(
+            "connection probe not started: kind=%s trigger=%s exception_type=%s",
+            kind.value,
+            trigger.value,
+            log_type_name(error),
+        )
+
+
 # -- routes ---------------------------------------------------------------------------
 
 
@@ -304,6 +400,7 @@ async def attach(
     await _require_step_up(request, principal, ACTION_CONNECT)
     with _errors():
         info = await service.connect(principal, kind, body.secret_handle)
+    await _probe_after_change(service, principal, kind, ProbeTrigger.ATTACH)
     # Answered from what was committed: no read afterwards can turn it into an
     # error or show somebody else's later change.
     return _out(kind, await service.committed_status(info, body.secret_handle))
@@ -330,6 +427,7 @@ async def replace(
             body.secret_handle,
             expected_revision=body.expected_revision,
         )
+    await _probe_after_change(service, principal, kind, ProbeTrigger.REPLACE)
     return _out(kind, await service.committed_status(info, body.secret_handle))
 
 
@@ -346,3 +444,30 @@ async def detach(
     with _errors():
         await service.disconnect(principal, kind)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post(
+    "/admin/connections/{kind}/health-check",
+    response_model=HealthCheckAccepted,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary=(
+        "Check the connection again: one health probe in the background; its end "
+        "is read from the list (needs a recent Passkey step-up)"
+    ),
+)
+async def health_check(
+    kind: ConnectionKind, request: Request, principal: _MANAGER
+) -> HealthCheckAccepted:
+    service = _service(request)
+    _require_store(request)
+    await _require_step_up(request, principal, ACTION_PROBE)
+    with _errors():
+        ticket = await service.start_probe(principal, kind, ProbeTrigger.MANUAL)
+    return HealthCheckAccepted(
+        probe=ProbeStartedOut(
+            id=ticket.id,
+            trigger=ticket.trigger.value,
+            state="running",
+            started_at=ticket.started_at,
+        )
+    )

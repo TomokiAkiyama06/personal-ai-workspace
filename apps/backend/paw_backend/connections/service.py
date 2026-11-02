@@ -1095,7 +1095,9 @@ class ConnectionService:
     ) -> tuple[ConnectionCredentialStatus, ...]:
         """The configured connections with their attached credential (issue
         #277, Owner / Admin): whether the store holds it, its version and the
-        ``revision`` a replacement names; never the value or the handle."""
+        ``revision`` a replacement names; never the value or the handle. Also
+        the latest probe of that credential and when the next recheck may
+        start (Decision 0100, 7)."""
         self._actor(principal)
         await self._authorize(
             principal,
@@ -1106,9 +1108,17 @@ class ConnectionService:
         found = []
         for info, handle in await self._call_store(self._store.list_credentials()):
             stored, version = await self._stored_version(handle, info.kind)
+            last_probe, available_at = await self._call_store(
+                self._store.probe_summary(info.id, handle)
+            )
             found.append(
                 ConnectionCredentialStatus(
-                    info, stored, version, credential_revision(info.id, handle)
+                    info,
+                    stored,
+                    version,
+                    credential_revision(info.id, handle),
+                    last_probe,
+                    available_at,
                 )
             )
         return tuple(found)
@@ -1119,8 +1129,9 @@ class ConnectionService:
         """The status of a connection this caller just made or pointed at
         ``secret_handle`` (``connect`` / ``replace_credential`` returned
         ``info``): built from that result, with no database read (a read after
-        the commit could fail or show a later change). Only the store is
-        asked for the version; its failure is ``stored`` ``False``."""
+        the commit could fail or show a later change), so without the probes'
+        fields. Only the store is asked for the version; its failure is
+        ``stored`` ``False``."""
         if type(info) is not ConnectionInfo:
             raise fail("info", InputProblem.WRONG_TYPE)
         handle = validate_handle("secret_handle", secret_handle)

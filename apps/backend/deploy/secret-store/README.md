@@ -92,12 +92,17 @@ await fetch("/api/v1/admin/connections/claude/credential", {
 
 // 3. 外す（Connection を消す。参照されなくなった Credential はその場で消える）
 await fetch("/api/v1/admin/connections/claude", {method: "DELETE"})
+
+// 4. もう一度確かめる（202。結果は 1 の last_probe と status で読む）
+await fetch("/api/v1/admin/connections/claude/health-check", {method: "POST"})
 ```
 
 答えの読み方:
 
 - `credential.stored` が `true`、`credential.version` が版（Session の中の Refresh の書き戻しで上がる）。`false` は Store から消えた・読めない（入れ直して差し替える）。`null` は Backend に Store が設定されていない。
-- `status` は `unavailable`（まだ確かめていない・使えない）、`connected`、`expired`（Provider が Credential を拒んだ。入れ直して差し替える）。結び付けた直後と差し替えた直後は `unavailable` で、Health Check が `connected` にする。
+- `status` は `unavailable`（まだ確かめていない・使えない）、`connected`、`expired`（Provider が Credential を拒んだ。入れ直して差し替える）。結び付けた直後と差し替えた直後は `unavailable` で、Backend が背景で 1 回走らせる Health の Probe（[Decision 0100](../../../../docs/decisions/0100-cli-connection-health-probe.md)。`[cloud] enabled = true` と `[agents.claude]` がある配備。Codex は #305 の後）が `connected` にする。
+- `last_probe` は最新の Probe（`state` が `running` の間は待つ。`finished` なら `outcome`）、`probe_available_at` は次に 4 ができる時刻。`status` が `unavailable` のままで `last_probe` が null なら Probe は始まっていない（Backend の Log の `connection probe not started`）。
+- 4 の拒否: 409 `connection_disabled`（無効にしている）・`probe_not_configured`（上の配備でない）・`probe_running`（走っている）、429 `probe_cooldown`（`Retry-After` の秒だけ待つ。続けて失敗すると 60 秒から倍になり最大 15 分）。
 - 422 `credential_not_stored`: その種類の Credential として Store にない Handle（打ち間違い、別の種類の Handle、Reaper が消した未登録の古い Handle）。`put` からやり直す。
 - 503 `secret_store_not_configured`: Backend に `PAW_SECRET_STORE_DIR` がない（上の「初めの準備」）。
 - 403 `step_up_required` / `step_up_method_insufficient`: Passkey の Step-up をしてから。

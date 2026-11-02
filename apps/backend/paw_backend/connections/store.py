@@ -95,7 +95,9 @@ from paw_backend.connections.probe import (
     PROBE_HISTORY_ROWS,
     PROBE_RESOURCE_KIND,
     ProbeOutcome,
+    ProbeState,
     ProbeTrigger,
+    ProbeView,
     probe_available_at,
 )
 from paw_backend.connections.records import (
@@ -960,18 +962,7 @@ class ConnectionStore:
                 return ProbeDenied(ProbeRefusal.PROBE_RUNNING, connection_id)
             now = await self._instant(connection)
             if enforce_spacing:
-                cursor = await connection.execute(
-                    "SELECT outcome, finished_at FROM connection_probes"
-                    " WHERE connection_id = %(id)s AND secret_handle = %(handle)s"
-                    " AND state = 'finished'"
-                    " ORDER BY finished_at DESC, started_at DESC LIMIT %(rows)s",
-                    {"id": connection_id, "handle": handle, "rows": PROBE_HISTORY_ROWS},
-                )
-                history = [
-                    (ProbeOutcome(outcome), finished)
-                    for outcome, finished in await cursor.fetchall()
-                ]
-                available = probe_available_at(history)
+                available = await self._next_recheck(connection, connection_id, handle)
                 if available is not None and now < available:
                     wait = math.ceil((available - now).total_seconds())
                     return ProbeDenied(
@@ -1020,6 +1011,61 @@ class ConnectionStore:
             # Another probe of the same credential started at the same time
             # (the partial unique index): nothing of this one was committed.
             return ProbeDenied(ProbeRefusal.PROBE_RUNNING)
+
+    async def _next_recheck(
+        self, connection: psycopg.AsyncConnection, connection_id: uuid.UUID, handle: str
+    ) -> datetime | None:
+        """When the spacing of rechecks ends for this credential (Decision
+        0100, 8), from its finished probes; ``None``: it has none yet."""
+        cursor = await connection.execute(
+            "SELECT outcome, finished_at FROM connection_probes"
+            " WHERE connection_id = %(id)s AND secret_handle = %(handle)s"
+            " AND state = 'finished'"
+            " ORDER BY finished_at DESC, started_at DESC LIMIT %(rows)s",
+            {"id": connection_id, "handle": handle, "rows": PROBE_HISTORY_ROWS},
+        )
+        return probe_available_at(
+            [
+                (ProbeOutcome(outcome), finished)
+                for outcome, finished in await cursor.fetchall()
+            ]
+        )
+
+    async def probe_summary(
+        self, connection_id: uuid.UUID, handle: str
+    ) -> tuple[ProbeView | None, datetime | None]:
+        """The latest probe of this connection's credential (whatever its
+        state; an earlier credential's verdict says nothing about this one) and
+        when its next manual recheck may start (``None``: now). One read."""
+
+        async def work(
+            connection: psycopg.AsyncConnection,
+        ) -> tuple[ProbeView | None, datetime | None]:
+            cursor = await connection.execute(
+                "SELECT trigger, state, outcome, started_at, finished_at"
+                " FROM connection_probes"
+                " WHERE connection_id = %(id)s AND secret_handle = %(handle)s"
+                " ORDER BY started_at DESC, id DESC LIMIT 1",
+                {"id": connection_id, "handle": handle},
+            )
+            row = await cursor.fetchone()
+            latest = None
+            if row is not None:
+                latest = ProbeView(
+                    ProbeTrigger(row[0]),
+                    ProbeState(row[1]),
+                    None if row[2] is None else ProbeOutcome(row[2]),
+                    row[3],
+                    row[4],
+                )
+            available = await self._next_recheck(connection, connection_id, handle)
+            if available is not None and await self._instant(connection) >= available:
+                available = None
+            return latest, available
+
+        return await self._database.transact_abortable(
+            work, timeout_seconds=self._timeout
+        )
 
     async def finish_probe(
         self,
