@@ -13,7 +13,7 @@ from fastapi import FastAPI
 
 from paw_backend import __version__
 from paw_backend.agents.cli_session import SystemdLauncher
-from paw_backend.agents.cli_wiring import CliSetup
+from paw_backend.agents.cli_wiring import CliSetup, build_probe_adapters
 from paw_backend.agents.codex_collect import (
     SystemdSessionUnits,
     build_codex_collection,
@@ -478,6 +478,8 @@ def create_app(
     elif gh_runner is not None:
         raise TypeError("gh_runner needs a database")
     # The quota / usage routes' connection service (issue #187): with a database.
+    # With ``cli`` and the secret store it also holds the connections' health
+    # probes (Decision 0100, 11: the same probes as the orchestrator's).
     app.state.connections = (
         build_connection_service(
             settings,
@@ -485,6 +487,7 @@ def create_app(
             app.state.authorizer,
             auth.audit_sink,
             secret_store=secret_store,
+            probes=build_probe_adapters(cli) if secret_store is not None else (),
         )
         if database.configured
         else None

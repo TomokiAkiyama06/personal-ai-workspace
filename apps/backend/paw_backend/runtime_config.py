@@ -347,15 +347,26 @@ class RuntimeWiring:
         )
 
     def cli_setup(self) -> CliSetup | None:
-        """``create_app``'s ``cli`` (Decision 0099): only when a ladder names a
-        CLI runtime (the parser then made sure ``[cloud]`` is enabled and that
-        runtime's ``[agents.<name>]`` is there)."""
+        """``create_app``'s ``cli`` (Decision 0099): when a ladder names a CLI
+        runtime (the parser then made sure ``[cloud]`` is enabled and that
+        runtime's ``[agents.<name>]`` is there), and also, with the
+        orchestrator, when ``[cloud] enabled = true`` and an ``[agents.<name>]``
+        is written that no ladder names (Decision 0100, 4's 2: the
+        connection's health probe runs before the ladder names the CLI). It
+        holds every ``[agents.<name>]``; the runtimes are built only for the
+        labels a ladder names (``build_cli_services``)."""
         labels = self.cli_labels()
-        if not labels or self.cloud is None:
+        if self.cloud is None:
+            return None
+        if not labels and not (
+            self.cloud.enabled is True
+            and self.agents
+            and self.orchestrator_config is not None
+        ):
             return None
         return CliSetup(
             self.cloud,
-            {label: self.agents[label] for label in sorted(labels)},
+            {label: self.agents[label] for label in sorted(self.agents)},
         )
 
     def summary(self) -> str:
@@ -486,7 +497,10 @@ def check_environment(wiring: RuntimeWiring, settings: Settings) -> None:
     ):
         # The policy counts the users and reads the task's project.
         raise RuntimeConfigError("cloud", "needs PAW_DATABASE_URL")
-    labels = wiring.cli_labels()
+    # The CLIs a ladder names, and those whose connection is probed (Decision
+    # 0100, 4: every ``[agents.<name>]`` while the cloud is enabled).
+    cli = wiring.cli_setup()
+    labels = frozenset(()) if cli is None else frozenset(cli.agents)
     if labels and settings.secret_store_dir is None:
         # The CLIs' credentials are the connections' (Decision 0087, 1).
         raise RuntimeConfigError("agents", "needs PAW_SECRET_STORE_DIR")

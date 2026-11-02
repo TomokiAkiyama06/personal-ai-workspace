@@ -15,6 +15,7 @@ import unittest
 from pathlib import Path
 
 from paw_backend.agents.claude_cli import ClaudeCliRuntime, ClaudeSessionAdapter
+from paw_backend.agents.claude_probe import ClaudeProbeAdapter
 from paw_backend.agents.cli_session import SystemdLauncher
 from paw_backend.agents.cli_wiring import (
     CLAUDE_EXECUTABLE,
@@ -23,15 +24,17 @@ from paw_backend.agents.cli_wiring import (
     CliAgentSetup,
     CliSetup,
     build_cli_services,
+    build_probe_adapters,
 )
 from paw_backend.agents.cloud_policy import CloudSettings, ConfiguredCloudPolicy
 from paw_backend.agents.codex_cli import CodexCliRuntime, CodexSessionAdapter
 from paw_backend.app import create_app
 from paw_backend.auth.principals import DatabasePrincipalDirectory
 from paw_backend.authz import Authorizer, InMemoryAuditSink
-from paw_backend.connections import ConnectionKind
+from paw_backend.connections import PROBE_TIMEOUT_SECONDS, ConnectionKind
 from paw_backend.connections.secret_store import FileSecretStore
 from paw_backend.connections.service import ConnectionService
+from paw_backend.connections.wiring import NoSecretStore, build_connection_service
 from paw_backend.db import Database
 from paw_backend.orchestrator import OrchestratorConfig
 from paw_backend.orchestrator.composition import build_task_execution
@@ -258,6 +261,84 @@ class ComposedCliRuntimesTest(StoreCase):
             )
         with self.assertRaises(TypeError):
             CliSetup(CloudSettings(enabled=True), {"codex": AGENTS["claude"]})
+
+
+class ProbeWiringTest(StoreCase):
+    """Decision 0100, 4 and 11: the Claude connection's health probe in both
+    connection services, whether a ladder names the CLI or not."""
+
+    def assertClaudeProbe(self, service):
+        self.assertEqual(service._adapters.kinds(), (ConnectionKind.CLAUDE,))
+        probe = service._adapters.get(ConnectionKind.CLAUDE)
+        self.assertIsInstance(probe, ClaudeProbeAdapter)
+        self.assertIsInstance(probe._launcher, SystemdLauncher)
+        self.assertEqual(probe._executable, CLAUDE_EXECUTABLE)
+        self.assertEqual(probe._proxy_url, EGRESS_PROXY_URL)
+        self.assertEqual(probe._model, "claude-opus-4-1")
+        self.assertEqual(probe._base, Path("/run/paw-cli"))
+        self.assertEqual(service._health_timeout, PROBE_TIMEOUT_SECONDS)
+
+    def test_the_probes_need_the_cloud_and_claudes_section(self):
+        self.assertEqual(build_probe_adapters(None), ())
+        self.assertEqual(
+            build_probe_adapters(CliSetup(CloudSettings(enabled=False), AGENTS)), ()
+        )
+        self.assertEqual(
+            build_probe_adapters(
+                CliSetup(CloudSettings(enabled=True), {"codex": AGENTS["codex"]})
+            ),
+            (),
+        )
+        (probe,) = build_probe_adapters(CliSetup(CloudSettings(enabled=True), AGENTS))
+        self.assertIsInstance(probe, ClaudeProbeAdapter)
+
+    def test_the_orchestrators_service_probes_claude(self):
+        for ladders in (LADDERS, {role: ("local",) for role in NodeRole}):
+            with self.subTest(ladders=ladders):
+                settings = make_settings()
+                execution = build_task_execution(
+                    settings,
+                    Database(settings),
+                    Authorizer(InMemoryAuditSink()),
+                    runtimes={"local": FakeRuntime()},
+                    orchestrator_config=decisions_config(ladders),
+                    cli=CliSetup(CloudSettings(enabled=True), AGENTS),
+                    secret_store=self.store,
+                )
+                self.assertClaudeProbe(execution.orchestrator._connections)
+
+    def test_the_http_service_probes_claude_with_the_secret_store(self):
+        settings = make_settings()
+        database = Database(settings)
+        authorizer = Authorizer(InMemoryAuditSink())
+        probes = build_probe_adapters(CliSetup(CloudSettings(enabled=True), AGENTS))
+        service = build_connection_service(
+            settings,
+            database,
+            authorizer,
+            InMemoryAuditSink(),
+            secret_store=self.store,
+            probes=probes,
+        )
+        self.assertClaudeProbe(service)
+        self.assertIs(service._secrets, self.store)
+        # Still no call: no session adapter, no budget, no lease.
+        self.assertEqual(service._session_adapters, {})
+        self.assertIsNone(service._budget)
+        with self.assertRaises(TypeError):
+            build_connection_service(
+                settings, database, authorizer, InMemoryAuditSink(), probes=probes
+            )
+        plain = build_connection_service(
+            settings, database, authorizer, InMemoryAuditSink(), secret_store=self.store
+        )
+        self.assertEqual(len(plain._adapters), 0)
+        self.assertIsInstance(plain._secrets, NoSecretStore)
+
+    def test_create_app_without_cli_registers_no_probe(self):
+        settings, database = configured()
+        app = create_app(settings, database=database)
+        self.assertEqual(len(app.state.connections._adapters), 0)
 
 
 if __name__ == "__main__":

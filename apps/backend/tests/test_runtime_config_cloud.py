@@ -174,23 +174,47 @@ class TheDecisionsFileTest(Refused):
             },
         )
 
+    def test_the_sections_without_a_cli_rung_give_the_probes(self):
+        # Decision 0100, 4's 2: [cloud] enabled and [agents.*] with local-only
+        # ladders build no CLI runtime, but the connections are probed: the
+        # setup is create_app's ``cli`` with every [agents.*].
+        text = decision_text(ladders=LOCAL_LADDERS, assignment="")
+        wiring = load(text)
+        self.assertEqual(wiring.cli_labels(), frozenset())
+        cli = wiring.create_app_arguments()["cli"]
+        self.assertEqual(cli.agents, wiring.agents)
+        url = "postgresql+psycopg://paw@localhost/paw"
+        with self.assertRaises(RuntimeConfigError) as caught:
+            check_environment(wiring, make_settings(database_url=url))
+        self.assertEqual(caught.exception.where, "agents")
+        check_environment(
+            wiring,
+            make_settings(database_url=url, secret_store_dir="/var/lib/paw/secrets"),
+        )
+
     def test_the_sections_without_a_cli_rung_load_today(self):
         # [cloud], [agents.*] and an assignment inside local-only ladders: no
-        # CLI rung, so no CLI runtime is built.
+        # CLI rung, so no CLI runtime is built; with the cloud disabled nothing
+        # is probed either.
         text = decision_text(
+            cloud="[cloud]\nenabled = false\n",
             ladders=LOCAL_LADDERS,
             assignment="",
         )
         wiring = load(text)
-        self.assertTrue(wiring.cloud.enabled)
+        self.assertFalse(wiring.cloud.enabled)
         self.assertEqual(set(wiring.agents), {"claude", "codex"})
         self.assertIsNone(wiring.assignment)
         # Without an assignment every role allows only its first rung.
         self.assertIsNone(wiring.orchestrator_config.assignment)
-        self.assertIn("cloud: enabled single_user", wiring.summary())
+        self.assertIn("cloud: disabled", wiring.summary())
         self.assertNotIn("assignment", wiring.summary())
         self.assertIsNone(wiring.cli_setup())
         self.assertNotIn("cli", wiring.create_app_arguments())
+        # No secret store needed.
+        check_environment(
+            wiring, make_settings(database_url="postgresql+psycopg://paw@localhost/paw")
+        )
 
     def test_cloud_disabled_and_absent(self):
         text = decision_text(cloud="[cloud]\n", ladders=LOCAL_LADDERS, assignment="")

@@ -102,13 +102,21 @@ def paw_tool_names(tool_names: Iterable[str]) -> frozenset[str]:
 class ClaudeStream:
     """Reads the lines of one session (see the module)."""
 
-    def __init__(self, expected_tools: frozenset[str]) -> None:
+    def __init__(self, expected_tools: frozenset[str], *, probe: bool = False) -> None:
+        """``probe`` (Decision 0100, 2: the health probe of a connection): the
+        session has no tool and no MCP server at all, and the ``result``'s
+        answer is kept (:attr:`answer`) so that the probe can check it. A
+        node's session never keeps it."""
+        if probe and expected_tools:
+            raise ValueError("a probe expects no tools")
         self._expected = expected_tools
+        self._probe = probe
         self._open: dict[str, int] = {}  # message id -> its input tokens
         self._output: dict[str, int] = {}
         self._current: str | None = None
         self._counted: set[str] = set()
         self.initialized = False
+        self.answer: str | None = None
 
     @property
     def turn_open(self) -> bool:
@@ -144,6 +152,9 @@ class ClaudeStream:
         if kind == "result":
             if self.turn_open:
                 raise StreamRefused("turn_open")
+            if self._probe:
+                answer = message.get("result")
+                self.answer = answer if isinstance(answer, str) else None
             return _totals(message)
         return None
 
@@ -151,6 +162,16 @@ class ClaudeStream:
         tools = message.get("tools")
         if not isinstance(tools, list) or not all(isinstance(t, str) for t in tools):
             raise StreamRefused("tools")
+        if self._probe:
+            # No tool (not even ``EndConversation``: no MCP tool remains) and
+            # no MCP server.
+            if tools:
+                raise StreamRefused("tools")
+            if message.get("mcp_servers") not in ([], None) or message.get(
+                "mcp_server_errors"
+            ):
+                raise StreamRefused("mcp")
+            return
         present = set(tools)
         if present - {END_CONVERSATION} != set(self._expected):
             # A built-in tool that stayed, or a PAW tool that is missing.
