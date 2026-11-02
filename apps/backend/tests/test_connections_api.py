@@ -309,6 +309,7 @@ class AttachTest(ConnectionsHttpCase):
             "kind": "codex", "configured": False, "status": None, "enabled": None,
             "available": None, "checked_at": None, "created_at": None,
             "updated_at": None, "credential": None, "revision": None,
+            "last_probe": None, "probe_available_at": None,
         })  # fmt: skip
 
 

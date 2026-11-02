@@ -25,6 +25,7 @@ from paw_backend.connections.limits import (
     DEFAULT_CALL_TIMEOUT_SECONDS,
     MAX_CALL_TIMEOUT_SECONDS,
 )
+from paw_backend.connections.probe import ProbeView
 from paw_backend.connections.validation import (
     validate_enum,
     validate_model,
@@ -72,12 +73,18 @@ class ConnectionCredentialStatus:
     ``stored`` is whether the secret store holds the handle for this kind (its
     current version decrypts), ``version`` the store's current version of it
     (``rotate_credential`` counts it up); both ``None`` without a store.
-    ``revision`` is the compare-and-swap token of ``replace_credential``."""
+    ``revision`` is the compare-and-swap token of ``replace_credential``.
+    ``last_probe`` is the latest health probe of the attached credential and
+    ``probe_available_at`` when the next manual recheck may start (``None``:
+    now), Decision 0100, 7; both come from a read: ``committed_status`` leaves
+    them ``None``."""
 
     connection: ConnectionInfo
     stored: bool | None
     version: int | None
     revision: str
+    last_probe: ProbeView | None = None
+    probe_available_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)

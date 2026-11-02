@@ -65,11 +65,19 @@ ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
 class ApiError(Exception):
     """Raise from application code to return a specific error response."""
 
-    def __init__(self, status_code: int, code: str, message: str) -> None:
+    def __init__(
+        self,
+        status_code: int,
+        code: str,
+        message: str,
+        *,
+        headers: dict[str, str] | None = None,
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.code = code
         self.message = message
+        self.headers = headers
 
 
 def error_response(
@@ -106,7 +114,11 @@ def _phrase(status_code: int) -> str:
 
 async def _handle_api_error(request: Request, error: ApiError) -> JSONResponse:
     return error_response(
-        error.status_code, error.code, error.message, request_id=_request_id(request)
+        error.status_code,
+        error.code,
+        error.message,
+        request_id=_request_id(request),
+        headers=error.headers,
     )
 
 

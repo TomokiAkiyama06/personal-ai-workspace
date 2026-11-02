@@ -100,7 +100,9 @@ reviewer = ["local"]
 # session_base equal to PAW_CLI_SESSION_DIR (default /run/paw-cli). Codex sends
 # nothing until its CLI version is verified (VERIFIED_VERSIONS, Decision 0089):
 # until then every Codex review fails, and so does every writing task.
-# Replace the step 3 [orchestrator] above with this one; uncomment to enable.
+# First only [cloud] and [agents.claude], with the step 3 [orchestrator]: attach the
+# Claude connection and see its health probe say connected (Decision 0100).
+# Then replace the step 3 [orchestrator] above with this one; uncomment to enable.
 #
 # [cloud]
 # enabled = true                     # to stop: see docs/DEPLOYMENT_UPDATE.md

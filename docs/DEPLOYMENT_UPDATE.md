@@ -308,13 +308,29 @@ Order (root, the human; the agent never does this):
    it runs as before (local ladders only).
 3. The provider terms decision (the PR of Decision 0099's 6) and the checks of
    `apps/backend/deploy/cli-session/README.md` ("確かめること"): the Claude image's
-   digest in `/etc/paw/cli-session.toml`, the egress units, the Claude connection
-   registered with a `claude setup-token` credential in the secret store.
-4. Edit `/etc/paw/runtime.toml`: uncomment step 4 of the example in place of step 3's
-   `[orchestrator]`; run `runtime-config-check` (it lists `cloud: enabled single_user`,
-   `ladders=claude,codex,local` and `assignment: yes`), then
-   `systemctl restart paw-backend.service` with `PAW_ORCHESTRATOR_WORKERS=0` first.
-5. With the human's go-ahead, `PAW_ORCHESTRATOR_WORKERS=1` and one small writing task:
+   digest in `/etc/paw/cli-session.toml`, the egress units, and a `claude setup-token`
+   credential put into the secret store (not attached yet).
+4. Check the Claude connection with its health probe **before any ladder names `claude`**
+   (Decision 0100; the probe needs no ladder):
+   1. Add only `[cloud] enabled = true` and `[agents.claude]` of step 4 of the example to
+      `/etc/paw/runtime.toml` and keep step 3's `[orchestrator]`; run
+      `runtime-config-check`, then `systemctl restart paw-backend.service` with
+      `PAW_ORCHESTRATOR_WORKERS=0`.
+   2. Attach the credential (`POST /api/v1/admin/connections/claude`, Passkey Step-up;
+      `apps/backend/deploy/secret-store/README.md`). One probe starts by itself: read
+      `GET /api/v1/admin/connections` until `last_probe.state` is `finished`, and go on
+      only with `status: connected`. `expired`: the provider refused the token; put a new
+      one and replace it. `unavailable`: see the backend's log, then check again
+      (`POST /api/v1/admin/connections/claude/health-check`; 429 `probe_cooldown` says how
+      long to wait in `Retry-After`).
+   3. `connection_probes` has the row and `audit_events` has `connection.probe`,
+      `connection.probe_result` and `connection.status`. The real CLI's first run is the
+      smoke of Decision 0100 ("PR の分け方" 5), with the human's permission.
+5. Edit `/etc/paw/runtime.toml`: uncomment the rest of step 4 of the example in place of
+   step 3's `[orchestrator]`; run `runtime-config-check` (it lists
+   `cloud: enabled single_user`, `ladders=claude,codex,local` and `assignment: yes`), then
+   `systemctl restart paw-backend.service`, still with `PAW_ORCHESTRATOR_WORKERS=0`.
+6. With the human's go-ahead, `PAW_ORCHESTRATOR_WORKERS=1` and one small writing task:
    `agent_plan_calls` shows `cloud` / `claude`, the attempts' placements, the
    `orchestrator.cloud_send` rows of `audit_events` and `connection_usage`.
 

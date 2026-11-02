@@ -17,6 +17,7 @@ This module holds what the store and the service share:
   recheck, Decision 0100, 6 and 7);
 * :class:`ProbeState` / :class:`ProbeOutcome`: a probe's row
   (``running`` -> ``finished`` with an outcome, or ``abandoned`` by the reaper);
+* :class:`ProbeView`: a probe as an Owner / Admin sees it (Decision 0100, 7);
 * :class:`ProbeReport`: what a probe adapter may answer besides a bare
   ``ConnectionStatus`` (the outcome, a failure code, the tokens and the model);
 * :func:`changes_status`: which outcomes are written to the connection's status
@@ -57,6 +58,11 @@ PROBE_MAX_COOLDOWN_SECONDS: Final = 900
 #: (the deadline of 120 s plus the worst stop of a unit, about 200 s): the
 #: reaper marks it ``abandoned``.
 PROBE_ABANDONED_AGE_SECONDS: Final = 600
+#: How long the backend's shutdown waits at least for its running probes to stop
+#: their CLIs and finish their rows (Decision 0100, 6: SIGTERM, 5 s, SIGKILL and
+#: the container's removal), inside ``TimeoutStopSec=60s`` of ``paw-backend``. A
+#: probe that takes longer is given up on: the reaper closes its row.
+PROBE_SHUTDOWN_WAIT_SECONDS: Final = 20
 #: How many finished probes of a credential the spacing looks at (the back-off
 #: reaches its cap after five failures; ``busy`` / ``cancelled`` are skipped).
 PROBE_HISTORY_ROWS: Final = 32
@@ -205,6 +211,18 @@ class ProbeTicket:
 
 
 @dataclass(frozen=True, slots=True)
+class ProbeView:
+    """A probe's row as an Owner / Admin sees it (Decision 0100, 7): never the
+    answer, the tokens, the handle or the failure code."""
+
+    trigger: ProbeTrigger
+    state: ProbeState
+    outcome: ProbeOutcome | None
+    started_at: datetime
+    finished_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
 class ProbeResult:
     """How a probe ended: its outcome and failure code, and whether the
     connection's status was written (``False``: the outcome does not change it,
@@ -225,6 +243,7 @@ __all__ = [
     "PROBE_HISTORY_ROWS",
     "PROBE_MAX_COOLDOWN_SECONDS",
     "PROBE_RESOURCE_KIND",
+    "PROBE_SHUTDOWN_WAIT_SECONDS",
     "PROBE_TIMEOUT_SECONDS",
     "REPORTABLE_OUTCOMES",
     "ProbeOutcome",
@@ -234,6 +253,7 @@ __all__ = [
     "ProbeState",
     "ProbeTicket",
     "ProbeTrigger",
+    "ProbeView",
     "changes_status",
     "cooldown_seconds",
     "failures_in_a_row",
