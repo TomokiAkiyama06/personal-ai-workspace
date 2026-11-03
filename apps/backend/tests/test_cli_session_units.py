@@ -16,6 +16,7 @@ fake ``systemctl`` on ``PATH``; no container, no systemd, no other account.
 
 import asyncio
 import json
+import os
 import shutil
 import socket
 import stat
@@ -27,10 +28,13 @@ import threading
 import unittest
 import uuid
 from pathlib import Path
+from unittest.mock import patch
 
+from paw_backend.agents import cli_session
 from paw_backend.agents.cli_session import (
     UNIT_END_SECONDS,
     CliLaunch,
+    SessionDirectoryGroupError,
     SystemdLauncher,
     UnitNotStoppedError,
     create_session,
@@ -753,6 +757,83 @@ class LauncherTest(unittest.IsolatedAsyncioTestCase):
             await self.launcher().start(launch)
         self.assertFalse(self.calls.exists())
         self.assertFalse((spec.directory / "credential.env").exists())
+
+
+class SessionDirectoryGroupTest(unittest.TestCase):
+    """Issue #319: in production the backend's user owns the session's
+    directory but is not in its group (``paw-cli-bridge``), and Linux clears
+    ``S_ISGID`` on a ``chmod`` by such an owner; the files made after it then
+    had the backend's group and the CLI could not read ``launch.json``. CI
+    cannot make such a group, so ``os.chmod`` plays the kernel here: it
+    clears the bit of a directory as it does for a non-member."""
+
+    def setUp(self):
+        self.base = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.base, ignore_errors=True)
+        self.shared = self.base / "shared"
+        self.shared.mkdir()
+        self.shared.chmod(0o2750)
+        self.chmods: list[tuple[str, int]] = []
+        previous = os.umask(0o022)  # paw-backend.service's
+        self.addCleanup(os.umask, previous)
+
+    def as_non_member(self):
+        chmod = os.chmod
+
+        def kernel(path, mode, *args, **kwargs):
+            self.chmods.append((str(path), mode))
+            if os.path.isdir(path):
+                mode &= ~stat.S_ISGID
+            return chmod(path, mode, *args, **kwargs)
+
+        return patch.object(cli_session.os, "chmod", kernel)
+
+    def test_the_directories_keep_the_setgid_group_of_a_non_member_owner(self):
+        with self.as_non_member():
+            spec = create_session(self.shared, ("python3", "relay.py"))
+        group = self.shared.stat().st_gid
+        for directory in (spec.directory, spec.config_dir):
+            info = directory.stat()
+            self.assertTrue(info.st_mode & stat.S_ISGID, directory)
+            self.assertEqual(stat.S_IMODE(info.st_mode) & 0o777, 0o750)
+            self.assertEqual(info.st_gid, group)
+        for path in (spec.token_path, spec.mcp_config_path, spec.settings_path):
+            info = path.stat()
+            self.assertEqual(info.st_gid, group)
+            self.assertEqual(stat.S_IMODE(info.st_mode), 0o640)
+
+    def test_no_chmod_when_mkdir_already_gave_the_mode(self):
+        with self.as_non_member():
+            spec = create_session(self.shared, ("python3", "relay.py"))
+        directories = {str(spec.directory), str(spec.config_dir)}
+        self.assertEqual([c for c in self.chmods if c[0] in directories], [])
+
+    def test_a_lost_setgid_group_is_refused_and_leaves_nothing(self):
+        os.umask(0o077)  # mkdir gives 0700: a chmod is needed and clears it
+        with self.as_non_member(), self.assertRaises(SessionDirectoryGroupError):
+            create_session(self.shared, ("python3", "relay.py"))
+        self.assertEqual(list(self.shared.iterdir()), [])
+
+    def test_another_umask_is_corrected_when_the_setgid_stays(self):
+        # The owner in the group (as here, without the patch): chmod keeps it.
+        os.umask(0o077)
+        spec = create_session(self.shared, ("python3", "relay.py"))
+        for directory in (spec.directory, spec.config_dir):
+            mode = directory.stat().st_mode
+            self.assertTrue(mode & stat.S_ISGID)
+            self.assertEqual(stat.S_IMODE(mode) & 0o777, 0o750)
+        for path in (spec.token_path, spec.mcp_config_path, spec.settings_path):
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o640)
+
+    def test_the_old_chmod_would_have_lost_it(self):
+        # The reproduction of #319 with the simulated kernel: what the
+        # previous code did (mkdir, then chmod with the parent's setgid).
+        directory = self.shared / "old"
+        directory.mkdir(mode=0o750)
+        self.assertTrue(directory.stat().st_mode & stat.S_ISGID)
+        with self.as_non_member():
+            cli_session.os.chmod(directory, 0o750 | stat.S_ISGID)
+        self.assertFalse(directory.stat().st_mode & stat.S_ISGID)
 
 
 class StopThroughCancellationTest(unittest.IsolatedAsyncioTestCase):
