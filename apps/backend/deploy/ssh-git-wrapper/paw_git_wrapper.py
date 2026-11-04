@@ -91,6 +91,14 @@ One ``syslog`` line per call (``LOG_AUTH``): accepted or rejected, a fixed
 reason code, the sub-command name when it is one of the allowed ones, and the
 Linux user. Never an argument, a path, a URL, a ``-c`` value or git's output: a
 URL or a configuration value may carry a credential (Issue #134).
+
+Nor does the sandbox's Podman (issue #329): every ``podman`` call is
+``podman --events-backend none ...`` (:data:`PODMAN_QUIET`). With the journald
+events backend (Podman's default) each event (``create``, ``start``, ``exec``,
+``exec_died``, ``died``, ``remove``, ...) is a journal entry whose ``_CMDLINE``
+is the whole command line of the call, so ``podman exec ... bash -lc
+<command>`` copied the agent's shell command into the account's journal. The
+container's own output is logged nowhere either (``--log-driver none``).
 """
 
 import errno
@@ -2200,6 +2208,15 @@ def _lstat(path: str) -> os.stat_result:
         raise Rejected("mask_unavailable") from None
 
 
+#: The options after ``podman`` of every sandbox call (issue #329): Podman's
+#: events go nowhere. With the journald events backend each event is a journal
+#: entry whose ``_CMDLINE`` is the call's whole command line (an ``exec``'s
+#: shell command, a ``start``'s mounts). A global option, before the
+#: sub-command; the cleanup processes Podman starts for a container or an
+#: ``exec`` (their ``exec_died``, ``died``, ``remove``) inherit it.
+PODMAN_QUIET = ("--events-backend", "none")
+
+
 def sandbox_plan(original: str, config: Config) -> SandboxCall:
     """The :class:`SandboxCall` of a ``paw-sandbox/v1`` command, or ``Rejected``."""
     if config.sandbox_image is None:
@@ -2222,9 +2239,15 @@ def sandbox_plan(original: str, config: Config) -> SandboxCall:
         mounts = _start_mounts(spec, places, config, name)
         argv = [
             podman,
+            *PODMAN_QUIET,
             "run",
             "--detach",
             "--rm",
+            # The container's stdout / stderr are logged nowhere (issue #329;
+            # Podman's default log driver is journald). An ``exec``'s output
+            # goes only to its caller already; this keeps the entry's own out.
+            "--log-driver",
+            "none",
             "--name",
             name,
             "--label",
@@ -2266,7 +2289,7 @@ def sandbox_plan(original: str, config: Config) -> SandboxCall:
         argv.extend((config.sandbox_image, "sleep", "infinity"))
         return SandboxCall("start", name, argv, env)
     if op == "stop" and len(words) == 3:
-        argv = [podman, "rm", "--force", "--time", "5", "--ignore", name]
+        argv = [podman, *PODMAN_QUIET, "rm", "--force", "--time", "5", "--ignore", name]
         return SandboxCall("stop", name, argv, env)
     if op == "exec" and len(words) in (6, 7):
         nonce, workdir, kind = words[3], _sandbox_path(words[4]), words[5]
@@ -2274,7 +2297,7 @@ def sandbox_plan(original: str, config: Config) -> SandboxCall:
             raise Rejected("bad_arguments")
         if (kind == "shell") != (len(words) == 6):
             raise Rejected("bad_arguments")
-        argv = [podman, "exec"]
+        argv = [podman, *PODMAN_QUIET, "exec"]
         if kind == "shell":
             entry = [
                 "timeout",
@@ -2301,6 +2324,7 @@ def sandbox_plan(original: str, config: Config) -> SandboxCall:
         argv.extend(("--user", _own_user(), "--workdir", workdir, name, *entry))
         inspect = [
             podman,
+            *PODMAN_QUIET,
             "container",
             "inspect",
             "--format",

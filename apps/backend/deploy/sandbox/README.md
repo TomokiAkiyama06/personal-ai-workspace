@@ -1,6 +1,6 @@
 # Tool の Sandbox（`paw-sandbox/v1`）の配備
 
-更新日: 2026-10-16
+更新日: 2026-11-04
 
 Issue [#208](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/208) の段階 2。
 [Decision 0083](../../../../docs/decisions/0083-agent-runtime-adapters.md)（Approved）の 2（ファイル・Shell・Git の Tool と git の Shim）と 6（Sandbox と Mask、SSH の Wrapper の拡張）を実装したもの。
@@ -104,6 +104,49 @@ Backend が `v2` を送るのは `PAW_SANDBOX_OOM_STATUS=true` のときだけ�
 
 `oom=1` の Tool の呼び出しは、Executor が `SandboxOutOfMemoryError` を上げ、Toolkit が Node の試行を `AgentOutOfMemory`（`escalate` なし）で終える（Local の Tool loop と CLI の MCP の Bridge の両方）。1 つの Sandbox で同時に走る `exec` はない（`SandboxPool` が Key ごとに 1 つずつ走らせる）ので、OOM を別の Command のせいにすることはない。
 
+### Podman の Event を journal に残さない（Issue #329。root、Human）
+
+Wrapper は Podman を `podman --events-backend none` で呼び、`start` の Container は `--log-driver none`（[`../ssh-git-wrapper/README.md`](../ssh-git-wrapper/README.md) の「Sandbox」）。それより前の Wrapper では、Rootless の Podman の既定（Event は journald）のため、`exec` の 1 回ごとに `exec`・`exec_died` の Event の Entry が Workspace User（`alice`）の journal に残り、その `_CMDLINE` に `podman exec ... bash -lc <Agent の Shell の Command>` が全部入っていた（`start` の Entry には Mount の Path）。
+
+入れ直す: すべての Workspace User の `authorized_keys` が指す Wrapper を [`../ssh-git-wrapper/README.md`](../ssh-git-wrapper/README.md) の「1. Wrapper 本体」の `install` で入れ替える（Restart は要らない。動いている Sandbox は次の `exec` から新しい Wrapper になる。Backend の版に依らない）:
+
+```sh
+sudo install -o root -g root -m 0755 \
+  apps/backend/deploy/ssh-git-wrapper/paw_git_wrapper.py \
+  /usr/local/lib/paw/paw-git-wrapper
+```
+
+確かめる（下のチェックリストの 2・7 の `start`・`exec`・`stop`、または Sandbox の Tool を使う Task を 1 つ動かす前後で）:
+
+```sh
+since=$(date '+%Y-%m-%d %H:%M:%S')   # start の直前に
+# ……start・exec（Shell の Command）・stop……
+sudo journalctl --since "$since" --no-pager -o verbose _UID=$(id -u alice) | grep -c 'SYSLOG_IDENTIFIER=podman'   # 0
+sudo journalctl --since "$since" --no-pager -o verbose _UID=$(id -u alice) | grep -c '_CMDLINE=.*paw-sbx-'        # 0
+```
+
+残るのは systemd の `Started podman-<pid>.scope.`・`Started libpod-<container id>.scope` の行だけ（Command も Path も含まない）。
+
+#### 既に残った分
+
+journald は Entry を 1 件ずつ消せない。量と最初の時刻を確かめる:
+
+```sh
+sudo journalctl --no-pager -o verbose _UID=$(id -u alice) SYSLOG_IDENTIFIER=podman | grep -c '_CMDLINE=.*paw-sbx-'
+sudo journalctl --no-pager -o short-iso _UID=$(id -u alice) SYSLOG_IDENTIFIER=podman | head -n 3
+ls /var/log/journal 2>/dev/null   # 無ければ journal は /run（Volatile）で、Host の再起動で消える
+```
+
+消すには、その時刻より前の journal を File ごと消すしかない（`alice` の User の journal だけでなく、**同じ時刻までの Host の他の Log もすべて消える**。どこまで消すかは Human が決める）:
+
+```sh
+sudo journalctl --rotate                # 今の File を閉じて Archive にする
+sudo journalctl --vacuum-time=<期間>     # 最後の Entry がこれより古い Archive を消す（例: 1s で今までの全部）
+sudo journalctl --no-pager -o verbose _UID=$(id -u alice) SYSLOG_IDENTIFIER=podman | grep -c '_CMDLINE=.*paw-sbx-'   # 0
+```
+
+journal の写しが他にもあれば同じく扱う: rsyslog などの転送先（`sudo grep -l 'paw-sbx-' /var/log/syslog* /var/log/messages* 2>/dev/null`）、journal を含む Backup、`systemd-journal-upload` などの転送。
+
 ## Human がサーバーで行う確認（チェックリスト）
 
 Agent は他の Linux User・Podman を使えないため、次は Human がサーバーで行う（段階 3 の配線の前）。`paw_ssh` は [`../ssh-git-wrapper/README.md`](../ssh-git-wrapper/README.md) の確認と同じ関数。`ID=$(python3 -c 'import uuid; print(uuid.uuid4())')`。
@@ -116,7 +159,7 @@ Agent は他の Linux User・Podman を使えないため、次は Human がサ�
 - [ ] 6. Shim: Container の中の `git status` / `git diff` / `git log --oneline` が動き、`git commit` / `git show <起点より古い Commit>` / `git diff -- <除外の Path>` が 128 で拒否される。`/run/paw-shim` の Socket に Container の User が繋がる（`keep-groups`）。
 - [ ] 6b. 本物の git（Decision 0090）: Container の中で `git init -q /tmp/r && git -C /tmp/r -c user.name=a -c user.email=a@b commit -q --allow-empty -m x && git -C /tmp/r log --oneline` が通り、`/workspace` での `git init`、`git init /workspace/x`（`/tmp` から）、`git init --separate-git-dir=/workspace/m /tmp/r2` が Shim で 128 になる。`which -a git` が `/usr/local/bin/git` だけ。
 - [ ] 7. 時間と停止: `sleep 400` が 300 秒で 124 になる。`stop` で Container が消える。Backend を止めても `--sandbox-lifetime` で消える。
-- [ ] 8. Log: `journalctl -t paw-git-wrapper` に `accepted user=alice sandbox=start` などがあり、Path・Command・出力を含まない。
+- [ ] 8. Log: `journalctl -t paw-git-wrapper` に `accepted user=alice sandbox=start` などがあり、Path・Command・出力を含まない。Podman の Event の Entry（`SYSLOG_IDENTIFIER=podman`）が `alice` の journal に増えない（上の「Podman の Event を journal に残さない」。Issue #329）。
 - [ ] 9. OOM（Decision 0092 の 7）: `alice` として `podman container inspect --format '{{.State.CgroupPath}}' <container>` の Path の `/sys/fs/cgroup/<Path>/memory.events` が `alice` で読める。`paw-sandbox/v2 exec` で Memory を食う Command（`python3 -c 'b = bytearray(16 << 30)'` など、`--sandbox-memory` を超える量）の状態行が `oom=1`、普通の Command（`true`）が `oom=0` になる。
 
 1 つでも期待と違えば段階 3 で配線せず、結果を #208 に書く。
