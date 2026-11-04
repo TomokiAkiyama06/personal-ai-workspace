@@ -713,6 +713,23 @@ class LauncherTest(unittest.IsolatedAsyncioTestCase):
         # The socket is closed now, not when the garbage collector comes.
         self.assertEqual(process.stdin.transport.get_extra_info("socket").fileno(), -1)
 
+    async def test_a_collected_session_logs_no_asyncio_error(self):
+        # #326, production's journal: when the garbage collector destroyed
+        # the pending ``accept`` ("Task was destroyed but it is pending!"),
+        # closing its transport then woke the closed coroutine ("Unhandled
+        # exception in client_connected_cb", RuntimeError "cannot reuse
+        # already awaited coroutine"). Neither comes after a stop now.
+        import gc
+
+        with self.assertNoLogs("asyncio", "ERROR"):
+            spec, process = await self.launch()
+            await self.read_to_the_end(process)
+            await process.stop()
+            del process
+            for _ in range(3):
+                gc.collect()
+                await asyncio.sleep(0.05)
+
     async def test_an_interactive_session_leaves_no_accept_task(self):
         spec = create_session(self.sessions, ("python3", "relay.py"))
         launcher = self.launcher()
