@@ -1,6 +1,6 @@
 # Deployment / Update / Rollback
 
-更新日: 2026-10-16
+更新日: 2026-11-04
 Status: [FIXED DIRECTION]
 
 ## Principles
@@ -309,7 +309,13 @@ Order (root, the human; the agent never does this):
 3. The provider terms decision (the PR of Decision 0099's 6) and the checks of
    `apps/backend/deploy/cli-session/README.md` ("確かめること"): the Claude image's
    digest in `/etc/paw/cli-session.toml`, the egress units, and a `claude setup-token`
-   credential put into the secret store (not attached yet).
+   credential put into the secret store (not attached yet). The session unit and its
+   program are not part of a release: after a release that changes
+   `paw-cli-session@.service` or `paw_cli_session_run.py` (issue #322: no `Group=`, but
+   `SupplementaryGroups=paw-cli-bridge`; Podman's `--sysctl net.ipv4.ping_group_range` and
+   `--group-add keep-groups`; Podman's own failures in the unit's journal), install both
+   again, `systemctl daemon-reload`, and run the check without Claude of that README
+   ("Unit の Group と Podman を確かめる") before the health probe of step 4.
 4. Check the Claude connection with its health probe **before any ladder names `claude`**
    (Decision 0100; the probe needs no ladder):
    1. Add only `[cloud] enabled = true` and `[agents.claude]` of step 4 of the example to

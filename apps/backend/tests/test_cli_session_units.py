@@ -15,6 +15,7 @@ fake ``systemctl`` on ``PATH``; no container, no systemd, no other account.
 """
 
 import asyncio
+import importlib.util
 import json
 import os
 import shutil
@@ -53,6 +54,13 @@ def fake_tool(directory: Path, name: str, body: str) -> None:
     path = directory / name
     path.write_text(f"#!{sys.executable}\n" + textwrap.dedent(body))
     path.chmod(0o755)
+
+
+def load_runner():
+    spec = importlib.util.spec_from_file_location("paw_cli_session_run", RUNNER)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 class RunnerTest(unittest.TestCase):
@@ -230,6 +238,14 @@ class RunnerTest(unittest.TestCase):
             ["--cap-drop", "all"],
             ["--security-opt", "no-new-privileges"],
             ["--userns", "keep-id"],
+            # Issue #322: keep-id maps no gid 0, so the ping range is the
+            # process's own gid's, and the supplementary group of the
+            # session's directory stays the container's.
+            [
+                "--sysctl",
+                f"net.ipv4.ping_group_range={os.getgid()} {os.getgid()}",
+            ],
+            ["--group-add", "keep-groups"],
             ["--env-file", str(self.directory / "credential.env")],
             ["--env", "HTTPS_PROXY=http://127.0.0.1:3128"],
             ["--volume", f"{self.directory}:{self.directory}:rw"],
@@ -258,6 +274,97 @@ class RunnerTest(unittest.TestCase):
             argv[image + 1 :], ["/opt/paw/start-claude", "-p", "--tools", ""]
         )
         self.assertNotIn(TOKEN, json.dumps(argv))
+
+    def failing_podman(self, code, stderr):
+        """A fake ``podman`` that writes ``stderr`` (a Python expression)
+        and exits ``code``."""
+        fake_tool(
+            self.bin,
+            "podman",
+            f"""
+            import sys
+            sys.stdin.read()
+            sys.stderr.write({stderr})
+            sys.stderr.flush()
+            sys.exit({code})
+            """,
+        )
+
+    def test_podmans_failure_is_in_the_journal_without_the_secrets(self):
+        # Issue #322: Podman's own failure (125) was thrown away; its tail is
+        # the unit's stderr now, without the credential or the bridge token.
+        bridge = "bridge-" + "7a" * 16
+        (self.directory / "bridge.token").write_text(bridge + "\n")
+        message = "Error: creating an ID-mapped copy of layer: chown: invalid argument"
+        self.failing_podman(
+            125,
+            repr(
+                f"time=x level=debug env CLAUDE_CODE_OAUTH_TOKEN={TOKEN}\n"
+                f"token {bridge} other sk-ant-oat01-abcdefXYZ\n"
+                f"\x1b[31m{message}\n"
+            ),
+        )
+        result, _ = self.run_runner()
+        self.assertEqual(result.returncode, 125)
+        err = result.stderr.decode()
+        self.assertIn("podman failed (exit 125)", err)
+        self.assertIn(message, err)
+        self.assertIn("[redacted]", err)
+        self.assertNotIn(TOKEN, err)
+        self.assertNotIn(bridge, err)
+        self.assertNotIn("sk-ant-oat01", err)
+        self.assertNotIn("\x1b", err)
+
+    def test_podmans_stderr_is_bounded_to_its_tail(self):
+        self.failing_podman(
+            125, "'x' * 3_000_000 + ''.join(f'line {i}\\n' for i in range(100))"
+        )
+        result, _ = self.run_runner()
+        self.assertEqual(result.returncode, 125)
+        lines = result.stderr.decode().splitlines()
+        runner = load_runner()
+        # The heading and at most STDERR_LINES lines, the last ones.
+        self.assertLessEqual(len(lines), runner.STDERR_LINES + 1)
+        self.assertEqual(lines[-1], "paw-cli-session: podman: line 99")
+        self.assertLess(len(result.stderr), runner.STDERR_CHARS + 2048)
+        self.assertNotIn("xxxx", result.stderr.decode())
+
+    def test_the_clis_own_stderr_is_never_written(self):
+        # Any other exit is the CLI's (its stderr may hold the task): only
+        # the code.
+        self.failing_podman(1, repr("the task's private words\n"))
+        result, _ = self.run_runner()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(b"the CLI ended (exit 1)", result.stderr)
+        self.assertNotIn(b"private words", result.stderr)
+
+    def test_a_codex_login_is_taken_out_of_podmans_stderr(self):
+        self.codex_session()
+        home = self.directory / "config"
+        home.mkdir()
+        refresh = "rt-" + "9f" * 20
+        (home / "auth.json").write_text(
+            json.dumps({"tokens": {"refresh_token": refresh, "id": ["x"]}})
+        )
+        self.failing_podman(125, repr(f"Error: {refresh}\n"))
+        result, _ = self.run_interactive(b"")
+        self.assertEqual(result.returncode, 125)
+        self.assertNotIn(refresh.encode(), result.stderr)
+        self.assertIn(b"Error: [redacted]", result.stderr)
+
+    def test_a_cut_tail_drops_its_first_line(self):
+        # The kept tail may begin inside a secret: that line is not written.
+        runner = load_runner()
+        self.assertEqual(
+            runner.stderr_excerpt(b"ecret-rest\nsecond\n", True, []), ["second"]
+        )
+        self.assertEqual(
+            runner.stderr_excerpt(b"first\nsecond\n", False, []),
+            ["first", "second"],
+        )
+        long = runner.stderr_excerpt(b"y" * 5000, False, [])
+        self.assertEqual(len(long), 1)
+        self.assertEqual(len(long[0]), runner.STDERR_CHARS)
 
     def test_a_codex_session_talks_over_the_stream_socket(self):
         # ``codex app-server`` is a conversation: the backend's socket is the
@@ -895,6 +1002,10 @@ class DeployFilesTest(unittest.TestCase):
         unit = (DEPLOY / "paw-cli-session@.service").read_text()
         for line in (
             "User=paw-agent-cli",
+            # Issue #322: the primary group stays paw-agent-cli's (its
+            # Podman storage's); the session's directory's group is a
+            # supplementary one.
+            "SupplementaryGroups=paw-cli-bridge",
             "NoNewPrivileges=yes",
             "CapabilityBoundingSet=",
             "ProtectSystem=strict",
@@ -926,6 +1037,7 @@ class DeployFilesTest(unittest.TestCase):
         after = [d for d in directives if d.startswith("After=")]
         self.assertEqual(after, ["After=paw-egress-session@%i.socket"])
         self.assertFalse([d for d in directives if "paw-egress.service" in d])
+        self.assertFalse([d for d in directives if d.startswith("Group=")])
         for script in ("start-claude", "start-codex"):
             with self.subTest(script=script):
                 text = (DEPLOY / script).read_text()

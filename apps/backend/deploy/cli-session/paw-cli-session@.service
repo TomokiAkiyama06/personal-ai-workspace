@@ -16,7 +16,14 @@ After=paw-egress-session@%i.socket
 [Service]
 Type=exec
 User=paw-agent-cli
-Group=paw-cli-bridge
+# The primary group stays paw-agent-cli's own (no Group=): with the single-uid
+# mapping (README.md) the container's gid 0 is the process's primary group,
+# and Podman's storage is that group's; another primary group makes Podman
+# copy the image's layers with an ID mapping, whose chown fails (exit 125,
+# issue #322). The session's directory (setgid, group paw-cli-bridge) is
+# reached through the supplementary group, which `podman run --group-add
+# keep-groups` keeps in the container.
+SupplementaryGroups=paw-cli-bridge
 Environment=HOME=/var/lib/paw-agent-cli
 # Rootless Podman's runtime directory (its runroot and tmpdir): the unit's own,
 # because ProtectHome=yes hides /run/user.
