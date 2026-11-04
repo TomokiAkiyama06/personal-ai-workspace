@@ -68,6 +68,8 @@ def main() -> int:
             out({"type": "system", "subtype": "api_retry", "error": action["retry"]})
         elif "result" in action:
             out({"type": "result", **action["result"]})
+        elif "line" in action:
+            out(action["line"])  # any other message, as it is
         elif "sleep" in action:
             time.sleep(action["sleep"])
         elif "exit" in action:

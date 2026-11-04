@@ -23,6 +23,9 @@ log) and returns a :class:`~paw_backend.connections.ProbeReport`:
   returned;
 * ``expired`` when an ``api_retry`` says the credential is refused
   (``authentication_failed`` and the like: the CLI is stopped at once);
+* a fallback to another model (the configured one refused: #325) is logged
+  (``Claude probe model fallback``, model names and counts only) and changes
+  nothing of the verdict: ``model`` stays the configured one;
 * ``unavailable`` otherwise, with its failure code (``rate_limited`` for the
   provider's limit, which does not change the connection's status;
   ``invalid_response`` for a stream or an answer that is not the expected
@@ -55,6 +58,7 @@ from paw_backend.agents.claude_stream import (
     StreamRefused,
     Totals,
     Turn,
+    fallback_note,
 )
 from paw_backend.agents.cli_session import (
     CliLaunch,
@@ -211,6 +215,15 @@ class ClaudeProbeAdapter:
                     raise failed
             with contextlib.suppress(Exception):
                 await process.wait()
+            note = fallback_note(stream, self._model)
+            if note is not None:
+                # #325: another model answered (or one refused). Noted only:
+                # the verdict is the same as without it (a human decision).
+                logger.warning(
+                    "Claude probe model fallback: session=%s %s",
+                    spec.session_id,
+                    note,
+                )
             return _report(stream, reading, self._model)
         finally:
             if unstopped:
