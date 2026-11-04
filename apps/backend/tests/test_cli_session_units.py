@@ -713,6 +713,27 @@ class LauncherTest(unittest.IsolatedAsyncioTestCase):
         # The socket is closed now, not when the garbage collector comes.
         self.assertEqual(process.stdin.transport.get_extra_info("socket").fileno(), -1)
 
+    async def test_a_stream_that_cannot_flush_does_not_hold_the_stop(self):
+        # Codex review of #327: an interactive CLI that stopped reading,
+        # a large request still buffered (Codex's ``_send`` writes before it
+        # drains) and a refused stop: the writer's close cannot flush, so
+        # waiting for it is bounded and the transport is aborted.
+        (self.sessions / "hold").write_text("30")  # the peer never reads
+        spec = create_session(self.sessions, ("python3", "relay.py"))
+        process = await self.launcher().start_interactive(("codex",), {}, spec)
+        await process.stdout.readline()
+        process.stdin.write(b"x" * (64 * 1024 * 1024))  # never drained
+        self.assertGreater(process.stdin.transport.get_write_buffer_size(), 0)
+        (self.sessions / "stop_fails").write_text("")
+        started = asyncio.get_running_loop().time()
+        with self.assertRaises(UnitNotStoppedError):
+            await asyncio.wait_for(process.stop(), 15)
+        self.assertLess(asyncio.get_running_loop().time() - started, 10)
+        self.assertEqual(self.accepting(), [])
+        self.assertEqual(process.stdin.transport.get_extra_info("socket").fileno(), -1)
+        (self.sessions / "stop_fails").unlink()
+        await process.stop()
+
     async def test_a_collected_session_logs_no_asyncio_error(self):
         # #326, production's journal: when the garbage collector destroyed
         # the pending ``accept`` ("Task was destroyed but it is pending!"),

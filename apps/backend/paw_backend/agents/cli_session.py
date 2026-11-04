@@ -400,12 +400,23 @@ class _UnitProcess:
         collector, which closed the socket only then."""
         writer, accepted = self._writer, self._accepted
         if writer is not None:
+            # A close flushes what is still buffered first: a peer that no
+            # longer reads (an interactive CLI, a request written and not
+            # drained) would hold it for ever. Bounded; then aborted.
             writer.close()
-            with contextlib.suppress(Exception):
-                await writer.wait_closed()
+            closing = asyncio.ensure_future(writer.wait_closed())
+            done, _ = await asyncio.wait({closing}, timeout=_STREAM_CLOSE_SECONDS)
+            if closing not in done:
+                writer.transport.abort()
+                await asyncio.wait({closing}, timeout=_STREAM_CLOSE_SECONDS)
+            if closing.done():
+                if not closing.cancelled():
+                    closing.exception()  # retrieved: a reset is no matter
+            else:
+                closing.cancel()
         if accepted is not None and not accepted.done():
             with contextlib.suppress(Exception):
-                await asyncio.wait_for(asyncio.shield(accepted), 1.0)
+                await asyncio.wait_for(asyncio.shield(accepted), _STREAM_CLOSE_SECONDS)
             if not accepted.done():
                 accepted.cancel()
 
@@ -439,6 +450,11 @@ class _UnitProcess:
         except ValueError:
             self._status = None
         self._result = result
+
+
+#: How long a session's stream may take to close (its flush, then after an
+#: abort) and its ``accept`` task to end (#326).
+_STREAM_CLOSE_SECONDS = 1.0
 
 
 #: The systemctl looks killed and not waited for (:meth:`SystemdLauncher.query`):
