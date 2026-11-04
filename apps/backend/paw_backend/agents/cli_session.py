@@ -116,11 +116,7 @@ def create_session(
     session_id = uuid.uuid4()
     # ``<base>/<uuid>``: the template unit's program finds it by the id alone.
     directory = Path(base) / str(session_id)
-    directory.mkdir(mode=0o750)
-    # Keep the parent's setgid (production: /run/paw-cli, group
-    # paw-cli-bridge): the files below then belong to the CLI's group.
-    setgid = Path(base).stat().st_mode & stat.S_ISGID
-    os.chmod(directory, 0o750 | setgid)
+    _make_directory(directory)
     spec = CliSessionSpec(
         session_id,
         directory,
@@ -129,6 +125,15 @@ def create_session(
         task_id,
         node_key,
     )
+    try:
+        _write_session_files(spec, settings)
+    except BaseException:
+        remove_session(spec)
+        raise
+    return spec
+
+
+def _write_session_files(spec: CliSessionSpec, settings: Mapping | None) -> None:
     _write(spec.token_path, spec.token + "\n", 0o640)
     config = {
         "mcpServers": {
@@ -146,8 +151,49 @@ def create_session(
     }
     _write(spec.mcp_config_path, json.dumps(config), 0o640)
     _write(spec.settings_path, json.dumps(dict(settings or {})), 0o640)
-    spec.config_dir.mkdir(mode=0o750)
-    return spec
+    _make_directory(spec.config_dir)
+
+
+class SessionDirectoryGroupError(OSError):
+    """A session's directory that did not keep its parent's setgid group
+    (production: ``paw-cli-bridge``, issue #319): the CLI's account could not
+    read the session's files, so no session starts in it."""
+
+
+def _make_directory(directory: Path) -> None:
+    """``directory`` as a new directory, mode 0750, that keeps its parent's
+    setgid group (production: ``/run/paw-cli``, 2750 ``paw:paw-cli-bridge``),
+    so that the files made in it belong to the CLI's group.
+
+    ``mkdir`` alone gives that: in a setgid parent the new directory takes the
+    parent's group and its setgid bit. A ``chmod`` must not follow when the
+    mode is already right: the backend's user is not in ``paw-cli-bridge``
+    (``deploy/cli-session/README.md``, 1), and Linux clears ``S_ISGID`` on a
+    ``chmod`` by an owner outside the file's group (issue #319). Only a
+    different umask makes one needed; when that cleared the bit (or the group
+    is not the parent's), the directory is removed and
+    :class:`SessionDirectoryGroupError` raised, instead of a session whose CLI
+    cannot read its files."""
+    parent = os.stat(directory.parent)
+    os.mkdir(directory, 0o750)
+    try:
+        info = os.stat(directory)
+        if stat.S_IMODE(info.st_mode) & 0o777 != 0o750:
+            os.chmod(directory, 0o750 | (info.st_mode & stat.S_ISGID))
+            info = os.stat(directory)
+        if parent.st_mode & stat.S_ISGID and (
+            not info.st_mode & stat.S_ISGID or info.st_gid != parent.st_gid
+        ):
+            raise SessionDirectoryGroupError(
+                "the session's directory lost its parent's setgid group"
+                " (the CLI's account could not read its files): check the"
+                " backend's umask (0022 or 0027) and the parent's mode"
+                " (2750, group paw-cli-bridge)"
+            )
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.rmdir(directory)
+        raise
 
 
 def log_session_start(
@@ -184,13 +230,14 @@ class UnitNotStoppedError(OSError):
 def _write_bytes(path: Path, data: bytes, mode: int) -> None:
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, mode)
     with os.fdopen(fd, "wb") as handle:
+        # Whatever the umask (the CLI's group reads it). A regular file's
+        # group stays the directory's: only a setgid bit would be cleared.
+        os.fchmod(fd, mode)
         handle.write(data)
 
 
 def _write(path: Path, text: str, mode: int) -> None:
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, mode)
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        handle.write(text)
+    _write_bytes(path, text.encode("utf-8"), mode)
 
 
 @dataclass(frozen=True, slots=True)
