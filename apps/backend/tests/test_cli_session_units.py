@@ -691,6 +691,50 @@ class LauncherTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(hasattr(process, "stdin"))
         await process.stop()
 
+    def accepting(self):
+        """The stream socket's ``accept`` tasks still pending (#326)."""
+        return [
+            task
+            for task in asyncio.all_tasks()
+            if not task.done()
+            and task.get_coro().__qualname__.endswith("_start_unit.<locals>.accept")
+        ]
+
+    async def test_a_stopped_session_leaves_no_accept_task_and_no_socket(self):
+        # #326: the stream socket's ``accept`` waited for a close nobody
+        # made: after a session's end it stayed pending (and its socket
+        # open) until the garbage collector destroyed it ("Task was
+        # destroyed but it is pending").
+        spec, process = await self.launch()
+        self.assertEqual(len(self.accepting()), 1)
+        await self.read_to_the_end(process)
+        await process.stop()
+        self.assertEqual(self.accepting(), [])
+        # The socket is closed now, not when the garbage collector comes.
+        self.assertEqual(process.stdin.transport.get_extra_info("socket").fileno(), -1)
+
+    async def test_an_interactive_session_leaves_no_accept_task(self):
+        spec = create_session(self.sessions, ("python3", "relay.py"))
+        launcher = self.launcher()
+        first = await launcher.start_interactive(("codex", "--version"), {}, spec)
+        await first.stdout.readline()
+        await first.stop()
+        second = await launcher.start_interactive(("codex", "app-server"), {}, spec)
+        await second.stdout.readline()
+        await second.stop()  # the CLI still running: the stop ends it
+        self.assertEqual(self.accepting(), [])
+
+    async def test_a_refused_stop_still_closes_the_stream(self):
+        (self.sessions / "hold").write_text("30")
+        spec, process = await self.launch()
+        await process.stdout.readline()
+        (self.sessions / "stop_fails").write_text("")
+        with self.assertRaises(OSError):
+            await process.stop()
+        self.assertEqual(self.accepting(), [])
+        (self.sessions / "stop_fails").unlink()
+        await process.stop()
+
     async def test_stop_stops_exactly_the_sessions_unit(self):
         (self.sessions / "hold").write_text("30")
         spec, process = await self.launch()

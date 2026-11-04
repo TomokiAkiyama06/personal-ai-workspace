@@ -344,6 +344,10 @@ class _UnitProcess:
         self._unit = unit
         self.stdout = stdout
         self.stdin: asyncio.StreamWriter | None = None
+        # The stream socket's connection and the task that took it (#326):
+        # closed and awaited by ``stop``, so neither outlives the session.
+        self._writer: asyncio.StreamWriter | None = None
+        self._accepted: asyncio.Task | None = None
         # How the unit ended, read by ``stop`` before it stopped the unit.
         self._result: str | None = None
         self._status: int | None = None
@@ -383,7 +387,27 @@ class _UnitProcess:
         still ``active`` is the backend's to stop: nothing is kept."""
         if self._result is None:
             await self._read_end()
-        await self._launcher.stop_unit(self._unit)
+        try:
+            await self._launcher.stop_unit(self._unit)
+        finally:
+            await self._close_stream()
+
+    async def _close_stream(self) -> None:
+        """Close the stream socket's connection and wait for the task that
+        accepted it (#326). The peer's end alone leaves the socket half open
+        (asyncio keeps a stream open after its EOF): without this close the
+        task waited for ever and was destroyed pending by the garbage
+        collector, which closed the socket only then."""
+        writer, accepted = self._writer, self._accepted
+        if writer is not None:
+            writer.close()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
+        if accepted is not None and not accepted.done():
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(asyncio.shield(accepted), 1.0)
+            if not accepted.done():
+                accepted.cancel()
 
     async def _read_end(self) -> None:
         launcher = self._launcher
@@ -590,8 +614,10 @@ class SystemdLauncher:
             if connected.done():
                 writer.close()
                 return
-            connected.set_result((reader, writer))
-            await writer.wait_closed()
+            connected.set_result((reader, writer, asyncio.current_task()))
+            # Held until the session closes the connection (``stop``).
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
 
         server = await asyncio.start_unix_server(
             accept, path=str(spec.directory / "stream.sock"), limit=16 * 1024 * 1024
@@ -603,8 +629,12 @@ class SystemdLauncher:
             code, _ = await self.systemctl("start", "--no-block", unit)
             if code != 0:
                 raise OSError("the session's unit did not start")
-            reader, writer = await asyncio.wait_for(connected, self._connect)
+            reader, writer, accepted = await asyncio.wait_for(connected, self._connect)
         except BaseException as error:
+            # A connection that came after all (the start was cancelled in
+            # the same turn) is closed with the unit's stop.
+            if connected.done() and not connected.cancelled():
+                _, process._writer, process._accepted = connected.result()
             # Whatever ended the start (a refusal, the wait, a cancellation
             # that came while systemctl ran): the unit may be queued or
             # running with the credential; stop it before passing on. A stop
@@ -619,7 +649,8 @@ class SystemdLauncher:
         finally:
             server.close()  # one connection only; it stays open
         process.stdout = reader
-        process.stdin = writer
+        process.stdin = process._writer = writer
+        process._accepted = accepted
         return process
 
 
