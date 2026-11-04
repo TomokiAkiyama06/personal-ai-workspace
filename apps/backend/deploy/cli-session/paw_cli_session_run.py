@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """``paw-cli-session@<uuid>.service``'s program (Decision 0083, 6; #208).
 
-Runs as ``paw-agent-cli`` (no login, in no user's group but
-``paw-cli-bridge``) and starts ONE CLI session's container with rootless
-Podman. Everything it takes comes from root-owned configuration or from the
-session's directory that the backend made (``<root>/<uuid>``, group
-``paw-cli-bridge``):
+Runs as ``paw-agent-cli`` (no login; its primary group ``paw-agent-cli``,
+which owns its Podman storage, and the supplementary group
+``paw-cli-bridge`` of the session's directory: the unit's
+``SupplementaryGroups=``, issue #322) and starts ONE CLI session's container
+with rootless Podman. Everything it takes comes from root-owned
+configuration or from the session's directory that the backend made
+(``<root>/<uuid>``, group ``paw-cli-bridge``):
 
 * ``launch.json``: the CLI's arguments (strings), its environment (names
   from a fixed list only) and which CLI it is (``cli``: ``claude``, the
@@ -40,6 +42,12 @@ directory) are mounted, each when the backend wrote it. Everything else Codex
 writes there (its logs, state, caches) stays in the container's tmpfs and
 goes with the container.
 
+Podman's own failures (exit 125, and 126 / 127: the entry could not be run)
+are this unit's journal's (issue #322): the tail of Podman's stderr, at most
+``STDERR_LINES`` lines and ``STDERR_CHARS`` characters, with the session's
+secrets taken out (``redact``). Any other exit is the CLI's own: only its
+code is written, never its stderr (it may hold anything of the task).
+
     paw_cli_session_run.py <uuid> [--config /etc/paw/cli-session.toml]
 """
 
@@ -51,6 +59,7 @@ import socket
 import stat
 import subprocess
 import sys
+import threading
 import tomllib
 from collections.abc import Sequence
 from pathlib import Path
@@ -81,6 +90,22 @@ CODEX_HOME_FILES = (("config.toml", "ro"), ("auth.json", "rw"))
 EGRESS_IN_CONTAINER = "/run/paw-egress.sock"
 #: Where systemd makes each session's egress socket (Decision 0091, 1).
 DEFAULT_EGRESS_SESSION_DIR = "/run/paw-egress/session"
+#: Podman's own exit codes (125: Podman failed; 126 / 127: the entry could
+#: not be run): only then is its stderr written to the journal (issue #322).
+PODMAN_FAILURES = frozenset({125, 126, 127})
+#: How much of Podman's stderr is kept while it runs (its tail, in bytes)
+#: and how much of that is written (lines, characters).
+STDERR_KEEP = 16 * 1024
+STDERR_LINES = 20
+STDERR_CHARS = 2000
+#: Shapes of a token that no file of the session names (defence in depth):
+#: an Anthropic key or OAuth token, a JWT (an OpenAI login's tokens).
+_TOKEN_SHAPES = re.compile(
+    r"sk-ant-[A-Za-z0-9_\-]+"
+    r"|eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}(?:\.[A-Za-z0-9_\-]*)?"
+)
+_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+REDACTED = "[redacted]"
 
 
 class Refused(Exception):
@@ -191,7 +216,11 @@ def podman_command(
     credential: Path | None,
     image: str,
     extra_mounts: Sequence[str] = (),
+    gid: int | None = None,
 ) -> list[str]:
+    if gid is None:
+        # The primary gid (``paw-agent-cli``): with keep-id the one mapped.
+        gid = os.getgid()
     command = [
         "podman",
         "run",
@@ -220,6 +249,16 @@ def podman_command(
         str(config["cpus"]),
         "--userns",
         "keep-id",
+        # keep-id maps no gid 0 into the container: Podman's default
+        # ``ping_group_range=0 0`` cannot be written there (crun: Invalid
+        # argument). The range of the one gid that is mapped (issue #322).
+        "--sysctl",
+        f"net.ipv4.ping_group_range={gid} {gid}",
+        # The unit's supplementary group (``paw-cli-bridge``, the session's
+        # directory's) stays the container process's: the session's files
+        # (0640 / 0660, that group) are read and written through it. crun.
+        "--group-add",
+        "keep-groups",
         "--volume",
         f"{directory}:{directory}:rw",
         "--volume",
@@ -232,6 +271,112 @@ def podman_command(
         command += ["--env", f"{name}={env[name]}"]
     command += [image, *argv]
     return command
+
+
+class _StderrTail(threading.Thread):
+    """Reads a pipe to its end and keeps only its last ``STDERR_KEEP`` bytes
+    (Podman never blocks on a full pipe; nothing grows without bound)."""
+
+    def __init__(self, pipe) -> None:
+        super().__init__(daemon=True)
+        self._pipe = pipe
+        self.data = b""
+        self.truncated = False
+
+    def run(self) -> None:
+        with self._pipe:
+            while chunk := self._pipe.read1(65536):
+                self.data += chunk
+                if len(self.data) > STDERR_KEEP:
+                    self.data = self.data[-STDERR_KEEP:]
+                    self.truncated = True
+
+
+def session_secrets(directory: Path) -> list[str]:
+    """What of the session's directory is secret, to take out of what is
+    written: the credential's value, the bridge's token and the strings of
+    Codex's login. A file that cannot be read has nothing to take out."""
+    secrets: list[str] = []
+    try:
+        line = (directory / "credential.env").read_text(encoding="utf-8")
+        secrets.append(line.strip().split("=", 1)[-1])
+    except (OSError, ValueError):
+        pass
+    try:
+        secrets.append((directory / "bridge.token").read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        pass
+    try:
+        login = json.loads(
+            (directory / CODEX_HOME_NAME / "auth.json").read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        login = None
+    pending = [login]
+    while pending:
+        value = pending.pop()
+        if isinstance(value, dict):
+            pending.extend(value.values())
+        elif isinstance(value, list):
+            pending.extend(value)
+        elif isinstance(value, str):
+            secrets.append(value)
+    # Short strings (a flag, a mode) are no secrets, and taking them out
+    # would take out ordinary words.
+    return sorted({s for s in secrets if len(s) >= 8}, key=len, reverse=True)
+
+
+def redact(text: str, secrets: Sequence[str]) -> str:
+    for secret in secrets:
+        text = text.replace(secret, REDACTED)
+    return _TOKEN_SHAPES.sub(REDACTED, text)
+
+
+def stderr_excerpt(data: bytes, truncated: bool, secrets: Sequence[str]) -> list[str]:
+    """The lines of Podman's stderr to write: its tail, without the first
+    line when the start was cut (it may begin inside a secret), the secrets
+    taken out, no control characters, at most ``STDERR_LINES`` lines and
+    ``STDERR_CHARS`` characters."""
+    text = data.decode("utf-8", errors="replace")
+    lines = text.splitlines()
+    if truncated and lines:
+        lines = lines[1:]
+    lines = [
+        _CONTROL.sub("?", redact(line, secrets)).rstrip()
+        for line in lines
+        if line.strip()
+    ][-STDERR_LINES:]
+    kept: list[str] = []
+    total = 0
+    for line in reversed(lines):
+        if total + len(line) > STDERR_CHARS:
+            if not kept:
+                kept.append("..." + line[-(STDERR_CHARS - 3) :])
+            break
+        kept.append(line)
+        total += len(line)
+    return kept[::-1]
+
+
+def run_podman(command: Sequence[str], stdin, stdout: int, directory: Path) -> int:
+    """Podman with its stderr read (never left to block, never kept whole);
+    its tail is written only on Podman's own failure."""
+    process = subprocess.Popen(
+        command, stdin=stdin, stdout=stdout, stderr=subprocess.PIPE
+    )
+    tail = _StderrTail(process.stderr)
+    tail.start()
+    code = process.wait()
+    tail.join(5)
+    if code in PODMAN_FAILURES:
+        lines = stderr_excerpt(tail.data, tail.truncated, session_secrets(directory))
+        print(f"paw-cli-session: podman failed (exit {code})", file=sys.stderr)
+        for line in lines:
+            print(f"paw-cli-session: podman: {line}", file=sys.stderr)
+    elif code != 0:
+        print(f"paw-cli-session: the CLI ended (exit {code})", file=sys.stderr)
+    sys.stderr.flush()
+    return code
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -272,21 +417,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     with stream:
         if interactive:
             # The conversation: the backend's socket is stdin and stdout.
-            result = subprocess.run(
-                command,
-                stdin=stream.fileno(),
-                stdout=stream.fileno(),
-                stderr=subprocess.DEVNULL,
-            )
-        else:
-            with open(directory / "prompt", "rb") as prompt:
-                result = subprocess.run(
-                    command,
-                    stdin=prompt,
-                    stdout=stream.fileno(),
-                    stderr=subprocess.DEVNULL,
-                )
-    return result.returncode
+            return run_podman(command, stream.fileno(), stream.fileno(), directory)
+        with open(directory / "prompt", "rb") as prompt:
+            return run_podman(command, prompt, stream.fileno(), directory)
 
 
 if __name__ == "__main__":
