@@ -16,7 +16,8 @@ Backend（User paw）
   └─ systemctl start --no-block paw-cli-session@<uuid>.service（polkit がこの名前の start / stop だけを許す）
        ├─ Requires= / After= paw-egress-session@<uuid>.socket（/run/paw-egress/session/<uuid>.sock。Session の Unit と一緒に止まる: ../egress/README.md）
        └─ paw_cli_session_run.py <uuid>（User paw-agent-cli、硬くした Unit）
-            └─ podman run --rm --cgroups=split --network none --read-only --cap-drop all --userns keep-id
+            └─ podman --events-backend none run --rm --log-driver none（Issue #324）
+                 --cgroups=split --network none --read-only --cap-drop all --userns keep-id
                  --sysctl net.ipv4.ping_group_range=<gid> <gid> --group-add keep-groups（Issue #322）
                  -v /run/paw-cli/<uuid>（同じ Path）-v /run/paw-egress/session/<uuid>.sock:/run/paw-egress.sock --env-file credential.env
                  <Image@sha256:...> /opt/paw/start-claude <引数>   stdin = prompt、stdout = stream.sock
@@ -27,6 +28,8 @@ Backend（User paw）
 Codex の Session（`launch.json` の `cli` が `codex`）は `codex app-server`（stdio の JSON-RPC の対話）なので、Program は `stream.sock` を Container の stdin と stdout の両方にする。Image は `codex_image`（`Containerfile.codex`、入口は `/opt/paw/start-codex`）。`credential.env` と `prompt` は書かない（Codex の Login は `CODEX_HOME` の `auth.json`。`credential.env` があれば拒否する）。版の確認（`codex --version`）と `app-server` は同じ Session の Unit を順に起動する。
 
 Codex の `CODEX_HOME`（Issue #239、Decision 0083 の 6、[Decision 0095](../../../../docs/decisions/0095-codex-auth-file-owner-and-mode.md)（Approved））: `launch.json` の `CODEX_HOME` は Session の Directory の `config` でなければならない（違えば拒否）。Program はそこに Container の tmpfs（`--mount type=tmpfs,destination=<dir>/config,tmpfs-mode=0700,chown=true`。所有者は Container の User = `paw-agent-cli`）を重ね、その中へ Session の `config.toml`（`:ro`）と `auth.json`（`:rw`）だけを Bind Mount する（Backend が書いたものだけ。普通の File でなければ拒否）。`auth.json` は Backend が作る 0660・所有者 `paw`・Group `paw-cli-bridge` の File で、Codex は Refresh した Login をこの File の Truncate と書き直しで保存し、Backend は Session の終わりに読み戻して Secret Store に書き戻す（Compare-and-swap）。Codex がその他に `CODEX_HOME` へ書く物（Log・状態）は Container の tmpfs に残り、Container と一緒に消える。Codex の Session は Connection ごとに同時に 1 つ（Backend の DB の Lease。`../../README.md` の「Codex の ChatGPT の Login」）。
+
+Container の出力は Backend だけのもの（Issue #324）: Program は `podman run --log-driver none` で Container の stdout / stderr をどこにも記録させない（Podman の既定の Log Driver は journald で、conmon が CLI の Stream（`stream-json` の本文: 応答・Tool の呼び出しと結果・Session の Id・利用量）を 1 行ずつ journal に書いていた。識別子は `paw-cli-<uuid>`）。`podman run` は Attach したままなので、stdout は今までどおり `stream.sock` に届き、stderr は Program が読む（Podman 自身の失敗の時だけ、その末尾を書く）。`podman --events-backend none` で Podman の Event（`create`・`start`・`attach` など）も記録しない（journald の Event の 1 件ごとに、その Entry の `_CMDLINE` に `podman run` の Command Line 全部、つまり CLI の引数（`--system-prompt` の本文・Session の Path）が残っていた）。
 
 Egress（[Decision 0091](../../../../docs/decisions/0091-egress-per-session-socket.md)）: Container に Mount するのは自分の Session の Socket（`<egress_session_dir>/<uuid>.sock`、既定 `/run/paw-egress/session`）だけで、Proxy はどの Socket で受けたかで Session を知る（Header は使わない。`PAW_SESSION_ID` も渡さない）。その Socket がなければ Program は起動を拒む（共有の Socket に戻らない）。設定に古い `egress_socket` が残っていても拒む。Backend は Session を起動するとき 1 行の Log（`CLI session started: session=<uuid> task=<id> node=<key> connection=<id> cli=<claude|codex>`）を書き、Egress の Log の `session=` を Task・Node・Connection に結び付ける。
 
@@ -58,6 +61,7 @@ python3 -I deploy/cli-session/smoke_codex_recorder.py --codex <codex> --out <res
 - **Rootless の Podman が、この硬くした Unit（`NoNewPrivileges`・空の `CapabilityBoundingSet`・`ProtectSystem=strict`・`ProtectHome`・`RestrictSUIDSGID`）の下で動くこと**（Decision 0083 の承認の条件 (1)）。`newuidmap` は Setuid なので動かないことがある。そのときは Subuid の Mapping を使わない形（`/etc/subuid` に `paw-agent-cli` の行を置かず、`storage.conf` の `ignore_chown_errors = "true"`）で、硬さはそのまま保つ。
   - Issue #322 の組み合わせ（主 Group `paw-agent-cli` + `SupplementaryGroups=paw-cli-bridge`、`--userns keep-id` + `--sysctl net.ipv4.ping_group_range=<gid> <gid>`（keep-id では gid 0 が写らないので Podman の既定の `0 0` は書けない）+ `--group-add keep-groups`）が、本物の Session の Directory（setgid の 2750、File は 0640・Group `paw-cli-bridge`）を Container の中から読めること。下の「Unit の Group と Podman を確かめる」。
   - Podman 自身の失敗（exit 125、126 / 127）は Unit の journal に出る: `paw-cli-session: podman failed (exit <code>)` と、Podman の stderr の最後の 20 行（2000 文字まで。Credential・Bridge の Token・Codex の Login の文字列と Token の形は `[redacted]`）。それ以外の終わりは CLI のもので、`paw-cli-session: the CLI ended (exit <code>)` の 1 行だけ（CLI の stderr は Task の中身を含みうるので書かない）。`journalctl -u 'paw-cli-session@*' -n 50`。
+- **CLI の出力が journal に残らないこと**（Issue #324）。下の「Container の出力を journal に残さない」。
 - Unit の `Delegate=yes` の下で、Podman の `--memory`・`--cpus`・`--pids-limit` が効くこと（cgroup v2 の Controller の委任）。
 - **`--cgroups=split` で Container の cgroup が Unit の cgroup の下にあること**（`podman inspect --format '{{.State.CgroupPath}}' paw-cli-<uuid>` が `/system.slice/system-paw\x2dcli\x2dsession.slice/paw-cli-session@<uuid>.service/` の下）。`--memory` を小さくした Session で Memory を食わせ、Unit が `systemctl show -p Result` で `oom-kill` になり、Node が `AgentOutOfMemory` になること（Decision 0092 の 7）。`split` が使えなければ、Decision 0092 の 4 の他の案 (a)（Wrapper が `OOMKilled` を読む）に新しい Decision で替える。
 - CLI の Unit が止められなかった（`systemctl stop` が 3 回とも失敗した）ときは、Runtime は Session の Directory を消さずに残す（Unit が Mount しているため）。Log の `A CLI session could not be stopped` を見たら、Unit を止める。
@@ -106,3 +110,36 @@ sudo rm -r /run/paw-cli/check-322
 ```
 
 `uid=<paw-agent-cli> gid=<paw-agent-cli>` の行と `readable` が出て Exit 0 なら良い（補助 Group は Container の中では名前のない gid に見える）。その後、Connection の Health Check（`docs/DEPLOYMENT_UPDATE.md` の「The CLI runtimes」の 4）を 1 回行い、失敗したら `journalctl -u 'paw-cli-session@*' -n 50` で Podman の stderr を見る。
+
+## Container の出力を journal に残さない（Issue #324。root、Human）
+
+`paw_cli_session_run.py` を配備の 3 で入れ直す（上の「Unit の Group と Podman を確かめる」の最初の `install`。Unit の File は変わらないが、入れ直しても良い）。走っている Session はそのまま（次の Session から新しい Program になる）。
+
+入れ直した後、Connection の Health Check（`docs/DEPLOYMENT_UPDATE.md` の「The CLI runtimes」の 4）を 1 回行い、その Session の分が journal に Unit の行（Podman の失敗・`the CLI ended` の 1 行・systemd の Start / Stop）しかないことを確かめる:
+
+```sh
+since=$(date '+%Y-%m-%d %H:%M:%S')   # Health Check の直前に
+# ……Health Check……
+sudo journalctl --since "$since" --no-pager -o verbose _UID=$(id -u paw-agent-cli) | grep -cE '"type":|session_id|--system-prompt'   # 0
+sudo journalctl --since "$since" --no-pager -u 'paw-cli-session@*' -o short-iso   # systemd と paw-cli-session: の行だけ
+```
+
+### 既に残った分
+
+journald は Entry を 1 件ずつ消せない。Issue #324 の前の Program が動いた Host（本番は 2026-11-04 22:15 の Health Check から）では、CLI の Stream の行（識別子 `paw-cli-<uuid>`）と Podman の Event（`SYSLOG_IDENTIFIER=podman`、`_CMDLINE` に CLI の引数）が、`paw-agent-cli`（System の Account なので System の journal）の Entry として残っている。量を確かめる:
+
+```sh
+sudo journalctl --no-pager -o cat _UID=$(id -u paw-agent-cli) | wc -l
+sudo journalctl --no-pager -o short-iso _UID=$(id -u paw-agent-cli) | head -n 3   # 最初の時刻
+ls /var/log/journal 2>/dev/null   # 無ければ journal は /run（Volatile）で、Host の再起動で消える
+```
+
+消すには、その時刻より前の journal を File ごと消すしかない（**同じ時刻までの Host の他の Log もすべて消える**。どこまで消すかは Human が決める）:
+
+```sh
+sudo journalctl --rotate                # 今の File を閉じて Archive にする
+sudo journalctl --vacuum-time=<期間>     # 最後の Entry がこれより古い Archive を消す（例: 1s で今までの全部）
+sudo journalctl --no-pager -o cat _UID=$(id -u paw-agent-cli) | wc -l   # 0（または Program を入れ直した後の Unit の行だけ）
+```
+
+journal の写しが他にもあれば同じく扱う: rsyslog などの転送先（`sudo grep -l 'paw-cli-' /var/log/syslog* /var/log/messages* 2>/dev/null`）、journal を含む Backup、`systemd-journal-upload` などの転送。

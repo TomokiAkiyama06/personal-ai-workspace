@@ -313,9 +313,13 @@ Order (root, the human; the agent never does this):
    program are not part of a release: after a release that changes
    `paw-cli-session@.service` or `paw_cli_session_run.py` (issue #322: no `Group=`, but
    `SupplementaryGroups=paw-cli-bridge`; Podman's `--sysctl net.ipv4.ping_group_range` and
-   `--group-add keep-groups`; Podman's own failures in the unit's journal), install both
-   again, `systemctl daemon-reload`, and run the check without Claude of that README
-   ("Unit の Group と Podman を確かめる") before the health probe of step 4.
+   `--group-add keep-groups`; Podman's own failures in the unit's journal; issue #324:
+   `podman --events-backend none run --log-driver none`, so the CLI's stream is no
+   longer copied into the journal), install both again, `systemctl daemon-reload`, and
+   run the check without Claude of that README ("Unit の Group と Podman を確かめる")
+   before the health probe of step 4. After the probe, check the journal and decide on
+   the entries already recorded ("Container の出力を journal に残さない" of the same
+   README).
 4. Check the Claude connection with its health probe **before any ladder names `claude`**
    (Decision 0100; the probe needs no ladder):
    1. Add only `[cloud] enabled = true` and `[agents.claude]` of step 4 of the example to
