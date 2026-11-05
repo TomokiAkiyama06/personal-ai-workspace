@@ -1571,7 +1571,7 @@ class ConnectionService:
         and a change of status (``connection.status``)."""
         status = (
             ConnectionStatus(end.outcome.value)
-            if changes_status(end.outcome, end.failure) and not end.keep_status
+            if changes_status(end.outcome, end.failure, keeps_status=end.keep_status)
             else None
         )
         try:

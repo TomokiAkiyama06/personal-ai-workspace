@@ -118,6 +118,9 @@ REPORTABLE_OUTCOMES: Final = frozenset(
 _FAILURES: Final = frozenset({ProbeOutcome.EXPIRED, ProbeOutcome.UNAVAILABLE})
 #: The outcomes the back-off skips (they say nothing about the credential).
 _NEUTRAL: Final = frozenset({ProbeOutcome.BUSY, ProbeOutcome.CANCELLED})
+#: The ``unavailable`` failures that keep the connection's status (Decision
+#: 0100, 5; Decision 0102, 3). They still count as failures for the back-off.
+_KEEPS_STATUS: Final = frozenset({FailureCode.RATE_LIMITED, FailureCode.MODEL_FALLBACK})
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,16 +223,26 @@ class ProbeSession:
                 )
 
 
-def changes_status(outcome: ProbeOutcome, failure: FailureCode | None) -> bool:
+def changes_status(
+    outcome: ProbeOutcome, failure: FailureCode | None, *, keeps_status: bool = False
+) -> bool:
     """Is this outcome written to the connection's status (Decision 0100, 5)?
 
-    ``connected``, ``expired`` and ``unavailable`` are; ``busy`` and
-    ``cancelled`` are not, and neither is an ``unavailable`` because of the
-    provider's rate limit (a working credential at its window's end)."""
+    The one rule: ``connected`` and ``expired`` are; ``busy`` and
+    ``cancelled`` are not; an ``unavailable`` is, unless it says nothing about
+    the credential. That is known from its failure code when the code itself
+    says so (``_KEEPS_STATUS``: the provider's rate limit, a working credential
+    at its window's end; a model fallback, the configured model refused this
+    text: Decision 0102, 3), or from the probe's own report when the same code
+    also names failures that do change it (``keeps_status``: Codex's slot was
+    lost or could not be bound, or its CLI could not be stopped: Decision 0100,
+    10; their codes ``unavailable`` / ``internal_error`` stay on the row)."""
     if outcome in (ProbeOutcome.CONNECTED, ProbeOutcome.EXPIRED):
         return True
-    return outcome is ProbeOutcome.UNAVAILABLE and failure is not (
-        FailureCode.RATE_LIMITED
+    return (
+        outcome is ProbeOutcome.UNAVAILABLE
+        and failure not in _KEEPS_STATUS
+        and not keeps_status
     )
 
 

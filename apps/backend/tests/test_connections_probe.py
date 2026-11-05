@@ -84,6 +84,18 @@ class RulesTest(unittest.TestCase):
         self.assertFalse(
             changes_status(ProbeOutcome.UNAVAILABLE, FailureCode.RATE_LIMITED)
         )
+        # Decision 0102, 3: the configured model refused the text, which says
+        # nothing about the credential.
+        self.assertFalse(
+            changes_status(ProbeOutcome.UNAVAILABLE, FailureCode.MODEL_FALLBACK)
+        )
+        # The report's own mark (Codex's slot or an unstopped CLI): the same
+        # codes without it change the status.
+        for code in (FailureCode.UNAVAILABLE, FailureCode.INTERNAL_ERROR):
+            self.assertTrue(changes_status(ProbeOutcome.UNAVAILABLE, code))
+            self.assertFalse(
+                changes_status(ProbeOutcome.UNAVAILABLE, code, keeps_status=True)
+            )
         self.assertFalse(changes_status(ProbeOutcome.BUSY, None))
         self.assertFalse(changes_status(ProbeOutcome.CANCELLED, None))
 
@@ -271,6 +283,47 @@ class ProbeTest(PostgresConnectionTestCase):
                 self.assertNotIn(
                     "connection.status", [a for a, _, _ in self.own_audit()]
                 )
+
+    async def test_a_model_fallback_is_kept_on_the_row_only_and_spaced(self):
+        # Decision 0102, 3: the status and ``checked_at`` stay what they were
+        # (a connected credential is not dropped, an unchecked one is not
+        # marked connected); the row keeps ``unavailable`` / ``model_fallback``
+        # and the rechecks back off as after any failure.
+        fallback = ProbeReport(
+            ProbeOutcome.UNAVAILABLE, FailureCode.MODEL_FALLBACK, 100, 0, "claude-x"
+        )
+        for status in ("connected", "unavailable"):
+            with self.subTest(status=status):
+                self.clean_tables()
+                self.admin = self.seed_user(system_role="admin")
+                self.admin_principal = self.principal(self.admin)
+                self.seed_connection(CLAUDE, status=status)
+                before = self.connection_row(CLAUDE)
+                self.claude.health = fallback
+                for trigger in (ATTACH, REPLACE):  # two in a row, not spaced
+                    with self.assertNoLogs("paw_backend.connections", logging.ERROR):
+                        _, result = await self.probe(trigger)
+                    self.assertEqual(
+                        (result.outcome, result.failure),
+                        (ProbeOutcome.UNAVAILABLE, FailureCode.MODEL_FALLBACK),
+                    )
+                    self.assertFalse(result.status_written)
+                after = self.connection_row(CLAUDE)
+                self.assertEqual(
+                    (after["status"], after["checked_at"]),
+                    (before["status"], before["checked_at"]),
+                )
+                self.assertNotIn(
+                    "connection.status", [a for a, _, _ in self.own_audit()]
+                )
+                self.assertEqual(
+                    [(p["outcome"], p["failure_code"]) for p in self.probe_rows()],
+                    [("unavailable", "model_fallback")] * 2,
+                )
+                with self.assertRaises(ProbeRefusedError) as caught:
+                    await self.service.start_probe(self.admin_principal, CLAUDE, MANUAL)
+                # Two failures in a row: 120 s after the latest end.
+                self.assertTrue(115 <= caught.exception.retry_after_seconds <= 120)
 
     async def test_an_answer_that_is_neither_a_status_nor_a_report_is_unavailable(
         self,

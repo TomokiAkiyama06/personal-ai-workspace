@@ -1,7 +1,7 @@
 """The health probe of the Claude connection: one short Claude Code session
 with a fixed prompt and no tools (Decision 0100, 2 and 11, approved
-2026-10-29; issue #306; the prompts' wording: Decision 0102, 1, approved
-2026-11-05; issue #325).
+2026-10-29; issue #306; the prompts' wording and the model fallback: Decision
+0102, 1 and 3, approved 2026-11-05; issue #325).
 
 :class:`ClaudeProbeAdapter` is the connection's ``ConnectionAdapter``
 (``AdapterRegistry``): ``check_health(secret)`` starts the CLI on the same
@@ -19,14 +19,21 @@ log) and returns a :class:`~paw_backend.connections.ProbeReport`:
   directory holds no worktree and no bridge;
 * ``connected`` only when ``system/init`` shows no tool and no MCP server,
   exactly one model call is reported, the ``result`` is a success that is not
-  an error, and its answer contains :data:`PROBE_ANSWER` (Decision 0100's
-  answer 2 A). The answer is read for that check only: never kept, logged or
-  returned;
+  an error, the CLI reported no fallback and no safety stop, and its answer
+  contains :data:`PROBE_ANSWER` (Decision 0100's answer 2 A). The answer is
+  read for that check only: never kept, logged or returned;
 * ``expired`` when an ``api_retry`` says the credential is refused
   (``authentication_failed`` and the like: the CLI is stopped at once);
-* a fallback to another model (the configured one refused: #325) is logged
-  (``Claude probe model fallback``, model names and counts only) and changes
-  nothing of the verdict: ``model`` stays the configured one;
+* ``unavailable`` with ``model_fallback`` (Decision 0102, 3; the service keeps
+  the connection's status) when the configured model was refused and another
+  one answered or was about to (#325): the CLI is stopped as soon as its
+  fallback notice (``system/model_refusal_fallback``) or an ``assistant``
+  ``fallback`` block is read (the lines after it are never read), and a
+  ``result`` with ``safety_stops`` of 1 or more is one too, whatever else it
+  says. It comes before every other failure but ``expired`` (a refused
+  credential stops the CLI first). The fallback is also logged (``Claude probe
+  model fallback``, model names and counts only); ``model`` stays the
+  configured one;
 * ``unavailable`` otherwise, with its failure code (``rate_limited`` for the
   provider's limit, which does not change the connection's status;
   ``invalid_response`` for a stream or an answer that is not the expected
@@ -219,8 +226,8 @@ class ClaudeProbeAdapter:
                 await process.wait()
             note = fallback_note(stream, self._model)
             if note is not None:
-                # #325: another model answered (or one refused). Noted only:
-                # the verdict is the same as without it (a human decision).
+                # #325: another model answered (or one refused). The model
+                # names are in this line only (Decision 0102, 2).
                 logger.warning(
                     "Claude probe model fallback: session=%s %s",
                     spec.session_id,
@@ -262,6 +269,12 @@ async def _read(process, stream: ClaudeStream, reading: _Reading) -> None:
             logger.warning("Claude probe refused: %s", refused.reason)
             reading.failure = FailureCode.INVALID_RESPONSE
             return
+        if stream.fallbacks:
+            # Decision 0102, 3 (1): the configured model was refused. Stop
+            # here: the fallback model is not let finish its answer, and no
+            # later line (its call, its answer, the result) is read.
+            reading.failure = FailureCode.MODEL_FALLBACK
+            return
         if isinstance(item, Turn):
             if not stream.initialized:
                 reading.failure = FailureCode.INVALID_RESPONSE
@@ -298,6 +311,11 @@ def _report(stream: ClaudeStream, reading: _Reading, model: str) -> ProbeReport:
     failure = reading.failure
     if failure is FailureCode.EXPIRED:
         return report(ProbeOutcome.EXPIRED, FailureCode.EXPIRED)
+    if failure is FailureCode.MODEL_FALLBACK or stream.fell_back:
+        # Decision 0102, 3 (2 and 4): a safety stop counted by the result is
+        # a fallback too, and it comes before the other failures.
+        stream.answer = None  # never checked
+        return report(ProbeOutcome.UNAVAILABLE, FailureCode.MODEL_FALLBACK)
     if failure is not None:
         return report(ProbeOutcome.UNAVAILABLE, failure)
     if reading.retry in RATE_ERRORS and (totals is None or totals.is_error):

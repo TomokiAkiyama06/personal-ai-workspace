@@ -111,6 +111,10 @@ class FailureCode(StrEnum):
     TIMEOUT = "timeout"
     INVALID_RESPONSE = "invalid_response"
     INTERNAL_ERROR = "internal_error"
+    #: A health probe's configured model was refused and another model
+    #: answered or was about to (the CLI's fallback; Decision 0102, 3). Only a
+    #: probe reports it: a node's session only logs its fallback.
+    MODEL_FALLBACK = "model_fallback"
 
 
 class QuotaMetric(StrEnum):
