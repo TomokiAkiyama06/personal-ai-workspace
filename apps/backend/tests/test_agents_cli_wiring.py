@@ -27,7 +27,13 @@ from paw_backend.agents.cli_wiring import (
     build_probe_adapters,
 )
 from paw_backend.agents.cloud_policy import CloudSettings, ConfiguredCloudPolicy
-from paw_backend.agents.codex_cli import CodexCliRuntime, CodexSessionAdapter
+from paw_backend.agents.codex_cli import (
+    CodexCliRuntime,
+    CodexSessionAdapter,
+    SystemdCodexLauncher,
+)
+from paw_backend.agents.codex_credentials import CodexAuthFile
+from paw_backend.agents.codex_probe import CodexProbeAdapter
 from paw_backend.app import create_app
 from paw_backend.auth.principals import DatabasePrincipalDirectory
 from paw_backend.authz import Authorizer, InMemoryAuditSink
@@ -167,7 +173,15 @@ class ComposedCliRuntimesTest(StoreCase):
         self.assertEqual(
             set(orchestrator._connections._session_adapters), {ConnectionKind.CLAUDE}
         )
-        self.assertIsNone(orchestrator._connections._session_collector)
+        # No Codex session runs here, but ``[agents.codex]`` gives the Codex
+        # connection its probe, whose kept slot this process collects.
+        self.assertIn(ConnectionKind.CODEX, orchestrator._connections._adapters)
+        self.assertIsNotNone(orchestrator._connections._session_collector)
+        claude_only = self.build(
+            cli=CliSetup(CloudSettings(enabled=True), {"claude": AGENTS["claude"]}),
+            ladders=ladders,
+        )
+        self.assertIsNone(claude_only.orchestrator._connections._session_collector)
 
     def test_without_cli_nothing_is_sent_from_the_orchestrator(self):
         settings, database = configured()
@@ -264,11 +278,16 @@ class ComposedCliRuntimesTest(StoreCase):
 
 
 class ProbeWiringTest(StoreCase):
-    """Decision 0100, 4 and 11: the Claude connection's health probe in both
-    connection services, whether a ladder names the CLI or not."""
+    """Decision 0100, 4, 10 and 11: the Claude and Codex connections' health
+    probes in both connection services, whether a ladder names the CLI or
+    not."""
 
     def assertClaudeProbe(self, service):
-        self.assertEqual(service._adapters.kinds(), (ConnectionKind.CLAUDE,))
+        self.assertEqual(
+            set(service._adapters.kinds()),
+            {ConnectionKind.CLAUDE, ConnectionKind.CODEX},
+        )
+        self.assertCodexProbe(service)
         probe = service._adapters.get(ConnectionKind.CLAUDE)
         self.assertIsInstance(probe, ClaudeProbeAdapter)
         self.assertIsInstance(probe._launcher, SystemdLauncher)
@@ -278,19 +297,62 @@ class ProbeWiringTest(StoreCase):
         self.assertEqual(probe._base, Path("/run/paw-cli"))
         self.assertEqual(service._health_timeout, PROBE_TIMEOUT_SECONDS)
 
-    def test_the_probes_need_the_cloud_and_claudes_section(self):
+    def assertCodexProbe(self, service):
+        probe = service._adapters.get(ConnectionKind.CODEX)
+        self.assertIsInstance(probe, CodexProbeAdapter)
+        codex = probe._codex
+        self.assertIsInstance(codex._launcher, SystemdCodexLauncher)
+        self.assertIsInstance(codex._launcher._systemd, SystemdLauncher)
+        self.assertEqual(codex._executable, CODEX_EXECUTABLE)
+        self.assertEqual(codex._proxy_url, EGRESS_PROXY_URL)
+        self.assertIsInstance(probe._credentials, CodexAuthFile)
+        self.assertEqual(probe._model, "gpt-5-codex")
+        self.assertEqual(probe._base, Path("/run/paw-cli"))
+        # The write-back of a refreshed login needs the secret store.
+        self.assertIs(service._credentials, self.store)
+
+    def test_the_probes_need_the_cloud_and_their_sections(self):
         self.assertEqual(build_probe_adapters(None), ())
         self.assertEqual(
             build_probe_adapters(CliSetup(CloudSettings(enabled=False), AGENTS)), ()
         )
         self.assertEqual(
-            build_probe_adapters(
-                CliSetup(CloudSettings(enabled=True), {"codex": AGENTS["codex"]})
-            ),
-            (),
+            build_probe_adapters(CliSetup(CloudSettings(enabled=True))), ()
         )
-        (probe,) = build_probe_adapters(CliSetup(CloudSettings(enabled=True), AGENTS))
-        self.assertIsInstance(probe, ClaudeProbeAdapter)
+        (codex,) = build_probe_adapters(
+            CliSetup(CloudSettings(enabled=True), {"codex": AGENTS["codex"]})
+        )
+        self.assertIsInstance(codex, CodexProbeAdapter)
+        (claude,) = build_probe_adapters(
+            CliSetup(CloudSettings(enabled=True), {"claude": AGENTS["claude"]})
+        )
+        self.assertIsInstance(claude, ClaudeProbeAdapter)
+        claude, codex = build_probe_adapters(
+            CliSetup(CloudSettings(enabled=True), AGENTS)
+        )
+        self.assertIsInstance(claude, ClaudeProbeAdapter)
+        self.assertIsInstance(codex, CodexProbeAdapter)
+        # One launcher for both (Decision 0100, 11).
+        self.assertIs(codex._codex._launcher._systemd, claude._launcher)
+
+    def test_a_codex_probe_without_a_ladder_is_still_collected(self):
+        # Decision 0096, 1 D: a probe's slot kept for a CLI that could not be
+        # stopped is collected by the service that runs it.
+        settings = make_settings()
+        execution = build_task_execution(
+            settings,
+            Database(settings),
+            Authorizer(InMemoryAuditSink()),
+            runtimes={"local": FakeRuntime()},
+            orchestrator_config=decisions_config(
+                {role: ("local",) for role in NodeRole}
+            ),
+            cli=CliSetup(CloudSettings(enabled=True), AGENTS),
+            secret_store=self.store,
+        )
+        connections = execution.orchestrator._connections
+        self.assertEqual(connections._session_adapters, {})
+        self.assertIsNotNone(connections._session_collector)
 
     def test_the_orchestrators_service_probes_claude(self):
         for ladders in (LADDERS, {role: ("local",) for role in NodeRole}):

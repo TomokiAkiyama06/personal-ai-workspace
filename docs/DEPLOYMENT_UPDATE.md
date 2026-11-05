@@ -305,7 +305,10 @@ CLIs' session units (`paw-cli-session@<uuid>.service`, image entry
 0089 and 0101). Only `0.156.1` is (#305). The Codex image (`Containerfile.codex`,
 `CODEX_VERSION=0.156.1`) must be built and its digest pinned as `codex_image` first;
 until then every Codex review fails, and so does every writing task. Before enabling,
-the token-breakdown check and the egress allowlist of Decision 0089, 3 remain.
+the token-breakdown check and the egress allowlist of Decision 0089, 3 remain, and the
+Codex connection must reach `connected` through its own health probe (step 4b below,
+issue #306: `agents/codex_probe.py`, in the connection's session slot, with the
+login's write-back).
 
 Order (root, the human; the agent never does this):
 
@@ -345,6 +348,36 @@ Order (root, the human; the agent never does this):
    3. `connection_probes` has the row and `audit_events` has `connection.probe`,
       `connection.probe_result` and `connection.status`. The real CLI's first run is the
       smoke of Decision 0100 ("PR の分け方" 5), with the human's permission.
+4b. Check the Codex connection the same way **before step 5** (Decision 0100, 10; the
+   probe needs no ladder). It is one short `codex app-server` session with the same
+   fixed prompts as Claude's and no tool at all (its `config.toml` has no MCP server),
+   run in the connection's session slot like a node's session: it waits up to 60 s for
+   the slot (`busy` when a Codex session holds it: the status is kept; check again
+   later), binds the slot before the login is placed, and writes a refreshed login back
+   as the credential's next version (`connection.rotate`).
+   1. The Codex image (`Containerfile.codex`, `CODEX_VERSION=0.156.1`) built, its digest
+      pinned as `codex_image` in `/etc/paw/cli-session.toml`, and `chatgpt.com` /
+      `auth.openai.com` in the egress allowlist (`/etc/paw/egress.toml`; decide from the
+      proxy's refusal log, never `ab.chatgpt.com`). On a development machine first:
+      `smoke_codex_recorder.py --probe` with the same `codex` (no login, nothing sent to
+      OpenAI: one request, no tool offered, verdict `connected`).
+   2. The ChatGPT login put into the secret store
+      (`apps/backend/deploy/secret-store/README.md`, "Codex の ChatGPT の Login"), not
+      attached yet.
+   3. Add `[agents.codex]` of step 4 of the example to `/etc/paw/runtime.toml` (no ladder
+      names `codex` yet); `runtime-config-check`; restart with
+      `PAW_ORCHESTRATOR_WORKERS=0`.
+   4. Attach it (`POST /api/v1/admin/connections/codex`); read
+      `GET /api/v1/admin/connections` until `last_probe.state` is `finished` and go on
+      only with `status: connected` (`expired`: log in again, put and replace;
+      `unavailable`: the backend's log, then
+      `POST /api/v1/admin/connections/codex/health-check`). The journal shows
+      `cli=codex-probe` for the session; `connection_probes` has its tokens. With the
+      first real run, check the token breakdown of Decision 0089, 3 (`inputTokens` /
+      `outputTokens` include the cached and reasoning parts) before any ladder names
+      `codex`.
+   5. A probe whose CLI could not be stopped keeps the slot (`connection.session_kept`):
+      stop the unit as the log says; the collection loop then collects the login.
 5. Edit `/etc/paw/runtime.toml`: uncomment the rest of step 4 of the example in place of
    step 3's `[orchestrator]`; run `runtime-config-check` (it lists
    `cloud: enabled single_user`, `ladders=claude,codex,local` and `assignment: yes`), then

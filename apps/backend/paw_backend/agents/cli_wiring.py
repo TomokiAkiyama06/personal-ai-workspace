@@ -28,16 +28,20 @@ Nothing is sent by building them: every send still goes through ``CloudGate``
 its CLI's version is verified (``codex_app_server.VERIFIED_VERSIONS``, Decision
 0089, 2).
 
-The health probes (Decision 0100, 4 and 11; issue #306): with ``[cloud]
-enabled = true``, every configured ``[agents.claude]`` gives the Claude
-connection a :class:`~.claude_probe.ClaudeProbeAdapter` (one short session
-with a fixed prompt and no tools, on the same launcher, image and egress) —
-whether a ladder names the CLI or not, so that the connection is checked
-before it is used. :func:`build_probe_adapters` builds them; they are
-registered in this orchestrator's ``ConnectionService`` and in the HTTP
-layer's (``connections/wiring.py``), each built with ``PROBE_TIMEOUT_SECONDS``
-as its ``health_timeout_seconds``. Codex gets its probe after its CLI's
-version is verified (issue #305).
+The health probes (Decision 0100, 4, 10 and 11; issue #306): with ``[cloud]
+enabled = true``, a configured ``[agents.claude]`` gives the Claude connection
+a :class:`~.claude_probe.ClaudeProbeAdapter` and a configured
+``[agents.codex]`` the Codex connection a :class:`~.codex_probe.
+CodexProbeAdapter` (one short session with a fixed prompt and no tools, on the
+same launcher, image and egress; Codex's in the connection's session slot,
+with its login's write-back) — whether a ladder names the CLI or not, so that
+the connection is checked before it is used. :func:`build_probe_adapters`
+builds them; they are registered in this orchestrator's ``ConnectionService``
+and in the HTTP layer's (``connections/wiring.py``), each built with
+``PROBE_TIMEOUT_SECONDS`` as its ``health_timeout_seconds`` and the secret
+store as its credential store (the write-back). Codex's probe on the HTTP
+layer's service is collected by that service's own collector (``app.py``'s
+``build_codex_collection``) when its CLI could not be stopped.
 """
 
 from collections.abc import Mapping
@@ -60,6 +64,7 @@ from paw_backend.agents.codex_cli import (
 )
 from paw_backend.agents.codex_collect import CodexLoginCollector, SystemdSessionUnits
 from paw_backend.agents.codex_credentials import CodexAuthFile
+from paw_backend.agents.codex_probe import CodexProbeAdapter
 from paw_backend.auth.principals import DatabasePrincipalDirectory
 from paw_backend.authz import Authorizer, PostgresAuditSink
 from paw_backend.connections import PROBE_TIMEOUT_SECONDS, ConnectionKind
@@ -186,9 +191,9 @@ def build_cli_services(
         database_timeout_seconds=database_timeout_seconds,
         health_timeout_seconds=PROBE_TIMEOUT_SECONDS,
     )
-    if "codex" in used:
-        # Decision 0096, 1 D: a slot this process keeps for a session whose CLI
-        # could not be stopped is collected here.
+    if "codex" in used or ConnectionKind.CODEX in probes:
+        # Decision 0096, 1 D: a slot this process keeps for a session (or a
+        # probe) whose CLI could not be stopped is collected here.
         connections.attach_session_collector(
             CodexLoginCollector(
                 connections,
@@ -219,26 +224,43 @@ def build_cli_services(
 
 def build_probe_adapters(
     setup: CliSetup | None, *, launcher: CliLauncher | None = None
-) -> tuple[ClaudeProbeAdapter, ...]:
-    """The connections' health probe adapters (Decision 0100, 4 and 11): none
-    without ``setup`` or with the cloud disabled (nothing is sent then);
-    Claude's when ``[agents.claude]`` is written (its model and session
-    directory), on production's launcher by default. Codex has none yet
-    (issue #305)."""
+) -> tuple[ClaudeProbeAdapter | CodexProbeAdapter, ...]:
+    """The connections' health probe adapters (Decision 0100, 4, 10 and 11):
+    none without ``setup`` or with the cloud disabled (nothing is sent then);
+    Claude's when ``[agents.claude]`` is written and Codex's when
+    ``[agents.codex]`` is (each with its model and session directory), on
+    production's launcher by default (Codex's through its interactive form,
+    ``SystemdCodexLauncher``)."""
     if setup is None or setup.cloud.enabled is not True:
         return ()
+    probes: list[ClaudeProbeAdapter | CodexProbeAdapter] = []
     claude = setup.agents.get("claude")
-    if claude is None:
+    codex = setup.agents.get("codex")
+    if claude is None and codex is None:
         return ()
-    return (
-        ClaudeProbeAdapter(
-            launcher if launcher is not None else SystemdLauncher(),
-            model=claude.model,
-            session_base=Path(claude.session_base),
-            executable=CLAUDE_EXECUTABLE,
-            proxy_url=EGRESS_PROXY_URL,
-        ),
-    )
+    launcher = launcher if launcher is not None else SystemdLauncher()
+    if claude is not None:
+        probes.append(
+            ClaudeProbeAdapter(
+                launcher,
+                model=claude.model,
+                session_base=Path(claude.session_base),
+                executable=CLAUDE_EXECUTABLE,
+                proxy_url=EGRESS_PROXY_URL,
+            )
+        )
+    if codex is not None:
+        probes.append(
+            CodexProbeAdapter(
+                SystemdCodexLauncher(launcher),
+                model=codex.model,
+                session_base=Path(codex.session_base),
+                credentials=CodexAuthFile(),
+                executable=CODEX_EXECUTABLE,
+                proxy_url=EGRESS_PROXY_URL,
+            )
+        )
+    return tuple(probes)
 
 
 __all__ = [
