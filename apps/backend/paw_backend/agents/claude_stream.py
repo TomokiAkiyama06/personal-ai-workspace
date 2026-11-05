@@ -24,6 +24,15 @@ kept, logged or returned):
   and the like are an expired credential, ``rate_limit`` a rate limit).
 * ``result``: the session's totals from ``modelUsage`` (every model, subagents
   included), its ``subtype`` and ``is_error``.
+* a model's refusal and the CLI's fallback to another model (#325): the
+  ``system`` / ``model_refusal_fallback`` message, an ``assistant`` content
+  block of type ``fallback``, the ``result``'s ``safety_stops`` and the models
+  named in its ``modelUsage``. They are kept on the stream
+  (:attr:`ClaudeStream.fallbacks`, :attr:`ClaudeStream.models`,
+  :attr:`ClaudeStream.safety_stops`) for the adapter to note; they change
+  nothing of what the stream returns or refuses (a malformed one is skipped,
+  never refused). Only model names of the form ``validate_model`` accepts are
+  kept (any other is ``unknown``): nothing of the conversation.
 
 A token count that is missing (the cache counts may be missing or ``null``),
 negative or not a whole number is refused (``malformed``), never read as 0.
@@ -35,6 +44,8 @@ import json
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any, Final
+
+from paw_backend.connections.limits import MAX_MODEL_CHARS, MODEL_PATTERN
 
 #: The tool every Claude Code session keeps while an MCP tool remains
 #: (CLI reference, ``--tools``): it only ends the conversation.
@@ -50,6 +61,8 @@ RATE_ERRORS: Final = frozenset({"rate_limit"})
 MAX_LINE_BYTES: Final = 16 * 1024 * 1024
 #: The refusals of ``system/init`` (an unsupported CLI, Decision 0087, 4).
 INIT_REFUSALS: Final = frozenset({"tools", "mcp"})
+#: A model name the stream showed that is not of the accepted form.
+UNKNOWN_MODEL: Final = "unknown"
 
 
 class StreamRefused(Exception):
@@ -88,6 +101,14 @@ class Totals:
 
 
 @dataclass(frozen=True, slots=True)
+class Fallback:
+    """The CLI answered on ``to_model`` after ``from_model`` refused (#325)."""
+
+    from_model: str
+    to_model: str
+
+
+@dataclass(frozen=True, slots=True)
 class Retry:
     """An ``api_retry`` event's category."""
 
@@ -117,6 +138,18 @@ class ClaudeStream:
         self._counted: set[str] = set()
         self.initialized = False
         self.answer: str | None = None
+        #: The fallbacks the CLI reported, in order, each once (#325).
+        self.fallbacks: list[Fallback] = []
+        #: The models of the ``result``'s ``modelUsage`` (``None``: none).
+        self.models: frozenset[str] | None = None
+        #: The ``result``'s ``safety_stops`` (``None``: not reported).
+        self.safety_stops: int | None = None
+
+    @property
+    def fell_back(self) -> bool:
+        """The CLI said a model refused and another one answered, or the
+        ``result`` counted a safety stop."""
+        return bool(self.fallbacks) or bool(self.safety_stops)
 
     @property
     def turn_open(self) -> bool:
@@ -145,6 +178,13 @@ class ClaudeStream:
             elif subtype == "api_retry":
                 error = message.get("error")
                 return Retry(error if isinstance(error, str) else "unknown")
+            elif subtype == "model_refusal_fallback":
+                self._fallback(
+                    message.get("original_model"), message.get("fallback_model")
+                )
+            return None
+        if kind == "assistant":
+            self._assistant(message)
             return None
         if kind == "stream_event":
             event = message.get("event")
@@ -155,8 +195,36 @@ class ClaudeStream:
             if self._probe:
                 answer = message.get("result")
                 self.answer = answer if isinstance(answer, str) else None
+            self._result_models(message)
             return _totals(message)
         return None
+
+    def _fallback(self, from_model: object, to_model: object) -> None:
+        fallback = Fallback(_model_name(from_model), _model_name(to_model))
+        # The system message and the assistant's block say the same fallback.
+        if fallback not in self.fallbacks:
+            self.fallbacks.append(fallback)
+
+    def _assistant(self, message: Mapping[str, Any]) -> None:
+        body = message.get("message")
+        content = body.get("content") if isinstance(body, dict) else None
+        if not isinstance(content, list):
+            return
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "fallback":
+                source, target = block.get("from"), block.get("to")
+                self._fallback(
+                    source.get("model") if isinstance(source, dict) else None,
+                    target.get("model") if isinstance(target, dict) else None,
+                )
+
+    def _result_models(self, message: Mapping[str, Any]) -> None:
+        stops = message.get("safety_stops")
+        if isinstance(stops, int) and not isinstance(stops, bool) and stops >= 0:
+            self.safety_stops = stops
+        usage = message.get("modelUsage")
+        if isinstance(usage, dict) and usage:
+            self.models = frozenset(_model_name(name) for name in usage)
 
     def check_init(self, message: Mapping[str, Any]) -> None:
         tools = message.get("tools")
@@ -226,6 +294,36 @@ class ClaudeStream:
         return None
 
 
+def _model_name(value: object) -> str:
+    """A model name as the stream showed it, when it is of the accepted
+    form (``validate_model``); else :data:`UNKNOWN_MODEL`."""
+    if (
+        isinstance(value, str)
+        and len(value) <= MAX_MODEL_CHARS
+        and MODEL_PATTERN.fullmatch(value) is not None
+    ):
+        return value
+    return UNKNOWN_MODEL
+
+
+def fallback_note(stream: "ClaudeStream", configured: str) -> str | None:
+    """One log line's worth of a fallback (#325), or ``None`` when the CLI
+    reported none (no fallback, no safety stop): ``configured=<m>
+    used=<m,...> fallbacks=<a>-><b>,... safety_stops=<n>``. Model names and
+    counts only. A ``modelUsage`` name other than ``configured`` alone is not
+    one (the CLI may name an alias's full id, or a model of its own)."""
+    if not stream.fell_back:
+        return None
+    used = stream.models
+    fallbacks = ",".join(f"{f.from_model}->{f.to_model}" for f in stream.fallbacks)
+    return (
+        f"configured={configured}"
+        f" used={','.join(sorted(used)) if used else '-'}"
+        f" fallbacks={fallbacks or '-'}"
+        f" safety_stops={'-' if stream.safety_stops is None else stream.safety_stops}"
+    )
+
+
 def _count(usage: Mapping[str, Any], name: str, *, optional: bool = False) -> int:
     """A token count of ``usage``: a whole number of at least 0. A missing or
     malformed count is refused (``malformed``), never read as 0 (that would
@@ -269,10 +367,13 @@ __all__ = [
     "MAX_LINE_BYTES",
     "PAW_SERVER",
     "RATE_ERRORS",
+    "UNKNOWN_MODEL",
     "ClaudeStream",
+    "Fallback",
     "Retry",
     "StreamRefused",
     "Totals",
     "Turn",
+    "fallback_note",
     "paw_tool_names",
 ]

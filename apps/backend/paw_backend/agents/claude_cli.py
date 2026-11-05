@@ -34,7 +34,11 @@ launcher, never in an argument or a log), the task on stdin, and reads its
   stopped;
 * an ``api_retry`` for an authentication failure stops it as ``expired``;
 * the ``result``'s ``modelUsage`` gives the totals (unknown when missing or
-  zero: the service then counts its estimate).
+  zero: the service then counts its estimate);
+* a fallback to another model (the configured one refused: the CLI's
+  ``model_refusal_fallback`` or ``safety_stops``, #325) is logged (``Claude
+  session model fallback``, model names and counts only); it changes nothing
+  of the result.
 
 Stopping is SIGTERM, five seconds, SIGKILL (the launcher). Nothing of the
 conversation is kept or logged.
@@ -61,6 +65,7 @@ from paw_backend.agents.claude_stream import (
     StreamRefused,
     Totals,
     Turn,
+    fallback_note,
     paw_tool_names,
 )
 from paw_backend.agents.cli_session import (
@@ -300,6 +305,15 @@ class ClaudeSessionAdapter:
             if failed is not None:
                 raise failed
         code = await process.wait()
+        note = fallback_note(stream, request.model)
+        if note is not None:
+            # #325: another model answered (or one refused). Noted only: the
+            # session's result and its usage are the same as without it.
+            logger.warning(
+                "Claude session model fallback: session=%s %s",
+                attachment.spec.session_id,
+                note,
+            )
         if getattr(process, "oom_killed", False):
             attachment.out_of_memory.append(True)
         if failure is None and not stream.initialized:

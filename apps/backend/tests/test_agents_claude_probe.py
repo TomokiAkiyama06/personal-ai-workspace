@@ -25,7 +25,13 @@ from paw_backend.agents.claude_probe import (
     PROBE_SYSTEM_PROMPT,
     ClaudeProbeAdapter,
 )
-from paw_backend.agents.claude_stream import ClaudeStream, StreamRefused
+from paw_backend.agents.claude_stream import (
+    UNKNOWN_MODEL,
+    ClaudeStream,
+    Fallback,
+    StreamRefused,
+    fallback_note,
+)
 from paw_backend.agents.cli_session import SubprocessLauncher
 from paw_backend.connections import (
     AdapterFailure,
@@ -48,6 +54,47 @@ GOOD = [
             "is_error": False,
             "result": "PAW_PROBE_OK.",
             "modelUsage": {"m": {"inputTokens": 120, "outputTokens": 4}},
+        }
+    },
+]
+# #325: what the CLI wrote in production when the configured model's
+# safeguard stopped the probe and it answered on another model.
+REFUSED_MODEL, FALLBACK_MODEL = "claude-test-model", "claude-older-model"
+FALLBACK_NOTICE = {
+    "line": {
+        "type": "system",
+        "subtype": "model_refusal_fallback",
+        "original_model": REFUSED_MODEL,
+        "fallback_model": FALLBACK_MODEL,
+    }
+}
+FALLBACK_BLOCK = {
+    "line": {
+        "type": "assistant",
+        "message": {
+            "content": [
+                {
+                    "type": "fallback",
+                    "from": {"model": REFUSED_MODEL},
+                    "to": {"model": FALLBACK_MODEL},
+                },
+                {"type": "text", "text": "PAW_PROBE_OK"},
+            ]
+        },
+    }
+}
+FELL_BACK = [
+    FALLBACK_NOTICE,
+    {"turn": [120, 4]},
+    FALLBACK_BLOCK,
+    {
+        "result": {
+            **GOOD[1]["result"],
+            "safety_stops": 2,
+            "modelUsage": {
+                REFUSED_MODEL: {"inputTokens": 100, "outputTokens": 0},
+                FALLBACK_MODEL: {"inputTokens": 20, "outputTokens": 4},
+            },
         }
     },
 ]
@@ -196,6 +243,101 @@ class VerdictTest(ProbeCase):
                 await self.adapter().check_health(Secret(TOKEN))
         self.assertLess(time.monotonic() - started, 20)
         self.assertEqual(list(self.sessions.iterdir()), [])
+
+
+class FallbackTest(ProbeCase):
+    """#325: a fallback is noted; the verdict stays what it was (whether a
+    probe that fell back is ``connected`` is a human decision)."""
+
+    async def test_a_fallback_is_logged_and_the_verdict_is_unchanged(self):
+        plain = await self.probe(GOOD)
+        with self.assertLogs("paw_backend.agents.claude_probe", "WARNING") as logs:
+            report = await self.probe(FELL_BACK)
+        self.assertEqual(
+            (report.outcome, report.failure, report.input_tokens, report.output_tokens),
+            (plain.outcome, plain.failure, plain.input_tokens, plain.output_tokens),
+        )
+        self.assertEqual(report.model, "claude-test-model")  # the configured one
+        [line] = [m for m in logs.output if "model fallback" in m]
+        self.assertIn("configured=claude-test-model", line)
+        self.assertIn(f"used={FALLBACK_MODEL},{REFUSED_MODEL}", line)
+        self.assertIn(f"fallbacks={REFUSED_MODEL}->{FALLBACK_MODEL} ", line)
+        self.assertIn("safety_stops=2", line)
+        # Nothing of the conversation, nor the token.
+        self.assertNotIn("PAW_PROBE_OK", "\n".join(logs.output))
+        self.assertNotIn(TOKEN, "\n".join(logs.output))
+
+    async def test_a_probe_without_fallback_logs_none(self):
+        with self.assertNoLogs("paw_backend.agents.claude_probe", "WARNING"):
+            await self.probe(GOOD)
+
+    async def test_a_fallback_after_a_failure_keeps_the_failure(self):
+        report = await self.probe(FELL_BACK[:3] + [NO_ANSWER])
+        self.assertEqual(
+            (report.outcome, report.failure),
+            (ProbeOutcome.UNAVAILABLE, FailureCode.INVALID_RESPONSE),
+        )
+
+
+class FallbackStreamTest(unittest.TestCase):
+    def feed(self, stream, messages):
+        return [stream.feed(json.dumps(m)) for m in messages]
+
+    def test_the_fallback_is_kept_once_and_the_stream_says_the_same(self):
+        init = {"type": "system", "subtype": "init", "tools": [], "mcp_servers": []}
+        result = {"type": "result", **FELL_BACK[3]["result"]}
+        plain = ClaudeStream(frozenset(), probe=True)
+        fell = ClaudeStream(frozenset(), probe=True)
+        expected = self.feed(plain, [init, result])
+        got = self.feed(
+            fell, [init, FALLBACK_NOTICE["line"], FALLBACK_BLOCK["line"], result]
+        )
+        self.assertEqual([g for g in got if g is not None], expected[1:])
+        self.assertEqual(fell.answer, plain.answer)
+        self.assertEqual(fell.fallbacks, [Fallback(REFUSED_MODEL, FALLBACK_MODEL)])
+        self.assertEqual(fell.models, frozenset({REFUSED_MODEL, FALLBACK_MODEL}))
+        self.assertEqual(fell.safety_stops, 2)
+        self.assertTrue(fell.fell_back)
+        self.assertEqual(plain.fallbacks, [])
+
+    def test_a_malformed_fallback_is_skipped_never_refused(self):
+        stream = ClaudeStream(frozenset())
+        for message in (
+            {"type": "system", "subtype": "model_refusal_fallback"},
+            {
+                "type": "system",
+                "subtype": "model_refusal_fallback",
+                "original_model": "a model\nwith a line",
+                "fallback_model": 7,
+            },
+            {"type": "assistant", "message": {"content": [{"type": "fallback"}]}},
+            {"type": "assistant", "message": {"content": "text"}},
+            {"type": "assistant", "message": None},
+            {"type": "result", "subtype": "success", "safety_stops": "2"},
+        ):
+            with self.subTest(message):
+                stream.feed(json.dumps(message))
+        self.assertEqual(stream.fallbacks, [Fallback(UNKNOWN_MODEL, UNKNOWN_MODEL)])
+        self.assertIsNone(stream.safety_stops)
+
+    def test_the_note(self):
+        stream = ClaudeStream(frozenset())
+        self.assertIsNone(fallback_note(stream, "m"))
+        # Another name in ``modelUsage`` alone is not a fallback.
+        stream.models = frozenset({"m", "m-full-id"})
+        stream.safety_stops = 0
+        self.assertIsNone(fallback_note(stream, "m"))
+        stream.safety_stops = 1
+        self.assertEqual(
+            fallback_note(stream, "m"),
+            "configured=m used=m,m-full-id fallbacks=- safety_stops=1",
+        )
+        stream.models = None
+        stream.fallbacks.append(Fallback("m", "n"))
+        self.assertEqual(
+            fallback_note(stream, "m"),
+            "configured=m used=- fallbacks=m->n safety_stops=1",
+        )
 
 
 class StreamTest(unittest.TestCase):

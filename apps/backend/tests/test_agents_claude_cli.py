@@ -674,6 +674,63 @@ class GroupStopTest(unittest.IsolatedAsyncioTestCase):
             self.fail("the child that ignored SIGTERM outlived the stop")
 
 
+class FallbackTest(ClaudeCase):
+    """#325: a node's session that fell back to another model is noted; its
+    result and usage are what they were."""
+
+    async def test_a_fallback_is_logged_and_the_result_is_unchanged(self):
+        result = {
+            "subtype": "success",
+            "is_error": False,
+            "safety_stops": 1,
+            "modelUsage": {
+                "claude-sonnet-5": {"inputTokens": 60, "outputTokens": 0},
+                "claude-older-model": {"inputTokens": 40, "outputTokens": 10},
+            },
+        }
+        fallback = {
+            "line": {
+                "type": "system",
+                "subtype": "model_refusal_fallback",
+                "original_model": "claude-sonnet-5",
+                "fallback_model": "claude-older-model",
+            }
+        }
+        with self.assertLogs("paw_backend.agents.claude_cli", "WARNING") as logs:
+            outcome = await self.run_node(
+                [
+                    fallback,
+                    {"turn": [100, 10]},
+                    {"result": result},
+                    {"call": "submit", "arguments": {"summary": "It is in parse.py"}},
+                    {"sleep": 30},
+                ]
+            )
+        self.assertEqual(outcome.result.summary, "It is in parse.py")
+        self.assertEqual(self.connections.turns, [(100, 10)])
+        self.assertIsNone(self.connections.raw.failure)
+        [line] = [m for m in logs.output if "model fallback" in m]
+        self.assertIn("configured=claude-sonnet-5", line)
+        self.assertIn("fallbacks=claude-sonnet-5->claude-older-model", line)
+        self.assertIn("safety_stops=1", line)
+        self.assertNotIn("parse.py", line)
+
+    async def test_a_session_on_its_model_logs_no_fallback(self):
+        result = {
+            "subtype": "success",
+            "is_error": False,
+            "modelUsage": {"claude-sonnet-5": {"inputTokens": 100, "outputTokens": 10}},
+        }
+        with self.assertNoLogs("paw_backend.agents.claude_cli", "WARNING"):
+            await self.run_node(
+                [
+                    {"turn": [100, 10]},
+                    {"result": result},
+                    {"call": "submit", "arguments": {"summary": "It is in parse.py"}},
+                ]
+            )
+
+
 class StreamTest(unittest.TestCase):
     def init(self, tools, servers=None, errors=None):
         message = {
