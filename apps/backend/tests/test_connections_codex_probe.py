@@ -25,6 +25,7 @@ import uuid
 
 from sqlalchemy import text
 
+from paw_backend.agents.cli_session import UnitNotStoppedError
 from paw_backend.agents.codex_cli import InteractiveSubprocessLauncher
 from paw_backend.agents.codex_credentials import CodexAuthFile
 from paw_backend.agents.codex_probe import CodexProbeAdapter
@@ -297,6 +298,74 @@ class SlotTest(CodexProbeCase):
 
 
 class EndToEndTest(CodexProbeCase):
+    def real_adapter(self, actions, launcher=None):
+        directory = self.root.parent / f"sessions-{uuid.uuid4().hex[:8]}"
+        directory.mkdir()
+        self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
+        scenario, report = directory / "scenario.json", directory / "report.json"
+        scenario.write_text(json.dumps({"actions": actions}))
+        self.sessions = directory / "s"
+        self.sessions.mkdir()
+        return CodexProbeAdapter(
+            launcher or InteractiveSubprocessLauncher(),
+            model="gpt-test-codex",
+            session_base=self.sessions,
+            credentials=CodexAuthFile(),
+            executable=(
+                sys.executable,
+                "-I",
+                str(FAKE),
+                "--scenario",
+                str(scenario),
+                "--report",
+                str(report),
+            ),
+            verified_versions=frozenset({"0.162.1"}),
+        )
+
+    async def test_a_deadline_during_a_stop_that_fails_keeps_the_status(self):
+        # Codex review of #336 (P2): the deadline comes while the CLI is
+        # being stopped and the stop then fails: the probe is unavailable,
+        # but the connection's status is kept (Decision 0100, 10).
+        self.set_status("connected")
+
+        class SlowStuckLauncher(InteractiveSubprocessLauncher):
+            async def start(self, launch):
+                process = await super().start(launch)
+                if "app-server" in launch.argv:
+                    real_stop = process.stop
+
+                    async def stop():
+                        await real_stop()
+                        await asyncio.sleep(4)  # the deadline passes here
+                        raise UnitNotStoppedError("the unit could not be stopped")
+
+                    process.stop = stop
+                return process
+
+        adapter = self.real_adapter(GOOD, SlowStuckLauncher())
+        service = self.probing_service(adapter, health_timeout_seconds=3.0)
+        with self.assertLogs("paw_backend", "ERROR"):
+            _, result = await self.probe(service)
+        self.addAsyncCleanup(self.let_the_hold_go)
+        self.assertEqual(
+            (result.outcome, result.failure),
+            (ProbeOutcome.UNAVAILABLE, FailureCode.TIMEOUT),
+        )
+        self.assertFalse(result.status_written)
+        self.assertEqual(self.status(), "connected")
+        row = self.probe_row()
+        self.assertEqual(
+            (row["outcome"], row["failure_code"]), ("unavailable", "timeout")
+        )
+        # The CLI may still run with the login: the slot and the files stay.
+        self.assertEqual(len(self.leases()), 1)
+        self.assertEqual(len(list(self.sessions.iterdir())), 1)
+
+    async def let_the_hold_go(self):
+        await asyncio.to_thread(self.clean_leases)
+        await asyncio.sleep(0.3)
+
     async def test_the_real_probe_marks_the_connection_connected(self):
         directory = self.root.parent / f"sessions-{uuid.uuid4().hex[:8]}"
         directory.mkdir()

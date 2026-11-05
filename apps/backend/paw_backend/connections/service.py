@@ -1503,6 +1503,11 @@ class ConnectionService:
                 held = await run_within(slot, work())
             except Exception as error:  # the store's or the adapter's: type only
                 self._probe_failed(ticket, error, end)
+                if session is not None and session.unstopped:
+                    # The deadline came while a stop that failed was under
+                    # way: nothing was learnt about the credential (Decision
+                    # 0100, 10; Codex review of #336).
+                    end.keep_status = True
                 return
             if not held:
                 # The slot could not be renewed: the probe was stopped before
@@ -1513,6 +1518,12 @@ class ConnectionService:
                 end.keep_status = True
                 return
             self._take_verdict(verdict, end)
+            if (
+                session is not None
+                and session.unstopped
+                and end.outcome is ProbeOutcome.UNAVAILABLE
+            ):
+                end.keep_status = True
         finally:
             try:
                 await self._shielded(slot.release())

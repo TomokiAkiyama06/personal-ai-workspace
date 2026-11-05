@@ -232,10 +232,16 @@ class CodexProbeAdapter:
                 ProbeOutcome.UNAVAILABLE, FailureCode.INTERNAL_ERROR, keeps_status=True
             )
         finally:
-            if state.unstopped and state.placed:
-                # The slot stays held (Decision 0083, 6). A version check that
-                # could not be stopped had no login: the slot goes back.
-                session.cli_running()
+            if state.unstopped:
+                # Also when the deadline (a cancellation) came during the
+                # stop that failed: the service's verdict keeps the status
+                # whatever ended the probe (Codex review of #336).
+                session.mark_unstopped()
+                if state.placed:
+                    # The slot stays held (Decision 0083, 6). A version check
+                    # that could not be stopped had no login: the slot goes
+                    # back.
+                    session.cli_running()
 
     async def _probe(
         self, secret: Secret, session: ProbeSession, state: _ProbeState

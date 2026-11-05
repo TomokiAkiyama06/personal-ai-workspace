@@ -420,6 +420,37 @@ class LoginTest(ProbeCase):
         self.assertEqual(self.hooks.written, [REFRESHED])  # read back at once
         self.assertEqual(len(self.directories()), 1)
 
+    async def test_a_deadline_during_a_stop_that_fails_marks_the_session(self):
+        # Codex review of #336: the cancellation passes, the service still
+        # learns the CLI could not be stopped.
+        class SlowStuckLauncher(InteractiveSubprocessLauncher):
+            async def start(self, launch):
+                process = await super().start(launch)
+                if "app-server" in launch.argv:
+                    real_stop = process.stop
+
+                    async def stop():
+                        await real_stop()
+                        await asyncio.sleep(3)
+                        raise UnitNotStoppedError("the unit could not be stopped")
+
+                    process.stop = stop
+                return process
+
+        self.scenario.write_text(json.dumps({"actions": GOOD}))
+        hooks = Hooks()
+        session = hooks.session()
+        with self.assertLogs("paw_backend", logging.ERROR):
+            with self.assertRaises(TimeoutError):
+                async with asyncio.timeout(2):
+                    await self.adapter(launcher=SlowStuckLauncher()).check_health(
+                        Secret(LOGIN), session
+                    )
+            session.released(True)
+        self.assertTrue(session.unstopped)
+        self.assertTrue(hooks.kept)
+        self.assertEqual(len(self.directories()), 1)
+
     async def test_the_login_is_in_no_log(self):
         with self.assertLogs("paw_backend", logging.DEBUG) as logs:
             await self.probe([{"refresh": REFRESHED}, *GOOD])

@@ -196,6 +196,10 @@ class ProbeSession:
     write_back: CredentialWriter = field(repr=False)
     cli_running: Callable[[], None] = field(repr=False)
     connection_id: uuid.UUID | None = None
+    #: Set by the adapter (:meth:`mark_unstopped`) when its CLI could not be
+    #: stopped: the probe's verdict then keeps the connection's status,
+    #: whatever ended it (the deadline included).
+    unstopped: bool = False
     _released: list[Callable[[bool], None]] = field(default_factory=list, repr=False)
 
     def __post_init__(self) -> None:
@@ -204,6 +208,9 @@ class ProbeSession:
                 raise TypeError(f"{name} must be callable")
         if self.connection_id is not None and type(self.connection_id) is not uuid.UUID:
             raise TypeError("connection_id must be a UUID")
+
+    def mark_unstopped(self) -> None:
+        self.unstopped = True
 
     def on_released(self, callback: Callable[[bool], None]) -> None:
         if not callable(callback):
