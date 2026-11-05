@@ -230,7 +230,9 @@ class RunnerTest(unittest.TestCase):
         record = json.loads(self.record.read_text())
         argv = record["argv"]
         self.assertEqual(record["stdin"], "the task")
-        self.assertEqual(argv[:2], ["run", "--rm"])
+        # Issue #324: Podman's events go nowhere (a global option, before
+        # ``run``), then the container removed when it ends.
+        self.assertEqual(argv[:4], ["--events-backend", "none", "run", "--rm"])
         # The container's cgroup below the unit's (Decision 0092, 4).
         self.assertIn("--cgroups=split", argv)
         for pair in (
@@ -274,6 +276,41 @@ class RunnerTest(unittest.TestCase):
             argv[image + 1 :], ["/opt/paw/start-claude", "-p", "--tools", ""]
         )
         self.assertNotIn(TOKEN, json.dumps(argv))
+
+    def assert_nothing_is_logged(self, argv):
+        """Issue #324: the container's stdout / stderr (the CLI's whole
+        stream) are logged nowhere (no journald, no log file), and Podman's
+        events (journal entries whose ``_CMDLINE`` is the whole command line)
+        go nowhere either. Each option once, and never overridden later."""
+        run = argv.index("run")
+        image = argv.index(next(a for a in argv if "@sha256:" in a))
+        self.assertEqual(argv[:run], ["--events-backend", "none"])
+        podman_options = argv[run:image]
+        self.assertEqual(
+            [
+                podman_options[i : i + 2]
+                for i, a in enumerate(podman_options)
+                if a.startswith("--log-")
+            ],
+            [["--log-driver", "none"]],
+        )
+        self.assertFalse(
+            [a for a in argv[:image] if a.startswith("--log-opt")],
+        )
+
+    def test_the_claude_containers_output_is_logged_nowhere(self):
+        result, stream = self.run_runner()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # The backend still reads the stream from its socket.
+        self.assertEqual(stream, b'{"type": "result"}\n')
+        self.assert_nothing_is_logged(json.loads(self.record.read_text())["argv"])
+
+    def test_the_codex_containers_output_is_logged_nowhere(self):
+        self.codex_session()
+        result, stream = self.run_interactive(b'{"id": 1}\n')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(stream, b'{"type": "result"}\n')
+        self.assert_nothing_is_logged(json.loads(self.record.read_text())["argv"])
 
     def failing_podman(self, code, stderr):
         """A fake ``podman`` that writes ``stderr`` (a Python expression)
@@ -385,8 +422,9 @@ class RunnerTest(unittest.TestCase):
             ["--volume", f"{self.egress_socket}:/run/paw-egress.sock"],
         ):
             with self.subTest(pair=pair):
-                index = argv.index(pair[1]) - 1
-                self.assertEqual(argv[index : index + 2], pair)
+                # The pair itself, wherever it is ("none" is several options'
+                # value: --events-backend, --log-driver, --network).
+                self.assertIn(pair, [argv[i : i + 2] for i in range(len(argv) - 1)])
         self.assertNotIn("PAW_SESSION_ID", json.dumps(argv))
         image = argv.index(CODEX_DIGEST)
         self.assertEqual(argv[image + 1 :], ["/opt/paw/start-codex", "app-server"])

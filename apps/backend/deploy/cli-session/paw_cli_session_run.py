@@ -42,6 +42,11 @@ directory) are mounted, each when the backend wrote it. Everything else Codex
 writes there (its logs, state, caches) stays in the container's tmpfs and
 goes with the container.
 
+The container's output is the backend's only (issue #324): ``podman run
+--log-driver none`` (no copy of the stream in the journal or a log file; the
+attached stdout still goes to ``stream.sock``) and ``podman --events-backend
+none`` (no event entries carrying this command line in the journal).
+
 Podman's own failures (exit 125, and 126 / 127: the entry could not be run)
 are this unit's journal's (issue #322): the tail of Podman's stderr, at most
 ``STDERR_LINES`` lines and ``STDERR_CHARS`` characters, with the session's
@@ -223,8 +228,22 @@ def podman_command(
         gid = os.getgid()
     command = [
         "podman",
+        # Podman's events (create, start, attach, ...) go nowhere (issue
+        # #324): with the journald events backend each one is a journal entry
+        # whose ``_CMDLINE`` is this whole command line (the CLI's arguments:
+        # its system prompt, the session's paths).
+        "--events-backend",
+        "none",
         "run",
         "--rm",
+        # The container's stdout and stderr are logged nowhere (issue #324):
+        # the default driver (journald, through conmon) wrote every line of
+        # the CLI's stream (the task's answers, its tool calls, the session's
+        # ids and usage) to the journal. ``podman run`` still attaches: the
+        # stdout goes to ``stream.sock`` and the stderr to the tail read
+        # below, which is written only on Podman's own failure.
+        "--log-driver",
+        "none",
         # The container's cgroup below this unit's (Decision 0092, 4): an OOM
         # kill in the container is then the unit's (``Result=oom-kill``).
         "--cgroups=split",
