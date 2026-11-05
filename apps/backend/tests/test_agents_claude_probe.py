@@ -160,8 +160,21 @@ class LaunchTest(ProbeCase):
 
     def test_the_prompts_hold_nothing_but_the_fixed_text(self):
         for text in (PROBE_SYSTEM_PROMPT, PROBE_PROMPT):
-            self.assertIn("PAW_PROBE_OK", text)
             self.assertNotRegex(text, r"[0-9a-f]{8}-|/|@|\d{4}-\d{2}")
+        self.assertIn("PAW_PROBE_OK", PROBE_PROMPT)
+
+    def test_the_prompts_are_the_decisions_text(self):
+        # Decision 0102, 1 (superseding the wording of Decision 0100, 2): the
+        # text itself is pinned; changing it needs a new decision.
+        self.assertEqual(PROBE_SYSTEM_PROMPT, "Answer the user's message briefly.")
+        self.assertEqual(PROBE_PROMPT, "Please reply with the word PAW_PROBE_OK.")
+
+    def test_the_prompts_name_neither_the_purpose_nor_the_tools(self):
+        # #325: words a safeguard reads as reconnaissance are left out.
+        for text in (PROBE_SYSTEM_PROMPT, PROBE_PROMPT):
+            for word in ("connectivity", "check", "backend", "service", "tool"):
+                with self.subTest(text=text, word=word):
+                    self.assertNotIn(word, text.lower())
 
     async def test_run_starts_nothing(self):
         adapter = self.adapter()
