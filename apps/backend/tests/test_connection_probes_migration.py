@@ -68,8 +68,15 @@ class ValuesTest(unittest.TestCase):
         self.assertEqual(revision.TRIGGERS, tuple(t.value for t in ProbeTrigger))
         self.assertEqual(revision.STATES, tuple(s.value for s in ProbeState))
         self.assertEqual(revision.OUTCOMES, tuple(o.value for o in ProbeOutcome))
+        # The failure codes of the day: revision 0325 added ``model_fallback``
+        # (``tests/test_model_fallback_migration.py`` compares the rest).
         self.assertEqual(
-            revision.FAILURE_CODES, tuple(code.value for code in FailureCode)
+            revision.FAILURE_CODES,
+            tuple(
+                code.value
+                for code in FailureCode
+                if code is not FailureCode.MODEL_FALLBACK
+            ),
         )
         self.assertEqual(revision.HANDLE_PATTERN, HANDLE_SQL_PATTERN)
         self.assertEqual(revision.MODEL_PATTERN, MODEL_SQL_PATTERN)

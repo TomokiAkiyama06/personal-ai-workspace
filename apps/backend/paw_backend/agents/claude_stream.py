@@ -29,7 +29,8 @@ kept, logged or returned):
   block of type ``fallback``, the ``result``'s ``safety_stops`` and the models
   named in its ``modelUsage``. They are kept on the stream
   (:attr:`ClaudeStream.fallbacks`, :attr:`ClaudeStream.models`,
-  :attr:`ClaudeStream.safety_stops`) for the adapter to note; they change
+  :attr:`ClaudeStream.safety_stops`) for the adapter to note (and for the
+  probe's verdict, ``model_fallback``: Decision 0102, 3); they change
   nothing of what the stream returns or refuses (a malformed one is skipped,
   never refused). Only model names of the form ``validate_model`` accepts are
   kept (any other is ``unknown``): nothing of the conversation.
