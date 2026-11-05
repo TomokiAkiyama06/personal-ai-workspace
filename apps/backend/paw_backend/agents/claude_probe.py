@@ -1,6 +1,7 @@
 """The health probe of the Claude connection: one short Claude Code session
 with a fixed prompt and no tools (Decision 0100, 2 and 11, approved
-2026-10-29; issue #306).
+2026-10-29; issue #306; the prompts' wording: Decision 0102, 1, approved
+2026-11-05; issue #325).
 
 :class:`ClaudeProbeAdapter` is the connection's ``ConnectionAdapter``
 (``AdapterRegistry``): ``check_health(secret)`` starts the CLI on the same
@@ -85,13 +86,14 @@ from paw_backend.tools.interfaces import require_async_method
 logger = logging.getLogger(__name__)
 
 TOKEN_ENV: Final = "CLAUDE_CODE_OAUTH_TOKEN"
-#: Decision 0100, 2: the fixed prompts of the probe (backend constants: no
-#: setting, user or agent changes them; they hold nothing of anybody).
-PROBE_SYSTEM_PROMPT: Final = (
-    "You are a connectivity check for a backend service. Do not use any tools."
-    " Reply with exactly the single line PAW_PROBE_OK and nothing else."
-)
-PROBE_PROMPT: Final = "Reply with exactly: PAW_PROBE_OK"
+#: Decision 0102, 1 (superseding the wording of Decision 0100, 2): the fixed
+#: prompts of the probe (backend constants: no setting, user or agent changes
+#: them; they hold nothing of anybody). Plain words: nothing that tells the
+#: model what the probe is for or how the backend is built (the configured
+#: model's safeguard refused the old wording, #325). No tool is enforced by the
+#: flags and the ``system/init`` check, not by the text.
+PROBE_SYSTEM_PROMPT: Final = "Answer the user's message briefly."
+PROBE_PROMPT: Final = "Please reply with the word PAW_PROBE_OK."
 #: The answer must contain this (case-sensitive; whatever is around it).
 PROBE_ANSWER: Final = "PAW_PROBE_OK"
 #: The session's own MCP configuration: no server at all.
