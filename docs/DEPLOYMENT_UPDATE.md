@@ -142,6 +142,15 @@ only with `PAW_SANDBOX_OOM_STATUS=true`. Order:
 
 Details: `apps/backend/deploy/sandbox/README.md` ("OOM の検出").
 
+Issue #329: the wrapper now calls Podman as `podman --events-backend none ...` (and
+starts the container with `--log-driver none`). An older wrapper left a journal entry
+per Podman event in each workspace account's journal, whose `_CMDLINE` held the whole
+`podman exec ... bash -lc <the agent's shell command>`. Install the wrapper again on the
+host (`sudo install -o root -g root -m 0755 apps/backend/deploy/ssh-git-wrapper/paw_git_wrapper.py /usr/local/lib/paw/paw-git-wrapper`,
+no restart, independent of the backend's version), check the journal and decide on the
+entries already recorded (`apps/backend/deploy/sandbox/README.md`, "Podman の Event を
+journal に残さない").
+
 ## Runtime configuration (`PAW_RUNTIME_CONFIG_FILE`, Decision 0093)
 
 [Decision 0093](decisions/0093-production-runtime-config.md) (Approved, issue #208).

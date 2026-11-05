@@ -1,6 +1,6 @@
 # SSH の Forced Command の Wrapper（`paw-git-wrapper`）の配備
 
-更新日: 2026-10-22
+更新日: 2026-11-04
 
 Issue [#134](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/134)。
 [Decision 0029](../../../../docs/decisions/0029-per-user-git-runner-ssh.md)（Approved）の SSH の Wrapper と、
@@ -104,6 +104,7 @@ paw-sandbox/v1 stop  <sandbox id>
 - `exec` の出力の最後の行は Wrapper の状態行（`paw-sandbox-status <nonce> exit=<n> truncated=<0|1>`）。Nonce は Backend が呼び出しごとに決め、Container の中には渡らないので、Command は偽れない。
 - `paw-sandbox/v2 exec`（語の並びは `v1` の `exec` と同じ。[Decision 0092](../../../../docs/decisions/0092-runtime-oom-kill-detection.md) の 5）は、状態行に `oom=<0|1|->` を足す（`paw-sandbox-status <nonce> exit=<n> truncated=<0|1> oom=<0|1|->`）。Container の cgroup の Host の側の `memory.events` の `oom_kill` を Command の前後に比べる。`start` / `stop` に `v2` はない（`bad_protocol`）。手順は [`../sandbox/README.md`](../sandbox/README.md) の「OOM の検出」。
 - Podman の環境は固定（`PATH`・`HOME`・`LC_ALL`・`LANG`・`XDG_RUNTIME_DIR`）。Log は操作の名前と User だけ。
+- Podman の呼び出しはすべて `podman --events-backend none <run|exec|container inspect|rm> ...`、`start` は `run --log-driver none` も付ける（Issue #329）。Podman の既定の Event の記録先は journald で、Event（`create`・`start`・`exec`・`exec_died`・`died`・`remove` など）の 1 件ごとに、その Entry の `_CMDLINE` に呼び出しの Command Line 全部（`exec` の `bash -lc <Agent の Shell の Command>`、`start` の Mount の Path）が残っていた。Container と `exec` の後始末の Process（`podman container cleanup`）も同じ Option を継ぐ。`exec` の出力は今までどおり Wrapper だけが受け取る（Container の Log には入らない）。配備は下の「1. Wrapper 本体」の `install` で入れ直すだけ、確認と既に残った分は [`../sandbox/README.md`](../sandbox/README.md) の「Podman の Event を journal に残さない」。
 
 ### Managed Checkout の Directory（`paw-dir/v1`、[Decision 0097](../../../../docs/decisions/0097-managed-checkout-directory-over-ssh.md)）
 
@@ -144,7 +145,7 @@ paw-git-wrapper[1235]: rejected user=alice reason=config_not_allowed
 
 書くのは、受け付けたか・固定の理由コード・許可リストにある副コマンド名・Linux User 名だけ。**引数・Path・URL・`-c` の値・git の出力は書かない**（URL や設定値は Credential を含み得る）。stderr にも `paw-git-wrapper: rejected (<理由コード>)` しか出さない（`SshGitRunner` は stderr を読まずに捨てる）。
 
-Sandbox（`paw-sandbox/v1`）の Log は `accepted user=alice sandbox=start`・`accepted user=alice sandbox=exec kind=shell` の形で、Path・Command・Spec・出力を書かない。
+Sandbox（`paw-sandbox/v1`）の Log は `accepted user=alice sandbox=start`・`accepted user=alice sandbox=exec kind=shell` の形で、Path・Command・Spec・出力を書かない。Wrapper が呼ぶ Podman も journal に何も書かない（`--events-backend none`・`--log-driver none`。Issue #329。上の「Sandbox」）。
 
 理由コード: `no_command`・`too_long`・`bad_encoding`・`bad_protocol`・`root_unavailable`・`bad_worktrees`・`bad_path`・`path_unresolvable`・`path_outside_root`・`path_outside_worktrees`・`path_in_worktrees`・`bad_ceiling`・`bad_option`・`no_subcommand`・`subcommand_not_allowed`・`config_not_allowed`・`bad_git_dir`・`bad_work_tree`・`unpinned_worktree`・`bad_arguments`・`populated_submodule`・`git_dir_outside_root`・`git_dir_link`・`git_dir_alternates`・`init_existing`・`probe_failed`・`config_unsafe`・`config_unreadable`・`misconfigured`、`paw-dir/v1` の `root_unsafe`（Path の問題は stdout の語。上の節）、Sandbox の `sandbox_not_configured`・`bad_sandbox_id`・`bad_spec`・`bad_mask`・`mask_unavailable`・`path_is_link`・`not_a_worktree`・`bad_shim`。
 

@@ -59,6 +59,12 @@ import json, os, subprocess, sys
 STATE = __STATE__
 HELPER = __HELPER__
 args = sys.argv[1:]
+# Issue #329: every call keeps Podman's events out of the journal (a global
+# option, before the sub-command); a call without it fails like Podman's own.
+if args[:2] != ["--events-backend", "none"] or "--events-backend" in args[2:]:
+    sys.stderr.write("fake podman: no --events-backend none\\n")
+    sys.exit(125)
+args = args[2:]
 with open(os.path.join(STATE, "calls.jsonl"), "a") as log:
     log.write(json.dumps(args) + "\\n")
 def state(name):
@@ -164,7 +170,26 @@ class SandboxPlanTest(unittest.TestCase):
         self.assertEqual(call.op, "start")
         argv = call.argv
         self.assertEqual(
-            argv[:6], ["/usr/bin/podman", "run", "--detach", "--rm", "--name", NAME]
+            argv[:10],
+            [
+                "/usr/bin/podman",
+                # Issue #329: no event entries (their ``_CMDLINE``) in the
+                # journal, no container log either.
+                "--events-backend",
+                "none",
+                "run",
+                "--detach",
+                "--rm",
+                "--log-driver",
+                "none",
+                "--name",
+                NAME,
+            ],
+        )
+        image = argv.index(IMAGE)
+        self.assertEqual(
+            [a for a in argv[:image] if a.startswith(("--log", "--events"))],
+            ["--events-backend", "--log-driver"],
         )
         for pair in (
             ("--network", "none"),
@@ -316,7 +341,17 @@ class SandboxPlanTest(unittest.TestCase):
         stop = wrapper.sandbox_plan(stop_command(SANDBOX), self.r.config())
         self.assertEqual(
             stop.argv,
-            ["/usr/bin/podman", "rm", "--force", "--time", "5", "--ignore", NAME],
+            [
+                "/usr/bin/podman",
+                "--events-backend",
+                "none",
+                "rm",
+                "--force",
+                "--time",
+                "5",
+                "--ignore",
+                NAME,
+            ],
         )
         unconfigured = wrapper.parse_config(
             [f"--root={self.r.root}", f"--home={self.r.home}"]
@@ -344,6 +379,10 @@ class SandboxPlanTest(unittest.TestCase):
             call.argv,
             [
                 "/usr/bin/podman",
+                # Issue #329: the shell command (appended to this) never in a
+                # journal event's ``_CMDLINE``.
+                "--events-backend",
+                "none",
                 "exec",
                 "--user",
                 f"{os.geteuid()}:{os.getegid()}",
@@ -359,12 +398,19 @@ class SandboxPlanTest(unittest.TestCase):
             ],
         )
         self.assertEqual(call.inspect[-1], NAME)
+        self.assertEqual(
+            call.inspect[:4],
+            ["/usr/bin/podman", "--events-backend", "none", "container"],
+        )
         write = SandboxCommand(
             CommandKind.FILE_WRITE, "/workspace", "/workspace/a.py", stdin=b"{}"
         )
         call = wrapper.sandbox_plan(exec_command(SANDBOX, NONCE, write), config)
         self.assertEqual(
-            call.argv[2:],
+            call.argv[:4], ["/usr/bin/podman", "--events-backend", "none", "exec"]
+        )
+        self.assertEqual(
+            call.argv[4:],
             [
                 "--interactive",
                 "--user",
@@ -394,6 +440,52 @@ class SandboxPlanTest(unittest.TestCase):
         ):
             with self.assertRaises(wrapper.Rejected, msg=words):
                 wrapper.sandbox_plan(shlex.join(["paw-sandbox/v1", *words]), config)
+
+    def test_no_podman_call_writes_to_the_journal(self):
+        # Issue #329: with Podman's default (journald) events backend, each
+        # event of a call is a journal entry whose ``_CMDLINE`` is the call's
+        # whole command line: an ``exec``'s shell command, a ``start``'s
+        # mounts. Every call of every operation turns events off, once, as a
+        # global option (before the sub-command), and the container logs
+        # nowhere.
+        config = self.r.config()
+        spec = SandboxSpec((SandboxMount(self.r.worktree, "/workspace"),))
+        commands = [
+            start_command(SANDBOX, spec),
+            stop_command(SANDBOX),
+            *(
+                exec_command(SANDBOX, NONCE, command, oom_status=oom)
+                for oom in (False, True)
+                for command in (
+                    SandboxCommand(CommandKind.SHELL, "/workspace", "echo secret"),
+                    SandboxCommand(
+                        CommandKind.FILE_WRITE, "/workspace", "/workspace/a.py"
+                    ),
+                    SandboxCommand(
+                        CommandKind.FILE_STR_REPLACE, "/workspace", "/workspace/a.py"
+                    ),
+                )
+            ),
+        ]
+        for original in commands:
+            call = wrapper.sandbox_plan(original, config)
+            argvs = [call.argv] + ([call.inspect] if call.inspect else [])
+            for argv in argvs:
+                with self.subTest(op=call.op, argv=argv[:5]):
+                    self.assertEqual(
+                        argv[:3], ["/usr/bin/podman", "--events-backend", "none"]
+                    )
+                    self.assertNotIn("--events-backend", argv[3:])
+                    self.assertFalse([a for a in argv if a.startswith("--log-opt")])
+                    if call.op == "start":
+                        self.assertEqual(
+                            [
+                                argv[i : i + 2]
+                                for i, a in enumerate(argv)
+                                if a.startswith("--log-")
+                            ],
+                            [["--log-driver", "none"]],
+                        )
 
 
 class ExecDeadlineTest(unittest.TestCase):
