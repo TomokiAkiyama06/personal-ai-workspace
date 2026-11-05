@@ -65,6 +65,7 @@ class VocabularyTest(unittest.TestCase):
                 "timeout",
                 "invalid_response",
                 "internal_error",
+                "model_fallback",
             ],
         )
 

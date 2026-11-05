@@ -6,7 +6,9 @@ adapter and launcher with a fake ``claude`` (``fake_claude_probe_cli.py``).
 * the verdicts: an answer with ``PAW_PROBE_OK`` is ``connected``; an
   authentication failure is ``expired``; a rate limit, an answer without the
   token, a second model call, a tool or an MCP server in ``system/init``, an
-  error result or a CLI that ended without a result are ``unavailable``;
+  error result or a CLI that ended without a result are ``unavailable``; a
+  model fallback (the CLI's notice or block: the CLI is stopped there) or a
+  safety stop is ``unavailable`` with ``model_fallback`` (Decision 0102, 3);
 * a probe past its deadline stops the CLI; the session's directory is gone
   afterwards; ``run`` starts nothing.
 """
@@ -259,37 +261,116 @@ class VerdictTest(ProbeCase):
 
 
 class FallbackTest(ProbeCase):
-    """#325: a fallback is noted; the verdict stays what it was (whether a
-    probe that fell back is ``connected`` is a human decision)."""
+    """#325, Decision 0102, 3: a probe whose configured model was refused is
+    ``unavailable`` with ``model_fallback`` (never ``connected``, and never
+    ``expired`` for that alone); the fallback is also logged."""
 
-    async def test_a_fallback_is_logged_and_the_verdict_is_unchanged(self):
-        plain = await self.probe(GOOD)
-        with self.assertLogs("paw_backend.agents.claude_probe", "WARNING") as logs:
-            report = await self.probe(FELL_BACK)
+    def assert_fallback(self, report):
         self.assertEqual(
-            (report.outcome, report.failure, report.input_tokens, report.output_tokens),
-            (plain.outcome, plain.failure, plain.input_tokens, plain.output_tokens),
+            (report.outcome, report.failure),
+            (ProbeOutcome.UNAVAILABLE, FailureCode.MODEL_FALLBACK),
         )
         self.assertEqual(report.model, "claude-test-model")  # the configured one
+
+    async def test_the_production_form_is_a_model_fallback_and_is_logged(self):
+        # One model call, the notice first: the CLI is stopped at the notice
+        # (the sleep after it is not waited for, nothing after it is read).
+        started = time.monotonic()
+        with self.assertLogs("paw_backend.agents.claude_probe", "WARNING") as logs:
+            report = await self.probe([FELL_BACK[0], {"sleep": 60}, *FELL_BACK[1:]])
+        self.assertLess(time.monotonic() - started, 20)
+        self.assert_fallback(report)
+        self.assertEqual((report.input_tokens, report.output_tokens), (None, None))
         [line] = [m for m in logs.output if "model fallback" in m]
         self.assertIn("configured=claude-test-model", line)
-        self.assertIn(f"used={FALLBACK_MODEL},{REFUSED_MODEL}", line)
         self.assertIn(f"fallbacks={REFUSED_MODEL}->{FALLBACK_MODEL} ", line)
-        self.assertIn("safety_stops=2", line)
+        # The result was never read.
+        self.assertIn("used=- ", line)
+        self.assertIn("safety_stops=-", line)
         # Nothing of the conversation, nor the token.
         self.assertNotIn("PAW_PROBE_OK", "\n".join(logs.output))
         self.assertNotIn(TOKEN, "\n".join(logs.output))
+        self.assertEqual(list(self.sessions.iterdir()), [])
 
-    async def test_a_probe_without_fallback_logs_none(self):
-        with self.assertNoLogs("paw_backend.agents.claude_probe", "WARNING"):
-            await self.probe(GOOD)
+    async def test_two_model_calls_with_the_notice_between_are_a_model_fallback(self):
+        # The refused call, the notice, then the fallback model's call: the
+        # CLI is stopped before the second call is read (only the first
+        # call's tokens are known).
+        report = await self.probe(
+            [{"turn": [100, 0]}, FALLBACK_NOTICE, {"turn": [20, 4]}, *FELL_BACK[2:]]
+        )
+        self.assert_fallback(report)
+        self.assertEqual((report.input_tokens, report.output_tokens), (100, 0))
 
-    async def test_a_fallback_after_a_failure_keeps_the_failure(self):
-        report = await self.probe(FELL_BACK[:3] + [NO_ANSWER])
+    async def test_two_model_calls_without_a_notice_stay_an_invalid_response(self):
+        # The CLI did not say it fell back: the second call stops it first
+        # (Decision 0100, 2), and the result (its safety stops) is not read.
+        report = await self.probe([{"turn": [100, 0]}, {"turn": [20, 4]}, FELL_BACK[3]])
         self.assertEqual(
             (report.outcome, report.failure),
             (ProbeOutcome.UNAVAILABLE, FailureCode.INVALID_RESPONSE),
         )
+
+    async def test_the_assistant_block_alone_is_a_model_fallback(self):
+        self.assert_fallback(await self.probe([GOOD[0], FALLBACK_BLOCK, GOOD[1]]))
+
+    async def test_a_safety_stop_alone_is_a_model_fallback(self):
+        stopped = {"result": {**GOOD[1]["result"], "safety_stops": 1}}
+        with self.assertLogs("paw_backend.agents.claude_probe", "WARNING") as logs:
+            report = await self.probe([GOOD[0], stopped])
+        self.assert_fallback(report)
+        self.assertEqual((report.input_tokens, report.output_tokens), (120, 4))
+        self.assertIn("safety_stops=1", "\n".join(logs.output))
+
+    async def test_no_safety_stop_and_no_fallback_is_connected(self):
+        another_name = {
+            "claude-test-model-20261101": {"inputTokens": 120, "outputTokens": 4}
+        }
+        for name, result in (
+            ("safety_stops 0", {**GOOD[1]["result"], "safety_stops": 0}),
+            ("no safety_stops", GOOD[1]["result"]),
+            # Another name in ``modelUsage`` alone is not a fallback (#330).
+            ("another model name", {**GOOD[1]["result"], "modelUsage": another_name}),
+        ):
+            with self.subTest(name):
+                report = await self.probe([GOOD[0], {"result": result}])
+                self.assertEqual(
+                    (report.outcome, report.failure), (ProbeOutcome.CONNECTED, None)
+                )
+
+    async def test_a_model_fallback_comes_before_the_other_failures(self):
+        error_result = {
+            "subtype": "error_during_execution",
+            "is_error": True,
+            "safety_stops": 1,
+        }
+        no_answer = {**NO_ANSWER["result"], "safety_stops": 1}
+        hello = {**GOOD[1]["result"], "result": "Hello"}
+        for name, actions in (
+            ("an error result", [GOOD[0], {"result": error_result}]),
+            ("a rate limit",
+             [{"retry": "rate_limit"}, GOOD[0], {"result": error_result}]),
+            ("no answer", [GOOD[0], {"result": no_answer}]),
+            ("no token in the answer",
+             [GOOD[0], FALLBACK_BLOCK, {"result": hello}]),
+            ("no result", [GOOD[0], FALLBACK_BLOCK, {"exit": 1}]),
+        ):  # fmt: skip
+            with self.subTest(name):
+                self.assert_fallback(await self.probe(actions))
+
+    async def test_an_expired_probe_stays_expired(self):
+        # The refused credential stops the CLI before the notice is read.
+        report = await self.probe(
+            [{"retry": "authentication_failed"}, FALLBACK_NOTICE, *FELL_BACK[1:]]
+        )
+        self.assertEqual(
+            (report.outcome, report.failure),
+            (ProbeOutcome.EXPIRED, FailureCode.EXPIRED),
+        )
+
+    async def test_a_probe_without_fallback_logs_none(self):
+        with self.assertNoLogs("paw_backend.agents.claude_probe", "WARNING"):
+            await self.probe(GOOD)
 
 
 class FallbackStreamTest(unittest.TestCase):

@@ -107,6 +107,9 @@ REPORTABLE_OUTCOMES: Final = frozenset(
 _FAILURES: Final = frozenset({ProbeOutcome.EXPIRED, ProbeOutcome.UNAVAILABLE})
 #: The outcomes the back-off skips (they say nothing about the credential).
 _NEUTRAL: Final = frozenset({ProbeOutcome.BUSY, ProbeOutcome.CANCELLED})
+#: The ``unavailable`` failures that keep the connection's status (Decision
+#: 0100, 5; Decision 0102, 3). They still count as failures for the back-off.
+_KEEPS_STATUS: Final = frozenset({FailureCode.RATE_LIMITED, FailureCode.MODEL_FALLBACK})
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,12 +151,12 @@ def changes_status(outcome: ProbeOutcome, failure: FailureCode | None) -> bool:
 
     ``connected``, ``expired`` and ``unavailable`` are; ``busy`` and
     ``cancelled`` are not, and neither is an ``unavailable`` because of the
-    provider's rate limit (a working credential at its window's end)."""
+    provider's rate limit (a working credential at its window's end) or of a
+    model fallback (the configured model refused this text: Decision 0102, 3,
+    which says nothing about the credential)."""
     if outcome in (ProbeOutcome.CONNECTED, ProbeOutcome.EXPIRED):
         return True
-    return outcome is ProbeOutcome.UNAVAILABLE and failure is not (
-        FailureCode.RATE_LIMITED
-    )
+    return outcome is ProbeOutcome.UNAVAILABLE and failure not in _KEEPS_STATUS
 
 
 def failures_in_a_row(outcomes: Iterable[ProbeOutcome]) -> int:
