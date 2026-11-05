@@ -37,6 +37,7 @@ from paw_backend.agents.cli_session import (
     CliLaunch,
     SessionDirectoryGroupError,
     SystemdLauncher,
+    UnitEndedError,
     UnitNotStoppedError,
     create_session,
     stop_through_cancellation,
@@ -587,6 +588,11 @@ class LauncherTest(unittest.IsolatedAsyncioTestCase):
                 if os.path.exists(delay):
                     time.sleep(float(open(delay).read()))
                 open(calls, "a").write("queued " + unit + "\\n")
+                if os.path.exists(os.path.join(root, "fails_at_once")):
+                    # The unit's program fails before it connects (#320:
+                    # production's PermissionError): no stream at all.
+                    open(state, "w").write("failed 1 exit-code")
+                    sys.exit(0)
                 program = (
                     "import socket, sys, time, os;"
                     "s = socket.socket(socket.AF_UNIX);"
@@ -607,6 +613,10 @@ class LauncherTest(unittest.IsolatedAsyncioTestCase):
                     f"open({{state!r}}, 'w').write(end)"
                 )
                 hold = os.path.join(root, "hold")
+                if os.path.exists(os.path.join(root, "never_connects")):
+                    # A unit that runs and never connects (a container
+                    # still starting): only the deadline ends the wait.
+                    program = "import time; time.sleep(60)"
                 child = subprocess.Popen(
                     [sys.executable, "-c", program, hold],
                     start_new_session=True,
@@ -619,7 +629,12 @@ class LauncherTest(unittest.IsolatedAsyncioTestCase):
                 text = ["inactive", "0"]
                 if os.path.exists(state):
                     text = open(state).read().split()
-                if "ActiveState" in args:
+                if "ActiveState,Job" in args:
+                    # A start job still queued: the 'job' file's content.
+                    j = os.path.join(root, "job")
+                    job = open(j).read() if os.path.exists(j) else ""
+                    print(f"ActiveState={{text[0]}}\\nJob={{job}}")
+                elif "ActiveState" in args:
                     print(text[0])
                 elif "Result" in args:
                     print(text[2] if len(text) > 2 else "success")
@@ -876,6 +891,82 @@ class LauncherTest(unittest.IsolatedAsyncioTestCase):
         await process.stop()
         self.assertFalse(process.oom_killed)
         self.assertEqual(await process.wait(), 143)
+
+    async def test_a_unit_that_fails_at_once_ends_the_start_at_once(self):
+        # #320: production's probe waited the whole 120 s for a stream that
+        # never came, the unit having failed at its start. The unit is
+        # watched while the socket waits: the start fails within a look or
+        # two, the unit is stopped, and nothing of the stream is left.
+        (self.sessions / "fails_at_once").write_text("")
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        with self.assertLogs(cli_session.logger, "WARNING") as logs:
+            with self.assertRaises(UnitEndedError) as caught:
+                await asyncio.wait_for(self.launch(connect_seconds=60), 30)
+        self.assertLess(loop.time() - started, 5)
+        self.assertNotIsInstance(caught.exception, TimeoutError)
+        self.assertIsInstance(caught.exception, OSError)
+        self.assertIn("state=failed", "\n".join(logs.output))
+        calls = self.calls.read_text()
+        self.assertIn("show --property ActiveState,Job paw-cli-session@", calls)
+        self.assertIn("stop paw-cli-session@", calls)
+        self.assertEqual(self.accepting(), [])
+
+    async def test_a_queued_start_is_not_taken_for_an_ended_unit(self):
+        # ``--no-block``: the start job may wait in systemd's queue while the
+        # unit still shows an earlier run's state (``failed``): not an end.
+        (self.sessions / "fails_at_once").write_text("")
+        (self.sessions / "job").write_text("7")
+        starting = asyncio.create_task(self.launch(connect_seconds=60))
+        await asyncio.sleep(1.6)  # three looks
+        self.assertFalse(starting.done())
+        (self.sessions / "job").unlink()
+        with self.assertRaises(UnitEndedError):
+            await asyncio.wait_for(starting, 5)
+
+    async def test_a_unit_that_runs_and_never_connects_waits_for_the_deadline(self):
+        # The watch changes nothing for a unit still running: its connection
+        # is waited for until ``connect_seconds`` (a timeout), then stopped.
+        (self.sessions / "never_connects").write_text("")
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        with self.assertRaises(TimeoutError):
+            await asyncio.wait_for(self.launch(connect_seconds=1.5), 30)
+        self.assertGreaterEqual(loop.time() - started, 1.4)
+        self.assertIn("stop paw-cli-session@", self.calls.read_text())
+
+    async def test_a_cancelled_start_stops_its_unit_while_it_is_watched(self):
+        (self.sessions / "never_connects").write_text("")
+        starting = asyncio.create_task(self.launch(connect_seconds=60))
+        await asyncio.sleep(1.2)  # the unit is running and looked at
+        starting.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await asyncio.wait_for(asyncio.shield(starting), 10)
+        self.assertIn("stop paw-cli-session@", self.calls.read_text())
+
+    async def test_the_probe_of_a_unit_that_fails_at_once_ends_at_once(self):
+        # #320 end to end below the service: the Claude probe on the systemd
+        # launcher, under the service's 120 s deadline. It fails within a few
+        # seconds, as the service records ``unavailable`` / ``internal_error``
+        # (not ``timeout``), and its session's directory is removed.
+        from paw_backend.agents.claude_probe import ClaudeProbeAdapter
+        from paw_backend.connections import FailureCode
+        from paw_backend.connections.probe import PROBE_TIMEOUT_SECONDS
+        from paw_backend.connections.service import _failure_code_of
+
+        (self.sessions / "fails_at_once").write_text("")
+        adapter = ClaudeProbeAdapter(
+            self.launcher(), model="claude-x", session_base=self.sessions
+        )
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        with self.assertLogs(cli_session.logger, "WARNING"):
+            with self.assertRaises(UnitEndedError) as caught:
+                async with asyncio.timeout(PROBE_TIMEOUT_SECONDS):
+                    await adapter.check_health(Secret(TOKEN))
+        self.assertLess(loop.time() - started, 5)
+        self.assertIs(_failure_code_of(caught.exception), FailureCode.INTERNAL_ERROR)
+        self.assertEqual([p for p in self.sessions.iterdir() if p.is_dir()], [])
 
     def test_the_window_is_ten_seconds(self):
         self.assertEqual(UNIT_END_SECONDS, 10.0)

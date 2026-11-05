@@ -30,6 +30,12 @@ unit's :meth:`_UnitProcess.stop` reads it **before** it stops the unit: after th
 CLI ended by itself (its stream reached its end) it first waits up to 10 s for
 the unit to leave ``active``; a stop of a CLI still running does not wait. A
 process's ``oom_killed`` then says whether the OOM killer ended it.
+
+A unit that ends before its program connected to ``stream.sock`` (it failed at
+once: issue #320) is seen while the launcher waits for the connection (the
+unit's ``ActiveState`` and ``Job``, every half second): the start raises
+:class:`UnitEndedError` then, after the unit's stop, instead of waiting for the
+connection's deadline (``connect_seconds``).
 """
 
 import asyncio
@@ -218,6 +224,14 @@ def remove_session(spec: CliSessionSpec) -> None:
 
 
 _ENV_NAME = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
+
+
+class UnitEndedError(OSError):
+    """The session's unit ended before its program connected to the stream
+    socket (#320): it failed at once (its container did not start, its
+    program could not read the session's files). Not a ``TimeoutError``: a
+    probe or a session records it as ``internal_error``, like a start that
+    systemd refused, and does not wait for the connection's deadline."""
 
 
 class UnitNotStoppedError(OSError):
@@ -452,6 +466,11 @@ class _UnitProcess:
         self._result = result
 
 
+#: How often a started unit is looked at while its stream socket waits for
+#: its connection (#320).
+_START_POLL_SECONDS = 0.5
+
+
 #: How long a session's stream may take to close (its flush, then after an
 #: abort) and its ``accept`` task to end (#326).
 _STREAM_CLOSE_SECONDS = 1.0
@@ -645,7 +664,7 @@ class SystemdLauncher:
             code, _ = await self.systemctl("start", "--no-block", unit)
             if code != 0:
                 raise OSError("the session's unit did not start")
-            reader, writer, accepted = await asyncio.wait_for(connected, self._connect)
+            reader, writer, accepted = await self._connection(connected, unit)
         except BaseException as error:
             # A connection that came after all (the start was cancelled in
             # the same turn) is closed with the unit's stop.
@@ -668,6 +687,72 @@ class SystemdLauncher:
         process.stdin = process._writer = writer
         process._accepted = accepted
         return process
+
+    async def _connection(self, connected: asyncio.Future, unit: str) -> tuple:
+        """The stream socket's connection, waited for at most
+        ``connect_seconds`` (``TimeoutError`` past it) while the unit is
+        watched (#320): a unit that ended before its program connected (it
+        failed at once) raises :class:`UnitEndedError` at its next look,
+        not at the deadline."""
+        watching = asyncio.ensure_future(self._ended(unit))
+        try:
+            done, _ = await asyncio.wait(
+                {connected, watching},
+                timeout=self._connect,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            if not watching.done():
+                watching.cancel()
+                # Not ``await watching``: its own cancellation is no matter,
+                # and the caller's must not be taken for it.
+                await asyncio.wait({watching})
+            if not watching.cancelled():
+                watching.exception()  # retrieved
+        if connected in done or connected.done():
+            # A connection that came in the same turn as the unit's end
+            # wins: the stream may hold the CLI's whole output.
+            return connected.result()
+        if watching in done:
+            state = watching.result()  # an unexpected failure is raised
+            logger.warning(
+                "A CLI session's unit ended before its stream connected: "
+                "unit=%s state=%s",
+                unit,
+                state,
+            )
+            raise UnitEndedError("the session's unit ended before it connected")
+        raise TimeoutError("the session's stream did not connect in time")
+
+    async def _ended(self, unit: str) -> str:
+        """Look at the started unit every ``_START_POLL_SECONDS`` until it has
+        ended (no job, and ``inactive``, ``failed`` or ``deactivating``, as
+        ``codex_collect.SystemdSessionUnits.stopped`` reads them): its state
+        then. A look that fails or does not answer says nothing; the next
+        one is made. A start job still queued (``--no-block``) is a unit not
+        yet started, whatever its state from an earlier run."""
+        while True:
+            await asyncio.sleep(_START_POLL_SECONDS)
+            try:
+                code, out = await self.query(
+                    "show",
+                    "--property",
+                    "ActiveState,Job",
+                    unit,
+                    timeout_seconds=self._systemctl_seconds,
+                )
+            except OSError:
+                continue
+            if code != 0:
+                continue
+            found = {}
+            for line in out.splitlines():
+                name, sep, value = line.partition("=")
+                if sep:
+                    found[name.strip()] = value.strip()
+            state, job = found.get("ActiveState"), found.get("Job")
+            if job in ("", "0") and state in _ENDED_STATES:
+                return state
 
 
 class SubprocessLauncher:
@@ -719,6 +804,7 @@ __all__ = [
     "CliProcess",
     "CliSessionSpec",
     "SubprocessLauncher",
+    "UnitEndedError",
     "UnitNotStoppedError",
     "create_session",
     "remove_session",
