@@ -670,6 +670,12 @@ class SystemdLauncher:
             # the same turn) is closed with the unit's stop.
             if connected.done() and not connected.cancelled():
                 _, process._writer, process._accepted = connected.result()
+            else:
+                # None came yet: one that comes during the stop below (the
+                # server is still open) meets ``accept``'s guard and is
+                # closed there, instead of being taken by nobody and left
+                # open with its task pending (Codex review of #335).
+                connected.cancel()
             # Whatever ended the start (a refusal, the wait, a cancellation
             # that came while systemctl ran): the unit may be queued or
             # running with the credential; stop it before passing on. A stop

@@ -935,6 +935,38 @@ class LauncherTest(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(loop.time() - started, 1.4)
         self.assertIn("stop paw-cli-session@", self.calls.read_text())
 
+    async def test_a_connection_during_the_stop_after_a_timeout_is_closed(self):
+        # Codex review of #335: after the wait for the connection ended (here
+        # its deadline), the CLI connects while its unit is being stopped
+        # (the server is still open). It is closed by ``accept``'s guard: no
+        # task left pending, no stream left open.
+        (self.sessions / "never_connects").write_text("")
+        spec = create_session(self.sessions, ("python3", "relay.py"))
+        launch = CliLaunch(
+            ("x",), {}, Secret(TOKEN), "CLAUDE_CODE_OAUTH_TOKEN", b"", spec
+        )
+        launcher = self.launcher(connect_seconds=1)
+        late = []
+        stop_unit = launcher.stop_unit
+
+        async def connecting_stop(unit, attempts=3):
+            late.append(
+                await asyncio.open_unix_connection(str(spec.directory / "stream.sock"))
+            )
+            await asyncio.sleep(0.2)  # ``accept`` runs
+            await stop_unit(unit, attempts)
+
+        launcher.stop_unit = connecting_stop
+        with self.assertRaises(TimeoutError):
+            await asyncio.wait_for(launcher.start(launch), 30)
+        self.assertEqual(len(late), 1)
+        self.assertEqual(self.accepting(), [])
+        reader, writer = late[0]
+        # The backend's end was closed: the CLI's side reads its end.
+        self.assertEqual(await asyncio.wait_for(reader.read(), 5), b"")
+        writer.close()
+        await writer.wait_closed()
+
     async def test_a_cancelled_start_stops_its_unit_while_it_is_watched(self):
         (self.sessions / "never_connects").write_text("")
         starting = asyncio.create_task(self.launch(connect_seconds=60))
