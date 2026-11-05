@@ -49,6 +49,8 @@ python3 -I deploy/cli-session/smoke_codex_recorder.py --codex <codex> --out <res
 
 すべての Request の `tools` が `codex_app_server.tool_check` を通り（PAW の Tool と、MCP の Resource の 3 つの Tool だけ。MCP の Server は `paw` だけ）、`submit` の `summary` が Node の結果になれば Exit 0（`passed: true`）。結果の JSON（Request の Tool・Model・入力の Item の種類だけ。Prompt の文は入れない）を `/data/results/` に残し、その版を `VERIFIED_VERSIONS` に入れる PR に Path を書く。Feature の一覧の照合と Fake のやり直しも同じ PR で行う（0101 の 4）。
 
+`--probe` を付けると、同じ記録用の Provider で Codex の Connection の Health の Probe（`CodexProbeAdapter`、[Decision 0100](../../../../docs/decisions/0100-cli-connection-health-probe.md) の 10。`config.toml` は MCP の Server のない `probe_config`）を 1 回走らせる。記録用の Provider は `PAW_PROBE_OK` と答え、Request がちょうど 1 つで、その `tools` が空（Model に Tool を 1 つも見せない）で、Probe の判定が `connected` なら Exit 0。Codex の Probe を本番で使う前に、同じ版の `codex` で 1 回走らせ、結果の JSON を同じく残す。
+
 ## 配備（root）
 
 1. Account と Group: `useradd --system --home-dir /var/lib/paw-agent-cli --create-home --shell /usr/sbin/nologin paw-agent-cli`、`groupadd --system paw-cli-bridge`（`paw-egress` の README と同じ Group）、`usermod -aG paw-cli-bridge paw-agent-cli`。Backend の User（`paw`）は Group に入れない（Directory の所有者なので要らない）。Unit は `paw-agent-cli` の主 Group を変えない（`Group=` を書かず、`SupplementaryGroups=paw-cli-bridge`。Issue #322）: Subuid の Mapping なしでは Container の gid 0 が Process の主 Group に写り、Podman の Storage は主 Group `paw-agent-cli` のものなので、主 Group が違うと Podman は Layer の ID-mapped copy を作ろうとして `chown ... invalid argument`（exit 125）で止まる。Session の Directory（setgid、Group `paw-cli-bridge`）は補助 Group で読み書きし、`podman run --group-add keep-groups`（crun が必要）で Container の中にも残す。Rootless の Podman の `XDG_RUNTIME_DIR` は Unit の `RuntimeDirectory`（`/run/paw-cli-session/<uuid>`）にする（`ProtectHome=yes` が `/run/user` を隠すため。Linger は要らない）。

@@ -12,6 +12,10 @@ the notifications the scenario says. The report file gets what the test
 checks: the arguments, the environment's names, the config, the requests'
 params, the tools the bridge listed and the answers of the tool calls, and
 whether the credential file was there (its length, never its value).
+
+Without an MCP server in the config (the health probe's) no relay is started
+and no tool is listed. ``answer`` completes an agent message with the given
+text; ``reroute`` sends ``model/rerouted``.
 """
 
 import json
@@ -93,12 +97,14 @@ def main() -> int:
             )
             break
 
-    server = config["mcp_servers"]["paw"]
-    relay = subprocess.Popen(
-        [server["command"], *server["args"]],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-    )
+    server = config.get("mcp_servers", {}).get("paw")
+    relay = None
+    if server is not None:
+        relay = subprocess.Popen(
+            [server["command"], *server["args"]],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+        )
     next_id = [0]
 
     def rpc(method, params=None):
@@ -119,8 +125,11 @@ def main() -> int:
     def item(body):
         notify("item/started", {"turnId": "turn_1", "item": body})
 
-    rpc("initialize", {"protocolVersion": "2025-06-18"})
-    report["listed"] = [t["name"] for t in rpc("tools/list")["result"]["tools"]]
+    if relay is not None:
+        rpc("initialize", {"protocolVersion": "2025-06-18"})
+        report["listed"] = [t["name"] for t in rpc("tools/list")["result"]["tools"]]
+    else:
+        report["listed"] = []
     save()
     item({"type": "userMessage", "id": "item_0", "content": []})
     total = [0, 0]
@@ -185,6 +194,23 @@ def main() -> int:
             save()
         elif "item" in action:
             item(action["item"])
+        elif "answer" in action:
+            body = {"type": "agentMessage", "id": "item_answer", "text": ""}
+            item(body)
+            notify(
+                "item/completed",
+                {"turnId": "turn_1", "item": {**body, "text": action["answer"]}},
+            )
+        elif "reroute" in action:
+            notify(
+                "model/rerouted",
+                {
+                    "turnId": "turn_1",
+                    "fromModel": action["reroute"][0],
+                    "toModel": action["reroute"][1],
+                    "reason": "highRiskCyberActivity",
+                },
+            )
         elif "error" in action:
             notify(
                 "error",

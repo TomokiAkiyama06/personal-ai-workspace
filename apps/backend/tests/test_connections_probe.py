@@ -96,6 +96,10 @@ class RulesTest(unittest.TestCase):
             {"outcome": ProbeOutcome.UNAVAILABLE, "failure": "timeout"},
             {"outcome": ProbeOutcome.CONNECTED, "input_tokens": -1},
             {"outcome": ProbeOutcome.CONNECTED, "model": "a model"},
+            # Only an ``unavailable`` keeps the status (Codex, Decision 0100, 10).
+            {"outcome": ProbeOutcome.CONNECTED, "keeps_status": True},
+            {"outcome": ProbeOutcome.EXPIRED, "keeps_status": True},
+            {"outcome": ProbeOutcome.UNAVAILABLE, "keeps_status": 1},
         ):
             with self.subTest(bad), self.assertRaises((ValueError, TypeError)):
                 ProbeReport(**bad)

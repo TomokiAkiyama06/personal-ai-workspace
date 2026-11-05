@@ -16,10 +16,16 @@ The result passes when every request passes ``codex_app_server.tool_check``
 (the PAW tools, and only the MCP resource tools besides, while ``paw`` is the
 only MCP server) and the submit's summary came back as the node's result.
 
+With ``--probe`` it runs the Codex connection's health probe instead (Decision
+0100, 10: ``CodexProbeAdapter`` with the probe's own ``config.toml``, no MCP
+server): the recorder answers ``PAW_PROBE_OK`` and the result passes when
+there was exactly one request, it offered the model no tool at all, and the
+probe's verdict is ``connected``.
+
 Run it as the user who develops, never with a real login, never as ``paw``::
 
     python3 -I deploy/cli-session/smoke_codex_recorder.py \\
-        --codex <codex executable> --out <result.json> [--sessions <dir>]
+        --codex <codex executable> --out <result.json> [--sessions <dir>] [--probe]
 
 The exit code is 0 when it passed, 1 when not. The result JSON holds the
 requests (the tools, the model, the input item types; no prompt text).
@@ -57,9 +63,10 @@ def _sse(event: dict) -> bytes:
 class Recorder:
     """The 127.0.0.1 model provider: records the requests, calls submit once."""
 
-    def __init__(self, model_tool_names) -> None:
+    def __init__(self, model_tool_names, message: str = "done") -> None:
         self.requests: list[dict] = []
         self._names = model_tool_names
+        self._message = message
         recorder = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -114,7 +121,7 @@ class Recorder:
                 "type": "message",
                 "id": "msg_1",
                 "role": "assistant",
-                "content": [{"type": "output_text", "text": "done"}],
+                "content": [{"type": "output_text", "text": self._message}],
             }
         return [
             {"type": "response.created", "response": {"id": rid}},
@@ -287,6 +294,94 @@ async def smoke(codex: str, sessions: Path) -> dict:
     }
 
 
+async def probe_smoke(codex: str, sessions: Path) -> dict:
+    """The health probe's smoke (see the module)."""
+    sys.path.insert(0, str(BACKEND))
+    import paw_backend.agents.codex_probe as codex_probe
+    from paw_backend.agents.codex_app_server import model_tool_names
+    from paw_backend.agents.codex_cli import InteractiveSubprocessLauncher
+    from paw_backend.connections import ProbeSession, Secret, WriteBack
+
+    recorder = Recorder(model_tool_names, message="PAW_PROBE_OK")
+    configs: list[dict] = []
+    original = codex_probe.probe_config
+
+    def probe_config():
+        text = (
+            'model_provider = "pawsmoke"\n'
+            + original()
+            + "\n[model_providers.pawsmoke]\n"
+            'name = "paw smoke recorder"\n'
+            f'base_url = "http://127.0.0.1:{recorder.port}/v1"\n'
+            'wire_api = "responses"\n'
+            "requires_openai_auth = false\n"
+        )
+        configs.append(
+            {"mcp_servers": sorted(tomllib.loads(text).get("mcp_servers", {}))}
+        )
+        return text
+
+    class Credentials:
+        async def place(self, secret, codex_home):
+            (Path(codex_home) / "auth.json").write_text(secret.reveal())
+
+        async def collect(self, secret, codex_home, write_back):
+            return None
+
+    async def bind(session):
+        return True
+
+    async def held():
+        return True
+
+    async def write_back(value):
+        return WriteBack.WRITTEN
+
+    codex_probe.probe_config = probe_config
+    try:
+        version = await _version(codex)
+        adapter = codex_probe.CodexProbeAdapter(
+            InteractiveSubprocessLauncher(),
+            model=MODEL,
+            session_base=sessions,
+            credentials=Credentials(),
+            executable=(codex,),
+            verified_versions=frozenset({version}),
+        )
+        session = ProbeSession(
+            bind_session=bind,
+            still_held=held,
+            write_back=write_back,
+            cli_running=lambda: None,
+        )
+        started = time.monotonic()
+        try:
+            report = await asyncio.wait_for(
+                adapter.check_health(Secret(DUMMY_AUTH), session), 200
+            )
+        finally:
+            session.released(True)
+    finally:
+        codex_probe.probe_config = original
+        recorder.close()
+    offered = [r["model_tool_names"] for r in recorder.requests]
+    no_tools = bool(offered) and all(names == [] for names in offered)
+    connected = report.outcome.value == "connected"
+    return {
+        "mode": "probe",
+        "codex_version": version,
+        "seconds": round(time.monotonic() - started, 1),
+        "config": configs[0] if configs else None,
+        "requests_count": len(recorder.requests),
+        "no_tools": no_tools,
+        "outcome": report.outcome.value,
+        "failure": None if report.failure is None else report.failure.value,
+        "tokens": [report.input_tokens, report.output_tokens],
+        "passed": no_tools and len(recorder.requests) == 1 and connected,
+        "requests": recorder.requests,
+    }
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="smoke_codex_recorder.py", allow_abbrev=False)
     parser.add_argument("--codex", required=True, help="the codex executable to test")
@@ -296,11 +391,17 @@ def main(argv=None) -> int:
         type=Path,
         help="the session directories' base (short: the bridge socket is AF_UNIX)",
     )
+    parser.add_argument(
+        "--probe",
+        action="store_true",
+        help="run the connection's health probe instead of a node",
+    )
     arguments = parser.parse_args(argv)
     with tempfile.TemporaryDirectory(prefix="pawsm") as scratch:
         sessions = (arguments.sessions or Path(scratch)).resolve()
         sessions.mkdir(parents=True, exist_ok=True)
-        result = asyncio.run(smoke(arguments.codex, sessions))
+        run = probe_smoke if arguments.probe else smoke
+        result = asyncio.run(run(arguments.codex, sessions))
         result["sessions_left"] = sorted(p.name for p in sessions.iterdir())
     arguments.out.write_text(json.dumps(result, indent=2, default=str))
     print(json.dumps({k: v for k, v in result.items() if k != "requests"}, default=str))

@@ -19,15 +19,23 @@ This module holds what the store and the service share:
   (``running`` -> ``finished`` with an outcome, or ``abandoned`` by the reaper);
 * :class:`ProbeView`: a probe as an Owner / Admin sees it (Decision 0100, 7);
 * :class:`ProbeReport`: what a probe adapter may answer besides a bare
-  ``ConnectionStatus`` (the outcome, a failure code, the tokens and the model);
+  ``ConnectionStatus`` (the outcome, a failure code, the tokens and the model;
+  ``keeps_status`` for an ``unavailable`` that says nothing about the
+  credential: Codex's slot was lost or its CLI could not be stopped);
+* :class:`ProbeSession`: what the service hands an ``exclusive_sessions``
+  probe adapter (Codex: Decision 0100, 10) that holds the connection's session
+  slot: the slot's binding and check, the write-back of a refreshed login and
+  the slot's keep, as a node's session gets them (Decision 0083, 6; Decision
+  0096, 2);
 * :func:`changes_status`: which outcomes are written to the connection's status
   (Decision 0100, 5: ``busy``, ``cancelled`` and a rate limit say nothing about
   the credential);
 * :func:`probe_available_at`: the spacing of manual rechecks (Decision 0100, 8).
 """
 
+import logging
 import uuid
-from collections.abc import Iterable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import StrEnum
@@ -35,7 +43,10 @@ from typing import Final
 
 from paw_backend.connections.domain import ConnectionKind, FailureCode, ProbeRefusal
 from paw_backend.connections.limits import MAX_TOKENS_PER_CALL
+from paw_backend.connections.session import CredentialWriter
 from paw_backend.connections.validation import validate_model, validate_optional_tokens
+
+logger = logging.getLogger(__name__)
 
 #: Decision 0100, 9: the audit events of a probe (ids and enums only). The
 #: start, written with the probe's row (``allow``, the trigger as the reason)
@@ -114,13 +125,20 @@ class ProbeReport:
     """What a probe adapter's ``check_health`` may return instead of a bare
     ``ConnectionStatus``: the outcome, a failure code (only when it is not
     ``connected``), the tokens the CLI reported (``None``: unknown, never
-    estimated) and the model it ran on. The answer's text is never part of it."""
+    estimated) and the model it ran on. The answer's text is never part of it.
+
+    ``keeps_status`` (``unavailable`` only): the probe learnt nothing about the
+    credential (Codex, Decision 0100, 10: its CLI could not be stopped and is
+    left to the collection, or the connection's session slot stopped being the
+    probe's): the row keeps the outcome, the connection's status is not
+    written (as for ``busy``)."""
 
     outcome: ProbeOutcome
     failure: FailureCode | None = None
     input_tokens: int | None = None
     output_tokens: int | None = None
     model: str | None = field(default=None)
+    keeps_status: bool = False
 
     def __post_init__(self) -> None:
         validate_probe_report(self)
@@ -141,6 +159,65 @@ def validate_probe_report(report: "ProbeReport") -> None:
     validate_optional_tokens("output_tokens", report.output_tokens, MAX_TOKENS_PER_CALL)
     if report.model is not None:
         validate_model("model", report.model)
+    if type(report.keeps_status) is not bool or (
+        report.keeps_status and report.outcome is not ProbeOutcome.UNAVAILABLE
+    ):
+        raise ValueError("keeps_status")
+
+
+@dataclass(slots=True)
+class ProbeSession:
+    """What the service hands the probe adapter of an ``exclusive_sessions``
+    kind (Codex, Decision 0100, 10) once it holds the connection's session
+    slot: the hooks a node's session gets (``AgentSessionRequest``):
+
+    * ``bind_session(session)``: records the probe's session (with the
+      credential's handle and version) on the slot BEFORE the login is placed
+      (Decision 0096, 2 B); ``False``: nothing may be placed;
+    * ``still_held()``: the check before each side effect (Decision 0096, 2's
+      fencing); ``False``: the probe gives up and leaves its files to the
+      collection;
+    * ``write_back(value)``: a refreshed login, compare-and-swap (Decision
+      0083, 6);
+    * ``cli_running()``: the CLI could not be stopped (the slot stays held);
+    * ``connection_id``: for the session's start line (Decision 0091, 4).
+
+    :meth:`on_released` registers what runs once the service released the
+    slot (``given_back``: the slot's own row was deleted, so the session's
+    files are nobody else's): the adapter removes its session's directory
+    then, not before (a slot that was not given back leaves them to the
+    collection, as a node's session does)."""
+
+    bind_session: Callable[[uuid.UUID], Awaitable[bool]] = field(repr=False)
+    still_held: Callable[[], Awaitable[bool]] = field(repr=False)
+    write_back: CredentialWriter = field(repr=False)
+    cli_running: Callable[[], None] = field(repr=False)
+    connection_id: uuid.UUID | None = None
+    _released: list[Callable[[bool], None]] = field(default_factory=list, repr=False)
+
+    def __post_init__(self) -> None:
+        for name in ("bind_session", "still_held", "write_back", "cli_running"):
+            if not callable(getattr(self, name)):
+                raise TypeError(f"{name} must be callable")
+        if self.connection_id is not None and type(self.connection_id) is not uuid.UUID:
+            raise TypeError("connection_id must be a UUID")
+
+    def on_released(self, callback: Callable[[bool], None]) -> None:
+        if not callable(callback):
+            raise TypeError("callback must be callable")
+        self._released.append(callback)
+
+    def released(self, given_back: bool) -> None:
+        """Called by the service once the slot was released; never raises."""
+        callbacks, self._released = self._released, []
+        for callback in callbacks:
+            try:
+                callback(given_back)
+            except Exception as error:
+                logger.error(
+                    "a probe's release callback failed: exception_type=%s",
+                    type(error).__name__,
+                )
 
 
 def changes_status(outcome: ProbeOutcome, failure: FailureCode | None) -> bool:
@@ -250,6 +327,7 @@ __all__ = [
     "ProbeRefusal",
     "ProbeReport",
     "ProbeResult",
+    "ProbeSession",
     "ProbeState",
     "ProbeTicket",
     "ProbeTrigger",
