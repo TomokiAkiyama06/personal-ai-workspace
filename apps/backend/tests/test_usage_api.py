@@ -3,17 +3,31 @@
 The sums themselves are tested on the service (``test_connections_report``); here
 the routes: their guards, the authorization of the service behind them, the
 Passkey Step-up of a quota change, the answers' shape and the errors.
+
+The report's instant is FIXED (issue #332): the routes' connection service runs on
+the store's test clock (``allow_explicit_clock``) at :data:`NOW`, and the rows are
+written relative to the same instant. On the database's clock, rows written
+before midnight in Tokyo and a report read after it (or rows "a minute ago" in
+the first minute of a day) put the counts on another day than ``daily[-1]``.
 """
 
 import uuid
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import text
 
+from paw_backend.connections.adapter import AdapterRegistry
+from paw_backend.connections.service import ConnectionService
+from paw_backend.connections.wiring import NoSecretStore
+
 from .auth_http_support import HttpTestCase, error_code, requires_postgres
 
 TOKYO = ZoneInfo("Asia/Tokyo")
+# The instant of every report: noon in Tokyo, mid-month (2026-09-16 12:00 JST), so
+# the rows "a minute ago" are on the report's day and month, and those 20 days
+# before are before its 14 days and its month.
+NOW = datetime(2026, 9, 16, 3, 0, tzinfo=UTC)
 QUOTA = "/api/v1/users/{}/quotas/codex/tasks/month"
 
 
@@ -32,6 +46,19 @@ class UsageHttpCase(HttpTestCase):
         self.admin = self.login_token("admin-one")
         self.user = self.login_token("alice")
         self.other = self.login_token("bob")
+        # The service of ``build_connection_service`` (no secret store, no probe in
+        # these settings), on the fixed clock.
+        self.assertIsNone(self.settings.secret_store_dir)
+        self.app.state.connections = ConnectionService(
+            self.database,
+            self.app.state.authorizer,
+            self.services.audit_sink,
+            AdapterRegistry(),
+            NoSecretStore(),
+            database_timeout_seconds=self.settings.database_timeout_seconds,
+            clock=lambda: NOW,
+            allow_explicit_clock=True,
+        )
 
     # -- data -------------------------------------------------------------------------
 
@@ -67,7 +94,7 @@ class UsageHttpCase(HttpTestCase):
                     " started_at, finished_at, duration_ms) VALUES (:id, :user,"
                     " :task, (SELECT project_id FROM tasks WHERE id = :task), :kind,"
                     " 'secret-model-name', :purpose, 'succeeded', :tokens, 1,"
-                    " now() - :ago, now() - :ago, 0)"
+                    " :at, :at, 0)"
                 ),
                 {
                     "id": uuid.uuid4(),
@@ -76,7 +103,7 @@ class UsageHttpCase(HttpTestCase):
                     "kind": kind,
                     "purpose": purpose,
                     "tokens": tokens,
-                    "ago": ago,
+                    "at": NOW - ago,
                 },
             )
 
@@ -97,7 +124,7 @@ class UsageHttpCase(HttpTestCase):
                 text(
                     "INSERT INTO local_usage (user_id, task_id, placement, calls,"
                     " tokens, seconds, started_at) VALUES (:user, :task, :placement,"
-                    " :calls, :tokens, :seconds, now() - :ago)"
+                    " :calls, :tokens, :seconds, :at)"
                 ),
                 {
                     "user": user_id,
@@ -106,7 +133,7 @@ class UsageHttpCase(HttpTestCase):
                     "calls": calls,
                     "tokens": tokens,
                     "seconds": seconds,
-                    "ago": ago,
+                    "at": NOW - ago,
                 },
             )
 
@@ -117,9 +144,9 @@ class UsageHttpCase(HttpTestCase):
             connection.execute(
                 text(
                     "INSERT INTO agent_incidents (kind, task_id, occurred_at)"
-                    " VALUES ('escalation', :task, now() - :ago)"
+                    " VALUES ('escalation', :task, :at)"
                 ),
-                {"task": task_id, "ago": ago},
+                {"task": task_id, "at": NOW - ago},
             )
 
     def quota(self, user_id: uuid.UUID, limit: int | None) -> None:
@@ -141,8 +168,8 @@ class UsageHttpCase(HttpTestCase):
         )
 
     def today(self) -> str:
-        now = self.scalar("SELECT now()")
-        return now.astimezone(TOKYO).date().isoformat()
+        """The day of the report's instant in Tokyo (``2026-09-16``)."""
+        return NOW.astimezone(TOKYO).date().isoformat()
 
 
 @requires_postgres
