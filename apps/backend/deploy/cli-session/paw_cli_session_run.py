@@ -35,12 +35,13 @@ Standard library only.
 Codex's ``CODEX_HOME`` (Decision 0083, 6: the CLI's tmpfs, 0700, its own
 account; issue #239) must be the session's ``config`` directory. Over it the
 container gets a tmpfs of its own (``tmpfs-mode=0700``, owned by the CLI's
-account: ``chown``), into which only the session's ``config.toml``
-(read-only) and ``auth.json`` (read-write: Codex rewrites it in place when it
-refreshes its login, and the backend reads it back from the session's
-directory) are mounted, each when the backend wrote it. Everything else Codex
-writes there (its logs, state, caches) stays in the container's tmpfs and
-goes with the container.
+account: ``chown``; ``notmpcopyup``: nothing of the session's ``config``
+directory under it is copied in, issue #339), into which only the session's
+``config.toml`` (read-only) and ``auth.json`` (read-write: Codex rewrites it
+in place when it refreshes its login, and the backend reads it back from the
+session's directory) are mounted, each when the backend wrote it. Everything
+else Codex writes there (its logs, state, caches) stays in the container's
+tmpfs and goes with the container.
 
 The container's output is the backend's only (issue #324): ``podman run
 --log-driver none`` (no copy of the stream in the journal or a log file; the
@@ -184,7 +185,14 @@ def codex_home_mounts(directory: Path, env: dict[str, str]) -> list[str]:
         raise Refused("launch.json: CODEX_HOME")
     mounts = [
         "--mount",
-        f"type=tmpfs,destination={home},tmpfs-mode=0700,chown=true",
+        # notmpcopyup (issue #339): the tmpfs lies over the session's own
+        # ``config`` directory (mounted with the session's directory), and
+        # Podman's default copies what is there into the tmpfs and chowns it.
+        # The backend's files (``paw``'s) have no uid in the container
+        # without subuid ranges (issue #322): crun's chown failed (EINVAL,
+        # exit 126) and no Codex session started. The two files are mounted
+        # below; nothing else of the directory belongs in CODEX_HOME.
+        f"type=tmpfs,destination={home},tmpfs-mode=0700,chown=true,notmpcopyup",
     ]
     for name, mode in CODEX_HOME_FILES:
         path = home / name
