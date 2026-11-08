@@ -72,6 +72,18 @@ class RecorderTest(unittest.TestCase):
         events = self.post({"model": "m", "tools": [{"type": "tool_search"}]})
         self.assertEqual(events[1]["item"]["type"], "message")
 
+    def test_the_probes_recorder_answers_the_probes_word(self):
+        # ``--probe`` (Decision 0100, 10): the answer the probe accepts, and
+        # a request that offers no tool is recorded as such.
+        recorder = load().Recorder(model_tool_names, message="PAW_PROBE_OK")
+        self.addCleanup(recorder.close)
+        self.recorder = recorder
+        events = self.post({"model": "m", "input": [{"type": "message"}]})
+        (content,) = events[1]["item"]["content"]
+        self.assertEqual(content["text"], "PAW_PROBE_OK")
+        (request,) = recorder.requests
+        self.assertEqual((request["tools"], request["model_tool_names"]), ([], []))
+
 
 if __name__ == "__main__":
     unittest.main()

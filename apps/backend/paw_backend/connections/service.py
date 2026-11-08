@@ -185,6 +185,7 @@ from paw_backend.connections.probe import (
     ProbeOutcome,
     ProbeReport,
     ProbeResult,
+    ProbeSession,
     ProbeTicket,
     ProbeTrigger,
     changes_status,
@@ -322,6 +323,9 @@ class _ProbeEnd:
     input_tokens: int | None = None
     output_tokens: int | None = None
     model: str | None = None
+    # The adapter said the probe learnt nothing about the credential
+    # (``ProbeReport.keeps_status``), or the service did (the slot was lost).
+    keep_status: bool = False
 
 
 @dataclass(slots=True)
@@ -1400,6 +1404,7 @@ class ConnectionService:
         except asyncio.CancelledError:
             end.outcome, end.failure = ProbeOutcome.CANCELLED, None
             end.input_tokens = end.output_tokens = None
+            end.keep_status = False
             await self._shielded(self._finish_probe(ticket, end))
             raise
         # The probe ended: its end is written even when a cancellation (the
@@ -1418,26 +1423,134 @@ class ConnectionService:
     ) -> None:
         """Resolve the credential and ask the adapter, under one deadline;
         whatever went wrong is ``unavailable`` (``expired`` for the
-        provider's refusal of the credential), logged by type only."""
+        provider's refusal of the credential), logged by type only.
+
+        An ``exclusive_sessions`` adapter (Codex, Decision 0100, 10) runs in
+        the connection's session slot, as a node's session does (Decision
+        0083, 6): the slot is waited for first (up to the slot's wait, 60 s,
+        BEFORE the deadline starts: the deadline is the probe's own session);
+        when it stays taken the probe is ``busy`` and nothing is sent. Held,
+        the credential is read with its version and the adapter is given a
+        :class:`ProbeSession` (the binding, the check before each side effect,
+        the write-back of a refreshed login, the keep of a CLI that could not
+        be stopped). A slot that is lost meanwhile cancels the probe (the
+        adapter stops its CLI and writes its login back first): ``unavailable``
+        without a change of status. The slot is released afterwards, also
+        through a cancellation, and the adapter told whether it was given
+        back."""
+        if _exclusive(adapter):
+            await self._probe_in_slot(ticket, adapter, end)
+            return
         try:
             async with asyncio.timeout(self._health_timeout):
                 secret = await self._resolve(ticket.secret_handle)
                 verdict = await adapter.check_health(secret)  # type: ignore[attr-defined]
         except Exception as error:  # the resolver's or the adapter's: type only
-            code = _failure_code_of(error)
-            logger.warning(
-                "connection probe failed: kind=%s code=%s exception_type=%s",
-                ticket.kind.value,
-                code.value,
-                log_type_name(error),
-            )
-            end.outcome = (
-                ProbeOutcome.EXPIRED
-                if code is FailureCode.EXPIRED
-                else ProbeOutcome.UNAVAILABLE
-            )
-            end.failure = code
+            self._probe_failed(ticket, error, end)
             return
+        self._take_verdict(verdict, end)
+
+    async def _probe_in_slot(
+        self, ticket: ProbeTicket, adapter: object, end: "_ProbeEnd"
+    ) -> None:
+        kind = ticket.kind
+        slot = SessionSlot(
+            self._store,
+            kind,
+            call=self._call_store,
+            collector=self._session_collector,
+            collect_seconds=self._collect_seconds,
+            **self._slot_timing,
+        )
+        try:
+            taken = await slot.acquire(self._slot_wait)
+        except Exception as error:  # the database's: type only
+            self._probe_failed(ticket, error, end)
+            end.keep_status = True  # nothing was learnt about the credential
+            return
+        if not taken:
+            logger.warning(
+                "connection probe's session slot stayed taken: kind=%s", kind.value
+            )
+            end.outcome, end.failure = ProbeOutcome.BUSY, None
+            return
+        session: ProbeSession | None = None
+        try:
+            verdict = None
+
+            async def work() -> None:
+                nonlocal verdict, session
+                async with asyncio.timeout(self._health_timeout):
+                    secret, write_back, bind = await self._session_credential(
+                        kind, ticket.secret_handle, slot
+                    )
+                    if write_back is None or bind is None:
+                        # No secret store to write a refreshed login to: the
+                        # probe would lose it (Decision 0083, 6).
+                        raise AdapterFailure(FailureCode.UNAVAILABLE)
+                    session = ProbeSession(
+                        bind_session=bind,
+                        still_held=slot.confirm,
+                        write_back=write_back,
+                        cli_running=slot.keep,
+                        connection_id=ticket.connection_id,
+                    )
+                    verdict = await adapter.check_health(  # type: ignore[attr-defined]
+                        secret, session
+                    )
+
+            try:
+                held = await run_within(slot, work())
+            except Exception as error:  # the store's or the adapter's: type only
+                self._probe_failed(ticket, error, end)
+                if session is not None and session.unstopped:
+                    # The deadline came while a stop that failed was under
+                    # way: nothing was learnt about the credential (Decision
+                    # 0100, 10; Codex review of #336).
+                    end.keep_status = True
+                return
+            if not held:
+                # The slot could not be renewed: the probe was stopped before
+                # its lease could expire. Nothing was learnt about the
+                # credential.
+                end.outcome = ProbeOutcome.UNAVAILABLE
+                end.failure = FailureCode.UNAVAILABLE
+                end.keep_status = True
+                return
+            self._take_verdict(verdict, end)
+            if (
+                session is not None
+                and session.unstopped
+                and end.outcome is ProbeOutcome.UNAVAILABLE
+            ):
+                end.keep_status = True
+        finally:
+            try:
+                await self._shielded(slot.release())
+            finally:
+                if session is not None:
+                    session.released(slot.given_back)
+                if slot.kept_session is not None:
+                    await self._shielded(self._audit_session(kind, ACTION_SESSION_KEPT))
+
+    @staticmethod
+    def _probe_failed(ticket: ProbeTicket, error: BaseException, end: "_ProbeEnd"):
+        code = _failure_code_of(error)
+        logger.warning(
+            "connection probe failed: kind=%s code=%s exception_type=%s",
+            ticket.kind.value,
+            code.value,
+            log_type_name(error),
+        )
+        end.outcome = (
+            ProbeOutcome.EXPIRED
+            if code is FailureCode.EXPIRED
+            else ProbeOutcome.UNAVAILABLE
+        )
+        end.failure = code
+
+    @staticmethod
+    def _take_verdict(verdict: object, end: "_ProbeEnd") -> None:
         if type(verdict) is ConnectionStatus:
             end.outcome, end.failure = ProbeOutcome(verdict.value), None
             return
@@ -1452,6 +1565,7 @@ class ConnectionService:
                 end.input_tokens = verdict.input_tokens
                 end.output_tokens = verdict.output_tokens
                 end.model = verdict.model
+                end.keep_status = verdict.keeps_status
                 return
         logger.warning("connection probe returned an invalid verdict")
         end.outcome, end.failure = (
@@ -1468,7 +1582,7 @@ class ConnectionService:
         and a change of status (``connection.status``)."""
         status = (
             ConnectionStatus(end.outcome.value)
-            if changes_status(end.outcome, end.failure)
+            if changes_status(end.outcome, end.failure, keeps_status=end.keep_status)
             else None
         )
         try:

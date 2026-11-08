@@ -315,6 +315,18 @@ def session_config(spec: CliSessionSpec, tools: Iterable[str]) -> str:
         "startup_timeout_sec": STARTUP_TIMEOUT_SECONDS,
         "tool_timeout_sec": TOOL_TIMEOUT_SECONDS,
     }
+    return _config(("mcp_servers.paw", paw))
+
+
+def probe_config() -> str:
+    """The ``config.toml`` of the connection's health probe (Decision 0100,
+    10): a node session's (:func:`session_config`) without any MCP server, so
+    that no tool at all is offered (with an MCP server Codex adds its resource
+    tools, Decision 0101: with none, none)."""
+    return _config()
+
+
+def _config(*servers: tuple[str, Mapping[str, object]]) -> str:
     tables: list[tuple[str, Mapping[str, object]]] = [
         ("analytics", {"enabled": False}),
         (
@@ -328,7 +340,7 @@ def session_config(spec: CliSessionSpec, tools: Iterable[str]) -> str:
         # available, offered as the ``skills`` namespace (``list``, ``read``).
         ("orchestrator.skills", {"enabled": False}),
         ("features", {name: False for name in DISABLED_FEATURES}),
-        ("mcp_servers.paw", paw),
+        *servers,
     ]
     lines = [
         _toml_pair("cli_auth_credentials_store", "file"),
@@ -935,5 +947,6 @@ __all__ = [
     "CodexSessionAdapter",
     "InteractiveSubprocessLauncher",
     "SystemdCodexLauncher",
+    "probe_config",
     "session_config",
 ]

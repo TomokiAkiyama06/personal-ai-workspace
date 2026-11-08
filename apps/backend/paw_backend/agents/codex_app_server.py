@@ -35,6 +35,14 @@ rpc.rs`` of ``rust-v0.162.1``). A session is:
   ``usageLimitExceeded`` / ``rateLimitExceeded`` a rate limit);
 * a request from the server (an approval, an elicitation) is refused
   (``request``): with approval ``never`` and these tools none should come.
+
+A probe's stream (``probe=True``, the connection's health probe: Decision
+0100, 10) expects no tool at all: an MCP call of any server, a resource call
+included, is refused (``item``). It keeps the last completed agent message's
+text (:attr:`CodexStream.answer`, read for the probe's check only, never
+logged) and the models of a ``model/rerouted`` notification (the provider
+answered on another model than the configured one: model names only, for the
+log line).
 """
 
 import json
@@ -70,6 +78,11 @@ PASSING_ITEMS: Final = frozenset(
     {"userMessage", "agentMessage", "reasoning", "contextCompaction"}
 )
 MCP_ITEM: Final = "mcpToolCall"
+AGENT_MESSAGE: Final = "agentMessage"
+#: The notification of a turn the provider moved to another model
+#: (``v2`` ``ModelReroutedNotification``: ``fromModel``, ``toModel``).
+REROUTED: Final = "model/rerouted"
+_MODEL_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}")
 #: ``codexErrorInfo`` values (``v2/shared.rs``'s ``CodexErrorInfo``).
 CREDENTIAL_ERRORS: Final = frozenset({"unauthorized"})
 RATE_ERRORS: Final = frozenset({"usageLimitExceeded", "rateLimitExceeded"})
@@ -273,8 +286,17 @@ class CodexStream:
         self,
         expected_tools: Iterable[str],
         verified_versions: frozenset[str] = VERIFIED_VERSIONS,
+        *,
+        probe: bool = False,
     ) -> None:
         self._tools = frozenset(expected_tools)
+        self._probe = probe
+        if probe and self._tools:
+            raise ValueError("a probe expects no tool")
+        #: A probe's last completed agent message (see the module).
+        self.answer: str | None = None
+        #: ``(from, to)`` of each ``model/rerouted`` (model names only).
+        self.reroutes: list[tuple[str, str]] = []
         self._verified = frozenset(verified_versions)
         self._input = 0
         self._output = 0
@@ -308,6 +330,12 @@ class CodexStream:
         return self.reported and (self._last_call is None or self.call_counted)
 
     @property
+    def error(self) -> str | None:
+        """The last unretried ``error``'s ``codexErrorInfo`` (``unknown``
+        when it named none), or ``None``."""
+        return self._error
+
+    @property
     def totals(self) -> tuple[int, int]:
         """The thread's tokens as far as the reports went."""
         return self._input, self._output
@@ -335,7 +363,23 @@ class CodexStream:
         if method == "thread/tokenUsage/updated":
             return self._usage(params)
         if method in ("item/started", "item/completed"):
-            self._item(params.get("item"))
+            item = params.get("item")
+            self._item(item)
+            if (
+                self._probe
+                and method == "item/completed"
+                and isinstance(item, dict)
+                and item.get("type") == AGENT_MESSAGE
+                and isinstance(item.get("text"), str)
+            ):
+                self.answer = item["text"]
+            return None
+        if method == REROUTED:
+            names = (
+                _model_name(params.get("fromModel")),
+                _model_name(params.get("toModel")),
+            )
+            self.reroutes.append(names)
             return None
         if method == "error":
             if params.get("willRetry") is not True:
@@ -405,6 +449,8 @@ class CodexStream:
         kind = item.get("type")
         if kind in PASSING_ITEMS:
             return
+        if self._probe:
+            raise StreamRefused("item")  # a probe offers no tool at all
         if (
             kind == MCP_ITEM
             and item.get("server") == PAW_SERVER
@@ -439,6 +485,13 @@ class CodexStream:
         raise StreamRefused("item")
 
 
+def _model_name(value: object) -> str:
+    """A model's name as it may be logged (anything else: ``?``)."""
+    if isinstance(value, str) and _MODEL_NAME.fullmatch(value):
+        return value
+    return "?"
+
+
 def _count(value: object) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         return None
@@ -460,11 +513,13 @@ def _error_info(error: object) -> str | None:
 
 
 __all__ = [
+    "AGENT_MESSAGE",
     "CREDENTIAL_ERRORS",
     "MAX_LINE_BYTES",
     "MCP_RESOURCE_TOOLS",
     "PASSING_ITEMS",
     "RATE_ERRORS",
+    "REROUTED",
     "VERIFIED_VERSIONS",
     "CodexStream",
     "Ended",

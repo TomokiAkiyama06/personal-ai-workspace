@@ -56,7 +56,8 @@ sudo paw-connection-credential-put codex < "$CODEX_HOME/auth.json"   # 新しい
 shred -u "$CODEX_HOME/auth.json"; rm -rf "$CODEX_HOME"; unset CODEX_HOME
 ```
 
-Owner / Admin はその Handle を Codex の Connection に結び付ける（初めて）か差し替える（下の「Handle を Connection に結び付ける」の手順。種類は `codex`）。使い捨ての `CODEX_HOME` の Login は二度と使わない（使えば Refresh Token が回り、Store の版が失効する。だから入れたらすぐ消す）。
+Owner / Admin はその Handle を Codex の Connection に結び付ける（初めて）か差し替える（下の「Handle を Connection に結び付ける」の手順。種類は `codex`、URL の `claude` を `codex` に替える）。
+結び付け・差し替えの後、Backend は Codex の Health の Probe を 1 回走らせる（Decision 0100 の 10。`codex app-server` の短い Session で、Tool なし・Claude と同じ固定の文）。Probe も Connection の Session の枠を取るので、Codex の Session が走っていれば最大 60 秒待ち、空かなければ `last_probe.outcome` が `busy`（状態は変えない。後で 4 の再確認をする）。Probe も Login を Refresh しうるので、終わりに Node の Session と同じく書き戻す（`credential.version` が上がることがある）。`connected` になるまで、Ladder に `codex` を入れない（`docs/DEPLOYMENT_UPDATE.md` の CLI の段の 4b）。使い捨ての `CODEX_HOME` の Login は二度と使わない（使えば Refresh Token が回り、Store の版が失効する。だから入れたらすぐ消す）。
 Session の間に Codex が Login を Refresh したら、Backend は Session の終わりにそれを同じ Handle の次の版として書き戻す（`rotate_credential`、Compare-and-swap、`connection.rotate` の Audit）。古い版は 1 日たつと Reaper が消す。書き戻せなかった（Process ごと落ちた）ときは、次の Health Check が `expired` を見つけたら、上の手順で入れ直す。
 置き換え・切断で参照されなくなった Credential は、その場で（Lock の中で参照を確かめてから）消える。登録されなかった Handle と、置き換えから 1 日たった古い版は、Backend の Reaper（`connection_reaper.py`）の周期で消える。
 
@@ -100,7 +101,7 @@ await fetch("/api/v1/admin/connections/claude/health-check", {method: "POST"})
 答えの読み方:
 
 - `credential.stored` が `true`、`credential.version` が版（Session の中の Refresh の書き戻しで上がる）。`false` は Store から消えた・読めない（入れ直して差し替える）。`null` は Backend に Store が設定されていない。
-- `status` は `unavailable`（まだ確かめていない・使えない）、`connected`、`expired`（Provider が Credential を拒んだ。入れ直して差し替える）。結び付けた直後と差し替えた直後は `unavailable` で、Backend が背景で 1 回走らせる Health の Probe（[Decision 0100](../../../../docs/decisions/0100-cli-connection-health-probe.md)。`[cloud] enabled = true` と `[agents.claude]` がある配備。Codex は #305 の後）が `connected` にする。
+- `status` は `unavailable`（まだ確かめていない・使えない）、`connected`、`expired`（Provider が Credential を拒んだ。入れ直して差し替える）。結び付けた直後と差し替えた直後は `unavailable` で、Backend が背景で 1 回走らせる Health の Probe（[Decision 0100](../../../../docs/decisions/0100-cli-connection-health-probe.md)。`[cloud] enabled = true` と `[agents.claude]`（Codex は `[agents.codex]`）がある配備）が `connected` にする。
 - `last_probe` は最新の Probe（`state` が `running` の間は待つ。`finished` なら `outcome`）、`probe_available_at` は次に 4 ができる時刻。`status` が `unavailable` のままで `last_probe` が null なら Probe は始まっていない（Backend の Log の `connection probe not started`）。
 - `outcome` は `connected`・`expired`・`unavailable`・`busy`・`cancelled`。`unavailable` のうち、Provider の Rate Limit（`rate_limited`）と、設定の Model が Safeguard に止められ CLI が別の Model へ Fallback した Probe（`model_fallback`。[Decision 0102](../../../../docs/decisions/0102-probe-prompt-wording-and-model-fallback.md) の 3）は `status` を変えない（`connected` は `connected` のまま、確かめる前の Connection は `unavailable` のまま）。この 2 つは `last_probe` には出ず（`failure_code` は応答に出さない）、`connection_probes` の行の `failure_code` と Backend の Log（Fallback は `Claude probe model fallback`）で分かる。Credential の入れ直しは要らない。
 - 4 の拒否: 409 `connection_disabled`（無効にしている）・`probe_not_configured`（上の配備でない）・`probe_running`（走っている）、429 `probe_cooldown`（`Retry-After` の秒だけ待つ。続けて失敗すると 60 秒から倍になり最大 15 分）。
