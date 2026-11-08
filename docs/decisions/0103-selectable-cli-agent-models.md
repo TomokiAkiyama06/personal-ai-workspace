@@ -1,7 +1,8 @@
 # Codex / Claude の Model を `runtime.toml` の固定の 1 つでなく、Task ごとに選べるようにする（どこで選ぶか、誰が選べるか、選べる一覧の出どころと検証した組、送る前の検査、Probe の Model、Planner との関係、使用量と Audit の記録、Reasoning の強さ、Migration、UI、PR の分け方）
 
-- Status: Proposed
-- Date: 2026-11-08
+- Status: Approved
+- Approval: 2026-11-08、Human が作業 Session（Claude Code）内で、PR [#343](https://github.com/TomokiAkiyama06/personal-ai-workspace/pull/343) の 11 の判断点（推奨つき）と「Human に確かめてほしいこと」の 2（最初に許す Model）を受けたうえで、「推奨でだいじょうぶです」と回答して承認（approved as recommended, all 11 points and the initial allowed models: 末尾の「承認時の決定」）
+- Date: 2026-11-08（承認 2026-11-08）
 - Scope: Issue [#341](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/341)（Human の要望: Codex（と Claude）の Model を、IDE の拡張機能のように **いつでも選べる** ようにしたい）。この Decision は設計だけで、コードは承認の後の下の「PR の分け方」の PR で書く。関係する既存の口: `apps/backend/paw_backend/runtime_config.py`（`[agents.*]` の `model`・`session_base`・`relay_command`。`model` は `MODEL_PATTERN` の形だけを確かめる）、`agents/cli_wiring.py`（`CliAgentSetup.model` を `ClaudeCliRuntime` / `CodexCliRuntime` と `ClaudeProbeAdapter` / `CodexProbeAdapter` の組み立てに 1 回だけ渡す）、`agents/claude_cli.py`（`self._model` を `--model` と `SessionRequest`・`CloudGate.session(model=…)` に使う）、`agents/codex_cli.py`（同じく `self._model`）、`agents/codex_app_server.py`（`thread_start(model, …)` の `thread/start` の `model`、`VERIFIED_VERSIONS = {"0.156.1"}`、`model/rerouted` の通知、`tool_check`）、`agents/claude_probe.py`・`agents/codex_probe.py`（Probe の Model）、`agents/cloud.py`（`CloudGate`: `placement.record(CLOUD, agent=…, model=…)`）、`orchestrator/runtime.py`（`NodeAssignment`。今は `agent` だけで Model を持たない）、`orchestrator/plan.py`（`NODE_FIELDS`）、`orchestrator/models.py`（`dag_node_attempts.placement_model`・`agent_plan_calls.placement_model`）、`connections/models.py`（`connection_usage.model`・`connection_probes.model`）、`connections/session.py`（`SessionRequest.model`）、`api/v1/tasks.py`（`CreateTaskRequest`）、`apps/web/src/tasks/CreateTaskForm.tsx`、`apps/backend/deploy/runtime/runtime.example.toml`。
 - Supersedes（一部。下の推奨どおりに承認されたとき）:
   - [Decision 0099](0099-claude-planner-and-node-assignment.md)（Approved）の 7 の `[agents.claude]` / `[agents.codex]` の `model` の意味（「その CLI の Runtime が使う唯一の Model」）を、「**DB の Model の Policy がないときの既定で、ただ 1 つの許す Model**」に置き換える（下の 3・9）。Key の名前・形・起動の検査（0093 の 2 の Fail closed）は変えない。DB の Policy がない限り、今とまったく同じ動きになる。
@@ -166,3 +167,24 @@ Orchestrator / Runtime
 実装は「PR の分け方」の 2〜5 の PR で行う（すべて「Refs #341」）。本番の Release と Policy の設定は Human / Admin が行う。
 方針を変えるときは、この Decision を書き換えず、新しい Decision から `Supersedes` する。
 [REQUIREMENTS.md](../../REQUIREMENTS.md) の原文は書き換えない。
+
+## 承認時の決定（2026-11-08）
+
+Human は、Claude Code の作業 Session で PR #343 の 11 の判断点（推奨つき）を受け、すべてを推奨どおりと回答して承認した（「推奨でだいじょうぶです」）。
+
+1. **どこで選ぶか**: A。Task の作成の時に CLI の種類ごとに選び、省けば既定。具体的な名前で Task に保存し、Planner・Node・Retry・Escalation で変えない。Node ごとの上書きと User の既定は入れない（1）。
+2. **誰が選べるか**: A。許す一覧と既定は Admin（Owner を含む）が Global Policy として決め（`admin.config.manage`・Step-up）、Task を作れる人はその中から選ぶ（2）。
+3. **一覧の出どころ**: A。Repository の「検証した組」と、その中から Admin が DB の Policy で許す 2 段（3）。
+4. **送る前の検査**: A。作成と Session の開始の前に確かめ、外れれば何も送らない（`model_not_allowed`。黙って置き換えない）（4）。
+5. **Probe の Model**: A。既定の Model だけ（既定の変更の後に 1 回）（5）。
+6. **Planner と Model**: A。割り当てない（6）。
+7. **使用量・Audit**: A（7）。
+8. **Reasoning の強さ**: A。今回は入れない（8）。
+9. **Migration と `runtime.toml`**: A（9）。
+10. **本番の暫定の値と起動の検査**: 推奨どおり。`gpt-6-sol` を既定のままにする（10）。
+11. **UI**: A。UI の PR は Human の目視の確認の後に Merge する（11）。
+
+「Human に確かめてほしいこと」:
+
+- 1: 本番の Codex の Probe は、Image に `ca-certificates` を入れた後（#344）、`gpt-6-sol` で `connected` になった（2026-11-08 16:10、入力 4084・出力 9 Token、Model の呼び出し 1 回）。それまでの `internal_error` は Model や Tool の検査ではなく、Container の中の TLS の Root 証明書がなかったため。記録用の Server の Smoke を `gpt-6-sol` で取り直すことは、3 の A の「検証した組」の PR で行う。
+- 2: 最初に許す Model は推奨どおり。Codex は `gpt-6-sol`（既定）・`gpt-6-astra`・`gpt-6-luna`、Claude は `claude-opus-5-5`（既定）だけ。それぞれ 3 の A の Smoke を通してから組に入れる。
