@@ -115,7 +115,7 @@ reviewer = ["local"]
 # relay_command = ["python3", "-I", "/opt/paw/paw_mcp_relay.py"]   # in the image
 #
 # [agents.codex]
-# model = "gpt-5.5-codex"
+# model = "gpt-6-sol"                # in codex-cli 0.156.1's catalog (Decision 0103)
 # session_base = "/run/paw-cli"
 # relay_command = ["python3", "-I", "/opt/paw/paw_mcp_relay.py"]
 #
