@@ -444,7 +444,9 @@ class RunnerTest(unittest.TestCase):
         result, _ = self.run_interactive(b"")
         self.assertEqual(result.returncode, 0, result.stderr)
         argv = json.loads(self.record.read_text())["argv"]
-        tmpfs = argv.index(f"type=tmpfs,destination={home},tmpfs-mode=0700,chown=true")
+        tmpfs = argv.index(
+            f"type=tmpfs,destination={home},tmpfs-mode=0700,chown=true,notmpcopyup"
+        )
         self.assertEqual(argv[tmpfs - 1], "--mount")
         for name, mode in (("config.toml", "ro"), ("auth.json", "rw")):
             with self.subTest(name):
