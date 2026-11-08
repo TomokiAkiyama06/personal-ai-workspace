@@ -56,7 +56,16 @@ python3 -I deploy/cli-session/smoke_codex_recorder.py --codex <codex> --out <res
 1. Account と Group: `useradd --system --home-dir /var/lib/paw-agent-cli --create-home --shell /usr/sbin/nologin paw-agent-cli`、`groupadd --system paw-cli-bridge`（`paw-egress` の README と同じ Group）、`usermod -aG paw-cli-bridge paw-agent-cli`。Backend の User（`paw`）は Group に入れない（Directory の所有者なので要らない）。Unit は `paw-agent-cli` の主 Group を変えない（`Group=` を書かず、`SupplementaryGroups=paw-cli-bridge`。Issue #322）: Subuid の Mapping なしでは Container の gid 0 が Process の主 Group に写り、Podman の Storage は主 Group `paw-agent-cli` のものなので、主 Group が違うと Podman は Layer の ID-mapped copy を作ろうとして `chown ... invalid argument`（exit 125）で止まる。Session の Directory（setgid、Group `paw-cli-bridge`）は補助 Group で読み書きし、`podman run --group-add keep-groups`（crun が必要）で Container の中にも残す。Rootless の Podman の `XDG_RUNTIME_DIR` は Unit の `RuntimeDirectory`（`/run/paw-cli-session/<uuid>`）にする（`ProtectHome=yes` が `/run/user` を隠すため。Linger は要らない）。
 2. `/run/paw-cli`: `tmpfiles.d` で作る（`/etc/tmpfiles.d/paw-cli.conf` に `d /run/paw-cli 2750 paw paw-cli-bridge -` を書き、`systemd-tmpfiles --create /etc/tmpfiles.d/paw-cli.conf`）。`paw-backend.service` の `RuntimeDirectory=` は使わない（Group が Unit の `Group=`（`paw`）になり、`paw-cli-bridge` にできない。Unit の停止で消えもする）。
 3. `install -m 0755 paw_cli_session_run.py /usr/local/lib/paw/`、`paw-cli-session@.service` を `/etc/systemd/system/`、`50-paw-cli-session.rules` を `/etc/polkit-1/rules.d/`、`cli-session.example.toml` を `/etc/paw/cli-session.toml`（Image の Digest を入れる）。Egress の Session ごとの Unit（`paw-egress-session@.socket` など）は [`../egress/README.md`](../egress/README.md) の配備で先に置く（`paw-cli-session@.service` が `Requires=` で引き込む。無いと Session の Unit は起動しない）。共有の `paw-egress.socket` を配備した Host は、同じ README の移行の手順を先に行う。
-4. Image: `Containerfile` の Base の Digest と Claude Code の版を固定して `paw-agent-cli` で Build し、Digest を `cli-session.toml` に入れる。Codex は `Containerfile.codex`（Codex の版は Backend の `VERIFIED_VERSIONS` にあるもの）を同じく Build して `codex_image` に入れる。
+4. Image: `Containerfile` の Base の Digest と Claude Code の版を固定して `paw-agent-cli` で Build し、Digest を `cli-session.toml` に入れる。Codex は `Containerfile.codex`（Codex の版は Backend の `VERIFIED_VERSIONS` にあるもの）を同じく Build して `codex_image` に入れる。Codex の Image には `ca-certificates` が要る（Codex は Node の組み込みの CA でなく OS の Root 証明書で TLS を確かめる。ないと `chatgpt.com` への接続が証明書の後で切れ、Probe は Token 0 の `internal_error`。Issue #344）。`paw-agent-cli` に Subuid の範囲がない Host（Issue #322）では、`runuser` に systemd の User の Session がないので Podman を cgroupfs で動かし、apt が `_apt` に切り替えられないので Build の間だけ `APT::Sandbox::User "root";` を Mount する（Image には残らない）:
+
+```sh
+printf 'APT::Sandbox::User "root";\n' > /var/lib/paw-agent-cli/apt-sandbox-build.conf   # root、0644
+cd /var/lib/paw-agent-cli && runuser -u paw-agent-cli -- podman --cgroup-manager=cgroupfs build \
+  --volume /var/lib/paw-agent-cli/apt-sandbox-build.conf:/etc/apt/apt.conf.d/99paw-build-sandbox:ro \
+  --from docker.io/library/node@sha256:<base の Digest> \
+  -t localhost/paw-codex-cli:<日付> -f <release>/apps/backend/deploy/cli-session/Containerfile.codex <release>/apps/backend/deploy
+runuser -u paw-agent-cli -- podman image inspect --format '{{.Digest}}' localhost/paw-codex-cli:<日付>
+```
 
 ## 確かめること（有効にする前）
 
