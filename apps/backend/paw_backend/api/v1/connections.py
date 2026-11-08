@@ -137,7 +137,7 @@ class ProbeOut(BaseModel):
     """The latest probe of the attached credential: never its answer, tokens,
     handle or failure code (Decision 0100, 7)."""
 
-    trigger: Literal["attach", "replace", "manual"]
+    trigger: Literal["attach", "replace", "manual", "policy"]
     state: Literal["running", "finished", "abandoned"]
     # null while running, and for a probe its process never finished.
     outcome: Literal["connected", "expired", "unavailable", "busy", "cancelled"] | None

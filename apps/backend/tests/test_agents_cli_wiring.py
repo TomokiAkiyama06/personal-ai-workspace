@@ -57,8 +57,8 @@ from .test_scratch_janitor_lifespan import configured
 KEY = bytes(range(32))
 RELAY = ("python3", "-I", "/opt/paw/paw_mcp_relay.py")
 AGENTS = {
-    "claude": CliAgentSetup("claude", "claude-opus-4-1", "/run/paw-cli", RELAY),
-    "codex": CliAgentSetup("codex", "gpt-5-codex", "/run/paw-cli", RELAY),
+    "claude": CliAgentSetup("claude", "claude-opus-5-5", "/run/paw-cli", RELAY),
+    "codex": CliAgentSetup("codex", "gpt-6-sol", "/run/paw-cli", RELAY),
 }
 LADDERS = {
     NodeRole.PLANNER: ("claude", "local"),
@@ -128,13 +128,13 @@ class ComposedCliRuntimesTest(StoreCase):
         self.assertEqual(orchestrator._store.cloud_send_check, policy.recheck_in)
         self.assertEqual(orchestrator._plan_calls._cloud_send_check, policy.recheck_in)
         # The file's model, session base and relay; the node timeout's margin.
-        self.assertEqual(claude._model, "claude-opus-4-1")
+        self.assertEqual(claude._model, "claude-opus-5-5")
         self.assertEqual(claude._base, Path("/run/paw-cli"))
         self.assertEqual(claude._relay, RELAY)
         self.assertEqual(
             claude._timeout, orchestrator._config.node_timeout_seconds - 60.0
         )
-        self.assertEqual(codex._model, "gpt-5-codex")
+        self.assertEqual(codex._model, "gpt-6-sol")
 
     def test_the_orchestrators_connections(self):
         execution = self.build()
@@ -293,7 +293,7 @@ class ProbeWiringTest(StoreCase):
         self.assertIsInstance(probe._launcher, SystemdLauncher)
         self.assertEqual(probe._executable, CLAUDE_EXECUTABLE)
         self.assertEqual(probe._proxy_url, EGRESS_PROXY_URL)
-        self.assertEqual(probe._model, "claude-opus-4-1")
+        self.assertEqual(probe._model, "claude-opus-5-5")
         self.assertEqual(probe._base, Path("/run/paw-cli"))
         self.assertEqual(service._health_timeout, PROBE_TIMEOUT_SECONDS)
 
@@ -306,7 +306,7 @@ class ProbeWiringTest(StoreCase):
         self.assertEqual(codex._executable, CODEX_EXECUTABLE)
         self.assertEqual(codex._proxy_url, EGRESS_PROXY_URL)
         self.assertIsInstance(probe._credentials, CodexAuthFile)
-        self.assertEqual(probe._model, "gpt-5-codex")
+        self.assertEqual(probe._model, "gpt-6-sol")
         self.assertEqual(probe._base, Path("/run/paw-cli"))
         # The write-back of a refreshed login needs the secret store.
         self.assertIs(service._credentials, self.store)

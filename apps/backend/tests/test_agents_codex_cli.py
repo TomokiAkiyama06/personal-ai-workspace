@@ -160,6 +160,11 @@ class CodexCase(unittest.IsolatedAsyncioTestCase):
         # The service's slot binding and check (Decision 0096), when set.
         self.bind_session = None
         self.still_held = None
+        # Decision 0103 (tests of ``test_agents_cli_models``): the verified
+        # pairs of the adapter, the runtime's gate and model, when set.
+        self.pairs = None
+        self.models = None
+        self.model = "gpt-5.5-codex"
 
     def adapter(self, *, verified=frozenset({VERSION}), credentials=True):
         return CodexSessionAdapter(
@@ -176,6 +181,7 @@ class CodexCase(unittest.IsolatedAsyncioTestCase):
                 str(self.report),
             ),
             verified_versions=verified,
+            verified_models=self.pairs,
         )
 
     async def run_node(
@@ -198,10 +204,11 @@ class CodexCase(unittest.IsolatedAsyncioTestCase):
         )
         self.placement = Placement()
         runtime = CodexCliRuntime(
-            model="gpt-5.5-codex",
+            model=self.model,
             session_base=self.sessions,
             relay_command=(sys.executable, "-I", str(RELAY)),
             cloud_policy=Policy(),
+            models=self.models,
         )
         self.task_id = uuid.uuid4()
         assignment = NodeAssignment(

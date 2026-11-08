@@ -16,9 +16,18 @@ fencing and collection it reuses), on the same launcher, image and egress
 (production: ``SystemdCodexLauncher``, ``/opt/paw/start-codex`` behind the
 session's egress forwarder on ``127.0.0.1:3128``):
 
+0. the model (Decision 0103, 5 A): with the gate of the CLI agents' models,
+   the default model it resolves (the Admin's policy's, else the runtime
+   configuration's), checked before anything starts: none (not a verified
+   model) is ``unavailable`` (``invalid_response``) with the status kept, and
+   nothing is sent; a policy that cannot be read is ``unavailable`` with the
+   status kept too;
 1. ``codex --version`` without any credential: a version that is not in the
    verified list (``codex_app_server.VERIFIED_VERSIONS``) is ``unavailable``
-   (``invalid_response``) and nothing is sent (Decision 0100, 10);
+   (``invalid_response``) and nothing is sent (Decision 0100, 10); with the
+   verified pairs (Decision 0103, 3 A), a version and model that are not one
+   is ``unavailable`` (``invalid_response``) with the status kept, and nothing
+   is sent either (checked again on ``initialize``'s version);
 2. the session is bound to the slot (Decision 0096, 2 B), its ``config.toml``
    written (:func:`~.codex_cli.probe_config`: a node session's without any MCP
    server, so no tool is offered at all), the login placed as ``auth.json``,
@@ -124,6 +133,7 @@ from paw_backend.connections import (
     Secret,
 )
 from paw_backend.connections.validation import validate_model
+from paw_backend.tools.interfaces import require_async_method
 
 logger = logging.getLogger(__name__)
 
@@ -149,6 +159,8 @@ class _ProbeState:
     fenced: list[bool] = field(default_factory=list)
     refused: list[bool] = field(default_factory=list)
     bound: bool = False
+    # The model this probe checks (Decision 0103, 5 A).
+    model: str = ""
 
 
 @dataclass(slots=True)
@@ -183,7 +195,15 @@ class CodexProbeAdapter:
         executable: tuple[str, ...] = ("codex",),
         proxy_url: str | None = None,
         verified_versions: frozenset[str] = VERIFIED_VERSIONS,
+        verified_models: frozenset[tuple[str, str]] | None = None,
+        models: object | None = None,
     ) -> None:
+        """``verified_models``: the verified ``(version, model)`` pairs
+        (Decision 0103, 3 A; ``None``: the version is the only check, as
+        before it). ``models``: an ``AgentModelGate`` whose ``default_model``
+        names the model to check (``None``: ``model``)."""
+        if models is not None:
+            require_async_method(models, "default_model", 1)
         credentials = credentials if credentials is not None else CodexAuthFile()
         # The node session's adapter, for its launch, version check and
         # collection (it never runs a session here).
@@ -193,8 +213,11 @@ class CodexProbeAdapter:
             executable=executable,
             proxy_url=proxy_url,
             verified_versions=verified_versions,
+            verified_models=verified_models,
         )
         self._credentials = credentials
+        self._pairs = None if verified_models is None else frozenset(verified_models)
+        self._models = models
         self._model = validate_model("model", model)
         self._base = Path(session_base)
         self._verified = frozenset(verified_versions)
@@ -213,10 +236,38 @@ class CodexProbeAdapter:
         tokens: tuple[int | None, int | None] = (None, None),
         *,
         keeps_status: bool = False,
+        model: str | None = None,
     ) -> ProbeReport:
         return ProbeReport(
-            outcome, failure, tokens[0], tokens[1], self._model, keeps_status
+            outcome, failure, tokens[0], tokens[1], model or self._model, keeps_status
         )
+
+    async def _model_to_check(self) -> str | None | ProbeReport:
+        """The model of this probe (see the module, 0), or the report that
+        ends it before anything starts."""
+        if self._models is None:
+            return self._model
+        try:
+            model = await self._models.default_model(ConnectionKind.CODEX)
+        except Exception as error:
+            logger.warning(
+                "Codex probe refused: model policy unreadable (%s)",
+                type(error).__name__,
+            )
+            return self._report(
+                ProbeOutcome.UNAVAILABLE, FailureCode.UNAVAILABLE, keeps_status=True
+            )
+        if model is None:
+            logger.warning("Codex probe refused: model")
+            return self._report(
+                ProbeOutcome.UNAVAILABLE,
+                FailureCode.INVALID_RESPONSE,
+                keeps_status=True,
+            )
+        return model
+
+    def _pair(self, version: str, model: str) -> bool:
+        return self._pairs is None or (version, model) in self._pairs
 
     async def check_health(
         self, secret: Secret, session: ProbeSession | None = None
@@ -226,8 +277,11 @@ class CodexProbeAdapter:
             # write-back) a refreshed login would be lost: nothing starts.
             logger.warning("Codex probe refused: not in the connection's slot")
             return self._report(ProbeOutcome.UNAVAILABLE, FailureCode.UNAVAILABLE)
+        model = await self._model_to_check()
+        if isinstance(model, ProbeReport):
+            return model
         spec = create_session(self._base, _NO_RELAY)
-        state = _ProbeState(spec)
+        state = _ProbeState(spec, model=model)
         session.on_released(partial(_clean, state))
         try:
             return await self._probe(secret, session, state)
@@ -238,7 +292,10 @@ class CodexProbeAdapter:
             # login): left to the collection; nothing was learnt about the
             # credential (Decision 0100, 10).
             return self._report(
-                ProbeOutcome.UNAVAILABLE, FailureCode.INTERNAL_ERROR, keeps_status=True
+                ProbeOutcome.UNAVAILABLE,
+                FailureCode.INTERNAL_ERROR,
+                keeps_status=True,
+                model=state.model,
             )
         finally:
             if state.unstopped:
@@ -260,9 +317,26 @@ class CodexProbeAdapter:
         version = await self._codex._version(state)
         if version is None or version not in self._verified:
             logger.warning("Codex probe refused: version")
-            return self._report(ProbeOutcome.UNAVAILABLE, FailureCode.INVALID_RESPONSE)
+            return self._report(
+                ProbeOutcome.UNAVAILABLE,
+                FailureCode.INVALID_RESPONSE,
+                model=state.model,
+            )
+        if not self._pair(version, state.model):
+            # Decision 0103, 3 A: not a verified pair; nothing was sent and
+            # nothing was learnt about the credential.
+            logger.warning("Codex probe refused: model")
+            return self._report(
+                ProbeOutcome.UNAVAILABLE,
+                FailureCode.INVALID_RESPONSE,
+                keeps_status=True,
+                model=state.model,
+            )
         lost = self._report(
-            ProbeOutcome.UNAVAILABLE, FailureCode.UNAVAILABLE, keeps_status=True
+            ProbeOutcome.UNAVAILABLE,
+            FailureCode.UNAVAILABLE,
+            keeps_status=True,
+            model=state.model,
         )
         if not await _bind(session, state):
             return lost
@@ -292,11 +366,18 @@ class CodexProbeAdapter:
             logger.warning(
                 "Codex probe model reroute: session=%s configured=%s from=%s to=%s",
                 spec.session_id,
-                self._model,
+                state.model,
                 rerouted,
                 to,
             )
-        return self._verdict(stream, reading, spec.session_id)
+        if reading.refused == "model":
+            return self._report(
+                ProbeOutcome.UNAVAILABLE,
+                FailureCode.INVALID_RESPONSE,
+                keeps_status=True,
+                model=state.model,
+            )
+        return self._verdict(stream, reading, spec.session_id, state.model)
 
     async def _converse(self, state: _ProbeState) -> tuple[CodexStream, _Reading]:
         process = await self._codex._start(
@@ -324,8 +405,13 @@ class CodexProbeAdapter:
                     reading.refused = refused.reason
                     break
                 if isinstance(item, Initialized):
+                    if not self._pair(item.version, state.model):
+                        logger.warning("Codex probe refused: model")
+                        reading.failure = FailureCode.INVALID_RESPONSE
+                        reading.refused = "model"
+                        break
                     await _send(process, notification("initialized"))
-                    await _send(process, thread_start(self._model, PROBE_SYSTEM_PROMPT))
+                    await _send(process, thread_start(state.model, PROBE_SYSTEM_PROMPT))
                 elif isinstance(item, Ready):
                     await _send(process, turn_start(item.thread_id, PROBE_PROMPT))
                 elif isinstance(item, Turn):
@@ -357,7 +443,11 @@ class CodexProbeAdapter:
         return stream, reading
 
     def _verdict(
-        self, stream: CodexStream, reading: _Reading, session_id: object = None
+        self,
+        stream: CodexStream,
+        reading: _Reading,
+        session_id: object = None,
+        model: str | None = None,
     ) -> ProbeReport:
         """See the module. Tokens: the thread's totals once a model call was
         reported; never estimated. An ``internal_error`` or
@@ -369,7 +459,7 @@ class CodexProbeAdapter:
         ) -> ProbeReport:
             if failure in (FailureCode.INTERNAL_ERROR, FailureCode.INVALID_RESPONSE):
                 _log_failure(failure, why, stream, reading, session_id)
-            return self._report(outcome, failure, tokens)
+            return self._report(outcome, failure, tokens, model=model)
 
         failure = reading.failure
         if failure is FailureCode.EXPIRED:

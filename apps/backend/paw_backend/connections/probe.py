@@ -14,7 +14,9 @@ This module holds what the store and the service share:
 
 * :class:`ProbeTrigger`: why a probe ran (``attach`` / ``replace``: once, right
   after an Admin attached or replaced the credential; ``manual``: the Admin's
-  recheck, Decision 0100, 6 and 7);
+  recheck, Decision 0100, 6 and 7; ``policy``: once, right after the Admin's
+  policy of the CLI agents' models changed the default model, Decision 0103,
+  5 A);
 * :class:`ProbeState` / :class:`ProbeOutcome`: a probe's row
   (``running`` -> ``finished`` with an outcome, or ``abandoned`` by the reaper);
 * :class:`ProbeView`: a probe as an Owner / Admin sees it (Decision 0100, 7);
@@ -85,6 +87,9 @@ class ProbeTrigger(StrEnum):
     ATTACH = "attach"
     REPLACE = "replace"
     MANUAL = "manual"
+    # Decision 0103, 5 A (revision 0341): once, after the Admin's policy of
+    # the CLI agents' models changed the kind's default model.
+    POLICY = "policy"
 
 
 class ProbeState(StrEnum):

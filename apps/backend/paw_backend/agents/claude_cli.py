@@ -26,6 +26,13 @@ launcher, never in an argument or a log), the task on stdin, and reads its
 * ``system/init`` must show exactly the PAW tools (and ``EndConversation``)
   and the ``paw`` server connected, or the CLI is stopped (``invalid_response``;
   the node's failure is ``unsupported_cli``, which escalates: Decision 0087, 4);
+  with the verified pairs (Decision 0103, 3 A and 4 A, 2), its
+  ``claude_code_version`` and the model must be one of them too, or the CLI is
+  stopped there (the node's failure is ``model_not_allowed``). Claude Code
+  says its version only there: the runtime has asked the gate of the CLI
+  agents' models before anything was set up (the model is allowed and
+  verified on some version), and this is the pair's check at the first point
+  the version is known, the same place as the tool check;
 * every model call is reported at once (``on_usage``); when the service
   answers ``False`` (the budget, the lease, the run) the CLI is stopped; a
   ``result`` or the end of the output while a call is still open (started,
@@ -59,6 +66,7 @@ from pathlib import Path
 from paw_backend.agents.bridge import McpBridge
 from paw_backend.agents.claude_stream import (
     CREDENTIAL_ERRORS,
+    MODEL_REFUSAL,
     RATE_ERRORS,
     ClaudeStream,
     Retry,
@@ -122,9 +130,11 @@ class SessionNotes:
     """What the adapter tells the runtime beside the service's result:
     ``unsupported``: the CLI's ``system/init`` was refused (its version or
     setup is not one this backend runs; the service records it as
-    ``invalid_response``)."""
+    ``invalid_response``). ``model_refused``: its version and the model are
+    not a verified pair (Decision 0103, 4 A, 2)."""
 
     unsupported: bool = False
+    model_refused: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,7 +169,11 @@ class ClaudeSessionAdapter:
         executable: tuple[str, ...] = ("claude",),
         proxy_url: str | None = None,
         restricted: bool = True,
+        verified_models: frozenset[tuple[str, str]] | None = None,
     ) -> None:
+        """``verified_models``: the verified ``(Claude Code version, model)``
+        pairs (Decision 0103, 3 A: production's wiring passes the
+        repository's; ``None``: no such check, as before it)."""
         require_async_method(launcher, "start", 1)
         if not executable or not all(isinstance(p, str) and p for p in executable):
             raise ValueError("executable")
@@ -167,6 +181,7 @@ class ClaudeSessionAdapter:
         self._executable = executable
         self._proxy_url = proxy_url
         self._restricted = restricted
+        self._pairs = None if verified_models is None else frozenset(verified_models)
 
     def __repr__(self) -> str:
         return "ClaudeSessionAdapter()"
@@ -241,7 +256,9 @@ class ClaudeSessionAdapter:
             # may run with the session's files although no process came back.
             attachment.unstopped.append(True)
             raise
-        stream = ClaudeStream(attachment.tools)
+        stream = ClaudeStream(
+            attachment.tools, verified_models=self._pairs, model=request.model
+        )
         totals: Totals | None = None
         failure: FailureCode | None = None
         retry: str | None = None
@@ -274,6 +291,7 @@ class ClaudeSessionAdapter:
                     logger.warning("Claude session refused: %s", refused.reason)
                     failure = FailureCode.INVALID_RESPONSE
                     attachment.notes.unsupported = refused.unsupported
+                    attachment.notes.model_refused = refused.reason == MODEL_REFUSAL
                     break
                 if isinstance(item, Turn):
                     if not stream.initialized:
@@ -351,7 +369,10 @@ class ClaudeSessionAdapter:
 
 class ClaudeCliRuntime:
     """See the module. ``cloud_policy``: the deployment's ``CloudPolicy``
-    (``None``: every session is refused)."""
+    (``None``: every session is refused). ``models``: the gate of the CLI
+    agents' models (Decision 0103, 4 A, 2: ``AgentModelGate``): a model it
+    does not allow is ``model_not_allowed`` before anything is set up or sent
+    (``None``: no such check, as before it)."""
 
     def __init__(
         self,
@@ -362,11 +383,15 @@ class ClaudeCliRuntime:
         cloud_policy: object | None = None,
         limits: ToolkitLimits | None = None,
         node_seconds: float = 1800.0,
+        models: object | None = None,
     ) -> None:
         if not isinstance(model, str) or not model:
             raise ValueError("model")
         if node_seconds <= NODE_MARGIN_SECONDS:
             raise ValueError("node_seconds")
+        if models is not None:
+            require_async_method(models, "allows", 2)
+        self._models = models
         self._model = model
         self._base = Path(session_base)
         self._relay = tuple(relay_command)
@@ -405,6 +430,13 @@ class ClaudeCliRuntime:
         # run and the queue lease); a call without either is refused there.
         # Its tools are the planner's: the read-only ``bash`` and
         # ``submit_plan`` (``NodeToolkit``), which the bridge hands back here.
+        if self._models is not None and (
+            await self._models.allows(ConnectionKind.CLAUDE, self._model) is not True
+        ):
+            # Decision 0103, 4 A, 2: before the gate and the placement's
+            # record; never another model in its place.
+            logger.warning("Claude session refused: model not allowed")
+            return ErrorClassifier.outcome(Failure.MODEL_NOT_ALLOWED)
         toolkit = NodeToolkit(assignment, self._limits)
         system, task = node_prompts(toolkit)
         spec = create_session(
@@ -459,9 +491,11 @@ class ClaudeCliRuntime:
             oom = _out_of_memory(bridge)
             if oom is not None:
                 return oom
+        failure = getattr(result, "failure", None)
+        if failure is FailureCode.INVALID_RESPONSE and attachment.notes.model_refused:
+            return ErrorClassifier.outcome(Failure.MODEL_NOT_ALLOWED)
         if bridge.failure is not None:
             return _ended(bridge.failure)
-        failure = getattr(result, "failure", None)
         if failure is FailureCode.INVALID_RESPONSE and attachment.notes.unsupported:
             return ErrorClassifier.outcome(Failure.UNSUPPORTED_CLI)
         if failure is FailureCode.INVALID_RESPONSE:

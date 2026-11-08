@@ -12,8 +12,14 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from paw_backend import __version__
+from paw_backend.agent_models import AgentModelPolicyStore, AgentModelService
 from paw_backend.agents.cli_session import SystemdLauncher
-from paw_backend.agents.cli_wiring import CliSetup, build_probe_adapters
+from paw_backend.agents.cli_wiring import (
+    CliSetup,
+    build_model_gate,
+    build_probe_adapters,
+    configured_models,
+)
 from paw_backend.agents.codex_collect import (
     SystemdSessionUnits,
     build_codex_collection,
@@ -513,7 +519,31 @@ def create_app(
             app.state.authorizer,
             auth.audit_sink,
             secret_store=secret_store,
-            probes=build_probe_adapters(cli) if secret_store is not None else (),
+            probes=(
+                build_probe_adapters(
+                    cli,
+                    models=build_model_gate(
+                        cli,
+                        database,
+                        timeout_seconds=settings.database_timeout_seconds,
+                    ),
+                )
+                if secret_store is not None
+                else ()
+            ),
+        )
+        if database.configured
+        else None
+    )
+    # The Admin's policy of the CLI agents' models (Decision 0103, issue #341:
+    # ``/admin/agent-models``), with the runtime configuration's models.
+    app.state.agent_models = (
+        AgentModelService(
+            AgentModelPolicyStore(
+                database, timeout_seconds=settings.database_timeout_seconds
+            ),
+            app.state.authorizer,
+            configured=configured_models(cli),
         )
         if database.configured
         else None

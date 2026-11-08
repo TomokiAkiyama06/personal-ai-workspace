@@ -72,6 +72,10 @@ class Failure(StrEnum):
     # ones (Decision 0087, 4): a version or setup this rung cannot run; the
     # same rung would fail again, a higher one may not.
     UNSUPPORTED_CLI = "unsupported_cli"
+    # The model is not allowed by the Admin's policy now, or the CLI's version
+    # and the model are not a verified pair (Decision 0103, 4 A, 2): nothing
+    # was sent; the same rung would refuse it again, a higher one may not.
+    MODEL_NOT_ALLOWED = "model_not_allowed"
     # The answer is not JSON or its tool calls are broken (three times running).
     MALFORMED_RESPONSE = "malformed_response"
     # The CLI provider's rate limit (``ConnectionService`` records ``rate_limited``).
@@ -122,6 +126,7 @@ _ROWS: dict[Failure, FailureRow] = {
     Failure.NO_TOOL_CALLS: FailureRow(RuntimeError.__name__, escalate=True),
     Failure.NO_SUBMISSION: FailureRow(RuntimeError.__name__, escalate=True),
     Failure.UNSUPPORTED_CLI: FailureRow(RuntimeError.__name__, escalate=True),
+    Failure.MODEL_NOT_ALLOWED: FailureRow(RuntimeError.__name__, escalate=True),
     Failure.MALFORMED_RESPONSE: FailureRow(ValueError.__name__),
     Failure.RATE_LIMITED: FailureRow(ConnectionError.__name__),
     Failure.CREDENTIAL_EXPIRED: FailureRow(ConnectionError.__name__, escalate=True),

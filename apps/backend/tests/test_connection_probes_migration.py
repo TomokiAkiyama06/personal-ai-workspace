@@ -65,7 +65,12 @@ class ValuesTest(unittest.TestCase):
         self.assertEqual(revision.TABLE, PROBE_TABLE)
         self.assertEqual(ConnectionProbeRow.__tablename__, PROBE_TABLE)
         self.assertEqual(revision.KINDS, tuple(kind.value for kind in ConnectionKind))
-        self.assertEqual(revision.TRIGGERS, tuple(t.value for t in ProbeTrigger))
+        # The triggers of the day: revision 0341 added ``policy``
+        # (``tests/test_agent_model_policies_migration.py`` compares the rest).
+        self.assertEqual(
+            revision.TRIGGERS,
+            tuple(t.value for t in ProbeTrigger if t is not ProbeTrigger.POLICY),
+        )
         self.assertEqual(revision.STATES, tuple(s.value for s in ProbeState))
         self.assertEqual(revision.OUTCOMES, tuple(o.value for o in ProbeOutcome))
         # The failure codes of the day: revision 0325 added ``model_fallback``

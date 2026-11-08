@@ -47,6 +47,9 @@ EXPECTED = [
     # Decision 0087, 4: a CLI whose ``system/init`` shows other tools or
     # servers is a version / setup this rung cannot run.
     (F.UNSUPPORTED_CLI, "RuntimeError", True),
+    # Decision 0103, 4 A, 2: a model the policy does not allow, or not a
+    # verified pair with the CLI's version: nothing was sent.
+    (F.MODEL_NOT_ALLOWED, "RuntimeError", True),
     (F.MALFORMED_RESPONSE, "ValueError", False),
     (F.RATE_LIMITED, "ConnectionError", False),
     (F.CREDENTIAL_EXPIRED, "ConnectionError", True),

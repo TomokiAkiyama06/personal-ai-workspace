@@ -103,6 +103,10 @@ reviewer = ["local"]
 # First only [cloud] and [agents.claude], with the step 3 [orchestrator]: attach the
 # Claude connection and see its health probe say connected (Decision 0100).
 # Then replace the step 3 [orchestrator] above with this one; uncomment to enable.
+# Each [agents.*] model must be in a verified pair of the release (Decision 0103:
+# paw_backend/agent_models/verified.py); another one starts with "model: unverified"
+# in the start-up line and that kind sends nothing. The Admin's policy
+# (/admin/agent-models) may allow other verified models without a restart.
 #
 # [cloud]
 # enabled = true                     # to stop: see docs/DEPLOYMENT_UPDATE.md
