@@ -55,6 +55,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Final
 
@@ -108,6 +109,8 @@ PROBE_MCP_CONFIG_NAME: Final = "probe-mcp.json"
 #: ``create_session`` writes a relay command into the session's default MCP
 #: configuration, which the probe never names: a command that does nothing.
 _NO_RELAY: Final = ("/bin/false",)
+#: What a code from the CLI must look like to be logged (``_code``).
+_CODE: Final = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,63}")
 
 
 class ClaudeProbeAdapter:
@@ -233,7 +236,7 @@ class ClaudeProbeAdapter:
                     spec.session_id,
                     note,
                 )
-            return _report(stream, reading, self._model)
+            return _report(stream, reading, self._model, spec.session_id)
         finally:
             if unstopped:
                 logger.error(
@@ -247,13 +250,25 @@ class ClaudeProbeAdapter:
 class _Reading:
     """What the read of the stream found (besides the stream's own state)."""
 
-    __slots__ = ("failure", "retry", "totals", "turns")
+    __slots__ = (
+        "eof_in_turn",
+        "failure",
+        "refused",
+        "retry",
+        "retry_status",
+        "totals",
+        "turns",
+    )
 
     def __init__(self) -> None:
         self.failure: FailureCode | None = None
         self.retry: str | None = None
         self.totals: Totals | None = None
         self.turns: list[Turn] = []
+        # For the verdict's log line only (issue #342).
+        self.refused: str | None = None
+        self.retry_status: int | None = None
+        self.eof_in_turn = False
 
 
 async def _read(process, stream: ClaudeStream, reading: _Reading) -> None:
@@ -262,12 +277,14 @@ async def _read(process, stream: ClaudeStream, reading: _Reading) -> None:
         if not line:
             if stream.turn_open:
                 reading.failure = FailureCode.INVALID_RESPONSE
+                reading.eof_in_turn = True
             return
         try:
             item = stream.feed(line)
         except StreamRefused as refused:
             logger.warning("Claude probe refused: %s", refused.reason)
             reading.failure = FailureCode.INVALID_RESPONSE
+            reading.refused = refused.reason
             return
         if stream.fallbacks:
             # Decision 0102, 3 (1): the configured model was refused. Stop
@@ -286,6 +303,7 @@ async def _read(process, stream: ClaudeStream, reading: _Reading) -> None:
                 return
         elif isinstance(item, Retry):
             reading.retry = item.error
+            reading.retry_status = item.status
             if item.error in CREDENTIAL_ERRORS:
                 reading.failure = FailureCode.EXPIRED
                 return
@@ -293,9 +311,12 @@ async def _read(process, stream: ClaudeStream, reading: _Reading) -> None:
             reading.totals = item
 
 
-def _report(stream: ClaudeStream, reading: _Reading, model: str) -> ProbeReport:
+def _report(
+    stream: ClaudeStream, reading: _Reading, model: str, session_id: object = None
+) -> ProbeReport:
     """The probe's verdict (see the module). Tokens: the result's totals when
-    known, else the reported turns; never estimated."""
+    known, else the reported turns; never estimated. An ``internal_error`` or
+    ``invalid_response`` is logged once with why (:func:`_log_failure`)."""
     totals = reading.totals
     if totals is not None and totals.input_tokens is not None:
         input_tokens, output_tokens = totals.input_tokens, totals.output_tokens
@@ -305,7 +326,11 @@ def _report(stream: ClaudeStream, reading: _Reading, model: str) -> ProbeReport:
     else:
         input_tokens = output_tokens = None
 
-    def report(outcome: ProbeOutcome, failure: FailureCode | None) -> ProbeReport:
+    def report(
+        outcome: ProbeOutcome, failure: FailureCode | None, why: str = ""
+    ) -> ProbeReport:
+        if failure in (FailureCode.INTERNAL_ERROR, FailureCode.INVALID_RESPONSE):
+            _log_failure(failure, why, stream, reading, session_id)
         return ProbeReport(outcome, failure, input_tokens, output_tokens, model)
 
     failure = reading.failure
@@ -317,23 +342,81 @@ def _report(stream: ClaudeStream, reading: _Reading, model: str) -> ProbeReport:
         stream.answer = None  # never checked
         return report(ProbeOutcome.UNAVAILABLE, FailureCode.MODEL_FALLBACK)
     if failure is not None:
-        return report(ProbeOutcome.UNAVAILABLE, failure)
+        if reading.refused is not None:
+            why = "refused"
+        elif reading.eof_in_turn:
+            why = "ended_in_turn"
+        elif len(reading.turns) > 1:
+            why = "second_model_call"
+        else:
+            why = "turn_before_init"
+        return report(ProbeOutcome.UNAVAILABLE, failure, why)
     if reading.retry in RATE_ERRORS and (totals is None or totals.is_error):
         # The provider's limit, whether or not a model call completed: it
         # says nothing about the credential (the status is kept; Codex review
         # of #317).
         return report(ProbeOutcome.UNAVAILABLE, FailureCode.RATE_LIMITED)
     if not stream.initialized or len(reading.turns) != 1:
-        return report(ProbeOutcome.UNAVAILABLE, FailureCode.INVALID_RESPONSE)
+        why = (
+            "not_initialized"
+            if not stream.initialized
+            else "no_model_call"
+            if not reading.turns
+            else "second_model_call"
+        )
+        return report(ProbeOutcome.UNAVAILABLE, FailureCode.INVALID_RESPONSE, why)
     if totals is None:
-        return report(ProbeOutcome.UNAVAILABLE, FailureCode.INTERNAL_ERROR)
+        return report(ProbeOutcome.UNAVAILABLE, FailureCode.INTERNAL_ERROR, "no_result")
     if totals.is_error:
-        return report(ProbeOutcome.UNAVAILABLE, FailureCode.INTERNAL_ERROR)
+        return report(
+            ProbeOutcome.UNAVAILABLE, FailureCode.INTERNAL_ERROR, "result_error"
+        )
     answer = stream.answer
     stream.answer = None  # read for the check only
     if answer is None or PROBE_ANSWER not in answer:
-        return report(ProbeOutcome.UNAVAILABLE, FailureCode.INVALID_RESPONSE)
+        return report(
+            ProbeOutcome.UNAVAILABLE,
+            FailureCode.INVALID_RESPONSE,
+            "no_answer" if answer is None else "answer_without_token",
+        )
     return report(ProbeOutcome.CONNECTED, None)
+
+
+def _code(value: object) -> str:
+    """A code from the CLI (a result's subtype, an ``api_retry`` category) as
+    it may be logged: a plain identifier, else ``other``; ``-`` when absent."""
+    if value is None:
+        return "-"
+    if isinstance(value, str) and _CODE.fullmatch(value):
+        return value
+    return "other"
+
+
+def _log_failure(
+    failure: FailureCode,
+    why: str,
+    stream: ClaudeStream,
+    reading: _Reading,
+    session_id: object,
+) -> None:
+    """Issue #342: one line saying why the probe was ``internal_error`` /
+    ``invalid_response``. Fixed codes, counts and the HTTP status class only:
+    never the prompt, the answer, the token or an error's text."""
+    totals = reading.totals
+    status = reading.retry_status
+    logger.warning(
+        "Claude probe failed: session=%s failure=%s why=%s result=%s"
+        " is_error=%s retry=%s http=%s initialized=%s turns=%d",
+        session_id,
+        failure.value,
+        why,
+        _code(totals.subtype if totals is not None else None),
+        "-" if totals is None else "yes" if totals.is_error else "no",
+        _code(reading.retry),
+        f"{status // 100}xx" if status is not None else "-",
+        "yes" if stream.initialized else "no",
+        len(reading.turns),
+    )
 
 
 def _write_private(path: Path, text: str) -> None:

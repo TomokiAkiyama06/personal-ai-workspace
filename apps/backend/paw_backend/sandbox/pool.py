@@ -9,6 +9,13 @@ writable one. A call whose :class:`~.spec.SandboxSpec` differs from the running
 one's (the scope changed: a Working Set change, a new excluded path) stops it
 and starts a new one: a sandbox never outlives the scope it was built for.
 
+A call that finds the sandbox gone (:class:`~.spec.SandboxGoneError`) or whose
+``ssh`` surely never connected (``SandboxUnavailableError.not_run``: the start or
+the command never reached the wrapper, issue #346) is tried once more, at most
+once per call, and only while the tool call's deadline
+(``paw_backend.tools.deadline``) leaves :data:`RETRY_MIN_SECONDS`; a call that
+may have run (``exec_failed``, a timeout, ...) is never run again.
+
 It is stopped:
 
 * when a command does not end in time (``timeout_s``) or the call is cancelled
@@ -43,6 +50,7 @@ from paw_backend.sandbox.spec import (
     SandboxUnavailableError,
 )
 from paw_backend.tasks import TaskRun
+from paw_backend.tools.deadline import time_left
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +61,11 @@ STOP_TIMEOUT_SECONDS = 8.0
 #: the process over SSH, the wrapper's checks) before the pool stops it.
 EXEC_MARGIN_SECONDS = 30.0
 DEFAULT_IDLE_SECONDS = 900.0
+#: A call that never reached the wrapper is tried again only while the tool
+#: call's deadline leaves this much (a connection and a short command); with
+#: less, the retry would most likely end in the deadline's ``TimeoutError``
+#: instead of the clear ``sandbox_unavailable``.
+RETRY_MIN_SECONDS = EXEC_MARGIN_SECONDS
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +88,27 @@ class _Sandbox:
     account: LinuxAccount
     shim: ShimServer | None
     used_at: float
+
+
+def _may_retry(error: SandboxUnavailableError, operation: str) -> bool:
+    """Whether a failed ``operation`` (``start`` / ``exec``) is tried once more:
+    only one that surely never reached the wrapper (``not_run``), and only
+    while the tool call's deadline leaves :data:`RETRY_MIN_SECONDS`. Logged
+    with the fixed reason code only."""
+    if not error.not_run:
+        return False
+    left = time_left()
+    if left is not None and left < RETRY_MIN_SECONDS:
+        logger.warning(
+            "A sandbox %s did not connect (%s); no time left to try again",
+            operation,
+            error.reason,
+        )
+        return False
+    logger.warning(
+        "A sandbox %s did not connect (%s); trying once more", operation, error.reason
+    )
+    return True
 
 
 class SandboxPool:
@@ -151,7 +185,12 @@ class SandboxPool:
         ``shim`` answers the sandbox's ``git`` while the command runs."""
         async with self._holding(key):
             for attempt in (1, 2):
-                sandbox = await self._ensure(key, account, spec)
+                try:
+                    sandbox = await self._ensure(key, account, spec)
+                except SandboxUnavailableError as error:
+                    if attempt == 2 or not _may_retry(error, "start"):
+                        raise
+                    continue  # nothing was started: start it once more
                 if sandbox.shim is not None and shim is not None:
                     sandbox.shim.activate(shim)
                 try:
@@ -162,6 +201,15 @@ class SandboxPool:
                     await self._discard(key)
                     if attempt == 2:
                         raise SandboxUnavailableError("not_running") from None
+                except SandboxUnavailableError as error:
+                    if not error.not_run:
+                        raise  # ``_exec`` stopped the sandbox already
+                    if attempt == 2 or not _may_retry(error, "exec"):
+                        # As any other failed call: the sandbox is stopped.
+                        await self._stop_shielded(key)
+                        raise
+                    # The command never reached the wrapper: the sandbox runs
+                    # as before; run the command once more in it.
                 finally:
                     if sandbox.shim is not None:
                         sandbox.shim.deactivate()
@@ -183,6 +231,12 @@ class SandboxPool:
                 **options,
             )
         except SandboxGoneError:
+            raise
+        except SandboxUnavailableError as error:
+            if not error.not_run:
+                await self._stop_shielded(key)
+            # One that never reached the wrapper left nothing running: ``run``
+            # decides whether to try once more or to stop the sandbox.
             raise
         except BaseException:
             # A timeout, a cancellation, a call that did not complete: whatever
@@ -211,8 +265,10 @@ class SandboxPool:
         sandbox = _Sandbox(sandbox_id, spec, account, shim, self._clock())
         try:
             await self._runner.start(account, sandbox_id, spec)
-        except BaseException:
-            await self._close_quietly(sandbox, stop=True)
+        except BaseException as error:
+            # A start that never reached the wrapper started nothing to stop.
+            not_run = isinstance(error, SandboxUnavailableError) and error.not_run
+            await self._close_quietly(sandbox, stop=not not_run)
             raise
         self._sandboxes[key] = sandbox
         return sandbox

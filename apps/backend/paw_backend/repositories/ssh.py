@@ -67,6 +67,7 @@ sub-command allowlist or the working directory). This module only has to be a
 
 import asyncio
 import os
+import re
 import shlex
 import shutil
 import stat
@@ -111,6 +112,57 @@ DIRECTORY_TAG = "paw-dir/v1"
 #: or is locked); every other code (0-254) is the remote command's own exit
 #: status and must never be treated as a transport failure.
 SSH_TRANSPORT_FAILURE_CODE = 255
+
+# What ``ssh`` (``LogLevel=ERROR``) prints when it never got as far as the
+# remote command: the TCP connection or the identification (banner) exchange
+# failed, before any authentication (issue #346). A 255 with such a stderr and
+# nothing else (no stdout, no other line) is a call whose remote command never
+# started; any other 255 (a connection lost after the command began, ...) may
+# have run it. ``_SSH_PRE_CONNECTION`` is a line only the client prints before
+# it connected; ``_SSH_CONNECTION_FOLLOW_UP`` may follow one of those
+# (OpenSSH prints the peer's address after ``kex_exchange_identification``)
+# but proves nothing alone: the packet layer prints it during a session too.
+_SSH_PRE_CONNECTION = re.compile(
+    r"ssh: connect to host [^\s]+ port [0-9]+: (?:Connection timed out"
+    r"|Connection refused|No route to host|Network is unreachable"
+    r"|Operation timed out)"
+    r"|Connection timed out during banner exchange"
+    r"|kex_exchange_identification: (?:read: Connection reset by peer"
+    r"|Connection closed by remote host)"
+    r"|banner exchange: Connection to [^\s]+ port [0-9]+: (?:Connection timed out"
+    r"|Connection reset by peer|Broken pipe)"
+)
+_SSH_CONNECTION_FOLLOW_UP = re.compile(
+    r"Connection (?:to [^\s]+ port [0-9]+ timed out"
+    r"|closed by [^\s]+ port [0-9]+|reset by [^\s]+ port [0-9]+)"
+)
+
+
+def ssh_never_connected(stdout: bytes, stderr: bytes) -> bool:
+    """Whether an ``ssh`` call that exited :data:`SSH_TRANSPORT_FAILURE_CODE`
+    surely never reached the remote command (see ``_SSH_PRE_CONNECTION``):
+    nothing on stdout, and stderr only ``ssh``'s own lines of a connection that
+    was never established, at least one of them a line printed before it.
+    Anything else (another line, a remote command's output) is ``False``: the
+    command may have run."""
+    if stdout or not stderr or len(stderr) > 4096:
+        return False
+    try:
+        text = stderr.decode("ascii")
+    except UnicodeDecodeError:
+        return False
+    lines = [line.strip() for line in text.replace("\r", "\n").split("\n")]
+    lines = [line for line in lines if line]
+    if not lines:
+        return False
+    before = False
+    for line in lines:
+        if _SSH_PRE_CONNECTION.fullmatch(line):
+            before = True
+        elif not _SSH_CONNECTION_FOLLOW_UP.fullmatch(line):
+            return False
+    return before
+
 
 #: The SSH wrapper's refusals (``deploy/ssh-git-wrapper``, Decision 0063, which
 #: supersedes the exit-status contract of Decision 0029 §5 / Decision 0051 §5):

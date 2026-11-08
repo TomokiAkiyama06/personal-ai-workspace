@@ -286,6 +286,16 @@ def format_failure_text(text: object) -> str:
     return text.encode("utf-8", errors="replace").decode("utf-8")
 
 
+def _fixed_failure_text(message: str) -> str:
+    """``message`` when it is one of the runtimes' fixed failure texts
+    (``agents.failures.Failure``), else ``-``: a failure text is hashed for the
+    loop detector and never stored or logged otherwise (``NodeOutcome``)."""
+    # Imported here: ``paw_backend.agents`` imports this package.
+    from paw_backend.agents.failures import Failure
+
+    return message if message in {failure.value for failure in Failure} else "-"
+
+
 def format_error_class(name: object) -> str:
     """A name for the failure records: ``[A-Za-z0-9_.-]`` only, at most 100 long."""
     if not isinstance(name, str) or not name:
@@ -2306,6 +2316,16 @@ class Orchestrator:
             run,
             LogLevel.WARNING,
             f"Node {node.key} attempt {number} failed ({error_class}): {step.value}",
+        )
+        # The process's log too (issue #346): the class and the runtime's fixed
+        # failure text only; any other text a runtime gave stays out of it.
+        logger.warning(
+            "Node %s attempt %d failed (%s: %s): %s",
+            node.key,
+            number,
+            error_class,
+            _fixed_failure_text(message),
+            step.value,
         )
         return dag, stop
 

@@ -81,6 +81,34 @@ class RetryTest(PostgresOrchestratorTestCase):
         (record,) = await h.loops.history(task_id)
         self.assertEqual(record.approach, 0)
 
+    async def test_a_failed_attempt_is_a_warning_with_the_fixed_text_only(self):
+        # Issue #346: node key, class and the runtime's fixed failure text in
+        # the process's log; any other failure text stays out of it.
+        rt = runtimes(
+            local={
+                "a": [
+                    fail("PermissionError", "sandbox_unavailable"),
+                    fail("ValueError", f"model said {SECRET}"),
+                    ok(),
+                ]
+            }
+        )
+        h = self.harness(runtimes=rt)
+        await self.prepare(h, make_plan(node("a")))
+        with self.assertLogs(
+            "paw_backend.orchestrator.orchestrator", "WARNING"
+        ) as logs:
+            report = await h.orchestrator.run_once("w1")
+        self.assertEqual(report.outcome, Out.DAG_SUCCEEDED)
+        failed = [line for line in logs.output if " failed (" in line]
+        self.assertEqual(len(failed), 2, logs.output)
+        self.assertIn(
+            "Node a attempt 1 failed (PermissionError: sandbox_unavailable)", failed[0]
+        )
+        self.assertIn("Node a attempt 2 failed (ValueError: -)", failed[1])
+        self.assertNotIn(SECRET, "\n".join(logs.output))
+        self.assertNotIn("model said", "\n".join(logs.output))
+
     async def test_a_retry_waits_for_the_backoff_and_it_doubles(self):
         rt = runtimes(local={"a": [fail(), fail(), ok()]})
         h = self.harness(runtimes=rt, config={"retry_backoff_seconds": 5.0})
@@ -620,6 +648,17 @@ class IsolationTest(PostgresOrchestratorTestCase):
         self.assertEqual(report.outcome, Out.DAG_FAILED)
         self.assertEqual(await self.states_of(task_id), {"a": "failed"})
         self.assertEqual(len(rt["local"].calls_of("a")), 1)  # not retryable
+
+
+class FixedFailureTextTest(unittest.TestCase):
+    def test_only_a_runtime_failure_text_is_logged(self):
+        from paw_backend.agents.failures import Failure
+        from paw_backend.orchestrator.orchestrator import _fixed_failure_text
+
+        for failure in Failure:
+            self.assertEqual(_fixed_failure_text(failure.value), failure.value)
+        for text in ("", "it broke", SECRET, "sandbox_unavailable (ssh)"):
+            self.assertEqual(_fixed_failure_text(text), "-")
 
 
 class RuntimeErrorClassTest(unittest.TestCase):

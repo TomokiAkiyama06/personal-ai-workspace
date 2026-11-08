@@ -61,11 +61,16 @@ class SandboxUnavailableError(PermissionError):
     path is a link, missing, or of a shape a mount cannot take), the wrapper
     refused, or the container did not start. Decision 0083, 4: a node then
     fails with ``PermissionError`` (``sandbox_unavailable``). ``reason`` is a
-    fixed code, never a path or anything the wrapper printed."""
+    fixed code, never a path or anything the wrapper printed.
 
-    def __init__(self, reason: str) -> None:
+    ``not_run``: the call surely never reached the wrapper (``ssh`` never
+    connected: issue #346), so the operation did not happen at all and the
+    pool may try it once more; ``False`` whenever it may have run."""
+
+    def __init__(self, reason: str, *, not_run: bool = False) -> None:
         super().__init__(f"sandbox_unavailable ({reason})")
         self.reason = reason
+        self.not_run = bool(not_run)
 
 
 class SandboxOutOfMemoryError(Exception):

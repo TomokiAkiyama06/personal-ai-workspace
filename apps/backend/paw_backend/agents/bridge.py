@@ -40,7 +40,9 @@ import os
 from collections.abc import Mapping
 from typing import Any, Protocol
 
+from paw_backend.agents.failures import RuntimeFailure
 from paw_backend.agents.toolkit import ToolError
+from paw_backend.orchestrator.errors import NodeStopped
 from paw_backend.orchestrator.runtime import NodeOutcome
 
 logger = logging.getLogger(__name__)
@@ -257,6 +259,11 @@ class McpBridge:
             )
         return listed
 
+    def _known_tool(self, name: str) -> str:
+        """``name`` when it is one of the listed tools (the client chose it)."""
+        listed = {tool["function"]["name"] for tool in self._toolkit.tools}
+        return name if name in listed else "unknown"
+
     async def _call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         async with self._calls:
             if self.ended.is_set():
@@ -273,15 +280,28 @@ class McpBridge:
                 # error): the runtime reads it and stops the CLI.
                 self.failure = error
                 self.ended.set()
-                logger.info(
-                    "MCP bridge: the attempt ended in a tool call (%s)",
+                # Issue #346: the tool and the fixed reason (a failure of the
+                # table, a stop's reason), never the error's message.
+                logger.warning(
+                    "MCP bridge: the attempt ended in a tool call (%s: %s) for %s",
                     type(error).__name__,
+                    _ended_reason(error),
+                    self._known_tool(name),
                 )
                 return _text(ENDED_TEXT, error=True)
             if outcome is not None:
                 self.outcome = outcome
                 self.ended.set()
             return _text(text, error=False)
+
+
+def _ended_reason(error: BaseException) -> str:
+    """The fixed reason of an attempt's end in a tool call (``-``: none)."""
+    if isinstance(error, RuntimeFailure):
+        return error.failure.value
+    if isinstance(error, NodeStopped):
+        return f"stopped ({error.reason.value})"
+    return "-"
 
 
 def _valid_id(value: Any) -> bool:

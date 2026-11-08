@@ -260,6 +260,34 @@ class CallTest(BridgeCase):
                 self.assertIs(bridge.failure, error)
                 self.assertTrue(bridge.ended.is_set())
 
+    async def test_the_end_in_a_tool_call_is_a_warning_with_the_reason(self):
+        # Issue #346: the tool and the fixed reason, never the message.
+        cases = (
+            (
+                "bash",
+                RuntimeFailure(Failure.SANDBOX_UNAVAILABLE),
+                "(RuntimeFailure: sandbox_unavailable) for bash",
+            ),
+            (
+                "bash",
+                NodeStopped(StopReason.LEASE_LOST),
+                f"(NodeStopped: stopped ({StopReason.LEASE_LOST.value})) for bash",
+            ),
+            ("bash", ValueError("/home/bob/secret"), "(ValueError: -) for bash"),
+            ("evil /home/bob", ValueError("x"), "for unknown"),
+        )
+        for name, error, expected in cases:
+            with self.subTest(error=type(error).__name__, name=name):
+                bridge = McpBridge(FakeToolkit(), token=TOKEN)
+                bridge._toolkit.answers[name] = error
+                with self.assertLogs("paw_backend.agents.bridge", "WARNING") as logs:
+                    await bridge._call(name, {"command": "cat secret.txt"})
+                self.assertEqual(len(logs.records), 1)
+                self.assertEqual(logs.records[0].levelname, "WARNING")
+                self.assertIn(expected, logs.output[0])
+                self.assertNotIn("/home/bob", logs.output[0])
+                self.assertNotIn("secret", logs.output[0])
+
     async def test_a_ping_is_answered_while_a_call_runs(self):
         reader, writer = await self.connect()
         self.toolkit.gate = asyncio.Event()

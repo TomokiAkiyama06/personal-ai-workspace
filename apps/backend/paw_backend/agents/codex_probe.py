@@ -64,6 +64,7 @@ for a CLI: it fails at once (``internal_error``) and starts nothing.
 import asyncio
 import contextlib
 import logging
+import re
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
@@ -131,6 +132,8 @@ PROBE_CLI: Final = "codex-probe"
 #: ``create_session`` writes a relay command into a Claude MCP configuration
 #: the Codex probe never reads: a command that does nothing.
 _NO_RELAY: Final = ("/bin/false",)
+#: What a code from Codex must look like to be logged (``_code``).
+_CODE: Final = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,63}")
 
 
 @dataclass(slots=True)
@@ -153,6 +156,12 @@ class _Reading:
     failure: FailureCode | None = None
     turns: list[Turn] = field(default_factory=list)
     ended: Ended | None = None
+    # For the verdict's log line only (issue #342): the stream's refusal (a
+    # fixed code), whether the CLI closed its output on its own, its exit
+    # status once it was stopped.
+    refused: str | None = None
+    eof: bool = False
+    returncode: int | None = None
 
 
 class CodexProbeAdapter:
@@ -287,7 +296,7 @@ class CodexProbeAdapter:
                 rerouted,
                 to,
             )
-        return self._verdict(stream, reading)
+        return self._verdict(stream, reading, spec.session_id)
 
     async def _converse(self, state: _ProbeState) -> tuple[CodexStream, _Reading]:
         process = await self._codex._start(
@@ -305,12 +314,14 @@ class CodexProbeAdapter:
             while True:
                 line = await process.stdout.readline()
                 if not line:
+                    reading.eof = True
                     break
                 try:
                     item = stream.feed(line)
                 except StreamRefused as refused:
                     logger.warning("Codex probe refused: %s", refused.reason)
                     reading.failure = FailureCode.INVALID_RESPONSE
+                    reading.refused = refused.reason
                     break
                 if isinstance(item, Initialized):
                     await _send(process, notification("initialized"))
@@ -335,7 +346,9 @@ class CodexProbeAdapter:
         finally:
             await _stop(process, state)
         with contextlib.suppress(Exception):
-            await process.wait()
+            returncode = await process.wait()
+            if isinstance(returncode, int) and not isinstance(returncode, bool):
+                reading.returncode = returncode
         if getattr(process, "oom_killed", False):
             logger.error(
                 "Codex probe's unit ran out of memory: session=%s",
@@ -343,37 +356,105 @@ class CodexProbeAdapter:
             )
         return stream, reading
 
-    def _verdict(self, stream: CodexStream, reading: _Reading) -> ProbeReport:
+    def _verdict(
+        self, stream: CodexStream, reading: _Reading, session_id: object = None
+    ) -> ProbeReport:
         """See the module. Tokens: the thread's totals once a model call was
-        reported; never estimated."""
+        reported; never estimated. An ``internal_error`` or
+        ``invalid_response`` is logged once with why (:func:`_log_failure`)."""
         tokens = stream.totals if stream.reported else (None, None)
 
-        def report(outcome: ProbeOutcome, failure: FailureCode | None) -> ProbeReport:
+        def report(
+            outcome: ProbeOutcome, failure: FailureCode | None, why: str = ""
+        ) -> ProbeReport:
+            if failure in (FailureCode.INTERNAL_ERROR, FailureCode.INVALID_RESPONSE):
+                _log_failure(failure, why, stream, reading, session_id)
             return self._report(outcome, failure, tokens)
 
         failure = reading.failure
         if failure is FailureCode.EXPIRED:
             return report(ProbeOutcome.EXPIRED, FailureCode.EXPIRED)
         if failure is not None:
-            return report(ProbeOutcome.UNAVAILABLE, failure)
+            if reading.refused is not None:
+                why = "refused"
+            elif len(reading.turns) > 1:
+                why = "second_model_call"
+            else:
+                why = "stream"
+            return report(ProbeOutcome.UNAVAILABLE, failure, why)
         if not stream.initialized:
-            return report(ProbeOutcome.UNAVAILABLE, FailureCode.INVALID_RESPONSE)
+            return report(
+                ProbeOutcome.UNAVAILABLE,
+                FailureCode.INVALID_RESPONSE,
+                "not_initialized",
+            )
         ended = reading.ended
         if ended is None:
-            return report(ProbeOutcome.UNAVAILABLE, FailureCode.INTERNAL_ERROR)
+            return report(
+                ProbeOutcome.UNAVAILABLE, FailureCode.INTERNAL_ERROR, "no_turn_end"
+            )
         if ended.status != "completed":
             if ended.error in CREDENTIAL_ERRORS:
                 return report(ProbeOutcome.EXPIRED, FailureCode.EXPIRED)
             if ended.error in RATE_ERRORS:
                 return report(ProbeOutcome.UNAVAILABLE, FailureCode.RATE_LIMITED)
-            return report(ProbeOutcome.UNAVAILABLE, FailureCode.INTERNAL_ERROR)
+            return report(
+                ProbeOutcome.UNAVAILABLE, FailureCode.INTERNAL_ERROR, "turn_failed"
+            )
         if len(reading.turns) != 1:
-            return report(ProbeOutcome.UNAVAILABLE, FailureCode.INVALID_RESPONSE)
+            return report(
+                ProbeOutcome.UNAVAILABLE,
+                FailureCode.INVALID_RESPONSE,
+                "no_model_call" if not reading.turns else "second_model_call",
+            )
         answer = stream.answer
         stream.answer = None  # read for the check only
         if answer is None or PROBE_ANSWER not in answer:
-            return report(ProbeOutcome.UNAVAILABLE, FailureCode.INVALID_RESPONSE)
+            return report(
+                ProbeOutcome.UNAVAILABLE,
+                FailureCode.INVALID_RESPONSE,
+                "no_answer" if answer is None else "answer_without_token",
+            )
         return report(ProbeOutcome.CONNECTED, None)
+
+
+def _code(value: object) -> str:
+    """A code from Codex (a ``codexErrorInfo`` name, a turn's status) as it
+    may be logged: a plain identifier, else ``other``; ``-`` when absent."""
+    if value is None:
+        return "-"
+    if isinstance(value, str) and _CODE.fullmatch(value):
+        return value
+    return "other"
+
+
+def _log_failure(
+    failure: FailureCode,
+    why: str,
+    stream: CodexStream,
+    reading: _Reading,
+    session_id: object,
+) -> None:
+    """Issue #342: one line saying why the probe was ``internal_error`` /
+    ``invalid_response``. Fixed codes, counts and the HTTP status class only:
+    never the prompt, the answer, the login, an error's message or its
+    ``additionalDetails`` (which can hold URLs with request ids)."""
+    ended = reading.ended
+    status = stream.http_status
+    logger.warning(
+        "Codex probe failed: session=%s failure=%s why=%s turn_status=%s"
+        " error=%s http=%s cli=%s exit=%s turns=%d rerouted=%s",
+        session_id,
+        failure.value,
+        why,
+        _code(ended.status if ended is not None else None),
+        _code(ended.error if ended is not None else stream.error),
+        f"{status // 100}xx" if status is not None else "-",
+        "turn_end" if ended is not None else "eof" if reading.eof else "stopped",
+        reading.returncode if reading.returncode is not None else "-",
+        len(reading.turns),
+        "yes" if stream.reroutes else "no",
+    )
 
 
 def _clean(state: _ProbeState, given_back: bool) -> None:

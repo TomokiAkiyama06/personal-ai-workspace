@@ -14,7 +14,7 @@ import unittest
 import uuid
 
 from paw_backend.repositories.paths import LinuxAccount
-from paw_backend.sandbox.pool import SandboxKey, SandboxPool
+from paw_backend.sandbox.pool import RETRY_MIN_SECONDS, SandboxKey, SandboxPool
 from paw_backend.sandbox.spec import (
     CommandKind,
     SandboxCommand,
@@ -25,6 +25,7 @@ from paw_backend.sandbox.spec import (
     SandboxUnavailableError,
 )
 from paw_backend.tasks import TaskRun
+from paw_backend.tools.deadline import call_deadline
 
 ACCOUNT = LinuxAccount(uuid.uuid4(), "alice", os.geteuid(), "/home/alice")
 TASK = uuid.uuid4()
@@ -183,6 +184,128 @@ class PoolTest(unittest.IsolatedAsyncioTestCase):
         with self.assertLogs("paw_backend.sandbox.pool", "WARNING"):
             await self.pool.close()
         self.assertEqual(self.pool.running(), 0)
+
+
+def _not_connected() -> SandboxUnavailableError:
+    return SandboxUnavailableError("ssh_unavailable", not_run=True)
+
+
+class NeverConnectedRetryTest(unittest.IsolatedAsyncioTestCase):
+    """Issue #346: a start or a command whose ``ssh`` surely never connected
+    (``not_run``) is tried once more; one that may have run never is."""
+
+    def setUp(self):
+        self.runner = FakeRunner()
+        self.pool = SandboxPool(self.runner)
+
+    def failing_first(self, *errors):
+        queue = list(errors)
+
+        async def on_exec(sandbox_id):
+            if queue:
+                raise queue.pop(0)
+            return SandboxExecResult(0, "ran", "", False)
+
+        self.runner.on_exec = on_exec
+
+    async def test_a_command_that_never_connected_runs_once_more(self):
+        self.failing_first(_not_connected())
+        command = SandboxCommand(CommandKind.SHELL, "/workspace", "echo hidden-cmd")
+        with self.assertLogs("paw_backend.sandbox.pool", "WARNING") as logs:
+            result = await self.pool.run(KEY, ACCOUNT, SPEC, command)
+        self.assertEqual(result.stdout, "ran")
+        # The same sandbox, not stopped: the command never reached it.
+        self.assertEqual(self.runner.execs, self.runner.started * 2)
+        self.assertEqual(self.runner.stopped, [])
+        self.assertEqual(self.pool.running(), 1)
+        self.assertEqual(len(logs.output), 1)
+        self.assertIn("ssh_unavailable", logs.output[0])
+        self.assertIn("trying once more", logs.output[0])
+        self.assertNotIn("/w/repo", logs.output[0])
+        self.assertNotIn("hidden-cmd", logs.output[0])
+
+    async def test_a_command_that_may_have_run_is_never_run_again(self):
+        for error in (
+            SandboxUnavailableError("exec_failed"),
+            SandboxUnavailableError("ssh_unavailable"),  # 255, may have run
+            TimeoutError(),
+        ):
+            self.runner.execs.clear()
+            self.failing_first(error)
+            with self.assertRaises(type(error)):
+                await self.pool.run(KEY, ACCOUNT, SPEC, COMMAND)
+            self.assertEqual(len(self.runner.execs), 1, error)
+            self.assertEqual(self.runner.stopped[-1], self.runner.started[-1])
+            self.assertEqual(self.pool.running(), 0)
+
+    async def test_a_second_failure_to_connect_fails_as_before(self):
+        self.failing_first(_not_connected(), _not_connected())
+        with self.assertLogs("paw_backend.sandbox.pool", "WARNING"):
+            with self.assertRaises(SandboxUnavailableError) as caught:
+                await self.pool.run(KEY, ACCOUNT, SPEC, COMMAND)
+        self.assertEqual(caught.exception.reason, "ssh_unavailable")
+        self.assertIsInstance(caught.exception, PermissionError)
+        self.assertEqual(len(self.runner.execs), 2)
+        # As any failed call: the sandbox is stopped.
+        self.assertEqual(self.runner.stopped, self.runner.started)
+        self.assertEqual(self.pool.running(), 0)
+
+    async def test_no_retry_when_the_call_has_no_time_left(self):
+        self.failing_first(_not_connected())
+        with call_deadline(RETRY_MIN_SECONDS - 1):
+            with self.assertLogs("paw_backend.sandbox.pool", "WARNING") as logs:
+                with self.assertRaises(SandboxUnavailableError) as caught:
+                    await self.pool.run(KEY, ACCOUNT, SPEC, COMMAND)
+        self.assertEqual(caught.exception.reason, "ssh_unavailable")
+        self.assertEqual(len(self.runner.execs), 1)
+        self.assertIn("no time left", logs.output[0])
+        self.assertEqual(self.pool.running(), 0)
+        # With time left, the same failure is tried once more.
+        self.failing_first(_not_connected())
+        with call_deadline(RETRY_MIN_SECONDS + 60):
+            with self.assertLogs("paw_backend.sandbox.pool", "WARNING"):
+                result = await self.pool.run(KEY, ACCOUNT, SPEC, COMMAND)
+        self.assertEqual(result.stdout, "ran")
+
+    async def test_a_start_that_never_connected_starts_once_more(self):
+        starts = [_not_connected()]
+        original = self.runner.start
+
+        async def start(account, sandbox_id, spec):
+            if starts:
+                raise starts.pop(0)
+            await original(account, sandbox_id, spec)
+
+        self.runner.start = start
+        with self.assertLogs("paw_backend.sandbox.pool", "WARNING") as logs:
+            result = await self.pool.run(KEY, ACCOUNT, SPEC, COMMAND)
+        self.assertEqual(result.stdout, "ok")
+        self.assertEqual(len(self.runner.started), 1)
+        # Nothing was started by the failed call: nothing to stop.
+        self.assertEqual(self.runner.stopped, [])
+        self.assertIn("start did not connect (ssh_unavailable)", logs.output[0])
+
+        # Twice in a row, or a start that may have run: no more tries.
+        await self.pool.close()
+        self.runner.stopped.clear()
+        for errors, calls in (
+            ([_not_connected(), _not_connected()], 2),
+            ([SandboxUnavailableError("start_failed")], 1),
+        ):
+            starts[:] = errors
+            seen = len(starts)
+            with self.assertRaises(SandboxUnavailableError):
+                await self.pool.run(KEY, ACCOUNT, SPEC, COMMAND)
+            self.assertEqual(seen - len(starts), calls)
+            self.assertEqual(self.pool.running(), 0)
+            starts.clear()
+
+    async def test_a_gone_sandbox_and_a_failed_connection_share_one_retry(self):
+        self.failing_first(SandboxGoneError(), _not_connected())
+        with self.assertRaises(SandboxUnavailableError) as caught:
+            await self.pool.run(KEY, ACCOUNT, SPEC, COMMAND)
+        self.assertEqual(caught.exception.reason, "ssh_unavailable")
+        self.assertEqual(len(self.runner.execs), 2)
 
 
 class ShimLifetimeTest(unittest.IsolatedAsyncioTestCase):
