@@ -38,6 +38,7 @@ from paw_backend.repositories.ssh import (
     SshGitRunnerPolicy,
     SshKeyDirectory,
     ssh_arguments,
+    ssh_never_connected,
 )
 from paw_backend.sandbox.spec import (
     MAX_STREAM_BYTES,
@@ -306,7 +307,15 @@ class SshSandboxRunner(_WrapperRunner):
             argv, env={"PATH": self._path}, stdin=stdin, timeout_s=timeout_s
         )
         if result.returncode == SSH_TRANSPORT_FAILURE_CODE:
-            raise SandboxUnavailableError("ssh_unavailable")
+            # ``not_run`` only when ``ssh`` surely never connected (its own
+            # stderr says so and nothing else came back): a 255 after the
+            # remote command began (a connection lost meanwhile) may have run
+            # it (issue #346).
+            raise SandboxUnavailableError(
+                "ssh_unavailable",
+                not_run=not result.truncated
+                and ssh_never_connected(result.stdout, result.stderr),
+            )
         return result
 
 

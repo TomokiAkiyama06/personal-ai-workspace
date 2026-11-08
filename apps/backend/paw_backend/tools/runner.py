@@ -25,6 +25,7 @@ of scope of the broker). See "Executor の契約" in ``apps/backend/README.md``.
 
 import asyncio
 import logging
+import re
 import uuid
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -34,6 +35,7 @@ from paw_backend.tasks.working_set import WRITE_RESERVATION_SECONDS
 from paw_backend.tools.broker import ToolBroker
 from paw_backend.tools.calls import ToolCall, ToolInvocation
 from paw_backend.tools.credentials import redact_value
+from paw_backend.tools.deadline import call_deadline
 from paw_backend.tools.decisions import BrokerDecision
 from paw_backend.tools.interfaces import require_async_method
 
@@ -74,6 +76,21 @@ if MAX_EXECUTION_TIMEOUT >= WRITE_RESERVATION_SECONDS:  # pragma: no cover
     raise RuntimeError("a repository reservation must outlive every tool call")
 
 
+_REASON_CODE = re.compile(r"[a-z][a-z_]{0,63}")
+
+
+def _sandbox_reason(error: BaseException) -> str | None:
+    """A ``SandboxUnavailableError``'s fixed reason code (``ssh_unavailable``,
+    ...), or ``None`` for any other error. Read by name: the sandbox package
+    imports this module."""
+    if type(error).__name__ != "SandboxUnavailableError":
+        return None
+    reason = getattr(error, "reason", None)
+    if isinstance(reason, str) and _REASON_CODE.fullmatch(reason):
+        return reason
+    return "unknown"
+
+
 class ToolRunner:
     def __init__(
         self,
@@ -106,13 +123,25 @@ class ToolRunner:
         error_type: str | None = None
         try:
             try:
-                async with asyncio.timeout(self._execution_timeout):
-                    raw = await self._executor.execute(invocation)
+                with call_deadline(self._execution_timeout):
+                    async with asyncio.timeout(self._execution_timeout):
+                        raw = await self._executor.execute(invocation)
             except Exception as error:
                 error_type = type(error).__name__
-                logger.error(
-                    "Tool execution failed (%s) for %s", error_type, decision.tool
-                )
+                reason = _sandbox_reason(error)
+                if reason is not None:
+                    # The sandbox's fixed reason code (issue #346): never the
+                    # message, which could name a path.
+                    logger.warning(
+                        "Tool execution failed (%s: %s) for %s",
+                        error_type,
+                        reason,
+                        decision.tool,
+                    )
+                else:
+                    logger.error(
+                        "Tool execution failed (%s) for %s", error_type, decision.tool
+                    )
             else:
                 succeeded = True
         finally:

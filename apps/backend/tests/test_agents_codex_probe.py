@@ -361,6 +361,96 @@ class VerdictTest(ProbeCase):
         self.assertIn(f"configured={MODEL} from={MODEL} to=gpt-older", line)
 
 
+class FailureLogTest(ProbeCase):
+    """Issue #342: an ``internal_error`` / ``invalid_response`` says why in one
+    warning: fixed codes only, never the answer, an error's text or details."""
+
+    def failure_lines(self, logs):
+        return [
+            r.getMessage()
+            for r in logs.records
+            if r.getMessage().startswith("Codex probe failed:")
+        ]
+
+    async def test_each_failure_is_logged_once_with_why(self):
+        cases = {
+            "failed turn": (
+                [
+                    {
+                        "complete": "failed",
+                        "turn_error": {"responseStreamFailed": {"httpStatusCode": 502}},
+                    }
+                ],
+                "failure=internal_error why=turn_failed turn_status=failed"
+                " error=responseStreamFailed http=5xx cli=turn_end",
+            ),
+            "ended early": (
+                [{"usage": [1, 1]}, {"exit": 1}],
+                "failure=internal_error why=no_turn_end turn_status=- error=- http=-"
+                " cli=eof exit=1",
+            ),
+            "no token": (
+                [{"answer": "OK"}, {"usage": [1, 1]}, {"complete": "completed"}],
+                "failure=invalid_response why=answer_without_token"
+                " turn_status=completed",
+            ),
+            "two calls": (
+                [{"usage": [1, 1]}, {"usage": [1, 1]}, *GOOD],
+                "why=second_model_call",
+            ),
+            "a request": ([{"request": "item/tool/call"}], "why=refused"),
+            "rerouted": (
+                [{"reroute": [MODEL, "gpt-older"]}, {"answer": "no"}, *GOOD[1:]],
+                "rerouted=yes",
+            ),
+        }
+        for name, (actions, expected) in cases.items():
+            with self.subTest(name):
+                with self.assertLogs(
+                    "paw_backend.agents.codex_probe", logging.WARNING
+                ) as logs:
+                    await self.probe(actions)
+                (line,) = self.failure_lines(logs)
+                self.assertIn(expected, line)
+                self.assertNotIn("PAW_PROBE_OK", line)
+                self.assertNotIn("paw-codex-probe", line)
+
+    async def test_a_connected_or_expired_probe_logs_no_failure(self):
+        for actions in (GOOD, [{"complete": "failed", "turn_error": "unauthorized"}]):
+            with self.subTest(actions=actions):
+                with self.assertLogs("paw_backend", logging.DEBUG) as logs:
+                    await self.probe(actions)
+                self.assertEqual(self.failure_lines(logs), [])
+
+    def test_the_error_text_and_details_stay_out_of_the_line(self):
+        from paw_backend.agents.codex_probe import _Reading
+
+        stream = CodexStream((), frozenset({VERSION}), probe=True)
+        secret = "sk-" + "never-logged"
+        for message in (
+            {"id": 1, "result": {"userAgent": f"x/{VERSION} (linux)"}},
+            {
+                "method": "error",
+                "params": {
+                    "error": {
+                        "message": f"bad model {secret}",
+                        "codexErrorInfo": {"badRequest weird": {"httpStatusCode": 400}},
+                        "additionalDetails": f"https://chatgpt.com/r/{secret}",
+                    }
+                },
+            },
+        ):
+            stream.feed(json.dumps(message))
+        with self.assertLogs("paw_backend.agents.codex_probe", logging.WARNING) as logs:
+            report = self.adapter()._verdict(stream, _Reading())
+        self.assertEqual(report.failure, FailureCode.INTERNAL_ERROR)
+        (line,) = self.failure_lines(logs)
+        self.assertIn("error=other http=4xx", line)
+        self.assertNotIn(secret, line)
+        self.assertNotIn("chatgpt.com", line)
+        self.assertNotIn("bad model", line)
+
+
 class LoginTest(ProbeCase):
     async def test_a_refreshed_login_is_written_back(self):
         await self.probe([{"refresh": REFRESHED}, *GOOD])
@@ -533,6 +623,38 @@ class StreamTest(unittest.TestCase):
             },
         )
         self.assertEqual(stream.error, "unauthorized")
+        self.assertIsNone(stream.http_status)
+
+    def test_the_http_status_of_an_error_is_known(self):
+        stream = self.started()
+        self.feed(
+            stream,
+            {
+                "method": "error",
+                "params": {
+                    "error": {
+                        "codexErrorInfo": {
+                            "httpConnectionFailed": {"httpStatusCode": 503}
+                        }
+                    }
+                },
+            },
+        )
+        self.assertEqual(
+            (stream.error, stream.http_status), ("httpConnectionFailed", 503)
+        )
+        for status in (None, "503", True, 99, 600):
+            stream = self.started()
+            self.feed(
+                stream,
+                {
+                    "method": "error",
+                    "params": {
+                        "error": {"codexErrorInfo": {"x": {"httpStatusCode": status}}}
+                    },
+                },
+            )
+            self.assertIsNone(stream.http_status, status)
 
 
 if __name__ == "__main__":

@@ -260,6 +260,88 @@ class VerdictTest(ProbeCase):
         self.assertEqual(list(self.sessions.iterdir()), [])
 
 
+class FailureLogTest(ProbeCase):
+    """Issue #342: an ``internal_error`` / ``invalid_response`` says why in one
+    warning: fixed codes only, never the answer, the token or an error's text."""
+
+    def failure_lines(self, logs):
+        return [
+            r.getMessage()
+            for r in logs.records
+            if r.getMessage().startswith("Claude probe failed:")
+        ]
+
+    async def test_each_failure_is_logged_once_with_why(self):
+        error_result = {
+            "result": {
+                "subtype": "error_during_execution",
+                "is_error": True,
+                "result": "secret words of the model",
+                "modelUsage": {"m": {"inputTokens": 5, "outputTokens": 1}},
+            }
+        }
+        overloaded = {
+            "line": {
+                "type": "system",
+                "subtype": "api_retry",
+                "error": "server_error",
+                "error_status": 529,
+                "message": "upstream said secret words",
+            }
+        }
+        cases = {
+            "an error result": (
+                [overloaded, {"turn": [5, 1]}, error_result],
+                "failure=internal_error why=result_error"
+                " result=error_during_execution is_error=yes retry=server_error"
+                " http=5xx initialized=yes turns=1",
+            ),
+            "no result": (
+                [GOOD[0], {"exit": 1}],
+                "failure=internal_error why=no_result result=- is_error=-",
+            ),
+            "no token": (
+                [GOOD[0], {"result": {**GOOD[1]["result"], "result": "Hello"}}],
+                "failure=invalid_response why=answer_without_token result=success",
+            ),
+            "two calls": ([GOOD[0], *GOOD], "why=second_model_call"),
+            "no model call": ([GOOD[1]], "why=no_model_call"),
+        }
+        for name, (actions, expected) in cases.items():
+            with self.subTest(name):
+                with self.assertLogs(
+                    "paw_backend.agents.claude_probe", "WARNING"
+                ) as logs:
+                    await self.probe(actions)
+                (line,) = self.failure_lines(logs)
+                self.assertIn(expected, line)
+                for hidden in ("secret words", "PAW_PROBE_OK", "Hello", TOKEN):
+                    self.assertNotIn(hidden, line)
+
+    async def test_a_refused_stream_says_so(self):
+        with self.assertLogs("paw_backend.agents.claude_probe", "WARNING") as logs:
+            await self.probe(GOOD, init_tools=["Bash"])
+        (line,) = self.failure_lines(logs)
+        self.assertIn("failure=invalid_response why=refused", line)
+
+    async def test_connected_expired_and_rate_limited_log_no_failure(self):
+        error_result = {
+            "result": {
+                "subtype": "error_during_execution",
+                "is_error": True,
+                "modelUsage": {"m": {"inputTokens": 5, "outputTokens": 1}},
+            }
+        }
+        for actions in (
+            GOOD,
+            [{"retry": "authentication_failed"}, {"sleep": 30}],
+            [{"retry": "rate_limit"}, error_result],
+        ):
+            with self.subTest(actions=actions):
+                with self.assertNoLogs("paw_backend.agents.claude_probe", "WARNING"):
+                    await self.probe(actions)
+
+
 class FallbackTest(ProbeCase):
     """#325, Decision 0102, 3: a probe whose configured model was refused is
     ``unavailable`` with ``model_fallback`` (never ``connected``, and never

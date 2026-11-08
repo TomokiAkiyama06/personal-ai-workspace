@@ -301,6 +301,7 @@ class CodexStream:
         self._input = 0
         self._output = 0
         self._error: str | None = None
+        self._http_status: int | None = None
         self.thread_id: str | None = None
         self.initialized = False
         self.reported = False
@@ -334,6 +335,14 @@ class CodexStream:
         """The last unretried ``error``'s ``codexErrorInfo`` (``unknown``
         when it named none), or ``None``."""
         return self._error
+
+    @property
+    def http_status(self) -> int | None:
+        """The HTTP status the last unretried ``error`` (or the failed turn's
+        error) named in its ``codexErrorInfo`` (``httpStatusCode``), or
+        ``None``: for the probe's log line (issue #342). Nothing else of the
+        error (its message, ``additionalDetails``) is kept."""
+        return self._http_status
 
     @property
     def totals(self) -> tuple[int, int]:
@@ -384,6 +393,7 @@ class CodexStream:
         if method == "error":
             if params.get("willRetry") is not True:
                 self._error = _error_info(params.get("error")) or "unknown"
+                self._http_status = _http_status(params.get("error"))
             return None
         if method == "turn/completed":
             turn = params.get("turn")
@@ -392,6 +402,8 @@ class CodexStream:
             status = turn.get("status")
             status = status if isinstance(status, str) else "unknown"
             error = _error_info(turn.get("error")) or self._error
+            if isinstance(turn.get("error"), dict):
+                self._http_status = _http_status(turn["error"])
             if status != "completed" and error is None:
                 error = "unknown"
             return Ended(status, error)
@@ -496,6 +508,22 @@ def _count(value: object) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         return None
     return value
+
+
+def _http_status(error: object) -> int | None:
+    """The ``httpStatusCode`` of a ``TurnError``'s ``codexErrorInfo`` variant
+    with fields (``{"responseStreamFailed": {"httpStatusCode": 502}}``), or
+    ``None``."""
+    if not isinstance(error, dict):
+        return None
+    info = error.get("codexErrorInfo")
+    if not isinstance(info, dict) or len(info) != 1:
+        return None
+    (fields,) = info.values()
+    status = fields.get("httpStatusCode") if isinstance(fields, dict) else None
+    if isinstance(status, bool) or not isinstance(status, int):
+        return None
+    return status if 100 <= status <= 599 else None
 
 
 def _error_info(error: object) -> str | None:

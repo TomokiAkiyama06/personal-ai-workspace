@@ -111,9 +111,11 @@ class Fallback:
 
 @dataclass(frozen=True, slots=True)
 class Retry:
-    """An ``api_retry`` event's category."""
+    """An ``api_retry`` event's category and its HTTP status (``error_status``,
+    ``None`` when it named none)."""
 
     error: str
+    status: int | None = None
 
 
 def paw_tool_names(tool_names: Iterable[str]) -> frozenset[str]:
@@ -178,7 +180,14 @@ class ClaudeStream:
                 self.initialized = True
             elif subtype == "api_retry":
                 error = message.get("error")
-                return Retry(error if isinstance(error, str) else "unknown")
+                status = message.get("error_status")
+                if (
+                    isinstance(status, bool)
+                    or not isinstance(status, int)
+                    or not 100 <= status <= 599
+                ):
+                    status = None
+                return Retry(error if isinstance(error, str) else "unknown", status)
             elif subtype == "model_refusal_fallback":
                 self._fallback(
                     message.get("original_model"), message.get("fallback_model")

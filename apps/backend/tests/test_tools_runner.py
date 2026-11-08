@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from paw_backend.authz import SystemRole
+from paw_backend.sandbox.spec import SandboxUnavailableError
 from paw_backend.tools import (
     ApprovalOutcome,
     BrokerReason,
@@ -13,6 +14,7 @@ from paw_backend.tools import (
     Verdict,
 )
 from paw_backend.tools.credentials import MAX_RESULT_NODES
+from paw_backend.tools.deadline import time_left
 from paw_backend.tools.runner import DEFAULT_EXECUTION_TIMEOUT
 
 from .authz_support import SECRET, FailingSink, principal
@@ -164,6 +166,37 @@ class ExecutorFailureTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(SECRET, everything)
         self.assertNotIn(GITHUB_TOKEN, everything)
         self.assertIn("RuntimeError", "\n".join(logs.output))
+
+    async def test_a_sandbox_failure_logs_its_fixed_reason_as_a_warning(self):
+        # Issue #346: the reason code beside the class name, never the message.
+        error = SandboxUnavailableError("ssh_unavailable")
+        error.args = (f"/home/bob/{SECRET}",)
+        h = Harness(executor=FakeExecutor(error=error))
+        with self.assertLogs("paw_backend.tools.runner", "WARNING") as logs:
+            outcome = await h.runner.run(make_call("repo.read_file", READ))
+        self.assertEqual(outcome.error_type, "SandboxUnavailableError")
+        self.assertEqual(
+            [record.levelname for record in logs.records], ["WARNING"], logs.output
+        )
+        self.assertIn("SandboxUnavailableError: ssh_unavailable", logs.output[0])
+        self.assertIn("repo.read_file", logs.output[0])
+        self.assertNotIn(SECRET, logs.output[0])
+        self.assertNotIn("/home/bob", logs.output[0])
+
+    async def test_the_call_says_its_deadline_to_the_executor(self):
+        seen = []
+
+        class Reading:
+            async def execute(self, invocation):
+                seen.append(time_left())
+                return {"ok": True}
+
+        h = Harness()
+        runner = ToolRunner(h.broker, Reading(), execution_timeout=120)
+        await runner.run(make_call("repo.read_file", READ))
+        self.assertEqual(len(seen), 1)
+        self.assertTrue(110 < seen[0] <= 120, seen)
+        self.assertIsNone(time_left())
 
     async def test_a_failed_call_is_audited_and_still_charged(self):
         h = Harness(executor=FakeExecutor(error=OSError("disk gone")))

@@ -12,14 +12,17 @@ import json
 import os
 import shlex
 import sys
+import tempfile
 import time
 import unittest
 import uuid
 
 from paw_backend.repositories.paths import LinuxAccount
+from paw_backend.repositories.ssh import ssh_never_connected
 from paw_backend.sandbox.runner import (
     LocalWrapperSandboxRunner,
     ProcessResult,
+    SshSandboxRunner,
     _WrapperRunner,
     run_process,
 )
@@ -198,6 +201,117 @@ class RunnerAnswerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(caught.exception.reason, "identity_mismatch")
         with self.assertRaises(ValueError):
             LocalWrapperSandboxRunner("relative/wrapper")
+
+
+class _Keys:
+    def __init__(self, path):
+        self.path = path
+
+    async def key_path_of(self, account):
+        return self.path
+
+
+_FAKE_SSH = """#!{python}
+import sys
+sys.stdout.write({stdout!r})
+sys.stderr.write({stderr!r})
+sys.exit({code})
+"""
+
+#: What OpenSSH (``LogLevel=ERROR``) prints when it never connected.
+TIMED_OUT = b"ssh: connect to host 127.0.0.1 port 22: Connection timed out\r\n"
+BANNER = (
+    b"Connection timed out during banner exchange\r\n"
+    b"Connection to 127.0.0.1 port 22 timed out\r\n"
+)
+CLOSED = (
+    b"kex_exchange_identification: Connection closed by remote host\r\n"
+    b"Connection closed by 127.0.0.1 port 22\r\n"
+)
+
+
+class NeverConnectedTest(unittest.TestCase):
+    """Issue #346: only ``ssh``'s own lines of a connection never established
+    say that the remote command did not run."""
+
+    def test_the_lines_of_a_connection_never_established(self):
+        for stderr in (
+            TIMED_OUT,
+            BANNER,
+            CLOSED,
+            b"ssh: connect to host 127.0.0.1 port 22: Connection refused\n",
+            b"kex_exchange_identification: read: Connection reset by peer\n"
+            b"Connection reset by 127.0.0.1 port 22\n",
+        ):
+            self.assertTrue(ssh_never_connected(b"", stderr), stderr)
+
+    def test_anything_else_may_have_run(self):
+        for stdout, stderr in (
+            (b"", b""),
+            (b"partial output", TIMED_OUT),  # the command printed something
+            (b"", b"make: error\n" + TIMED_OUT),
+            (b"", TIMED_OUT + b"more\n"),
+            # Alone, these are also printed when a session is lost.
+            (b"", b"Connection closed by 127.0.0.1 port 22\n"),
+            (b"", b"Connection reset by 127.0.0.1 port 22\n"),
+            (b"", b"Connection to 127.0.0.1 closed by remote host.\n"),
+            (b"", b"Permission denied (publickey).\n"),
+            (b"", b"\xff" + TIMED_OUT),
+            (b"", TIMED_OUT * 200),
+        ):
+            self.assertFalse(ssh_never_connected(stdout, stderr), (stdout, stderr))
+
+
+class SshSandboxRunnerTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+
+    def runner(self, stdout: bytes, stderr: bytes, code: int) -> SshSandboxRunner:
+        path = os.path.join(self.directory.name, f"ssh-{uuid.uuid4().hex}")
+        with open(path, "w") as handle:
+            handle.write(
+                _FAKE_SSH.format(
+                    python=sys.executable,
+                    stdout=stdout.decode(),
+                    stderr=stderr.decode(),
+                    code=code,
+                )
+            )
+        os.chmod(path, 0o700)
+        return SshSandboxRunner(_Keys("/keys/alice"), ssh_executable=path)
+
+    async def test_a_connection_never_established_did_not_run(self):
+        runner = self.runner(b"", TIMED_OUT, 255)
+        command = SandboxCommand(CommandKind.SHELL, "/workspace", "touch x")
+        with self.assertRaises(SandboxUnavailableError) as caught:
+            await runner.exec(ACCOUNT, SANDBOX, command, timeout_s=30)
+        self.assertEqual(caught.exception.reason, "ssh_unavailable")
+        self.assertTrue(caught.exception.not_run)
+        with self.assertRaises(SandboxUnavailableError) as caught:
+            await self.runner(b"", BANNER, 255).start(ACCOUNT, SANDBOX, SPEC)
+        self.assertTrue(caught.exception.not_run)
+
+    async def test_any_other_255_may_have_run(self):
+        command = SandboxCommand(CommandKind.SHELL, "/workspace", "touch x")
+        for stdout, stderr in (
+            (b"", b"Connection to 127.0.0.1 closed by remote host.\n"),
+            (b"out", TIMED_OUT),
+            (b"", b""),
+        ):
+            with self.assertRaises(SandboxUnavailableError) as caught:
+                await self.runner(stdout, stderr, 255).exec(
+                    ACCOUNT, SANDBOX, command, timeout_s=30
+                )
+            self.assertEqual(caught.exception.reason, "ssh_unavailable")
+            self.assertFalse(caught.exception.not_run, stderr)
+        # Not 255: the wrapper answered; never "not run".
+        with self.assertRaises(SandboxUnavailableError) as caught:
+            await self.runner(b"", TIMED_OUT, 1).exec(
+                ACCOUNT, SANDBOX, command, timeout_s=30
+            )
+        self.assertEqual(caught.exception.reason, "exec_failed")
+        self.assertFalse(caught.exception.not_run)
 
 
 class ProcessTest(unittest.IsolatedAsyncioTestCase):
