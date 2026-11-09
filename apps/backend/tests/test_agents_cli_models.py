@@ -2,9 +2,11 @@
 10; approved 2026-11-08; issue #341). No database: the policy's store is a
 fake; the CLIs are the fakes of the runtime and probe tests.
 
-* the repository's verified pairs: ``(0.156.1, gpt-6-sol)`` and
-  ``(2.1.301, claude-opus-5-5)``; no hidden Codex model, no Claude alias; every
-  Codex version is one the version check runs;
+* the repository's verified pairs: ``(2.1.301, claude-opus-5-5)`` only (no
+  Codex pair: ``0.156.1 x gpt-6-sol`` failed its recorder smoke); no hidden
+  Codex model, no Claude alias; every Codex version is one the version check
+  runs. The rules and the gate are tested on a test pair of Codex
+  (``agent_models_support``);
 * the policy's rules: verified models only, at least one, no model twice,
   exactly one default, a short plain description;
 * the gate: without a policy the configured model is the only allowed one;
@@ -53,9 +55,11 @@ from . import test_agents_claude_cli as claude_cli
 from . import test_agents_claude_probe as claude_probe
 from . import test_agents_codex_cli as codex_cli
 from . import test_agents_codex_probe as codex_probe
+from .agent_models_support import TEST_CODEX_MODEL, verified_pairs_of
 from .test_runtime_config_cloud import decision_text, load
 
 CODEX, CLAUDE = ConnectionKind.CODEX, ConnectionKind.CLAUDE
+MODEL = TEST_CODEX_MODEL
 RELAY = ("python3", "-I", "/opt/paw/paw_mcp_relay.py")
 
 
@@ -104,15 +108,21 @@ class VerifiedTest(unittest.TestCase):
         self.assertEqual(
             dict(VERIFIED_MODELS),
             {
-                CODEX: frozenset({("0.156.1", "gpt-6-sol")}),
+                CODEX: frozenset(),
                 CLAUDE: frozenset({("2.1.301", "claude-opus-5-5")}),
             },
         )
-        self.assertTrue(is_verified(CODEX, "0.156.1", "gpt-6-sol"))
-        self.assertFalse(is_verified(CODEX, "0.162.1", "gpt-6-sol"))
-        self.assertFalse(is_verified(CLAUDE, "2.1.301", "gpt-6-sol"))
+        self.assertTrue(is_verified(CLAUDE, "2.1.301", "claude-opus-5-5"))
+        self.assertFalse(is_verified(CLAUDE, "2.1.316", "claude-opus-5-5"))
         self.assertFalse(is_verified(CLAUDE, None, "claude-opus-5-5"))
-        self.assertEqual(verified_versions(CODEX, "gpt-6-sol"), ("0.156.1",))
+        self.assertEqual(verified_versions(CLAUDE, "claude-opus-5-5"), ("2.1.301",))
+
+    def test_gpt_6_sol_is_not_verified(self):
+        # Its recorder smoke on 0.156.1 offered tools outside ``tools``
+        # (``additional_tools``: ``exec``, ``spawn_agent``, ...): not a pair.
+        self.assertFalse(is_verified(CODEX, "0.156.1", "gpt-6-sol"))
+        with self.assertRaises(ModelNotVerifiedError):
+            check_policy(CODEX, [AllowedModel("gpt-6-sol", True)])
 
     def test_no_hidden_codex_model_and_no_claude_alias(self):
         codex = verified_models(CODEX)
@@ -131,13 +141,17 @@ class VerifiedTest(unittest.TestCase):
 
 
 class PolicyRulesTest(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(verified_pairs_of())
+
     def test_a_good_policy(self):
-        checked = check_policy(CODEX, [AllowedModel("gpt-6-sol", True, "Coding")])
-        self.assertEqual(checked, (AllowedModel("gpt-6-sol", True, "Coding"),))
+        checked = check_policy(CODEX, [AllowedModel(MODEL, True, "Coding")])
+        self.assertEqual(checked, (AllowedModel(MODEL, True, "Coding"),))
 
     def test_a_model_the_repository_has_not_verified(self):
         for models in (
             [AllowedModel("gpt-6-astra", True)],  # not yet smoke-tested
+            [AllowedModel("gpt-6-sol", True)],  # its smoke failed
             [AllowedModel("gpt-5.4", True)],  # hidden
             [AllowedModel("claude-opus-5-5", True)],  # the other kind's
         ):
@@ -147,34 +161,37 @@ class PolicyRulesTest(unittest.TestCase):
             check_policy(CLAUDE, [AllowedModel("opus", True)])
 
     def test_exactly_one_default_and_the_other_rules(self):
-        sol = AllowedModel("gpt-6-sol", True)
+        sol = AllowedModel(MODEL, True)
         for name, kind, models in (
-            ("no default", CODEX, [AllowedModel("gpt-6-sol", False)]),
+            ("no default", CODEX, [AllowedModel(MODEL, False)]),
             ("two defaults", CLAUDE,
              [AllowedModel("claude-opus-5-5", True),
               AllowedModel("claude-opus-5-6", True)]),
             ("no model", CODEX, []),
-            ("twice", CODEX, [sol, AllowedModel("gpt-6-sol", False)]),
+            ("twice", CODEX, [sol, AllowedModel(MODEL, False)]),
             ("not a model", CODEX, [AllowedModel("gpt 6", True)]),
             ("not a kind", "codex", [sol]),
             ("not a list", CODEX, sol),
             ("a control character", CODEX,
-             [AllowedModel("gpt-6-sol", True, "a\nb")]),
-            ("an empty description", CODEX, [AllowedModel("gpt-6-sol", True, "")]),
+             [AllowedModel(MODEL, True, "a\nb")]),
+            ("an empty description", CODEX, [AllowedModel(MODEL, True, "")]),
             ("a long description", CODEX,
-             [AllowedModel("gpt-6-sol", True, "d" * 121)]),
-            ("spaces around", CODEX, [AllowedModel("gpt-6-sol", True, " x")]),
+             [AllowedModel(MODEL, True, "d" * 121)]),
+            ("spaces around", CODEX, [AllowedModel(MODEL, True, " x")]),
         ):  # fmt: skip
             with self.subTest(name), self.assertRaises(InvalidModelPolicyError):
                 check_policy(kind, models)
 
 
 class GateTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.enterContext(verified_pairs_of())
+
     async def test_without_a_policy_the_configured_model_only(self):
-        gate = AgentModelGate({CODEX: "gpt-6-sol"}, Store())
-        self.assertTrue(await gate.allows(CODEX, "gpt-6-sol"))
+        gate = AgentModelGate({CODEX: MODEL}, Store())
+        self.assertTrue(await gate.allows(CODEX, MODEL))
         self.assertFalse(await gate.allows(CLAUDE, "claude-opus-5-5"))
-        self.assertEqual(await gate.default_model(CODEX), "gpt-6-sol")
+        self.assertEqual(await gate.default_model(CODEX), MODEL)
         self.assertIsNone(await gate.default_model(CLAUDE))
         no_store = AgentModelGate({CLAUDE: "claude-opus-5-5"})
         self.assertTrue(await no_store.allows(CLAUDE, "claude-opus-5-5"))
@@ -198,15 +215,15 @@ class GateTest(unittest.IsolatedAsyncioTestCase):
     async def test_a_policy_model_that_is_no_longer_verified(self):
         # A release dropped the pair: the stored policy does not let it out.
         stale = KindPolicy(CODEX, (AllowedModel("gpt-6-astra", True),))
-        gate = AgentModelGate({CODEX: "gpt-6-sol"}, Store({CODEX: stale}))
+        gate = AgentModelGate({CODEX: MODEL}, Store({CODEX: stale}))
         self.assertFalse(await gate.allows(CODEX, "gpt-6-astra"))
-        self.assertFalse(await gate.allows(CODEX, "gpt-6-sol"))
+        self.assertFalse(await gate.allows(CODEX, MODEL))
         self.assertIsNone(await gate.default_model(CODEX))
 
     async def test_an_unreadable_policy_raises(self):
-        gate = AgentModelGate({CODEX: "gpt-6-sol"}, Store(error=TimeoutError()))
+        gate = AgentModelGate({CODEX: MODEL}, Store(error=TimeoutError()))
         with self.assertRaises(TimeoutError):
-            await gate.allows(CODEX, "gpt-6-sol")
+            await gate.allows(CODEX, MODEL)
 
 
 class ClaudeStreamPairTest(unittest.TestCase):

@@ -10,23 +10,30 @@ what an alias names changes with the CLI and the provider).
 
 A pair is added by a code PR (merged by the Human) that records its evidence:
 for Codex, the recorder smoke's ``tools`` check (Decision 0101) and the health
-probe (Decision 0100) on that version and model; for Claude, the probe and the
-``system/init`` tool check (Decision 0100, 2). The hidden Codex models
-(``gpt-5.4``, ``codex-auto-review``, ``gpt-daybreak-*``) are never listed.
+probe (Decision 0100) on that version and model (production's sessions do not
+replace the smoke: they check what the CLI does, not what it offers); for
+Claude, the probe and the ``system/init`` tool check (Decision 0100, 2).
+The hidden Codex models (``gpt-5.4``, ``codex-auto-review``,
+``gpt-daybreak-*``) are never listed.
 
-The pairs listed, with their evidence (production, 2026-11-05 to 2026-11-08):
+The pairs listed, with their evidence:
 
-* Codex ``0.156.1`` x ``gpt-6-sol``: the Codex connection's health probe
-  ``connected`` (2026-11-08 16:10, 4084 input / 9 output tokens, one model
-  call), and node sessions of task ``516904fd`` (2026-11-08 16:31) whose
-  per-session tool check (Decision 0101: every request's ``tools`` the PAW
-  tools and the three exceptions, fail closed) passed;
 * Claude ``2.1.301`` x ``claude-opus-5-5``: the Claude connection's health
-  probe ``connected`` (2026-11-05 15:24, no fallback) and the planner and
-  reviewer sessions of the same task, whose ``system/init`` tool check passed.
+  probe ``connected`` in production (2026-11-05 15:24, no fallback) and the
+  planner and reviewer sessions of task ``516904fd`` (2026-11-08 16:31), whose
+  ``system/init`` tool check passed (the image of ``/etc/paw/cli-session.toml``,
+  Claude Code 2.1.301 since 2026-10-16).
 
-``gpt-6-astra`` and ``gpt-6-luna`` (the Human's answer 2) are added once their
-own smoke passed (the Decision's "PR の分け方" 5).
+No Codex pair is listed. The recorder smoke of codex-cli ``0.156.1`` with
+``gpt-6-sol`` (``smoke_codex_recorder.py --model gpt-6-sol``, 2026-11-08) did
+not pass: the model's requests carry no ``tools``; the tools come in an
+``additional_tools`` input item instead, and it offers, besides the PAW
+``submit``, the built-in ``exec``, ``wait`` and ``request_user_input_async``
+and the ``collaboration`` tools (``spawn_agent`` and others), which Decision
+0101 does not allow (the probe's run offers them too). A pair is added once
+its smoke passes (after a Decision on that request form: Decision 0103, "Human
+に確かめてほしいこと" 1). ``gpt-6-astra`` and ``gpt-6-luna`` (the Human's
+answer 2) wait for their own smoke the same way.
 """
 
 from collections.abc import Mapping
@@ -39,7 +46,7 @@ from paw_backend.connections.domain import ConnectionKind
 VERIFIED_MODELS: Final[Mapping[ConnectionKind, frozenset[tuple[str, str]]]] = (
     MappingProxyType(
         {
-            ConnectionKind.CODEX: frozenset({("0.156.1", "gpt-6-sol")}),
+            ConnectionKind.CODEX: frozenset(),
             ConnectionKind.CLAUDE: frozenset({("2.1.301", "claude-opus-5-5")}),
         }
     )

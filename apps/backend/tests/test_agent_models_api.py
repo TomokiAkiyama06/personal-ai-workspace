@@ -19,19 +19,27 @@ from unittest.mock import patch
 from paw_backend.agent_models import AgentModelPolicyStore, AgentModelService
 from paw_backend.connections import ConnectionKind
 
+from .agent_models_support import TEST_CODEX_MODEL, verified_pairs_of
 from .auth_http_support import HttpTestCase, error_code, requires_postgres
 from .test_connections_probe_api import HeldProbe, ProbeHttpCase
 
 PATH = "/api/v1/admin/agent-models"
 CODEX, CLAUDE = ConnectionKind.CODEX, ConnectionKind.CLAUDE
-SOL = {"model": "gpt-6-sol", "default": True, "description": "Coding"}
+# No Codex pair is verified in the code yet: the tests run on a test pair
+# (``agent_models_support``); ``ShippedPairsTest`` runs on the shipped ones.
+MODEL = TEST_CODEX_MODEL
+SOL = {"model": MODEL, "default": True, "description": "Coding"}
 
 
 class AgentModelsCase(HttpTestCase):
-    configured = {CODEX: "gpt-6-sol", CLAUDE: "claude-opus-5-5"}
+    configured = {CODEX: MODEL, CLAUDE: "claude-opus-5-5"}
+
+    shipped_pairs = False
 
     def setUp(self) -> None:
         super().setUp()
+        if not self.shipped_pairs:
+            self.enterContext(verified_pairs_of())
         with self.engine.begin() as connection:
             connection.exec_driver_sql("TRUNCATE agent_model_policies")
             connection.exec_driver_sql("TRUNCATE agent_model_policy_changes")
@@ -76,12 +84,10 @@ class ReadTest(AgentModelsCase):
             {
                 "kind": "codex",
                 "source": "configuration",
-                "models": [
-                    {"model": "gpt-6-sol", "default": True, "description": None}
-                ],
-                "default_model": "gpt-6-sol",
-                "configured_model": "gpt-6-sol",
-                "candidates": [{"model": "gpt-6-sol", "versions": ["0.156.1"]}],
+                "models": [{"model": MODEL, "default": True, "description": None}],
+                "default_model": MODEL,
+                "configured_model": MODEL,
+                "candidates": [{"model": MODEL, "versions": ["0.156.1"]}],
                 "updated_at": None,
             },
         )
@@ -107,13 +113,13 @@ class UpdateTest(AgentModelsCase):
         # The kind it did not name keeps the configuration's model.
         self.assertEqual(kinds["claude"]["source"], "configuration")
         self.assertEqual(
-            self.stored(), [("codex", "gpt-6-sol", True, "Coding", self.admin_id)]
+            self.stored(), [("codex", MODEL, True, "Coding", self.admin_id)]
         )
         (change,) = self.rows(
             "SELECT change_id, kind, model, is_default, changed_by"
             " FROM agent_model_policy_changes"
         )
-        self.assertEqual(change[1:], ("codex", "gpt-6-sol", True, self.admin_id))
+        self.assertEqual(change[1:], ("codex", MODEL, True, self.admin_id))
         (event,) = [
             r for r in self.audit_rows() if r.action == "admin.agent_models.update"
         ]
@@ -121,13 +127,13 @@ class UpdateTest(AgentModelsCase):
             (event.decision, event.reason, event.actor_id, event.correlation_id),
             ("allow", "succeeded", self.admin_id, change.change_id),
         )
-        self.assertNotIn("gpt-6-sol", str(tuple(event)))
+        self.assertNotIn(MODEL, str(tuple(event)))
         listed = self.kinds(self.call("GET", PATH, token=self.admin))
         self.assertEqual(listed["codex"]["models"], [SOL])
 
     def test_a_model_outside_the_verified_ones_is_refused(self):
         self.fake_passkey_step_up(self.admin)
-        for model in ("gpt-6-astra", "gpt-5.4", "claude-opus-5-5"):
+        for model in ("gpt-6-sol", "gpt-6-astra", "gpt-5.4", "claude-opus-5-5"):
             with self.subTest(model):
                 response = self.put(
                     {"kind": "codex", "models": [{"model": model, "default": True}]}
@@ -145,7 +151,7 @@ class UpdateTest(AgentModelsCase):
     def test_exactly_one_default_per_kind(self):
         self.fake_passkey_step_up(self.admin)
         for name, body in {
-            "no default": [{"kind": "codex", "models": [{"model": "gpt-6-sol"}]}],
+            "no default": [{"kind": "codex", "models": [{"model": MODEL}]}],
             "twice": [{"kind": "codex", "models": [SOL, SOL]}],
             "no model": [{"kind": "codex", "models": []}],
             "a kind twice": [{"kind": "codex", "models": [SOL]},
@@ -199,7 +205,7 @@ class UpdateTest(AgentModelsCase):
         self.kinds(self.put({"kind": "codex", "models": [SOL]}))
         kinds = self.kinds(
             self.put(
-                {"kind": "codex", "models": [{"model": "gpt-6-sol", "default": True}]},
+                {"kind": "codex", "models": [{"model": MODEL, "default": True}]},
                 {"kind": "claude",
                  "models": [{"model": "claude-opus-5-5", "default": True}]},
             )
@@ -207,10 +213,34 @@ class UpdateTest(AgentModelsCase):
         self.assertEqual(kinds["codex"]["models"][0]["description"], None)
         self.assertEqual(
             [row[:3] for row in self.stored()],
-            [("claude", "claude-opus-5-5", True), ("codex", "gpt-6-sol", True)],
+            [("claude", "claude-opus-5-5", True), ("codex", MODEL, True)],
         )
         changes = self.rows("SELECT DISTINCT change_id FROM agent_model_policy_changes")
         self.assertEqual(len(changes), 2)
+
+
+@requires_postgres
+class ShippedPairsTest(AgentModelsCase):
+    shipped_pairs = True
+
+    def test_gpt_6_sol_is_not_verified_and_codex_has_no_candidate(self):
+        # Its recorder smoke on 0.156.1 failed (``agent_models/verified.py``).
+        self.fake_passkey_step_up(self.admin)
+        response = self.put(
+            {"kind": "codex", "models": [{"model": "gpt-6-sol", "default": True}]}
+        )
+        self.assertEqual(
+            (response.status_code, error_code(response)), (422, "model_not_verified")
+        )
+        kinds = self.kinds(self.call("GET", PATH, token=self.admin))
+        self.assertEqual(kinds["codex"]["candidates"], [])
+        claude = self.put(
+            {
+                "kind": "claude",
+                "models": [{"model": "claude-opus-5-5", "default": True}],
+            }
+        )
+        self.assertEqual(claude.status_code, 200, claude.text)
 
 
 @requires_postgres

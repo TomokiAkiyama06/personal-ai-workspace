@@ -62,10 +62,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from paw_backend.agent_models import (
-    VERIFIED_MODELS,
     AgentModelGate,
     AgentModelPolicyStore,
     verified_models,
+    verified_pairs,
 )
 from paw_backend.agents.claude_cli import ClaudeCliRuntime, ClaudeSessionAdapter
 from paw_backend.agents.claude_probe import ClaudeProbeAdapter
@@ -224,7 +224,7 @@ def build_cli_services(
             launcher,
             executable=CLAUDE_EXECUTABLE,
             proxy_url=EGRESS_PROXY_URL,
-            verified_models=VERIFIED_MODELS[ConnectionKind.CLAUDE],
+            verified_models=verified_pairs(ConnectionKind.CLAUDE),
         )
     if "codex" in used:
         adapters[ConnectionKind.CODEX] = CodexSessionAdapter(
@@ -232,7 +232,7 @@ def build_cli_services(
             credentials=CodexAuthFile(),
             executable=CODEX_EXECUTABLE,
             proxy_url=EGRESS_PROXY_URL,
-            verified_models=VERIFIED_MODELS[ConnectionKind.CODEX],
+            verified_models=verified_pairs(ConnectionKind.CODEX),
         )
     probes = AdapterRegistry()
     for probe in build_probe_adapters(setup, launcher=launcher, models=models):
@@ -319,7 +319,7 @@ def build_probe_adapters(
                 session_base=Path(claude.session_base),
                 executable=CLAUDE_EXECUTABLE,
                 proxy_url=EGRESS_PROXY_URL,
-                verified_models=VERIFIED_MODELS[ConnectionKind.CLAUDE],
+                verified_models=verified_pairs(ConnectionKind.CLAUDE),
                 models=models,
             )
         )
@@ -332,7 +332,7 @@ def build_probe_adapters(
                 credentials=CodexAuthFile(),
                 executable=CODEX_EXECUTABLE,
                 proxy_url=EGRESS_PROXY_URL,
-                verified_models=VERIFIED_MODELS[ConnectionKind.CODEX],
+                verified_models=verified_pairs(ConnectionKind.CODEX),
                 models=models,
             )
         )
