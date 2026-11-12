@@ -66,6 +66,7 @@ sub-command allowlist or the working directory). This module only has to be a
 """
 
 import asyncio
+import logging
 import os
 import re
 import shlex
@@ -97,7 +98,10 @@ from paw_backend.repositories.limits import (
     MAX_SSH_CONNECT_TIMEOUT_S,
 )
 from paw_backend.repositories.paths import LinuxAccount
+from paw_backend.tools.deadline import time_left
 from paw_backend.tools.scope import TargetError, normalise_host, normalise_path
+
+logger = logging.getLogger(__name__)
 
 #: The first word of every remote command: a wrapper that does not recognise it
 #: (an older or newer protocol version) must refuse rather than guess.
@@ -112,6 +116,12 @@ DIRECTORY_TAG = "paw-dir/v1"
 #: or is locked); every other code (0-254) is the remote command's own exit
 #: status and must never be treated as a transport failure.
 SSH_TRANSPORT_FAILURE_CODE = 255
+
+#: A call whose ``ssh`` surely never connected is tried once more only while
+#: the running tool call's deadline (``paw_backend.tools.deadline``) leaves
+#: this much: the same margin as the sandbox pool's ``RETRY_MIN_SECONDS``
+#: (issue #346), which this module cannot import (the sandbox imports it).
+RETRY_MIN_SECONDS = 30.0
 
 # What ``ssh`` (``LogLevel=ERROR``) prints when it never got as far as the
 # remote command: the TCP connection or the identification (banner) exchange
@@ -162,6 +172,13 @@ def ssh_never_connected(stdout: bytes, stderr: bytes) -> bool:
         elif not _SSH_CONNECTION_FOLLOW_UP.fullmatch(line):
             return False
     return before
+
+
+def _never_connected(returncode: int, stdout: bytes, stderr: bytes) -> bool:
+    """``run_subprocess``'s ``never_ran`` check of an ``ssh`` call."""
+    return returncode == SSH_TRANSPORT_FAILURE_CODE and ssh_never_connected(
+        stdout, stderr
+    )
 
 
 #: The SSH wrapper's refusals (``deploy/ssh-git-wrapper``, Decision 0063, which
@@ -517,17 +534,43 @@ class SshGitRunner:
             account=account,
             remote_command=command,
         )
-        result = await run_subprocess(
-            argv,
-            env={"PATH": self._path},
-            cwd=None,
-            timeout_s=timeout_s,
-            max_output_bytes=self._max_output,
-            log_name=name,
+        for attempt in (1, 2):
+            result = await run_subprocess(
+                argv,
+                env={"PATH": self._path},
+                cwd=None,
+                timeout_s=timeout_s,
+                max_output_bytes=self._max_output,
+                log_name=name,
+                never_ran=_never_connected,
+            )
+            if result.returncode != SSH_TRANSPORT_FAILURE_CODE:
+                return result
+            # Tried once more only when ``ssh`` surely never connected: the
+            # remote command (a read or a write alike) never started, so
+            # running it again cannot run it twice (issue #346). A 255 that
+            # may have reached the wrapper is never repeated.
+            if not result.not_run or not _may_retry(name, attempt):
+                break
+        raise GitCommandError(name, GitFailure.SSH_UNAVAILABLE)
+
+
+def _may_retry(name: str, attempt: int) -> bool:
+    """Whether a call that never connected on its ``attempt`` is tried once
+    more: only after the first, and only while the tool call's deadline leaves
+    :data:`RETRY_MIN_SECONDS` (nothing here extends it). Logged with the
+    sub-command name only: no argument, path or ``ssh`` output."""
+    if attempt != 1:
+        logger.warning("git %s over ssh did not connect again; giving up", name)
+        return False
+    left = time_left()
+    if left is not None and left < RETRY_MIN_SECONDS:
+        logger.warning(
+            "git %s over ssh did not connect; no time left to try again", name
         )
-        if result.returncode == SSH_TRANSPORT_FAILURE_CODE:
-            raise GitCommandError(name, GitFailure.SSH_UNAVAILABLE)
-        return result
+        return False
+    logger.warning("git %s over ssh did not connect; trying once more", name)
+    return True
 
 
 #: What ``paw-dir/v1`` answers with exit status 1: the problem of the path, one
