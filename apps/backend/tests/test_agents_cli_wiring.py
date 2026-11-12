@@ -50,6 +50,7 @@ from paw_backend.orchestrator.gateway import QueueLeaseVerifier
 from paw_backend.projects import ProjectStateGate
 from paw_backend.tasks.queueing import BudgetTracker, TaskQueue
 
+from .agent_models_support import verified_pairs_of
 from .orchestrator_support import FakeRuntime
 from .support import FakeDatabase, make_settings
 from .test_scratch_janitor_lifespan import configured
@@ -72,6 +73,19 @@ ASSIGNMENT = {
     NodeRole.REVIEWER: RoleAssignment(("claude", "codex"), None),
     NodeRole.PLANNER: RoleAssignment(("local",), "local"),
 }
+
+
+def setUpModule() -> None:
+    # Decision 0103, 10 A, 2: a section's model must be a verified one for
+    # its probe to be built; these are the fixture's.
+    patcher = verified_pairs_of(
+        {
+            ConnectionKind.CLAUDE: frozenset({("2.1.301", "claude-opus-4-1")}),
+            ConnectionKind.CODEX: frozenset({("0.156.1", "gpt-5-codex")}),
+        }
+    )
+    patcher.start()
+    unittest.addModuleCleanup(patcher.stop)
 
 
 def decisions_config(ladders=LADDERS) -> OrchestratorConfig:

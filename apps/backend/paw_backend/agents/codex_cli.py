@@ -19,6 +19,10 @@ talks to it (``codex_app_server.py``):
 
 * a version that is not in the verified list sends nothing (a version is
   listed once its recorder smoke passed: Decision 0089, 2; Decision 0101, 4);
+  with the verified pairs (Decision 0103, 3 A and 4 A, 2), neither does a
+  version and model that are not one (checked on ``codex --version``'s
+  version before any login is placed, and again on ``initialize``'s before
+  ``thread/start``): the attempt is ``model_not_allowed``;
 * every growth of the thread's tokens is reported at once (``on_usage``); when
   the service answers ``False`` the CLI is stopped;
 * an item that can execute (or that the table does not know), a request from
@@ -291,6 +295,9 @@ class CodexAttachment:
     # without deleting this session's own row (Codex review of #291: taken
     # over meanwhile, or not known): the directory is the collection's.
     slot_lost: list[bool] = field(default_factory=list, repr=False)
+    # Set by the adapter when the CLI's version and the model are not a
+    # verified pair (Decision 0103, 4 A, 2): nothing was sent.
+    model_refused: list[bool] = field(default_factory=list, repr=False)
 
 
 def session_config(spec: CliSessionSpec, tools: Iterable[str]) -> str:
@@ -374,7 +381,9 @@ def _toml_value(value: object) -> str:
 class CodexSessionAdapter:
     """See the module. ``verified_versions``: the CLI versions that may run
     (:data:`~.codex_app_server.VERIFIED_VERSIONS` unless a test says
-    otherwise)."""
+    otherwise). ``verified_models``: the verified ``(version, model)`` pairs
+    (Decision 0103, 3 A: production's wiring passes the repository's;
+    ``None``: the version is the only check, as before it)."""
 
     kind = ConnectionKind.CODEX
     # One session per connection at a time (Decision 0083, 6): the ChatGPT
@@ -389,6 +398,7 @@ class CodexSessionAdapter:
         executable: tuple[str, ...] = ("codex",),
         proxy_url: str | None = None,
         verified_versions: frozenset[str] = VERIFIED_VERSIONS,
+        verified_models: frozenset[tuple[str, str]] | None = None,
         drain_seconds: float = DRAIN_SECONDS,
     ) -> None:
         require_async_method(launcher, "start", 1)
@@ -402,6 +412,7 @@ class CodexSessionAdapter:
         self._executable = executable
         self._proxy_url = proxy_url
         self._verified = frozenset(verified_versions)
+        self._pairs = None if verified_models is None else frozenset(verified_models)
         self._drain = float(drain_seconds)
 
     def __repr__(self) -> str:
@@ -409,6 +420,11 @@ class CodexSessionAdapter:
 
     def arguments(self) -> tuple[str, ...]:
         return (*self._executable, "app-server", "--listen", "stdio://")
+
+    def verified_pair(self, version: str, model: str) -> bool:
+        """Decision 0103, 3 A: ``(version, model)`` is a verified pair (always,
+        without the pairs)."""
+        return self._pairs is None or (version, model) in self._pairs
 
     def environment(self, attachment: CodexAttachment) -> dict[str, str]:
         env = {
@@ -455,6 +471,11 @@ class CodexSessionAdapter:
         version = await self._version(attachment)
         if version is None or version not in self._verified:
             logger.warning("Codex session refused: version")
+            return AgentSessionResult(failure=FailureCode.INVALID_RESPONSE)
+        if not self.verified_pair(version, request.model):
+            # Decision 0103, 4 A, 2: before any login is placed.
+            logger.warning("Codex session refused: model")
+            attachment.model_refused.append(True)
             return AgentSessionResult(failure=FailureCode.INVALID_RESPONSE)
         codex_home = attachment.spec.config_dir
         # Decision 0096, 2 B: the session is recorded on the connection's slot
@@ -592,6 +613,12 @@ class CodexSessionAdapter:
                     failure = FailureCode.INVALID_RESPONSE
                     break
                 if isinstance(item, Initialized):
+                    if not self.verified_pair(item.version, request.model):
+                        # Decision 0103, 4 A, 2: before ``thread/start``.
+                        logger.warning("Codex session refused: model")
+                        attachment.model_refused.append(True)
+                        failure = FailureCode.INVALID_RESPONSE
+                        break
                     await _send(process, notification("initialized"))
                     await _send(
                         process, thread_start(request.model, attachment.system_prompt)
@@ -797,7 +824,10 @@ def _write(path: Path, text: str) -> None:
 
 class CodexCliRuntime:
     """See the module. ``cloud_policy``: the deployment's ``CloudPolicy``
-    (``None``: every session is refused)."""
+    (``None``: every session is refused). ``models``: the gate of the CLI
+    agents' models (Decision 0103, 4 A, 2: ``AgentModelGate``): a model it
+    does not allow is ``model_not_allowed`` before anything is set up or sent
+    (``None``: no such check, as before it)."""
 
     def __init__(
         self,
@@ -808,15 +838,19 @@ class CodexCliRuntime:
         cloud_policy: object | None = None,
         limits: ToolkitLimits | None = None,
         node_seconds: float = 1800.0,
+        models: object | None = None,
     ) -> None:
         if not isinstance(model, str) or not model:
             raise ValueError("model")
         if node_seconds <= NODE_MARGIN_SECONDS:
             raise ValueError("node_seconds")
+        if models is not None:
+            require_async_method(models, "allows", 2)
         self._model = model
         self._base = Path(session_base)
         self._relay = tuple(relay_command)
         self._gate = CloudGate(cloud_policy)
+        self._models = models
         self._limits = limits
         self._timeout = float(node_seconds) - NODE_MARGIN_SECONDS
 
@@ -850,6 +884,13 @@ class CodexCliRuntime:
             return ErrorClassifier.outcome(
                 Failure.CLOUD_POLICY_DENIED, fallback=fallback
             )
+        if self._models is not None and (
+            await self._models.allows(ConnectionKind.CODEX, self._model) is not True
+        ):
+            # Decision 0103, 4 A, 2: before the gate and the placement's
+            # record; never another model in its place.
+            logger.warning("Codex session refused: model not allowed")
+            return ErrorClassifier.outcome(Failure.MODEL_NOT_ALLOWED)
         toolkit = NodeToolkit(assignment, self._limits)
         system, task = node_prompts(toolkit)
         spec = create_session(
@@ -921,6 +962,8 @@ class CodexCliRuntime:
             oom = _out_of_memory(bridge)
             if oom is not None:
                 return oom
+        if attachment.model_refused:
+            return ErrorClassifier.outcome(Failure.MODEL_NOT_ALLOWED)
         if bridge.failure is not None:
             return _ended(bridge.failure)
         if attachment.refused:

@@ -76,7 +76,11 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 from urllib.parse import urlsplit
 
-from paw_backend.agents.cli_wiring import CliAgentSetup, CliSetup
+from paw_backend.agents.cli_wiring import (
+    CliAgentSetup,
+    CliSetup,
+    configured_models_summary,
+)
 from paw_backend.agents.cloud_policy import CLI_AGENT_LABELS, CloudSettings
 from paw_backend.agents.wiring import (
     DEFAULT_AGENT_LABEL,
@@ -783,6 +787,9 @@ class _Parser:
         agents: dict[str, CliAgentSetup] = {}
         if "agents" in document:
             agents = self._agents(_table("agents", document["agents"]))
+            # Decision 0103, 10 A, 2: a model verified on no CLI version does
+            # not stop the start; that kind sends nothing, and the line says so.
+            parts.extend(configured_models_summary(agents))
 
         compute = None
         if "compute" in document:

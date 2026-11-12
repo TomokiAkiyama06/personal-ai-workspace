@@ -42,12 +42,31 @@ and in the HTTP layer's (``connections/wiring.py``), each built with
 store as its credential store (the write-back). Codex's probe on the HTTP
 layer's service is collected by that service's own collector (``app.py``'s
 ``build_codex_collection``) when its CLI could not be stopped.
+
+The models (Decision 0103, 4 A, 5 A, 9 A and 10; issue #341): the runtimes and
+the probes ask an :class:`~paw_backend.agent_models.AgentModelGate` (the
+runtime configuration's models and the Admin's policy in the database) before
+anything is sent: a runtime refuses a model the policy does not allow
+(``model_not_allowed``), a probe checks the policy's default model (the
+configuration's while no policy is stored). The session adapters and the
+probes are given the repository's verified pairs
+(:data:`~paw_backend.agent_models.VERIFIED_MODELS`) and refuse a pair of the
+CLI's version and the model that is not one of them. A kind whose configured
+model is verified on no version gets no probe (Decision 0103, 10 A, 2: the
+backend still starts; ``configured_models_summary`` says ``model: unverified``
+in the start-up line) and its runtime's every session is refused.
 """
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from paw_backend.agent_models import (
+    AgentModelGate,
+    AgentModelPolicyStore,
+    verified_models,
+    verified_pairs,
+)
 from paw_backend.agents.claude_cli import ClaudeCliRuntime, ClaudeSessionAdapter
 from paw_backend.agents.claude_probe import ClaudeProbeAdapter
 from paw_backend.agents.cli_session import CliLauncher, SystemdLauncher
@@ -116,6 +135,41 @@ class CliSetup:
             raise TypeError("agents must map a cli label to its CliAgentSetup")
 
 
+def configured_models(setup: CliSetup | None) -> dict[ConnectionKind, str]:
+    """The runtime configuration's model of each ``[agents.<name>]``."""
+    if setup is None:
+        return {}
+    return {ConnectionKind(label): agent.model for label, agent in setup.agents.items()}
+
+
+def configured_models_summary(agents: Mapping[str, CliAgentSetup]) -> tuple[str, ...]:
+    """The start-up line's parts of the ``[agents.<name>]`` sections (Decision
+    0103, 10 A, 2): whether each configured model is a verified one (no model
+    name, no path)."""
+    return tuple(
+        f"agents.{label}: model: "
+        + (
+            "verified"
+            if agent.model in verified_models(ConnectionKind(label))
+            else "unverified"
+        )
+        for label, agent in sorted(agents.items())
+    )
+
+
+def build_model_gate(
+    setup: CliSetup | None, database: Database | None, *, timeout_seconds: float
+) -> AgentModelGate:
+    """The gate of the configured models and the Admin's policy (none read
+    without a database)."""
+    store = (
+        AgentModelPolicyStore(database, timeout_seconds=timeout_seconds)
+        if database is not None
+        else None
+    )
+    return AgentModelGate(configured_models(setup), store)
+
+
 @dataclass(frozen=True, slots=True)
 class CliServices:
     """What :func:`build_cli_services` built (see the module)."""
@@ -164,9 +218,13 @@ def build_cli_services(
     )
     launcher = launcher if launcher is not None else SystemdLauncher()
     adapters = {}
+    models = build_model_gate(setup, database, timeout_seconds=database_timeout_seconds)
     if "claude" in used:
         adapters[ConnectionKind.CLAUDE] = ClaudeSessionAdapter(
-            launcher, executable=CLAUDE_EXECUTABLE, proxy_url=EGRESS_PROXY_URL
+            launcher,
+            executable=CLAUDE_EXECUTABLE,
+            proxy_url=EGRESS_PROXY_URL,
+            verified_models=verified_pairs(ConnectionKind.CLAUDE),
         )
     if "codex" in used:
         adapters[ConnectionKind.CODEX] = CodexSessionAdapter(
@@ -174,9 +232,10 @@ def build_cli_services(
             credentials=CodexAuthFile(),
             executable=CODEX_EXECUTABLE,
             proxy_url=EGRESS_PROXY_URL,
+            verified_models=verified_pairs(ConnectionKind.CODEX),
         )
     probes = AdapterRegistry()
-    for probe in build_probe_adapters(setup, launcher=launcher):
+    for probe in build_probe_adapters(setup, launcher=launcher, models=models):
         probes.register(probe)
     connections = ConnectionService(
         database,
@@ -211,6 +270,7 @@ def build_cli_services(
             relay_command=agent.relay_command,
             cloud_policy=policy,
             node_seconds=node_seconds,
+            models=models,
         )
     return CliServices(
         policy=policy,
@@ -223,19 +283,31 @@ def build_cli_services(
 
 
 def build_probe_adapters(
-    setup: CliSetup | None, *, launcher: CliLauncher | None = None
+    setup: CliSetup | None,
+    *,
+    launcher: CliLauncher | None = None,
+    models: AgentModelGate | None = None,
 ) -> tuple[ClaudeProbeAdapter | CodexProbeAdapter, ...]:
     """The connections' health probe adapters (Decision 0100, 4, 10 and 11):
     none without ``setup`` or with the cloud disabled (nothing is sent then);
     Claude's when ``[agents.claude]`` is written and Codex's when
     ``[agents.codex]`` is (each with its model and session directory), on
     production's launcher by default (Codex's through its interactive form,
-    ``SystemdCodexLauncher``)."""
+    ``SystemdCodexLauncher``). None for a section whose model is verified on
+    no CLI version (Decision 0103, 10 A, 2). Each checks the repository's
+    verified pairs; with ``models`` it checks the default model the gate
+    resolves (Decision 0103, 5 A) instead of the configured one."""
     if setup is None or setup.cloud.enabled is not True:
         return ()
     probes: list[ClaudeProbeAdapter | CodexProbeAdapter] = []
     claude = setup.agents.get("claude")
     codex = setup.agents.get("codex")
+    if claude is not None and claude.model not in verified_models(
+        ConnectionKind.CLAUDE
+    ):
+        claude = None
+    if codex is not None and codex.model not in verified_models(ConnectionKind.CODEX):
+        codex = None
     if claude is None and codex is None:
         return ()
     launcher = launcher if launcher is not None else SystemdLauncher()
@@ -247,6 +319,8 @@ def build_probe_adapters(
                 session_base=Path(claude.session_base),
                 executable=CLAUDE_EXECUTABLE,
                 proxy_url=EGRESS_PROXY_URL,
+                verified_models=verified_pairs(ConnectionKind.CLAUDE),
+                models=models,
             )
         )
     if codex is not None:
@@ -258,6 +332,8 @@ def build_probe_adapters(
                 credentials=CodexAuthFile(),
                 executable=CODEX_EXECUTABLE,
                 proxy_url=EGRESS_PROXY_URL,
+                verified_models=verified_pairs(ConnectionKind.CODEX),
+                models=models,
             )
         )
     return tuple(probes)
@@ -271,5 +347,8 @@ __all__ = [
     "CliServices",
     "CliSetup",
     "build_cli_services",
+    "build_model_gate",
     "build_probe_adapters",
+    "configured_models",
+    "configured_models_summary",
 ]

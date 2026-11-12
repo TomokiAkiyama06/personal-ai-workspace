@@ -382,6 +382,14 @@ Order (root, the human; the agent never does this):
    step 3's `[orchestrator]`; run `runtime-config-check` (it lists
    `cloud: enabled single_user`, `ladders=claude,codex,local` and `assignment: yes`), then
    `systemctl restart paw-backend.service`, still with `PAW_ORCHESTRATOR_WORKERS=0`.
+   The line also says `agents.claude: model: verified` / `agents.codex: model: verified`
+   (Decision 0103, 10): a `model` that is in no verified pair of the release
+   (`paw_backend/agent_models/verified.py`) says `model: unverified`; the backend still
+   starts, but that kind's stages and probe send nothing (`model_not_allowed`). After the
+   release, an Admin may allow other verified models and change the default without a
+   restart (`GET` / `PUT /api/v1/admin/agent-models`, Passkey Step-up; a new default
+   probes the connection once, trigger `policy`). While no policy is stored, `model` of
+   `runtime.toml` is the only allowed model, as before.
 6. With the human's go-ahead, `PAW_ORCHESTRATOR_WORKERS=1` and one small writing task:
    `agent_plan_calls` shows `cloud` / `claude`, the attempts' placements, the
    `orchestrator.cloud_send` rows of `audit_events` and `connection_usage`.

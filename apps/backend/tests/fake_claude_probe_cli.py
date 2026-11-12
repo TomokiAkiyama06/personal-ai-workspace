@@ -47,6 +47,12 @@ def main() -> int:
             "subtype": "init",
             "tools": scenario.get("init_tools", []),
             "mcp_servers": scenario.get("mcp_servers", []),
+            # Claude Code's version, when the scenario names one.
+            **(
+                {"claude_code_version": scenario["claude_code_version"]}
+                if "claude_code_version" in scenario
+                else {}
+            ),
         }
     )
     for action in scenario["actions"]:

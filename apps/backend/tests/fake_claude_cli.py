@@ -133,6 +133,12 @@ def main() -> int:
             "mcp_servers": scenario.get(
                 "mcp_servers", [{"name": "paw", "status": "connected"}]
             ),
+            # Claude Code's version, when the scenario names one.
+            **(
+                {"claude_code_version": scenario["claude_code_version"]}
+                if "claude_code_version" in scenario
+                else {}
+            ),
         }
     )
     code = run(scenario["actions"])

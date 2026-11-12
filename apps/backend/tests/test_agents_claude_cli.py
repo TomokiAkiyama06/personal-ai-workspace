@@ -97,10 +97,16 @@ class ClaudeCase(unittest.IsolatedAsyncioTestCase):
         self.scenario = self.base / "scenario.json"
         self.sessions = self.base / "sessions"
         self.sessions.mkdir()
+        # Decision 0103 (tests of ``test_agents_cli_models``): the verified
+        # pairs of the adapter, the runtime's gate and model, when set.
+        self.pairs = None
+        self.models = None
+        self.model = "claude-sonnet-5"
 
     def adapter(self):
         return ClaudeSessionAdapter(
             SubprocessLauncher(),
+            verified_models=self.pairs,
             executable=(
                 sys.executable,
                 "-I",
@@ -126,10 +132,11 @@ class ClaudeCase(unittest.IsolatedAsyncioTestCase):
         self.connections = Connections(adapter, budget=budget)
         self.placement = Placement()
         runtime = ClaudeCliRuntime(
-            model="claude-sonnet-5",
+            model=self.model,
             session_base=self.sessions,
             relay_command=(sys.executable, "-I", str(RELAY)),
             cloud_policy=Policy(),
+            models=self.models,
         )
         self.task_id = uuid.uuid4()
         assignment = NodeAssignment(

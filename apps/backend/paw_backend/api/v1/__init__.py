@@ -4,6 +4,7 @@ from fastapi import APIRouter
 
 from paw_backend.api.v1 import (
     accounts,
+    agent_models,
     auth,
     boards,
     compute,
@@ -35,4 +36,5 @@ router.include_router(memory_preferences.router)
 router.include_router(projects.router)
 router.include_router(usage.router)
 router.include_router(connections.router)
+router.include_router(agent_models.router)
 router.include_router(notifications.router)

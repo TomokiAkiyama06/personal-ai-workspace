@@ -74,7 +74,11 @@ def main() -> int:
         {
             "id": message["id"],
             "result": {
-                "userAgent": f"paw_test/{version} (Linux 6; x86_64) paw",
+                # ``user_agent_version``: a CLI whose two answers disagree.
+                "userAgent": (
+                    f"paw_test/{scenario.get('user_agent_version', version)}"
+                    " (Linux 6; x86_64) paw"
+                ),
                 "codexHome": home,
                 "platformFamily": "unix",
                 "platformOs": "linux",

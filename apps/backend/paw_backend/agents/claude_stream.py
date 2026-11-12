@@ -9,7 +9,10 @@ kept, logged or returned):
   :meth:`ClaudeStream.check_init` accepts exactly the expected PAW tools
   (``mcp__paw__<name>``) plus ``EndConversation`` (which no flag removes while
   an MCP tool remains), the ``paw`` server ``connected`` and no
-  ``mcp_server_errors``; anything else is a refusal (Decision 0087, 4).
+  ``mcp_server_errors``; anything else is a refusal (Decision 0087, 4). With
+  the verified pairs (Decision 0103, 3 A and 4 A, 2), its
+  ``claude_code_version`` and the model the session asked for must be one of
+  them, or it is refused too (``model``; a missing version never is one).
 * ``stream_event`` (the raw API events): one model call is ``message_start``
   (its id and input: ``input_tokens + cache_creation_input_tokens +
   cache_read_input_tokens``) ... ``message_delta`` (its ``usage.output_tokens``,
@@ -62,16 +65,21 @@ RATE_ERRORS: Final = frozenset({"rate_limit"})
 MAX_LINE_BYTES: Final = 16 * 1024 * 1024
 #: The refusals of ``system/init`` (an unsupported CLI, Decision 0087, 4).
 INIT_REFUSALS: Final = frozenset({"tools", "mcp"})
+#: The refusal of a version and model that are not a verified pair
+#: (Decision 0103, 4 A, 2).
+MODEL_REFUSAL: Final = "model"
 #: A model name the stream showed that is not of the accepted form.
 UNKNOWN_MODEL: Final = "unknown"
 
 
 class StreamRefused(Exception):
     """The stream shows a session this backend does not run. ``reason`` is a
-    fixed code (``tools``, ``mcp``, ``turn_without_output``, ``turn_open``,
-    ``malformed``). ``unsupported``: the CLI's ``system/init`` showed other
-    tools or servers (``tools``, ``mcp``): its version or setup is not one
-    this backend runs (Decision 0087, 4), not a malformed answer."""
+    fixed code (``tools``, ``mcp``, ``model``, ``turn_without_output``,
+    ``turn_open``, ``malformed``). ``unsupported``: the CLI's ``system/init``
+    showed other tools or servers (``tools``, ``mcp``): its version or setup is
+    not one this backend runs (Decision 0087, 4), not a malformed answer.
+    ``model``: its version and the model are not a verified pair (Decision
+    0103, 4 A, 2)."""
 
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
@@ -126,15 +134,28 @@ def paw_tool_names(tool_names: Iterable[str]) -> frozenset[str]:
 class ClaudeStream:
     """Reads the lines of one session (see the module)."""
 
-    def __init__(self, expected_tools: frozenset[str], *, probe: bool = False) -> None:
+    def __init__(
+        self,
+        expected_tools: frozenset[str],
+        *,
+        probe: bool = False,
+        verified_models: frozenset[tuple[str, str]] | None = None,
+        model: str | None = None,
+    ) -> None:
         """``probe`` (Decision 0100, 2: the health probe of a connection): the
         session has no tool and no MCP server at all, and the ``result``'s
         answer is kept (:attr:`answer`) so that the probe can check it. A
-        node's session never keeps it."""
+        node's session never keeps it. ``verified_models`` (with the
+        session's ``model``): the verified ``(Claude Code version, model)``
+        pairs ``system/init`` is checked against (``None``: no such check)."""
         if probe and expected_tools:
             raise ValueError("a probe expects no tools")
+        if verified_models is not None and not isinstance(model, str):
+            raise ValueError("the pairs need the session's model")
         self._expected = expected_tools
         self._probe = probe
+        self._pairs = None if verified_models is None else frozenset(verified_models)
+        self._model = model
         self._open: dict[str, int] = {}  # message id -> its input tokens
         self._output: dict[str, int] = {}
         self._current: str | None = None
@@ -237,6 +258,16 @@ class ClaudeStream:
             self.models = frozenset(_model_name(name) for name in usage)
 
     def check_init(self, message: Mapping[str, Any]) -> None:
+        self._check_tools(message)
+        if self._pairs is not None:
+            version = message.get("claude_code_version")
+            if (
+                not isinstance(version, str)
+                or (version, self._model) not in self._pairs
+            ):
+                raise StreamRefused(MODEL_REFUSAL)
+
+    def _check_tools(self, message: Mapping[str, Any]) -> None:
         tools = message.get("tools")
         if not isinstance(tools, list) or not all(isinstance(t, str) for t in tools):
             raise StreamRefused("tools")
@@ -375,6 +406,7 @@ __all__ = [
     "END_CONVERSATION",
     "INIT_REFUSALS",
     "MAX_LINE_BYTES",
+    "MODEL_REFUSAL",
     "PAW_SERVER",
     "RATE_ERRORS",
     "UNKNOWN_MODEL",

@@ -14,7 +14,11 @@ to the tested version for this run only.
 
 The result passes when every request passes ``codex_app_server.tool_check``
 (the PAW tools, and only the MCP resource tools besides, while ``paw`` is the
-only MCP server) and the submit's summary came back as the node's result.
+only MCP server), no request offers tools in an ``additional_tools`` input
+item instead (the form of catalog models such as ``gpt-6-sol``: recorded,
+never passed; Decision 0103, issue #341), and the submit's summary came back
+as the node's result. ``--model`` picks the model of the run (the pair of a
+version and a model, Decision 0103, 3 A).
 
 With ``--probe`` it runs the Codex connection's health probe instead (Decision
 0100, 10: ``CodexProbeAdapter`` with the probe's own ``config.toml``, no MCP
@@ -25,7 +29,8 @@ probe's verdict is ``connected``.
 Run it as the user who develops, never with a real login, never as ``paw``::
 
     python3 -I deploy/cli-session/smoke_codex_recorder.py \\
-        --codex <codex executable> --out <result.json> [--sessions <dir>] [--probe]
+        --codex <codex executable> --out <result.json> [--sessions <dir>] \\
+        [--probe] [--model <model>]
 
 The exit code is 0 when it passed, 1 when not. The result JSON holds the
 requests (the tools, the model, the input item types; no prompt text).
@@ -104,6 +109,14 @@ class Recorder:
                     for i in body.get("input") or []
                     if isinstance(i, dict)
                 ],
+                # Decision 0103 (#341): a catalog model may offer its tools in
+                # an ``additional_tools`` input item instead of ``tools``;
+                # recorded (not checked) so that the run shows it.
+                "additional_tools": [
+                    i
+                    for i in body.get("input") or []
+                    if isinstance(i, dict) and i.get("type") == "additional_tools"
+                ],
             }
         )
         rid = f"resp_{uuid.uuid4().hex[:12]}"
@@ -138,7 +151,7 @@ async def _version(codex: str) -> str:
     return out.decode().split()[-1]
 
 
-async def smoke(codex: str, sessions: Path) -> dict:
+async def smoke(codex: str, sessions: Path, model: str = MODEL) -> dict:
     sys.path.insert(0, str(BACKEND))
     import paw_backend.agents.codex_cli as codex_cli
     from paw_backend.agents.codex_app_server import model_tool_names, tool_check
@@ -234,7 +247,7 @@ async def smoke(codex: str, sessions: Path) -> dict:
         connections = Connections(adapter)
         placement = Placement()
         runtime = codex_cli.CodexCliRuntime(
-            model=MODEL,
+            model=model,
             session_base=sessions,
             relay_command=(sys.executable, "-I", str(RELAY)),
             cloud_policy=Policy(),
@@ -268,6 +281,8 @@ async def smoke(codex: str, sessions: Path) -> dict:
     )
     checks = [
         list(tool_check(r["tools"], session["paw_tools"], session["mcp_servers"]))
+        # Tools offered outside ``tools`` are not the checked form: fail.
+        + (["additional_tools offered"] if r["additional_tools"] else [])
         for r in recorder.requests
     ]
     raw = Connections.raw
@@ -294,7 +309,7 @@ async def smoke(codex: str, sessions: Path) -> dict:
     }
 
 
-async def probe_smoke(codex: str, sessions: Path) -> dict:
+async def probe_smoke(codex: str, sessions: Path, model: str = MODEL) -> dict:
     """The health probe's smoke (see the module)."""
     sys.path.insert(0, str(BACKEND))
     import paw_backend.agents.codex_probe as codex_probe
@@ -342,7 +357,7 @@ async def probe_smoke(codex: str, sessions: Path) -> dict:
         version = await _version(codex)
         adapter = codex_probe.CodexProbeAdapter(
             InteractiveSubprocessLauncher(),
-            model=MODEL,
+            model=model,
             session_base=sessions,
             credentials=Credentials(),
             executable=(codex,),
@@ -365,7 +380,11 @@ async def probe_smoke(codex: str, sessions: Path) -> dict:
         codex_probe.probe_config = original
         recorder.close()
     offered = [r["model_tool_names"] for r in recorder.requests]
-    no_tools = bool(offered) and all(names == [] for names in offered)
+    no_tools = (
+        bool(offered)
+        and all(names == [] for names in offered)
+        and not any(r["additional_tools"] for r in recorder.requests)
+    )
     connected = report.outcome.value == "connected"
     return {
         "mode": "probe",
@@ -392,6 +411,11 @@ def main(argv=None) -> int:
         help="the session directories' base (short: the bridge socket is AF_UNIX)",
     )
     parser.add_argument(
+        "--model",
+        default=MODEL,
+        help="the model of the run (Decision 0103, 3 A: a pair's smoke)",
+    )
+    parser.add_argument(
         "--probe",
         action="store_true",
         help="run the connection's health probe instead of a node",
@@ -401,7 +425,7 @@ def main(argv=None) -> int:
         sessions = (arguments.sessions or Path(scratch)).resolve()
         sessions.mkdir(parents=True, exist_ok=True)
         run = probe_smoke if arguments.probe else smoke
-        result = asyncio.run(run(arguments.codex, sessions))
+        result = asyncio.run(run(arguments.codex, sessions, arguments.model))
         result["sessions_left"] = sorted(p.name for p in sessions.iterdir())
     arguments.out.write_text(json.dumps(result, indent=2, default=str))
     print(json.dumps({k: v for k, v in result.items() if k != "requests"}, default=str))

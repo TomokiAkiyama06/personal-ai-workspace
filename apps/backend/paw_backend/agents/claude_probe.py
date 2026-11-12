@@ -11,6 +11,15 @@ launcher, image and egress as a node's session (production: ``SystemdLauncher``,
 ``CLAUDE_CODE_OAUTH_TOKEN`` (handed to the launcher, never in an argument or a
 log) and returns a :class:`~paw_backend.connections.ProbeReport`:
 
+* the model (Decision 0103, 5 A): with the gate of the CLI agents' models,
+  the default model it resolves (the Admin's policy's, else the runtime
+  configuration's), before anything starts: none (not a verified model) is
+  ``unavailable`` (``invalid_response``) with the connection's status kept,
+  and nothing is started; a policy that cannot be read is ``unavailable``
+  with the status kept too. With the verified pairs (Decision 0103, 3 A),
+  ``system/init``'s ``claude_code_version`` and the model must be one of
+  them, or the CLI is stopped there (``unavailable``, ``invalid_response``,
+  the status kept);
 * the flags of a node's session without its MCP server: ``--tools ""``, an
   EMPTY MCP configuration with ``--strict-mcp-config``, no ``--allowedTools``,
   ``--max-turns 1``, the fixed system prompt (:data:`PROBE_SYSTEM_PROMPT`) and
@@ -61,6 +70,7 @@ from typing import Final
 
 from paw_backend.agents.claude_stream import (
     CREDENTIAL_ERRORS,
+    MODEL_REFUSAL,
     RATE_ERRORS,
     ClaudeStream,
     Retry,
@@ -127,11 +137,21 @@ class ClaudeProbeAdapter:
         executable: tuple[str, ...] = ("claude",),
         proxy_url: str | None = None,
         restricted: bool = True,
+        verified_models: frozenset[tuple[str, str]] | None = None,
+        models: object | None = None,
     ) -> None:
+        """``verified_models``: the verified ``(Claude Code version, model)``
+        pairs (Decision 0103, 3 A; ``None``: no such check). ``models``: an
+        ``AgentModelGate`` whose ``default_model`` names the model to check
+        (``None``: ``model``)."""
         require_async_method(launcher, "start", 1)
+        if models is not None:
+            require_async_method(models, "default_model", 1)
         if not executable or not all(isinstance(p, str) and p for p in executable):
             raise ValueError("executable")
         self._launcher = launcher
+        self._pairs = None if verified_models is None else frozenset(verified_models)
+        self._models = models
         self._model = validate_model("model", model)
         self._base = Path(session_base)
         self._executable = tuple(executable)
@@ -141,9 +161,12 @@ class ClaudeProbeAdapter:
     def __repr__(self) -> str:
         return f"ClaudeProbeAdapter(model={self._model!r})"
 
-    def arguments(self, mcp_config: Path, settings: Path) -> tuple[str, ...]:
+    def arguments(
+        self, mcp_config: Path, settings: Path, model: str | None = None
+    ) -> tuple[str, ...]:
         """The CLI's command line: a node session's flags (Decision 0087, 4)
-        without its MCP server and tools, and one turn at most."""
+        without its MCP server and tools, and one turn at most, on ``model``
+        (the configured one by default)."""
         argv = [
             *self._executable,
             "-p",
@@ -166,7 +189,7 @@ class ClaudeProbeAdapter:
             "--max-turns",
             "1",
             "--model",
-            self._model,
+            model or self._model,
             "--system-prompt",
             PROBE_SYSTEM_PROMPT,
         ]
@@ -192,7 +215,38 @@ class ClaudeProbeAdapter:
         """Never used for a CLI: fails at once, starts nothing."""
         raise AdapterFailure(FailureCode.INTERNAL_ERROR)
 
+    async def _model_to_check(self) -> str | ProbeReport:
+        """The model of this probe (see the module), or the report that ends
+        it before anything starts."""
+        if self._models is None:
+            return self._model
+        try:
+            model = await self._models.default_model(ConnectionKind.CLAUDE)
+        except Exception as error:
+            logger.warning(
+                "Claude probe refused: model policy unreadable (%s)",
+                type(error).__name__,
+            )
+            return ProbeReport(
+                ProbeOutcome.UNAVAILABLE,
+                FailureCode.UNAVAILABLE,
+                model=self._model,
+                keeps_status=True,
+            )
+        if model is None:
+            logger.warning("Claude probe refused: model")
+            return ProbeReport(
+                ProbeOutcome.UNAVAILABLE,
+                FailureCode.INVALID_RESPONSE,
+                model=self._model,
+                keeps_status=True,
+            )
+        return model
+
     async def check_health(self, secret: Secret) -> ProbeReport:
+        model = await self._model_to_check()
+        if isinstance(model, ProbeReport):
+            return model
         spec = create_session(self._base, _NO_RELAY)
         mcp_config = spec.directory / PROBE_MCP_CONFIG_NAME
         _write_private(mcp_config, json.dumps({"mcpServers": {}}))
@@ -202,7 +256,7 @@ class ClaudeProbeAdapter:
             try:
                 process = await self._launcher.start(
                     CliLaunch(
-                        self.arguments(mcp_config, spec.settings_path),
+                        self.arguments(mcp_config, spec.settings_path, model),
                         self.environment(spec.directory, spec.config_dir),
                         secret,
                         TOKEN_ENV,
@@ -213,7 +267,9 @@ class ClaudeProbeAdapter:
             except UnitNotStoppedError:
                 unstopped = True
                 raise
-            stream = ClaudeStream(frozenset(), probe=True)
+            stream = ClaudeStream(
+                frozenset(), probe=True, verified_models=self._pairs, model=model
+            )
             reading = _Reading()
             try:
                 await _read(process, stream, reading)
@@ -227,7 +283,7 @@ class ClaudeProbeAdapter:
                     raise failed
             with contextlib.suppress(Exception):
                 await process.wait()
-            note = fallback_note(stream, self._model)
+            note = fallback_note(stream, model)
             if note is not None:
                 # #325: another model answered (or one refused). The model
                 # names are in this line only (Decision 0102, 2).
@@ -236,7 +292,16 @@ class ClaudeProbeAdapter:
                     spec.session_id,
                     note,
                 )
-            return _report(stream, reading, self._model, spec.session_id)
+            if reading.refused == MODEL_REFUSAL:
+                # Decision 0103, 3 A: not a verified pair; nothing was learnt
+                # about the credential.
+                return ProbeReport(
+                    ProbeOutcome.UNAVAILABLE,
+                    FailureCode.INVALID_RESPONSE,
+                    model=model,
+                    keeps_status=True,
+                )
+            return _report(stream, reading, model, spec.session_id)
         finally:
             if unstopped:
                 logger.error(
