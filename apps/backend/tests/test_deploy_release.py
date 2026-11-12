@@ -84,6 +84,8 @@ class World:
         # The stop commands (counted from 1) that fail.
         self.stops = 0
         self.failing_stops: set[int] = set()
+        # The umask each build command ran under.
+        self.build_umasks: list[int] = []
 
     def release_of(self, argv) -> str:
         python = Path(argv[argv.index("-m") - 1])
@@ -111,6 +113,8 @@ class World:
                 return Result(3, "", "")
             return self.backend(version, name, args)
         name = argv[0]
+        if name == "make-venv":
+            return self.make_venv(Path(argv[1]))
         current = (
             os.readlink(self.root / "current").split("/")[-1]
             if (self.root / "current").is_symlink()
@@ -131,6 +135,21 @@ class World:
                 return Result(7)
         elif name in self.fail:
             return Result(1)
+        return Result(0)
+
+    def make_venv(self, release: Path) -> Result:
+        """What ``uv venv`` leaves: files and directories made with the
+        process's umask (Issue #348), and a private one."""
+        umask = os.umask(0)
+        os.umask(umask)
+        self.build_umasks.append(umask)
+        (release / "venv" / "bin").mkdir(parents=True)
+        python = os.open(release / "venv/bin/python", os.O_CREAT | os.O_WRONLY, 0o777)
+        os.close(python)
+        (release / "venv/private").mkdir(mode=0o700)
+        (release / "venv/private/data").write_text("x")
+        os.chmod(release / "venv/private/data", 0o600)
+        (release / "venv/link").symlink_to("bin/python")
         return Result(0)
 
     def backend(self, version: str, name: str, args: list[str]) -> Result:
@@ -180,6 +199,8 @@ class ReleaseToolTestCase(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        # The units' user must reach the releases (mkdtemp makes it 0700).
+        os.chmod(self.tmp, 0o755)
         self.root = self.tmp / "opt"
         self.points = self.tmp / "points"
         self.repo = self.tmp / "repo"
@@ -202,6 +223,7 @@ health_timeout_seconds = 10
 health_interval_seconds = 5
 
 [commands]
+build = [["make-venv", "{{release}}"]]
 stop = [["svc-stop"]]
 start = [["svc-start"]]
 health = [["health"]]
@@ -343,6 +365,30 @@ class BuildTest(ReleaseToolTestCase):
         self.assertEqual(code, paw_release.EXIT_REFUSED)
         self.assertIn("2 heads", out)
         self.assertEqual(os.listdir(self.root / "releases"), [])
+
+    def test_a_build_under_umask_077_is_readable_by_others(self):
+        # Production 2026-11-08: built under umask 077, the release was 0700
+        # and paw-backend could not change into apps/backend (200/CHDIR).
+        previous = os.umask(0o077)
+        self.addCleanup(os.umask, previous)
+        self.build("r1", "0001", None)
+        self.assertEqual(os.umask(0o077), 0o077)  # the caller's umask again
+        self.assertEqual(self.world.build_umasks, [0o022])
+        release = self.root / "releases" / "r1"
+        for path in [self.root / "releases", release, *release.rglob("*")]:
+            if path.is_symlink():
+                continue
+            mode = path.stat().st_mode & 0o7777
+            with self.subTest(path=str(path.relative_to(self.root))):
+                if path.is_dir():
+                    self.assertEqual(mode, 0o755)
+                elif path == release / "venv/bin/python":
+                    self.assertEqual(mode, 0o755)
+                else:
+                    self.assertEqual(mode, 0o644)
+        self.assertIsNone(paw_release.unreadable_by_others(release, "venv/bin/python"))
+        code, out = self.run_tool("install", "r1")
+        self.assertEqual(code, 0, out)
 
 
 class UpdateTest(ReleaseToolTestCase):
@@ -557,6 +603,35 @@ class UpdateTest(ReleaseToolTestCase):
                 self.assertNotIn("r1:deploy-maintenance-begin", self.world.calls)
         code, out = self.run_tool("precheck", "r2")
         self.assertEqual(code, paw_release.EXIT_REFUSED)
+
+    def test_a_release_the_units_user_cannot_read_is_refused(self):
+        self.installed()
+        release = self.root / "releases" / "r2"
+        for path, mode, detail in (
+            (release / "apps/backend", 0o700, "apps/backend: not searchable"),
+            (release / "apps/backend/migrations", 0o700, "migrations: mode 0700"),
+            (release / "apps", 0o711, "apps: mode 0711"),
+            (release / "release.json", 0o600, "release.json: mode 0600"),
+            (release / "venv/bin/python", 0o744, "not readable and executable"),
+            (self.root / "releases", 0o700, "not searchable by others"),
+        ):
+            with self.subTest(path=str(path.relative_to(self.root))):
+                before = path.stat().st_mode & 0o7777
+                os.chmod(path, mode)
+                self.addCleanup(os.chmod, path, before)
+                self.world.calls.clear()
+                code, out = self.run_tool("precheck", "r2")
+                self.assertEqual(code, paw_release.EXIT_REFUSED, out)
+                self.assertIn("[FAIL] target_readable", out)
+                self.assertIn(detail, out)
+                code, out = self.run_tool("update", "r2")
+                self.assertEqual(code, paw_release.EXIT_REFUSED, out)
+                self.assertNotIn("r1:deploy-maintenance-begin", self.world.calls)
+                self.assertEqual(self.current(), "r1")
+                os.chmod(path, before)
+        code, out = self.run_tool("precheck", "r2")
+        self.assertEqual(code, 0, out)
+        self.assertIn("[ok  ] target_readable", out)
 
     def test_too_little_disk_is_refused(self):
         self.installed()
