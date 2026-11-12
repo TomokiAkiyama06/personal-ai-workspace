@@ -57,7 +57,7 @@ import os
 import re
 import shutil
 import signal
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -82,10 +82,16 @@ _PROTOCOLS = re.compile(r"[a-z][a-z0-9+.-]{0,15}")
 
 @dataclass(frozen=True, slots=True)
 class GitResult:
-    """A finished git command. ``stdout`` is text; stderr is dropped on purpose."""
+    """A finished git command. ``stdout`` is text; stderr is dropped on purpose.
+
+    ``not_run``: the runner's ``never_ran`` check (``run_subprocess``) found,
+    from the stderr it then dropped, that the command surely never started
+    (``ssh`` never connected, issue #346). Only a yes/no ever leaves the
+    runner, never the text."""
 
     returncode: int
     stdout: str
+    not_run: bool = False
 
 
 class GitRunner(Protocol):
@@ -146,6 +152,7 @@ async def run_subprocess(
     timeout_s: float,
     max_output_bytes: int,
     log_name: str,
+    never_ran: Callable[[int, bytes, bytes], bool] | None = None,
 ) -> GitResult:
     """Run ``argv`` to completion and return its result, or raise a closed
     :class:`GitFailure`.
@@ -159,6 +166,10 @@ async def run_subprocess(
     an argument, a path or output (the module docstring). The caller has already
     decided the executable, every argument, the environment and the identity this
     runs as; this function knows none of that.
+
+    ``never_ran`` (exit code, stdout, stderr), when given, says whether the
+    finished process surely never started the command it carried
+    (:attr:`GitResult.not_run`); stderr is read by it and by nothing else.
     """
     try:
         process = await asyncio.create_subprocess_exec(
@@ -178,10 +189,10 @@ async def run_subprocess(
         asyncio.ensure_future(_drain(process.stderr, max_output_bytes)),
     ]
     failure: GitFailure | None = None
-    output = b""
+    output = errors = b""
     try:
         async with asyncio.timeout(timeout_s):
-            output, _ = await asyncio.gather(*readers)
+            output, errors = await asyncio.gather(*readers)
             await process.wait()
     except TimeoutError:
         failure = GitFailure.TIMEOUT
@@ -204,7 +215,9 @@ async def run_subprocess(
         text = output.decode("utf-8")
     except UnicodeDecodeError:
         raise GitCommandError(log_name, GitFailure.UNSAFE_OUTPUT) from None
-    return GitResult(process.returncode or 0, text)
+    code = process.returncode or 0
+    not_run = never_ran is not None and never_ran(code, output, errors)
+    return GitResult(code, text, not_run)
 
 
 def git_environment(

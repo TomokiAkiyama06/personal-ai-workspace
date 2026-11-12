@@ -26,6 +26,7 @@ from paw_backend.repositories import (
 )
 from paw_backend.repositories.ssh import (
     PROTOCOL_TAG,
+    RETRY_MIN_SECONDS,
     SshGitRunner,
     SshGitRunnerPolicy,
     SshKeyDirectory,
@@ -33,6 +34,7 @@ from paw_backend.repositories.ssh import (
     build_remote_command,
     validate_identity_template,
 )
+from paw_backend.tools.deadline import call_deadline
 
 from .repositories_support import World, fs, requires_git
 from .support import make_settings, paw_environment
@@ -83,6 +85,32 @@ sys.stdout.write(result.stdout)
 sys.stderr.write(result.stderr)
 sys.exit(result.returncode)
 """
+
+
+#: A fake ``ssh`` that answers each call with the next of ``__PLAN__``
+#: (``(exit code, stdout, stderr)``; the last one repeats) and appends a line
+#: to ``__COUNT__`` per call, so a test sees how many times it ran.
+_SCRIPTED_SSH = """#!/usr/bin/env python3
+import sys
+
+plan = __PLAN__
+with open(__COUNT__, "a") as handle:
+    handle.write("x\\n")
+with open(__COUNT__) as handle:
+    calls = len(handle.read().splitlines())
+code, out, err = plan[min(calls, len(plan)) - 1]
+sys.stdout.write(out)
+sys.stderr.write(err)
+sys.exit(code)
+"""
+
+_NEVER_CONNECTED = (
+    255,
+    "",
+    "ssh: connect to host 127.0.0.1 port 22: Connection timed out\n",
+)
+_BANNER_TIMEOUT = (255, "", "Connection timed out during banner exchange\n")
+_OK = (0, "true\n", "")
 
 
 class _FixedKey:
@@ -480,6 +508,123 @@ class RunTest(SshTestCase):
         with self.assertRaises(GitCommandError) as raised:
             await self.run_git(["status"], runner=runner, timeout_s=1)
         self.assertIs(raised.exception.failure, GitFailure.TIMEOUT)
+
+
+class NeverConnectedRetryTest(SshTestCase):
+    """Issue #346: a call whose ``ssh`` surely never connected is tried exactly
+    once more; anything that may have reached the wrapper is not."""
+
+    def scripted(self, *plan: tuple[int, str, str]) -> SshGitRunner:
+        name = uuid.uuid4().hex
+        self.count = f"{self.world.root}/{name}.count"
+        path = f"{self.world.root}/{name}-ssh.py"
+        script = _SCRIPTED_SSH.replace("__PLAN__", repr(list(plan))).replace(
+            "__COUNT__", repr(self.count)
+        )
+        fs.write(path, script)
+        os.chmod(path, 0o755)
+        return SshGitRunner(_FixedKey(self.key()), ssh_executable=path)
+
+    def calls(self) -> int:
+        return len(fs.read(self.count).splitlines()) if fs.exists(self.count) else 0
+
+    async def test_a_call_that_never_connected_is_tried_once_more(self):
+        runner = self.scripted(_NEVER_CONNECTED, _OK)
+        with self.assertLogs("paw_backend.repositories.ssh", "WARNING") as logs:
+            result = await self.run_git(
+                ["rev-parse", "--is-bare-repository"], runner=runner
+            )
+        self.assertEqual((result.returncode, result.stdout), (0, "true\n"))
+        self.assertEqual(self.calls(), 2)
+        self.assertEqual(len(logs.output), 1)
+        self.assertIn(
+            "rev-parse over ssh did not connect; trying once more", logs.output[0]
+        )
+        # Neither ssh's text nor the address it named reaches the log.
+        self.assertNotIn("127.0.0.1", logs.output[0])
+        self.assertNotIn("timed out", logs.output[0])
+
+    async def test_a_write_that_never_connected_is_tried_once_more_too(self):
+        runner = self.scripted(_BANNER_TIMEOUT, (0, "", ""))
+        with self.assertLogs("paw_backend.repositories.ssh", "WARNING"):
+            result = await self.run_git(["push", "origin", "main"], runner=runner)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(self.calls(), 2)
+
+    async def test_a_second_failure_to_connect_ends_after_two_calls(self):
+        runner = self.scripted(_NEVER_CONNECTED)
+        with self.assertLogs("paw_backend.repositories.ssh", "WARNING") as logs:
+            with self.assertRaises(GitCommandError) as raised:
+                await self.run_git(["status"], runner=runner)
+        self.assertIs(raised.exception.failure, GitFailure.SSH_UNAVAILABLE)
+        self.assertEqual(self.calls(), 2)
+        self.assertEqual(len(logs.output), 2)
+        self.assertIn("did not connect again; giving up", logs.output[1])
+
+    async def test_a_255_that_may_have_reached_the_wrapper_is_not_repeated(self):
+        cases = {
+            "output came back": (255, "partial\n", _NEVER_CONNECTED[2]),
+            "another stderr line": (
+                255,
+                "",
+                _NEVER_CONNECTED[2] + "fatal: remote said something\n",
+            ),
+            "a lost session": (
+                255,
+                "",
+                "Connection to 127.0.0.1 closed by remote host.\n",
+            ),
+            "no stderr": (255, "", ""),
+            "permission denied": (
+                255,
+                "",
+                "alice@127.0.0.1: Permission denied (publickey).\n",
+            ),
+        }
+        for label, answer in cases.items():
+            with self.subTest(label):
+                runner = self.scripted(answer, _OK)
+                with self.assertNoLogs("paw_backend.repositories.ssh", "WARNING"):
+                    with self.assertRaises(GitCommandError) as raised:
+                        await self.run_git(["status"], runner=runner)
+                self.assertIs(raised.exception.failure, GitFailure.SSH_UNAVAILABLE)
+                self.assertEqual(self.calls(), 1)
+
+    async def test_a_failure_of_git_itself_is_not_repeated(self):
+        runner = self.scripted((128, "", "fatal: not a git repository\n"), _OK)
+        result = await self.run_git(["status"], runner=runner)
+        self.assertEqual(result.returncode, 128)
+        self.assertEqual(self.calls(), 1)
+
+    async def test_no_retry_when_the_tool_call_has_too_little_time_left(self):
+        runner = self.scripted(_NEVER_CONNECTED, _OK)
+        with call_deadline(RETRY_MIN_SECONDS - 1):
+            with self.assertLogs("paw_backend.repositories.ssh", "WARNING") as logs:
+                with self.assertRaises(GitCommandError) as raised:
+                    await self.run_git(["status"], runner=runner)
+        self.assertIs(raised.exception.failure, GitFailure.SSH_UNAVAILABLE)
+        self.assertEqual(self.calls(), 1)
+        self.assertIn("no time left to try again", logs.output[0])
+
+    async def test_a_retry_when_the_tool_call_has_time_left(self):
+        runner = self.scripted(_NEVER_CONNECTED, _OK)
+        with call_deadline(RETRY_MIN_SECONDS + 60):
+            with self.assertLogs("paw_backend.repositories.ssh", "WARNING"):
+                result = await self.run_git(["status"], runner=runner)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(self.calls(), 2)
+
+    async def test_a_directory_call_that_never_connected_is_tried_once_more(self):
+        runner = self.scripted(_NEVER_CONNECTED, (0, "created\n", ""))
+        with self.assertLogs("paw_backend.repositories.ssh", "WARNING"):
+            result = await runner.run_directory(
+                "mkdir",
+                f"{self.account.home}/new",
+                account=self.account,
+                timeout_s=10,
+            )
+        self.assertEqual((result.returncode, result.stdout), (0, "created\n"))
+        self.assertEqual(self.calls(), 2)
 
 
 @requires_git
