@@ -29,14 +29,14 @@ Privileges of the application role (``PAW_APP_DATABASE_ROLE``):
 rows); ``agent_model_policy_changes`` SELECT and INSERT only (never UPDATE or
 DELETE).
 
-``paw_compatibility`` is ``expand`` (Decision 0079, 4): an older release never
-names the two tables and never writes ``policy``. One limit, stated: after a
-rollback that keeps the database, an older release reads a probe's
-``trigger`` back for ``GET /admin/connections`` (the latest probe of the
-credential), so while that latest probe is a ``policy`` one the older
-release's list fails until the next probe of the credential (``POST
-/admin/connections/{kind}/health-check`` still works there and writes a
-``manual`` one).
+No ``paw_compatibility`` (Decision 0079, 4: not backward compatible; Codex
+review of #350, P2). An older release never names the two tables, but it
+reads a probe's ``trigger`` back for ``GET /admin/connections`` (the latest
+probe of the credential) and knows no ``policy``: after an application-only
+rollback that list would fail while that latest probe is a ``policy`` one. A
+rollback over this revision therefore restores the database first. (Decision
+0103, 9 named this revision ``expand``; Decision 0079's definition decides,
+confirmed by the human 2026-11-12.)
 
 ``downgrade()`` drops both tables (the policy and its history are lost: the
 runtime configuration's models apply again) and puts the old trigger CHECK
@@ -60,8 +60,8 @@ down_revision: str | Sequence[str] | None = "0325"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
-# Decision 0079 4: what an older release can do with this schema.
-paw_compatibility: str = "expand"
+# Decision 0079 4: no ``paw_compatibility`` (not backward compatible; module
+# docstring). A rollback over this revision restores the database first.
 
 # Written out here (not imported): a migration keeps the values it was written
 # with. ``tests/test_agent_model_policies_migration.py`` compares them with the

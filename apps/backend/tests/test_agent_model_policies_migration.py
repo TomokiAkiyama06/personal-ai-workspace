@@ -4,7 +4,8 @@ Decision 0103, 5 A, 7 A and 9 A).
 * the values the revision writes out are the code's (the kinds, the model's
   shape, the description's length, the probe's triggers) and, without
   ``policy``, revision 0306's triggers;
-* it follows 0325 and is ``expand``; the upgrade creates both tables with
+* it follows 0325 and is not ``expand`` (an older release cannot read a
+  ``policy`` probe back); the upgrade creates both tables with
   their indexes, grants the application role SELECT / INSERT / DELETE on the
   policy and SELECT / INSERT only on its history, and rebuilds the probe's
   ``trigger`` CHECK with ``policy``; the downgrade undoes all of it;
@@ -40,6 +41,7 @@ from paw_backend.db import Base
 
 from .memory_support import migrate, requires_postgres, sync_database_url
 from .support import paw_environment
+from .test_deploy_release import load_tool
 from .test_migration_grants import VERSIONS
 from .test_migrations import offline_config
 
@@ -81,9 +83,19 @@ class ValuesTest(unittest.TestCase):
         probes = load("revision_0306", "0306_connection_probes.py")
         self.assertEqual(revision_module().PREVIOUS_TRIGGERS, probes.TRIGGERS)
 
-    def test_it_follows_the_model_fallback_code_and_is_an_expand(self):
+    def test_it_follows_the_model_fallback_code(self):
         self.assertEqual(previous_revision(), "0325")
-        self.assertEqual(revision_module().paw_compatibility, "expand")
+
+    def test_a_rollback_does_not_keep_this_schema(self):
+        # Codex review of #350 (P2): the release before 0341 reads the latest
+        # probe's trigger back (``GET /admin/connections``) and knows no
+        # ``policy``, so the revision is not ``expand`` (Decision 0079, 4): a
+        # rollback over it needs a restore point.
+        self.assertNotEqual(
+            getattr(revision_module(), "paw_compatibility", None), "expand"
+        )
+        migrations = load_tool().read_migrations(VERSIONS)
+        self.assertNotEqual(migrations[REVISION].compatibility, "expand")
 
 
 class OfflineMigrationTest(unittest.TestCase):
