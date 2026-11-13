@@ -46,12 +46,19 @@
 
 ### 3. 検証した組に足す前の本物での確かめ
 
-- **A（推奨）: 記録用の Server の Smoke（Node と Probe）に加え、本物で 2 つ確かめてから組を足す。** (1) 本番の Probe（Human が Release を入れた後、上書きの Catalog つき）が `connected`。(2) Human の了承のうえで、小さな書き込む Task を 1 つ流し、Codex の必須の Review が Tool の検査の失敗なしに終わり、結果が読める（品質は Human が目で見る）。どちらかが駄目なら組に入れない。
-- B: 記録用の Server の Smoke と本物の Probe だけで足す。悪い点: Code Mode を止めた時の質の劣化を見ないまま本番の Review を任せる。
+本番の Backend では、検証した組にない Model は送る前に止まる（`AgentModelGate.default_model()`、`CodexProbeAdapter` の組の検査、Session の検査。`agents/cli_wiring.py` が両方に渡す）。このため「Release を入れてから本番の Probe と Task で確かめ、その結果で組を足す」は順序として実行できない。本番の検査は緩めず、確かめは本番の Backend の外で行う。
+
+- **A（推奨）: 本番の外で本物に送る確かめの Script（`deploy/cli-session/live_check_codex.py`、仮の名前）を作り、その結果で組を足す。** 記録用の Server の Smoke と同じ作り（本物の `CodexCliRuntime`・`CodexSessionAdapter`・`McpBridge`・`CodexProbeAdapter`、Backend の `session_config`・`probe_config` と 1 の上書き）で、検証した組を **その Process の中だけ** 試す 1 組に広げ、Provider は本物の OpenAI のまま走らせる。
+  - 走らせるのは Human だけ（明示の実行。Agent は走らせない）。Credential は Human が Script に渡す `auth.json` の写し（本番の Secret Store を読まない。`paw` の User では走らせない）。本番の DB・Orchestrator・Policy には触れない。Session の後に写しと `CODEX_HOME` を消す。
+  - 確かめること: (1) Probe（0100）が `connected`。(2) Repository の中の固定の小さな Fixture（数行の差分）で Reviewer の Node を 1 つ走らせ、0101 の Tool の検査（Item の検出、0089 の 2）に引っかからず、`submit` の結果が読める。結果の文を JSON に残し、品質は Human が目で見る。
+  - どちらかが駄目なら組に入れない。組を足す PR は、記録用の Server の Smoke（Node と Probe）とこの Script の結果の JSON の Path を書く。
+  - 組が入った Release を入れた後の本番の Probe の `connected` は、事後の確かめとする。駄目なら Admin が Policy（0103 の 2）でその Model を許すのをやめる（再起動なし）。
+- B: 試す組を Code の別の一覧（Candidate）に置き、Admin が 1 つの Task だけに許す口を本番の Backend に足す。悪い点: 本番の Gate に例外の道ができ、その権限と監査の設計が要る。
+- C: 記録用の Server の Smoke だけで足す。悪い点: 本物の Backend の答え方と、Code Mode を止めたときの質の劣化を見ないまま本番の Review を任せる。
 
 ### 4. 当面の既定の Model（上書きの実装が入るまで）
 
-- **A（推奨）: `(0.156.1, gpt-5.5)` を先に検証した組に足し、本番の `[agents.codex].model` を `gpt-5.5` にする。** Catalog を変えずに Smoke（Node と Probe）が通ったので、上書きの実装を待たずに #350 を含む Release を入れられ、本物の Probe と小さな Task での確かめ（3 の A）もこの組で先にできる。上書きが入り `gpt-6-sol` が 3 を通ったら、Admin の Policy（0103 の 2）で既定を `gpt-6-sol` に変える（再起動なし）。
+- **A（推奨）: `(0.156.1, gpt-5.5)` を先に検証した組に足し、本番の `[agents.codex].model` を `gpt-5.5` にする。** Catalog を変えずに記録用の Server の Smoke（Node と Probe）が通ったので、上書きの実装を待たずに 3 の A の Script で確かめて組に足せ、#350 を含む Release を入れられる。上書きが入り `gpt-6-sol` が 3 の A を通ったら、Admin の Policy（0103 の 2）で既定を `gpt-6-sol` に変える（再起動なし）。
 - B: 上書きの実装と `gpt-6-sol` の確かめが終わるまで #350 を含む Release を入れない（本番の Codex は今の `gpt-6-sol` のまま、`additional_tools` は検査されないまま）。
 - C: 上書きが入るまで Codex を本番で使わない。悪い点: 0099 の 5 で必須の Codex の Review のため、assignment がある限り外せない（2026-11-12 に確かめた: Reviewer の `allowed` は claude と codex の両方が必須）。外すには ladder をすべて Local に戻すしかない。
 
@@ -65,13 +72,15 @@
 - 上書きの単体の Test: 元の Catalog の `gpt-6-sol` から 5 つの値が上書きされ、他の項目は変わらない。Catalog にない Model は Session を始めない。上書きの後に `code_mode*`・`multi_agent_version` が残れば Fail closed。Catalog の File が読めない・形が違うときも Fail closed。
 - `session_config` と `probe_config` の Test: `model_catalog_json` が Session の `CODEX_HOME` の中の File を指し、その File が Session の終わりに消える。
 - 記録用の Server の Smoke（`smoke_codex_recorder.py`）: Backend と同じ上書きで走る（Smoke 専用の別の上書きを持たない）。`gpt-6-sol` の Node と Probe、`gpt-5.5` の Node と Probe が合格し、上書きを外すと `gpt-6-sol` が不合格になる。
+- 3 の A の Script の Test（本物には送らない）: 検証した組の広げ方が Process の中だけで、Module の `VERIFIED_MODELS` と本番の Wiring は変わらない。`paw` の User・本番の Secret Store の Path・Credential なしでは走らない。終わりに `auth.json` の写しと `CODEX_HOME` が消える。結果の JSON に Credential と Prompt の文が入らない（Review の答えの文だけ入る）。
 
 ## PR の分け方
 
 1. この Decision（docs だけ）。
-2. 4 が A のとき: `(0.156.1, gpt-5.5)` を `VERIFIED_MODELS` に足す（Smoke の JSON の Path を PR に書く）。本番の `model` を `gpt-5.5` にする Human の手順（Script）。
-3. Backend: 版ごとの Catalog の File、上書きの定数と Session・Probe への `model_catalog_json`、Smoke の Script の対応、Test。検証した組はまだ足さない。
-4. 3 が入った Release で本物の確かめ（3 の A）をした後: `(0.156.1, gpt-6-sol)` を検証した組に足す PR。Admin が Policy で許し、既定を変える。
+2. 3 の A の確かめの Script（上書きなし。`gpt-5.5` で使える）と Test。検証した組は足さない。
+3. 4 が A のとき: Human が 2 の Script を `gpt-5.5` で走らせた後、`(0.156.1, gpt-5.5)` を `VERIFIED_MODELS` に足す（Smoke と Script の結果の JSON の Path を PR に書く）。本番の `model` を `gpt-5.5` にする Human の手順（Script）。
+4. Backend: 版ごとの Catalog の File、上書きの定数と Session・Probe への `model_catalog_json`、Smoke と 2 の Script の対応、Test。検証した組はまだ足さない。
+5. Human が 4 の入った Script を `gpt-6-sol` で走らせ、合格した後: `(0.156.1, gpt-6-sol)` を検証した組に足す PR。Release の後、本番の Probe で事後に確かめ、Admin が Policy で許し、既定を変える。
 
 ## 未決（この Decision では決めない）
 
@@ -81,12 +90,12 @@
 
 ## リスク
 
-- Code Mode を止めると Model の質が落ちることがある（Codex の警告）。3 の A の本物での確かめで見る。`gpt-5.5` を当面の既定にする 4 の A は、この危険を避ける。
+- Code Mode を止めると Model の質が落ちることがある（Codex の警告）。3 の A の Script で見る（Human が結果の文を目で見る）。`gpt-5.5` を当面の既定にする 4 の A は、この危険を避ける。
 - 本物の Backend が Catalog の上書きと違う形の Request を受け付けない、または Login のとき Codex が Catalog を Server から取り直して上書きを無視する。Probe の Request の Tool は本番では見えないので、記録用の Server の Smoke・本物の Probe の結果・Item の検出（0089 の 2）で見る。
 - 版を上げると Catalog の項目が増え、新しい項目で Tool が足される。版を上げる PR で Smoke をやり直す（0101 の 5 のとおり）。
 
 ## 承認後の扱い
 
 承認されたら、Status を Approved とし、承認の内容を Approval の行と末尾の「承認時の決定」に記録する。README の表に 1 行を足す。
-実装は「PR の分け方」の 2〜4 の PR で行う（どれも「Refs #341」）。本番の `runtime.toml` の変更と Release は Human が行う。
+実装は「PR の分け方」の 2〜5 の PR で行う（どれも「Refs #341」）。本番の `runtime.toml` の変更と Release は Human が行う。
 方針を変えるときは、この Decision を書き換えず、新しい Decision から `Supersedes` する。
