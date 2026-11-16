@@ -364,6 +364,39 @@ class RefusalTest(LiveCheckCase):
             )
         self.assertEqual(refused.exception.code, "secret_store_path")
 
+    def test_missing_backend_dependencies_are_refused(self):
+        self.module.BACKEND_MODULES = (
+            *self.module.BACKEND_MODULES,
+            "paw_backend.no_such_module_for_this_test",
+        )
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            code, result = self.check()
+        self.assert_refused(code, result, "backend_deps_missing")
+        self.assertFalse(Path(str(self.report) + ".probes").exists())
+        self.assertIn(sys.executable, stderr.getvalue())
+        self.assertIn("venv", stderr.getvalue())
+        self.assertEqual(self.auth.read_text(), LOGIN)
+
+    def test_the_users_own_codex_login_is_refused(self):
+        home = self.base / "home"
+        codex = home / ".codex"
+        codex.mkdir(parents=True)
+        own = codex / "auth.json"
+        own.write_text(LOGIN)
+        environ = {"HOME": str(home)}
+        code, result = self.check(arguments=self.arguments(auth=own), environ=environ)
+        self.assert_refused(code, result, "personal_codex_login")
+        # Through a link that points to it, too.
+        link = self.base / "own-link.json"
+        os.symlink(own, link)
+        code, result = self.check(arguments=self.arguments(auth=link), environ=environ)
+        self.assert_refused(code, result, "personal_codex_login")
+        # The passwd entry's home counts without HOME as well.
+        with self.assertRaises(self.module.Refused) as refused:
+            self.module.check_auth_path(Path.home() / ".codex" / "auth.json", {})
+        self.assertEqual(refused.exception.code, "personal_codex_login")
+
     def test_an_unverified_version_is_refused(self):
         code, result = self.check(arguments=self.arguments(cli_version="9.9.9"))
         self.assert_refused(code, result, "version_not_verified")

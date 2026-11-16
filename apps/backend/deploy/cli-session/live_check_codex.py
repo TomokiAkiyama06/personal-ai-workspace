@@ -31,14 +31,17 @@ A login Codex refreshed during a session (its refresh token is single-use) is
 carried to the next session and written back to the ``--auth`` file at once,
 atomically and keeping the file's mode and owner (again before the temporary
 directory goes, when that failed), so the same file serves the next run; the
-result says ``credential_refreshed`` and ``credential_written_back``. It
-refuses to run as the
-backend's user ``paw`` (or as root), without ``--auth``, and with an ``--auth``
-under the production secret store (``/var/lib/paw/secrets`` and
-``PAW_SECRET_STORE_DIR``). It reads no database, orchestrator, policy or
-runtime configuration of production.
+result says ``credential_refreshed`` and ``credential_written_back``.
 
-    python3 -I deploy/cli-session/live_check_codex.py \\
+It refuses to run as the backend's user ``paw`` (or as root), with an
+interpreter that lacks the backend's dependencies (use a venv with
+``apps/backend`` installed), without ``--auth``, with an ``--auth`` under the
+production secret store (``/var/lib/paw/secrets`` and
+``PAW_SECRET_STORE_DIR``) and with one under the invoking user's own
+``~/.codex``. It reads no database, orchestrator, policy or runtime
+configuration of production.
+
+    <venv>/bin/python -I deploy/cli-session/live_check_codex.py \\
         --codex <codex executable> --cli-version 0.156.1 --model gpt-5.5 \\
         --auth <the dedicated auth.json> --out <result.json> [--sessions <dir>]
 
@@ -55,6 +58,7 @@ import asyncio
 import contextlib
 import datetime
 import hashlib
+import importlib
 import json
 import os
 import pwd
@@ -139,9 +143,54 @@ def check_auth_path(auth: Path | None, environ) -> Path:
         for directory in {absolute, absolute.resolve(strict=False)}:
             if _under(given, directory) or _under(resolved, directory):
                 raise Refused("secret_store_path")
+    for codex in personal_codex_homes(environ):
+        absolute = Path(os.path.abspath(codex))
+        for directory in {absolute, absolute.resolve(strict=False)}:
+            if _under(given, directory) or _under(resolved, directory):
+                raise Refused("personal_codex_login")
     if not resolved.is_file():
         raise Refused("no_credential")
     return resolved
+
+
+def personal_codex_homes(environ) -> list[Path]:
+    """The invoking user's own ``~/.codex`` (its ``HOME`` and its passwd
+    entry's): the check uses a dedicated login, never that one."""
+    homes = []
+    if environ.get("HOME"):
+        homes.append(Path(environ["HOME"]))
+    with contextlib.suppress(KeyError):
+        homes.append(Path(pwd.getpwuid(os.getuid()).pw_dir))
+    return [home / ".codex" for home in homes]
+
+
+#: What the check imports from the backend (and so its dependencies).
+BACKEND_MODULES = (
+    "paw_backend.agents.codex_app_server",
+    "paw_backend.agents.codex_cli",
+    "paw_backend.agents.codex_credentials",
+    "paw_backend.agents.codex_probe",
+    "paw_backend.connections",
+    "paw_backend.connections.validation",
+    "paw_backend.orchestrator.domain",
+    "paw_backend.orchestrator.runtime",
+)
+
+
+def check_backend_modules() -> None:
+    """The backend's modules import with this interpreter (its dependencies
+    are installed), before anything is read or started."""
+    try:
+        for name in BACKEND_MODULES:
+            importlib.import_module(name)
+    except ImportError as error:
+        print(
+            f"the backend's dependencies are missing for {sys.executable}"
+            f" (no module {error.name!r}): run this script with the python of a"
+            " venv with apps/backend installed (deploy/cli-session/README.md)",
+            file=sys.stderr,
+        )
+        raise Refused("backend_deps_missing") from None
 
 
 def read_login(path: Path) -> str:
@@ -585,6 +634,7 @@ def run(
     code = 1
     try:
         check_runner(users, euid)
+        check_backend_modules()
         auth = check_auth_path(arguments.auth, environ)
         check_pair(arguments.cli_version, arguments.model)
         login = Login(read_login(auth), auth)

@@ -56,9 +56,9 @@ python3 -I deploy/cli-session/smoke_codex_recorder.py --codex <codex> --out <res
 本番の Backend は、検証した組（`agent_models/verified.py` の `VERIFIED_MODELS`）にない Model を送る前に止める。組を足す前の本物での確かめは、本番の Backend の外で `live_check_codex.py` で行う。**これは本物の OpenAI に送る**。走らせるのは Human だけで、Agent は走らせない。
 
 - 記録用の Smoke と同じ作り（本物の `CodexProbeAdapter`・`CodexSessionAdapter`・`CodexCliRuntime`・`McpBridge`・`paw_mcp_relay.py`、Backend の `probe_config`・`session_config`。Catalog の上書きはまだ無い）で、検証した組を **その Process の中だけ** Command Line の 1 組 `(--cli-version, --model)` に広げる。Repository の `VERIFIED_MODELS` と本番の Wiring は変えない。`--cli-version` は `VERIFIED_VERSIONS` にある版で、`codex --version` の答えと同じでなければ走らない。
-- 確かめること: (1) Codex の Connection の Health の Probe（Decision 0100）が `connected`。(2) (1) が通ったら、Fixture の小さな差分 `live_check_codex_review.diff` で Reviewer の Node を 1 つ走らせ、Stream の検査（Decision 0089 の 2 の Item の検出、0101 の Tool）に引っかからず、`submit` の結果が Node の結果になる。両方が通れば Exit 0、駄目なら 1、走らなかった（何も送っていない）ときは 2、更新した Login を書き戻せなかったときは 3。
+- 確かめること: (1) Codex の Connection の Health の Probe（Decision 0100）が `connected`。(2) (1) が通ったら、Fixture の小さな差分 `live_check_codex_review.diff` で Reviewer の Node を 1 つ走らせ、Stream の検査（Decision 0089 の 2 の Item の検出、0101 の Tool）に引っかからず、`submit` の結果が Node の結果になる。両方が通れば Exit 0、駄目なら 1、走らなかった（何も送っていない。理由は結果の `refused`）ときは 2、更新した Login を書き戻せなかったときは 3。
 - Credential は、この確かめ専用の Login の `auth.json`（下の「専用の Login を作る」）。Script は中身を Memory に読み、Session ごとの `CODEX_HOME`（新しい一時の Directory（0700）の中）に `auth.json` として置き、終わりに（失敗や中断でも）一時の Directory ごと消す。Session の中で Codex が Login を更新したら（Refresh Token は 1 回しか使えない）、次の Session へ渡し、同時に `--auth` の File を **その場で書き換える**（同じ Directory の一時の File に書いて `fsync` し `rename`。元の File の Mode（0600）と Owner を保つ）。後の確かめが失敗しても、例外や中断でも、一時の Directory を消す前に書き戻す（失敗したらもう 1 回試す）。更新しなかったときは書かない。結果の JSON に `credential_refreshed` と `credential_written_back` を残す（中身は入れない）。書き戻せなかったときは Exit 3 で、`--auth` の File が古くなったかもしれないと（例外の Class の名前だけで）表示する。そのときは Login を作り直す。
-- `paw` の User（と root）では走らない。`--auth` が無い・File でない・JSON の Object でないとき、本番の Secret Store（`/var/lib/paw/secrets` と `PAW_SECRET_STORE_DIR`）の下（Symlink の先も含む）のときも走らない。本番の DB・Orchestrator・Policy・`runtime.toml` は読まない。
+- `paw` の User（と root）では走らない。Backend の依存（`pydantic` など）が入っていない Python（System の `python3` など）では `backend_deps_missing` で走らない（下の venv の Python を使う）。`--auth` が無い・File でない・JSON の Object でないとき、本番の Secret Store（`/var/lib/paw/secrets` と `PAW_SECRET_STORE_DIR`）の下のとき、走らせる User 自身の `~/.codex` の下のとき（`personal_codex_login`）も走らない（どちらも Symlink の先も含む）。本番の DB・Orchestrator・Policy・`runtime.toml` は読まない。
 
 ### 専用の Login を作る（1 回だけ）
 
@@ -70,12 +70,25 @@ CODEX_HOME=<専用の Directory> codex login
 ls -l <専用の Directory>/auth.json   # 0600、開発する User のもの
 ```
 
+### Backend の依存の入った venv を作る（1 回だけ）
+
+System の `python3` には Backend の依存が無い。Repository の Checkout の Top で、この確かめ用の venv を作る（`uv` と Python 3.13。Repository の `README.md` の開発の手順と同じ）:
+
+```sh
+uv venv --python 3.13 <venv>
+uv pip install --python <venv>/bin/python -e apps/backend
+<venv>/bin/python -I apps/backend/deploy/cli-session/live_check_codex.py --help
+```
+
+Script は自分で `apps/backend` を `sys.path` に入れるので、`-I` のままでよい。Checkout を新しくしたら（依存の版が変わったら）`uv pip install` をやり直す。
+
 ### 走らせる
 
 開発する User で、確かめる版の `codex` を Scratch に置いて走らせる。**最初は `0.156.1` と `gpt-5.5` で走らせる**（[Decision 0104](../../../../docs/decisions/0104-codex-model-catalog-override.md) の 4 の A。この結果で `(0.156.1, gpt-5.5)` を組に足す PR を作る）:
 
 ```sh
-python3 -I deploy/cli-session/live_check_codex.py --codex <codex 0.156.1> \
+cd apps/backend
+<venv>/bin/python -I deploy/cli-session/live_check_codex.py --codex <codex 0.156.1> \
     --cli-version 0.156.1 --model gpt-5.5 --auth <専用の Directory>/auth.json \
     --out <result.json> --sessions <短い Directory>
 ```
