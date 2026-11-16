@@ -435,7 +435,11 @@ mechanism. Operator steps are in the
 
 - **Versioned release**: `paw-release build` makes one immutable directory per commit,
   `/opt/paw/releases/<YYYYMMDD-sha12>/` (`git archive`, its own venv and web build, and
-  `release.json` with the schema head, the migration chain and a source digest). The units run
+  `release.json` with the schema head, the migration chain and a source digest). The build
+  runs under umask 022 whatever the caller's (git, uv and npm included) and then sets every
+  directory to 0755 and every file to 0644 (0755 when executable), links left alone, so the
+  units' user can read it (Issue #348: a release built under umask 077 was 0700 and the
+  backend failed to change into `apps/backend`). The units run
   `/opt/paw/current`, a symlink switched atomically. Releases are kept; one becomes
   **known-good** when it passes an update's health check.
 - **Manual update**: `paw-release update <version>` on the server by the Owner/Admin
@@ -449,7 +453,10 @@ mechanism. Operator steps are in the
 - **Pre-update health / recovery check**: database reachable and migrated, no maintenance on,
   `audit_events` partitions to the end of next month (the `audit-retention-check` of
   Decision 0031), the last Recovery backup completed within 90 minutes, the Recovery
-  Repository configured, disk space, the schema compatibility, and configured commands
+  Repository configured, disk space, the target release readable by the units' user (every
+  directory from `/` to `apps/backend` and to the venv's python searchable by others, the
+  release's directories and files readable by others, the python executable by them;
+  Issue #348), the schema compatibility, and configured commands
   (for example that `paw-audit-retention.timer` and `paw-recovery-backup.timer` are enabled).
   The Recovery projection is refreshed before the writers stop: the configured
   `recovery_backup` commands (the backup unit, which runs as the owner of the checkout and its

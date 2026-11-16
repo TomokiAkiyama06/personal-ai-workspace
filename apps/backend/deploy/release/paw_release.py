@@ -55,6 +55,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -406,6 +407,73 @@ def source_digest(directory: Path) -> str:
     return digest.hexdigest()
 
 
+# The permissions of a release (Issue #348): the build runs as root, the units
+# as another user (paw, paw-maint), so everything in a release must be readable
+# by others. The build runs under this umask and then sets the modes itself
+# (a umask of 077 had made a release 0700 and the backend could not start).
+BUILD_UMASK = 0o022
+
+
+def normalise_permissions(directory: Path) -> None:
+    """Directories 0755, files 0644 (0755 if any execute bit was set): readable
+    by others, writable only by the owner, no setuid / setgid / sticky bits.
+    Links are left alone (``os.chmod`` would change what they point to)."""
+    os.chmod(directory, 0o755)
+    for top, dirs, files in os.walk(directory):
+        for name in (*dirs, *files):
+            path = os.path.join(top, name)
+            info = os.lstat(path)
+            if stat.S_ISLNK(info.st_mode):
+                continue
+            if stat.S_ISDIR(info.st_mode):
+                os.chmod(path, 0o755)
+            elif stat.S_ISREG(info.st_mode):
+                os.chmod(path, 0o755 if info.st_mode & 0o111 else 0o644)
+
+
+def _others_can(path: Path, bits: int) -> bool:
+    try:
+        return path.stat().st_mode & bits == bits
+    except OSError:
+        return False
+
+
+def unreadable_by_others(release: Path, python: str) -> str | None:
+    """Why the units' user (not the owner, not in its group) could not run
+    ``release``, or None: every directory from ``/`` down to ``apps/backend``
+    and to the venv's python (links followed) is searchable by others, the
+    python is executable by them, and every directory of the release is
+    readable and searchable and every file readable (``__pycache__`` aside: a
+    missing cache is rebuilt in memory)."""
+    interpreter = release / python
+    if not interpreter.exists():
+        return f"{python} not found"
+    for target in ((release / BACKEND).resolve(), interpreter.resolve().parent):
+        for directory in (*reversed(target.parents), target):
+            if not _others_can(directory, 0o001):
+                return f"{directory}: not searchable by others"
+    if not _others_can(interpreter, 0o005):
+        return f"{python}: not readable and executable by others"
+    try:
+        for top, dirs, files in os.walk(release, onerror=_raise):
+            dirs[:] = [name for name in dirs if name != _DIGEST_SKIP_DIR]
+            entries = [(top, 0o005)]
+            entries += [(os.path.join(top, name), 0o004) for name in files]
+            for name, bits in entries:
+                info = os.lstat(name)
+                if stat.S_ISLNK(info.st_mode) or info.st_mode & bits == bits:
+                    continue
+                relative = Path(name).relative_to(release).as_posix()
+                return f"{relative}: mode {stat.S_IMODE(info.st_mode):04o}"
+    except OSError as error:
+        return f"not readable ({type(error).__name__})"
+    return None
+
+
+def _raise(error: OSError) -> None:
+    raise error
+
+
 def _inside_releases(config: Config, version: str) -> bool:
     """Whether ``releases/<version>`` stays under the releases directory once
     links are followed (not itself a link out of the root, Codex review of #213)."""
@@ -684,12 +752,14 @@ class Tool:
             raise ReleaseError(
                 f"build: release {version} exists (releases are immutable)"
             )
-        self.config.releases.mkdir(parents=True, exist_ok=True)
         staging = self.config.releases / f".build-{version}"
-        if staging.exists():
-            shutil.rmtree(staging)
-        staging.mkdir(mode=0o755)
+        # Not the caller's umask (Issue #348): also that of git, uv and npm.
+        umask = os.umask(BUILD_UMASK)
         try:
+            self.config.releases.mkdir(parents=True, exist_ok=True)
+            if staging.exists():
+                shutil.rmtree(staging)
+            staging.mkdir(mode=0o755)
             archive = subprocess.run(
                 [*git, "archive", "--format=tar", sha],
                 env=git_env,
@@ -733,10 +803,13 @@ class Tool:
                     raise ReleaseError(
                         f"build: {argv[0]} failed ({result.code})", EXIT_ABORTED
                     )
+            normalise_permissions(staging)
             os.replace(staging, final)
         except BaseException:
             shutil.rmtree(staging, ignore_errors=True)
             raise
+        finally:
+            os.umask(umask)
         self.say(f"Built release {version} (commit {sha[:12]}).")
         return load_release(self.config, version)
 
@@ -818,6 +891,15 @@ class Tool:
                         else "not backward compatible: roll back with a restore point"
                     ),
                 )
+        unreadable = unreadable_by_others(target.path, self.config.python)
+        check(
+            "target_readable",
+            unreadable is None,
+            "readable by the units' user"
+            if unreadable is None
+            else f"{unreadable} (the units' user cannot run it: chmod -R "
+            "go+rX,go-w the release, or build a new one)",
+        )
         failed = self.configured("precheck", release=target)
         check(
             "configured_checks",
