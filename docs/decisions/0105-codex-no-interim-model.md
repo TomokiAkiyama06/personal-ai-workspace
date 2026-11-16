@@ -6,7 +6,8 @@
 - Scope: Issue [#341](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/341)（[Decision 0104](0104-codex-model-catalog-override.md) の PR の分け方の 2 の Script を Human が本物で走らせて分かった）。この Decision は設計だけで、コードは承認の後の下の「PR の分け方」の PR で書く。関係する既存の口: `apps/backend/deploy/cli-session/live_check_codex.py`（#353）、`agent_models/verified.py`（`VERIFIED_MODELS`。Codex の組は空）、`agents/codex_cli.py`（`session_config`・`probe_config`）。
 - Supersedes（一部）:
   - [Decision 0104](0104-codex-model-catalog-override.md)（Approved）の 4（当面の既定の Model を `gpt-5.5` にする）と、PR の分け方の 3（`(0.156.1, gpt-5.5)` を足す PR）。
-  - 次は書き換えず、その中で作る: 0104 の 1・2・3・5（上書きの 5 つの値、Catalog の置き場所、本番の外での確かめ、Probe にも当てる）と PR の分け方の 4・5。[Decision 0101](0101-codex-mcp-resource-tools-exception.md)（許す Tool は広げない）、[Decision 0103](0103-selectable-cli-agent-models.md)（検証した組の Gate）。[REQUIREMENTS.md](../../REQUIREMENTS.md) の原文は書き換えない。
+  - 0104 の 2 の「Catalog は Login なしの `codex debug models` の出力」（Human の選択で Login した状態の出力に変える。末尾の「2 の比較の結果と Human の選択」）。
+  - 次は書き換えず、その中で作る: 0104 の 1・2 の残り・3・5（上書きの 5 つの値、Catalog の置き場所、本番の外での確かめ、Probe にも当てる）と PR の分け方の 4・5。[Decision 0101](0101-codex-mcp-resource-tools-exception.md)（許す Tool は広げない）、[Decision 0103](0103-selectable-cli-agent-models.md)（検証した組の Gate）。[REQUIREMENTS.md](../../REQUIREMENTS.md) の原文は書き換えない。
 
 ## 背景
 
@@ -65,3 +66,9 @@ Human は、Claude Code の作業 Session で PR #354 の 3 つの判断点（�
 1. **当面の既定の Model と本番**: A。当面の既定の Model は置かない。本番は今のまま（#350 の前の Release、`gpt-6-sol`、step 5）で、0104 の上書きの実装と `gpt-6-sol` の組を先に進める（1）。
 2. **Catalog の出どころ**: A。Repository の Catalog は Login なしの `codex debug models` の出力。実装の前に Human が確かめ専用の Login で取った Catalog の `gpt-6-sol` の項目と比べ、5 つの値の外に違いがあれば PR に書いて Human に聞く（2）。
 3. **確かめの Script**: A。今のままで、README と上書きは 0104 の 4 の PR で直す（3）。
+
+### 2 の比較の結果と Human の選択（2026-11-16）
+
+Human が確かめ専用の Login で取った Catalog（`/data/results/paw-codex-live-check-2026-11-16/catalog-login.json`）と Login なしの Catalog を比べると、`gpt-6-sol` の項目は 41 の Key のうち 7 つが違った（上書きの 5 つの値は同じ）: `base_instructions`・`model_messages`（Skill / Plugin の節の書き方）、`default_service_tier`（Login なし `priority` / Login あり なし）、`supports_experimental_context`（`false` / `true`）、`supports_reasoning_effort_updates`（`false` / `true`）、`available_access_programs`（なし / `cyber: standard`）、`description`。証拠: 同じ Directory の `STATUS.md`。
+
+2 の A の手順どおり Human に聞き、Human は **Login した状態の Catalog の値を使う** と答えた（今の本番の Codex が使っている Server の値と同じにするため）。このため、Repository に置く 0.156.1 の Catalog は、0104 の 2 と上の 2 の A の「Login なしの `codex debug models` の出力」ではなく、**確かめ専用の Login で取った `codex debug models` の出力（Model は呼ばない）** とする。0104 の 2 の「Login なしの出力」の部分はこの Decision で Supersede する（Catalog を版ごとに Repository に置くこと・上書きの 5 つの値・Fail closed は 0104 の 2 のまま）。作り直すときも、確かめ専用の Login で取る。
