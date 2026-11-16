@@ -193,6 +193,24 @@ def check_backend_modules() -> None:
         raise Refused("backend_deps_missing") from None
 
 
+def resolve_codex(value: str, environ) -> str:
+    """``--codex`` as one absolute path, so that the binary whose version is
+    checked is the one every session launches (the sessions run in their own
+    directory with another ``PATH``): a path (with a ``/``) against this
+    process's directory, a bare name through the invoking ``PATH``. Refused
+    when it is not an executable file."""
+    if not value:
+        raise Refused("codex_not_found")
+    if os.sep in value or (os.altsep and os.altsep in value):
+        found: str | None = os.path.abspath(value)
+    else:
+        found = shutil.which(value, path=environ.get("PATH", os.defpath))
+        found = None if found is None else os.path.abspath(found)
+    if found is None or not os.path.isfile(found) or not os.access(found, os.X_OK):
+        raise Refused("codex_not_found")
+    return found
+
+
 def read_login(path: Path) -> str:
     """The login's text: a JSON object of at most ``MAX_AUTH_BYTES``."""
     with path.open("rb") as handle:
@@ -637,6 +655,9 @@ def run(
         check_backend_modules()
         auth = check_auth_path(arguments.auth, environ)
         check_pair(arguments.cli_version, arguments.model)
+        if executable is None:
+            executable = (resolve_codex(str(arguments.codex), environ),)
+            result["codex_executable"] = executable[0]
         login = Login(read_login(auth), auth)
         base = arguments.sessions.resolve() if arguments.sessions else None
         if base is not None:
@@ -644,7 +665,7 @@ def run(
         scratch = Path(tempfile.mkdtemp(prefix="pawlc", dir=base))
         asyncio.run(
             live_check(
-                executable or (str(arguments.codex),),
+                executable,
                 arguments.cli_version,
                 arguments.model,
                 login,

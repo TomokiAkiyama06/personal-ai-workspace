@@ -264,6 +264,69 @@ class WriteBackTest(LiveCheckCase):
         )
 
 
+class CodexPathTest(LiveCheckCase):
+    """``--codex`` is resolved once to an absolute path: the binary whose
+    version is checked is the one the sessions (in their own directory, with
+    another ``PATH``) launch."""
+
+    def wrapper(self):
+        """A ``codex`` that runs the fake with this test's scenario."""
+        bin_dir = self.base / "bin"
+        bin_dir.mkdir()
+        codex = bin_dir / "codex"
+        codex.write_text(
+            "#!/bin/sh\n"
+            f'exec "{sys.executable}" -I "{FAKE}" --scenario "{self.scenario}"'
+            f' --report "{self.report}" "$@"\n'
+        )
+        os.chmod(codex, 0o755)
+        return codex
+
+    def run_with(self, codex, environ):
+        self.scenario.write_text(
+            json.dumps(
+                {"version": VERSION, "actions": NODE_OK, "probe_actions": PROBE_OK}
+            )
+        )
+        return self.module.run(
+            self.arguments(codex=codex),
+            users={"developer"},
+            euid=1000,
+            environ=environ,
+        )
+
+    def test_a_relative_path_is_resolved_against_the_invoking_directory(self):
+        codex = self.wrapper()
+        cwd = os.getcwd()
+        os.chdir(self.base)
+        self.addCleanup(os.chdir, cwd)
+        code, result = self.run_with("./bin/codex", {"PATH": "/nonexistent"})
+        self.assertEqual(code, 0, result)
+        self.assertEqual(result["codex_executable"], str(codex))
+        self.assertEqual(result["probe"]["outcome"], "connected")
+        self.assertTrue(result["node"]["passed"])
+
+    def test_a_bare_name_is_looked_up_on_the_invoking_path(self):
+        codex = self.wrapper()
+        code, result = self.run_with("codex", {"PATH": str(codex.parent)})
+        self.assertEqual(code, 0, result)
+        self.assertEqual(result["codex_executable"], str(codex))
+        self.assertTrue(result["passed"])
+
+    def test_a_codex_that_cannot_be_resolved_is_refused(self):
+        for value, environ in (
+            ("codex", {"PATH": str(self.base / "empty")}),
+            ("./no/such/codex", {}),
+            (str(self.auth), {}),  # a file, but not executable
+        ):
+            with self.subTest(value=value):
+                code, result = self.run_with(value, environ)
+                self.assertEqual(code, 2)
+                self.assertEqual(result["refused"], "codex_not_found")
+                self.assertFalse(Path(str(self.report) + ".probes").exists())
+                self.assertEqual(self.left() if self.sessions.exists() else [], [])
+
+
 class FailTest(LiveCheckCase):
     def test_a_refused_stream_fails_and_cleans_up(self):
         code, result = self.check(node=[{"item": {"type": "commandExecution"}}])
