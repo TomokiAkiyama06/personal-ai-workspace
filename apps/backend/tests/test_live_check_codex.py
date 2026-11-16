@@ -10,6 +10,7 @@ import io
 import json
 import os
 import shutil
+import stat
 import sys
 import tempfile
 import unittest
@@ -59,8 +60,12 @@ class LiveCheckCase(unittest.TestCase):
         self.report = self.base / "report.json"
         self.scenario = self.base / "scenario.json"
         self.sessions = self.base / "s"
-        self.auth = self.base / "auth.json"
+        # The dedicated login's directory (``CODEX_HOME=<dir> codex login``).
+        self.dedicated = self.base / "dedicated"
+        self.dedicated.mkdir(mode=0o700)
+        self.auth = self.dedicated / "auth.json"
         self.auth.write_text(LOGIN)
+        os.chmod(self.auth, 0o600)
 
     def arguments(self, **changes):
         values = {
@@ -154,14 +159,109 @@ class PassTest(LiveCheckCase):
         # The given file is untouched.
         self.assertEqual(self.auth.read_text(), LOGIN)
 
-    def test_a_refreshed_login_is_carried_in_memory_only(self):
+    def test_an_unrefreshed_login_is_not_written(self):
+        before = os.stat(self.auth)
+        code, result = self.check()
+        self.assertEqual(code, 0, result)
+        self.assertEqual(
+            (result["credential_refreshed"], result["credential_written_back"]),
+            (False, False),
+        )
+        after = os.stat(self.auth)
+        self.assertEqual(
+            (after.st_ino, after.st_mtime_ns), (before.st_ino, before.st_mtime_ns)
+        )
+        self.assertEqual(self.auth.read_text(), LOGIN)
+
+
+class WriteBackTest(LiveCheckCase):
+    def assert_written_back(self, result, before):
+        self.assertTrue(result["credential_refreshed"])
+        self.assertTrue(result["credential_written_back"])
+        self.assertNotIn("credential_write_back_error", result)
+        self.assertEqual(self.auth.read_text(), REFRESHED)
+        after = os.stat(self.auth)
+        # Renamed over (a new file), with the mode and owner kept.
+        self.assertNotEqual(after.st_ino, before.st_ino)
+        self.assertEqual(stat.S_IMODE(after.st_mode), 0o600)
+        self.assertEqual((after.st_uid, after.st_gid), (before.st_uid, before.st_gid))
+        # Nothing left aside next to it.
+        self.assertEqual(
+            sorted(p.name for p in self.dedicated.iterdir()), ["auth.json"]
+        )
+        self.assertEqual(self.left(), [])
+        self.assert_clean_json(result)
+
+    def test_a_refreshed_login_is_written_back_and_carried_on(self):
+        before = os.stat(self.auth)
         node = [{"refresh": REFRESHED}, *NODE_OK]
         code, result = self.check(node=node)
         self.assertEqual(code, 0, result)
+        self.assert_written_back(result, before)
+
+    def test_the_probes_refresh_reaches_the_node_and_the_file(self):
+        before = os.stat(self.auth)
+        code, result = self.check(probe=[{"refresh": REFRESHED}, *PROBE_OK])
+        self.assertEqual(code, 0, result)
+        self.assert_written_back(result, before)
+        # The node's session was given the refreshed login.
+        sent = json.loads(self.report.read_text())
+        self.assertEqual(sent["auth_length"], len(REFRESHED))
+
+    def test_it_is_written_back_when_a_later_check_fails(self):
+        before = os.stat(self.auth)
+        code, result = self.check(
+            probe=[{"refresh": REFRESHED}, *PROBE_OK],
+            node=[{"item": {"type": "commandExecution"}}],
+        )
+        self.assertEqual(code, 1)
+        self.assertFalse(result["passed"])
+        self.assert_written_back(result, before)
+
+    def test_it_is_written_back_after_an_exception(self):
+        before = os.stat(self.auth)
+
+        def broken(*args, **kwargs):
+            raise RuntimeError("boom")
+
+        self.module.run_node = broken
+        code, result = self.check(probe=[{"refresh": REFRESHED}, *PROBE_OK])
+        self.assertEqual(code, 1)
+        self.assertEqual(result["error"], "RuntimeError")
+        self.assert_written_back(result, before)
+
+    def test_a_failed_write_back_is_tried_again_and_fails_the_run(self):
+        calls = []
+
+        def refuse(path, value):
+            calls.append(path)
+            raise PermissionError(value)
+
+        self.module.write_file_back = refuse
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            code, result = self.check(node=[{"refresh": REFRESHED}, *NODE_OK])
+        self.assertEqual(code, 3)
+        self.assertFalse(result["passed"])
         self.assertTrue(result["credential_refreshed"])
+        self.assertFalse(result["credential_written_back"])
+        self.assertEqual(result["credential_write_back_error"], "PermissionError")
+        self.assertEqual(len(calls), 2)  # at once, and again before the cleanup
+        self.assertIn("may now be stale", stderr.getvalue())
+        self.assertIn("PermissionError", stderr.getvalue())
+        self.assertNotIn("r3fr", stderr.getvalue())
         self.assertEqual(self.auth.read_text(), LOGIN)
         self.assertEqual(self.left(), [])
         self.assert_clean_json(result)
+
+    def test_write_file_back_keeps_another_mode(self):
+        os.chmod(self.auth, 0o640)
+        self.module.write_file_back(self.auth, REFRESHED)
+        self.assertEqual(self.auth.read_text(), REFRESHED)
+        self.assertEqual(stat.S_IMODE(os.stat(self.auth).st_mode), 0o640)
+        self.assertEqual(
+            sorted(p.name for p in self.dedicated.iterdir()), ["auth.json"]
+        )
 
 
 class FailTest(LiveCheckCase):

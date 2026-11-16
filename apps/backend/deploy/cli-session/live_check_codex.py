@@ -21,13 +21,18 @@ and be what ``codex --version`` answers. It checks, in turn:
    0089, 2 and the tools of Decision 0101: the stream was not refused) and its
    ``submit`` came back as the node's result (run only after 1 passed).
 
-The credential is a copy of a Codex ``auth.json`` that the Human passes with
-``--auth``. It is read into memory and placed (``CodexAuthFile``, as the
-backend places it) as ``auth.json`` in each session's ``CODEX_HOME``, a
-directory under a new temporary directory (0700) that is deleted at the end,
-also after a failure or an interruption. A login Codex refreshed during a
-session is carried to the next session in memory only: the file given is never
-written (the result says ``credential_refreshed``). It refuses to run as the
+The credential is the ``auth.json`` of a login dedicated to this check (made
+with ``CODEX_HOME=<dir> codex login``; never production's, never
+``~/.codex``'s) that the Human passes with ``--auth``. It is read into memory
+and placed (``CodexAuthFile``, as the backend places it) as ``auth.json`` in
+each session's ``CODEX_HOME``, a directory under a new temporary directory
+(0700) that is deleted at the end, also after a failure or an interruption.
+A login Codex refreshed during a session (its refresh token is single-use) is
+carried to the next session and written back to the ``--auth`` file at once,
+atomically and keeping the file's mode and owner (again before the temporary
+directory goes, when that failed), so the same file serves the next run; the
+result says ``credential_refreshed`` and ``credential_written_back``. It
+refuses to run as the
 backend's user ``paw`` (or as root), without ``--auth``, and with an ``--auth``
 under the production secret store (``/var/lib/paw/secrets`` and
 ``PAW_SECRET_STORE_DIR``). It reads no database, orchestrator, policy or
@@ -35,10 +40,11 @@ runtime configuration of production.
 
     python3 -I deploy/cli-session/live_check_codex.py \\
         --codex <codex executable> --cli-version 0.156.1 --model gpt-5.5 \\
-        --auth <a copy of auth.json> --out <result.json> [--sessions <dir>]
+        --auth <the dedicated auth.json> --out <result.json> [--sessions <dir>]
 
 The exit code is 0 when both checks passed, 1 when not, 2 when it refused to
-run (nothing was sent). The result JSON holds the checks' verdicts, the
+run (nothing was sent), 3 when a refreshed login could not be written back
+(the ``--auth`` file may then be stale). The result JSON holds the checks' verdicts, the
 versions, the model, the times and the review's answer (its summary and
 findings); never the credential, and never the prompts (the fixture is named
 by its path and SHA-256).
@@ -46,6 +52,7 @@ by its path and SHA-256).
 
 import argparse
 import asyncio
+import contextlib
 import datetime
 import hashlib
 import json
@@ -53,6 +60,7 @@ import os
 import pwd
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -189,24 +197,82 @@ async def codex_version(executable: tuple[str, ...], scratch: Path) -> str | Non
     return match.group(1) if match else None
 
 
+def write_file_back(path: Path, value: str) -> None:
+    """Replace ``path`` with ``value`` atomically (a file aside in the same
+    directory, ``fsync``, ``rename``, the directory's ``fsync``), keeping the
+    file's mode and owner. Raises ``OSError`` when it could not."""
+    status = os.stat(path)
+    directory = path.parent
+    aside = directory / f".{path.name}.{uuid.uuid4().hex}"
+    mode = stat.S_IMODE(status.st_mode)
+    fd = os.open(
+        aside, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, mode
+    )
+    try:
+        try:
+            os.fchmod(fd, mode)  # whatever the umask
+            if (status.st_uid, status.st_gid) != (os.geteuid(), os.getegid()):
+                os.fchown(fd, status.st_uid, status.st_gid)
+            data = value.encode("utf-8")
+            while data:
+                data = data[os.write(fd, data) :]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.rename(aside, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(aside)
+        raise
+    dfd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        os.fsync(dfd)
+    finally:
+        os.close(dfd)
+
+
 class Login:
     """The login of this run, in memory: a refreshed one (the adapter's
-    write-back) replaces it for the next session; nothing is written to disk
-    but each session's ``auth.json`` (by ``CodexAuthFile``)."""
+    write-back, made only when Codex changed its ``auth.json``) replaces it
+    for the next session and is written back to the ``--auth`` file at once
+    (:func:`write_file_back`), so that the dedicated login stays usable for
+    the next run. A write-back that failed is tried again by :meth:`settle`
+    (before the temporary directory goes)."""
 
-    def __init__(self, text: str) -> None:
+    def __init__(self, text: str, path: Path) -> None:
         from paw_backend.connections import Secret
 
         self._secret_type = Secret
+        self._path = path
         self.secret = Secret(text)
         self.refreshed = False
+        self.written = False
+        self.error: str | None = None
 
     async def write_back(self, value: str):
         from paw_backend.connections import WriteBack
 
         self.secret = self._secret_type(value)
         self.refreshed = True
-        return WriteBack.WRITTEN
+        self.written = False
+        self._write()
+        # The session goes on with the refreshed login either way.
+        return WriteBack.WRITTEN if self.written else WriteBack.FAILED
+
+    def settle(self) -> None:
+        """Write a refreshed login back if that is still to do."""
+        if self.refreshed and not self.written:
+            self._write()
+
+    def _write(self) -> None:
+        try:
+            write_file_back(self._path, self.secret.reveal())
+        except Exception as error:
+            # Only the class: the text may hold a path or anything.
+            self.error = type(error).__name__
+        else:
+            self.written = True
+            self.error = None
 
 
 class OnePair:
@@ -447,7 +513,7 @@ async def live_check(
     executable: tuple[str, ...],
     cli_version: str,
     model: str,
-    login_text: str,
+    login: Login,
     scratch: Path,
     result: dict,
     *,
@@ -474,7 +540,6 @@ async def live_check(
         raise Refused("version_mismatch")
     # Decision 0104, 3 A: the verified pairs of this process only.
     pairs = frozenset({(cli_version, model)})
-    login = Login(login_text)
     sessions = scratch / "sessions"
     sessions.mkdir(mode=0o700)
     result["probe"] = await run_probe(executable, sessions, pairs, login, launcher)
@@ -490,7 +555,6 @@ async def live_check(
         )
     else:
         result["node"] = {"passed": False, "skipped": "probe_not_connected"}
-    result["credential_refreshed"] = login.refreshed
     result["finished_at"] = _now()
     result["passed"] = bool(result["probe"]["passed"] and result["node"]["passed"])
     return result
@@ -517,12 +581,13 @@ def run(
         "model": arguments.model,
     }
     scratch: Path | None = None
+    login: Login | None = None
     code = 1
     try:
         check_runner(users, euid)
         auth = check_auth_path(arguments.auth, environ)
         check_pair(arguments.cli_version, arguments.model)
-        login_text = read_login(auth)
+        login = Login(read_login(auth), auth)
         base = arguments.sessions.resolve() if arguments.sessions else None
         if base is not None:
             base.mkdir(parents=True, exist_ok=True)
@@ -532,7 +597,7 @@ def run(
                 executable or (str(arguments.codex),),
                 arguments.cli_version,
                 arguments.model,
-                login_text,
+                login,
                 scratch,
                 result,
                 node_seconds=arguments.node_seconds,
@@ -550,9 +615,26 @@ def run(
         )
         code = 1
     finally:
+        if login is not None:
+            # Also after a failure or an interruption, before the temporary
+            # directory goes: the refreshed login must reach ``--auth``.
+            login.settle()
+            if login.refreshed and not login.written:
+                print(
+                    "the refreshed login could not be written back"
+                    f" ({login.error}): the --auth file may now be stale",
+                    file=sys.stderr,
+                )
         if scratch is not None:
             # The copies of the login and every CODEX_HOME are in it.
             shutil.rmtree(scratch, ignore_errors=True)
+    if login is not None:
+        result["credential_refreshed"] = login.refreshed
+        result["credential_written_back"] = login.written
+        if login.refreshed and not login.written:
+            result["passed"] = False
+            result["credential_write_back_error"] = login.error
+            code = 3
     if scratch is not None:
         result["cleaned"] = not scratch.exists()
         if not result["cleaned"]:
@@ -572,7 +654,8 @@ def parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--auth",
         type=Path,
-        help="a copy of a Codex auth.json (never the production secret store)",
+        help="the auth.json of a login dedicated to this check (updated in"
+        " place when Codex refreshes it; never production's or ~/.codex's)",
     )
     parser.add_argument("--out", required=True, type=Path, help="the result JSON")
     parser.add_argument(

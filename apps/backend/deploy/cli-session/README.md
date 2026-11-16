@@ -51,24 +51,36 @@ python3 -I deploy/cli-session/smoke_codex_recorder.py --codex <codex> --out <res
 
 `--probe` を付けると、同じ記録用の Provider で Codex の Connection の Health の Probe（`CodexProbeAdapter`、[Decision 0100](../../../../docs/decisions/0100-cli-connection-health-probe.md) の 10。`config.toml` は MCP の Server のない `probe_config`）を 1 回走らせる。記録用の Provider は `PAW_PROBE_OK` と答え、Request がちょうど 1 つで、その `tools` が空（Model に Tool を 1 つも見せない）で、Probe の判定が `connected` なら Exit 0。Codex の Probe を本番で使う前に、同じ版の `codex` で 1 回走らせ、結果の JSON を同じく残す。
 
-## Codex の版と Model の組を本物で確かめる（Decision 0104 の 3 の A、Issue #341。Human だけ）
+## Codex の版と Model の組を本物で確かめる（[Decision 0104](../../../../docs/decisions/0104-codex-model-catalog-override.md) の 3 の A、Issue #341。Human だけ）
 
 本番の Backend は、検証した組（`agent_models/verified.py` の `VERIFIED_MODELS`）にない Model を送る前に止める。組を足す前の本物での確かめは、本番の Backend の外で `live_check_codex.py` で行う。**これは本物の OpenAI に送る**。走らせるのは Human だけで、Agent は走らせない。
 
 - 記録用の Smoke と同じ作り（本物の `CodexProbeAdapter`・`CodexSessionAdapter`・`CodexCliRuntime`・`McpBridge`・`paw_mcp_relay.py`、Backend の `probe_config`・`session_config`。Catalog の上書きはまだ無い）で、検証した組を **その Process の中だけ** Command Line の 1 組 `(--cli-version, --model)` に広げる。Repository の `VERIFIED_MODELS` と本番の Wiring は変えない。`--cli-version` は `VERIFIED_VERSIONS` にある版で、`codex --version` の答えと同じでなければ走らない。
-- 確かめること: (1) Codex の Connection の Health の Probe（Decision 0100）が `connected`。(2) (1) が通ったら、Fixture の小さな差分 `live_check_codex_review.diff` で Reviewer の Node を 1 つ走らせ、Stream の検査（Decision 0089 の 2 の Item の検出、0101 の Tool）に引っかからず、`submit` の結果が Node の結果になる。両方が通れば Exit 0、駄目なら 1、走らなかった（何も送っていない）ときは 2。
-- Credential は Human が `--auth` で渡す `auth.json` の写し。Script は中身を Memory に読み、Session ごとの `CODEX_HOME`（新しい一時の Directory（0700）の中）に `auth.json` として置き、終わりに（失敗や中断でも）一時の Directory ごと消す。渡した File には書かない。Session の中で Codex が Login を更新したら、次の Session へは Memory の中だけで渡し、結果の `credential_refreshed` が `true` になる（そのときは渡した写しの Refresh Token はもう使えないことがある）。本番の Connection と同じ Login の写しを使うと、更新で本番の Login が使えなくなりうるので、確かめ用の別の Login を使う。
+- 確かめること: (1) Codex の Connection の Health の Probe（Decision 0100）が `connected`。(2) (1) が通ったら、Fixture の小さな差分 `live_check_codex_review.diff` で Reviewer の Node を 1 つ走らせ、Stream の検査（Decision 0089 の 2 の Item の検出、0101 の Tool）に引っかからず、`submit` の結果が Node の結果になる。両方が通れば Exit 0、駄目なら 1、走らなかった（何も送っていない）ときは 2、更新した Login を書き戻せなかったときは 3。
+- Credential は、この確かめ専用の Login の `auth.json`（下の「専用の Login を作る」）。Script は中身を Memory に読み、Session ごとの `CODEX_HOME`（新しい一時の Directory（0700）の中）に `auth.json` として置き、終わりに（失敗や中断でも）一時の Directory ごと消す。Session の中で Codex が Login を更新したら（Refresh Token は 1 回しか使えない）、次の Session へ渡し、同時に `--auth` の File を **その場で書き換える**（同じ Directory の一時の File に書いて `fsync` し `rename`。元の File の Mode（0600）と Owner を保つ）。後の確かめが失敗しても、例外や中断でも、一時の Directory を消す前に書き戻す（失敗したらもう 1 回試す）。更新しなかったときは書かない。結果の JSON に `credential_refreshed` と `credential_written_back` を残す（中身は入れない）。書き戻せなかったときは Exit 3 で、`--auth` の File が古くなったかもしれないと（例外の Class の名前だけで）表示する。そのときは Login を作り直す。
 - `paw` の User（と root）では走らない。`--auth` が無い・File でない・JSON の Object でないとき、本番の Secret Store（`/var/lib/paw/secrets` と `PAW_SECRET_STORE_DIR`）の下（Symlink の先も含む）のときも走らない。本番の DB・Orchestrator・Policy・`runtime.toml` は読まない。
 
-開発する User で、確かめる版の `codex` を Scratch に置いて走らせる。**最初は `0.156.1` と `gpt-5.5` で走らせる**（Decision 0104 の 4 の A。この結果で `(0.156.1, gpt-5.5)` を組に足す PR を作る）:
+### 専用の Login を作る（1 回だけ）
+
+本番の Connection の Login（Secret Store の中）や `~/.codex/auth.json` は **決して渡さない**（Script が Refresh Token を使うと、それらが使えなくなる）。この確かめ専用の Login を、空の Directory を `CODEX_HOME` にして 1 回だけ作り、以後の Run（`gpt-5.5` も後の `gpt-6-sol` も）で同じ File を渡す:
+
+```sh
+install -d -m 0700 <専用の Directory>
+CODEX_HOME=<専用の Directory> codex login
+ls -l <専用の Directory>/auth.json   # 0600、開発する User のもの
+```
+
+### 走らせる
+
+開発する User で、確かめる版の `codex` を Scratch に置いて走らせる。**最初は `0.156.1` と `gpt-5.5` で走らせる**（[Decision 0104](../../../../docs/decisions/0104-codex-model-catalog-override.md) の 4 の A。この結果で `(0.156.1, gpt-5.5)` を組に足す PR を作る）:
 
 ```sh
 python3 -I deploy/cli-session/live_check_codex.py --codex <codex 0.156.1> \
-    --cli-version 0.156.1 --model gpt-5.5 --auth <auth.json の写し> \
+    --cli-version 0.156.1 --model gpt-5.5 --auth <専用の Directory>/auth.json \
     --out <result.json> --sessions <短い Directory>
 ```
 
-結果の JSON は、各確かめの合否、版（`codex_version`・`backend_commit`）、Model、時刻、Fixture の Path と SHA-256、Review の答えの文（`node.review` の `summary`・`discovered_facts`・`unresolved_questions`）だけを持つ。Credential と Prompt の文は入れない。Review の答えの質は Human が目で見る。どちらかが駄目なら組に入れない。結果の JSON を `/data/results/` に残し、組を足す PR に記録用の Smoke（Node と Probe）の結果と一緒に Path を書く。終わったら `auth.json` の写しは Human が消す。
+結果の JSON は、各確かめの合否、版（`codex_version`・`backend_commit`）、Model、時刻、Fixture の Path と SHA-256、Review の答えの文（`node.review` の `summary`・`discovered_facts`・`unresolved_questions`）だけを持つ。Credential と Prompt の文は入れない。Review の答えの質は Human が目で見る。どちらかが駄目なら組に入れない。結果の JSON を `/data/results/` に残し、組を足す PR に記録用の Smoke（Node と Probe）の結果と一緒に Path を書く。専用の Login は次の Run のために残す（要らなくなったら Directory ごと消す）。
 
 ## 配備（root）
 
