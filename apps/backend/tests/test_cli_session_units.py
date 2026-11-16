@@ -434,12 +434,14 @@ class RunnerTest(unittest.TestCase):
     def test_codex_home_is_the_containers_own_tmpfs_with_the_login_in_it(self):
         # Decision 0083, 6 (issue #239): CODEX_HOME is a tmpfs of the
         # container (0700, the CLI's account); only the session's
-        # config.toml (read-only) and auth.json (read-write: Codex rewrites
-        # it in place, the backend reads it back) are mounted into it.
+        # config.toml and models.json (read-only; the model catalog,
+        # Decision 0104, 2 A) and auth.json (read-write: Codex rewrites it in
+        # place, the backend reads it back) are mounted into it.
         self.codex_session()
         home = self.directory / "config"
         home.mkdir()
         (home / "config.toml").write_text("")
+        (home / "models.json").write_text("{}")
         (home / "auth.json").write_text("{}")
         result, _ = self.run_interactive(b"")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -448,7 +450,11 @@ class RunnerTest(unittest.TestCase):
             f"type=tmpfs,destination={home},tmpfs-mode=0700,chown=true,notmpcopyup"
         )
         self.assertEqual(argv[tmpfs - 1], "--mount")
-        for name, mode in (("config.toml", "ro"), ("auth.json", "rw")):
+        for name, mode in (
+            ("config.toml", "ro"),
+            ("models.json", "ro"),
+            ("auth.json", "rw"),
+        ):
             with self.subTest(name):
                 mount = f"{home / name}:{home / name}:{mode}"
                 index = argv.index(mount)
@@ -466,6 +472,7 @@ class RunnerTest(unittest.TestCase):
         self.assertTrue(any(a.startswith("type=tmpfs,destination=") for a in argv))
         self.assertFalse(any("auth.json" in a for a in argv))
         self.assertFalse(any("config.toml" in a for a in argv))
+        self.assertFalse(any("models.json" in a for a in argv))
 
     def test_what_it_refuses_of_codex_home_starts_nothing(self):
         def elsewhere():
@@ -483,10 +490,16 @@ class RunnerTest(unittest.TestCase):
             home.mkdir()
             (home / "auth.json").symlink_to(self.config)
 
+        def linked_catalog():
+            home = self.directory / "config"
+            home.mkdir()
+            (home / "models.json").symlink_to(self.config)
+
         for name, prepare in {
             "CODEX_HOME elsewhere": elsewhere,
             "no CODEX_HOME": no_home,
             "a linked auth.json": linked_login,
+            "a linked models.json": linked_catalog,
         }.items():
             with self.subTest(name):
                 self.setUp()

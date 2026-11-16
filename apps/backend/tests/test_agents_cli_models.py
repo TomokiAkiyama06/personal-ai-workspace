@@ -56,6 +56,7 @@ from . import test_agents_claude_probe as claude_probe
 from . import test_agents_codex_cli as codex_cli
 from . import test_agents_codex_probe as codex_probe
 from .agent_models_support import TEST_CODEX_MODEL, verified_pairs_of
+from .codex_catalog_support import fake_catalogs
 from .test_runtime_config_cloud import decision_text, load
 
 CODEX, CLAUDE = ConnectionKind.CODEX, ConnectionKind.CLAUDE
@@ -409,6 +410,7 @@ class CodexProbeModelTest(codex_probe.ProbeCase):
             session_base=self.sessions,
             executable=adapter._codex._executable,
             verified_versions=frozenset({codex_probe.VERSION}),
+            catalogs=fake_catalogs(),
             **options,
         )
 

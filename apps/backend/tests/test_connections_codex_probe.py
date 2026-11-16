@@ -43,6 +43,7 @@ from paw_backend.connections import (
 from paw_backend.connections.store import ConnectionStore
 from paw_backend.db import Database
 
+from .codex_catalog_support import fake_catalogs
 from .support import make_settings
 from .task_support import TEST_DATABASE_URL
 from .test_agents_codex_probe import FAKE, GOOD
@@ -321,6 +322,7 @@ class EndToEndTest(CodexProbeCase):
                 str(report),
             ),
             verified_versions=frozenset({"0.162.1"}),
+            catalogs=fake_catalogs(),
         )
 
     async def test_a_deadline_during_a_stop_that_fails_keeps_the_status(self):
@@ -389,6 +391,7 @@ class EndToEndTest(CodexProbeCase):
                 str(report),
             ),
             verified_versions=frozenset({"0.162.1"}),
+            catalogs=fake_catalogs(),
         )
         _, result = await self.probe(self.probing_service(adapter))
         self.assertEqual(result.outcome, ProbeOutcome.CONNECTED)

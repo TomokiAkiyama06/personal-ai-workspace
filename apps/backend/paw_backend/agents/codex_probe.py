@@ -27,11 +27,18 @@ session's egress forwarder on ``127.0.0.1:3128``):
    (``invalid_response``) and nothing is sent (Decision 0100, 10); with the
    verified pairs (Decision 0103, 3 A), a version and model that are not one
    is ``unavailable`` (``invalid_response``) with the status kept, and nothing
-   is sent either (checked again on ``initialize``'s version);
-2. the session is bound to the slot (Decision 0096, 2 B), its ``config.toml``
-   written (:func:`~.codex_cli.probe_config`: a node session's without any MCP
-   server, so no tool is offered at all), the login placed as ``auth.json``,
-   each after the slot's check (Decision 0096, 2's fencing);
+   is sent either (checked again on ``initialize``'s version, which must be
+   the catalog's). Then the model's catalog is made (Decision 0104, 5 A: a
+   node session's, the repository's catalog of the version with the model's
+   Code Mode, multi-agent and extra tools off, ``codex_catalog``): a version
+   or model without one, or one that keeps a Code Mode value, is
+   ``unavailable`` (``invalid_response``) with the status kept and nothing is
+   sent;
+2. the session is bound to the slot (Decision 0096, 2 B), its catalog and
+   ``config.toml`` written (:func:`~.codex_cli.probe_config`: a node session's
+   without any MCP server, so no tool is offered at all; ``model_catalog_json``
+   names the catalog), the login placed as ``auth.json``, each after the
+   slot's check (Decision 0096, 2's fencing);
 3. ``app-server``: ``initialize``, ``thread/start`` (ephemeral, approval
    ``never``, read-only, ``environments: []``, the fixed system prompt as
    ``baseInstructions``), ``turn/start`` with the fixed task. Its stream is
@@ -104,6 +111,11 @@ from paw_backend.agents.codex_app_server import (
     notification,
     thread_start,
     turn_start,
+)
+from paw_backend.agents.codex_catalog import (
+    CATALOG_NAME,
+    REPOSITORY_CATALOGS,
+    CodexCatalogs,
 )
 from paw_backend.agents.codex_cli import (
     CLIENT_VERSION,
@@ -197,11 +209,14 @@ class CodexProbeAdapter:
         verified_versions: frozenset[str] = VERIFIED_VERSIONS,
         verified_models: frozenset[tuple[str, str]] | None = None,
         models: object | None = None,
+        catalogs: CodexCatalogs = REPOSITORY_CATALOGS,
     ) -> None:
         """``verified_models``: the verified ``(version, model)`` pairs
         (Decision 0103, 3 A; ``None``: the version is the only check, as
         before it). ``models``: an ``AgentModelGate`` whose ``default_model``
-        names the model to check (``None``: ``model``)."""
+        names the model to check (``None``: ``model``). ``catalogs``: the
+        model catalogs (a node session's: the repository's unless a test says
+        otherwise)."""
         if models is not None:
             require_async_method(models, "default_model", 1)
         credentials = credentials if credentials is not None else CodexAuthFile()
@@ -214,6 +229,7 @@ class CodexProbeAdapter:
             proxy_url=proxy_url,
             verified_versions=verified_versions,
             verified_models=verified_models,
+            catalogs=catalogs,
         )
         self._credentials = credentials
         self._pairs = None if verified_models is None else frozenset(verified_models)
@@ -332,6 +348,15 @@ class CodexProbeAdapter:
                 keeps_status=True,
                 model=state.model,
             )
+        catalog = self._codex.session_catalog(version, state.model)
+        if catalog is None:
+            # Decision 0104, 5 A: fail closed, as a node's session.
+            return self._report(
+                ProbeOutcome.UNAVAILABLE,
+                FailureCode.INVALID_RESPONSE,
+                keeps_status=True,
+                model=state.model,
+            )
         lost = self._report(
             ProbeOutcome.UNAVAILABLE,
             FailureCode.UNAVAILABLE,
@@ -342,7 +367,8 @@ class CodexProbeAdapter:
             return lost
         state.bound = True
         codex_home = spec.config_dir
-        _write(codex_home / CONFIG_NAME, probe_config())
+        _write(codex_home / CATALOG_NAME, catalog)
+        _write(codex_home / CONFIG_NAME, probe_config(codex_home / CATALOG_NAME))
         if not await _held(session, state):
             return lost
         try:
@@ -350,7 +376,7 @@ class CodexProbeAdapter:
             await self._credentials.place(secret, codex_home)
             if not await _held(session, state):
                 return lost
-            stream, reading = await self._converse(state)
+            stream, reading = await self._converse(state, version)
         finally:
             # After the CLI was stopped, run to its end even through a
             # cancellation (the deadline): a refreshed login is written back
@@ -379,7 +405,9 @@ class CodexProbeAdapter:
             )
         return self._verdict(stream, reading, spec.session_id, state.model)
 
-    async def _converse(self, state: _ProbeState) -> tuple[CodexStream, _Reading]:
+    async def _converse(
+        self, state: _ProbeState, version: str
+    ) -> tuple[CodexStream, _Reading]:
         process = await self._codex._start(
             CodexLaunch(
                 self._codex.arguments(),
@@ -405,7 +433,11 @@ class CodexProbeAdapter:
                     reading.refused = refused.reason
                     break
                 if isinstance(item, Initialized):
-                    if not self._pair(item.version, state.model):
+                    # Another version than the catalog's (Decision 0104, 2 A)
+                    # is refused as an unverified pair.
+                    if item.version != version or not self._pair(
+                        item.version, state.model
+                    ):
                         logger.warning("Codex probe refused: model")
                         reading.failure = FailureCode.INVALID_RESPONSE
                         reading.refused = "model"

@@ -53,10 +53,14 @@ from paw_backend.connections import (
     WriteBack,
 )
 
+from .codex_catalog_support import fake_catalogs
+
 HERE = Path(__file__).resolve().parent
 FAKE = HERE / "fake_codex_cli.py"
 VERSION = "0.162.1"
 MODEL = "gpt-test-codex"
+#: A session's catalog file (``model_catalog_json``, Decision 0104, 2 A).
+CATALOG = Path("/run/paw-cli/s/config/models.json")
 # A login built from pieces (no literal a scanner would flag).
 LOGIN = '{"tokens": {"access_token": "paw-codex-probe-' + "c4na" + 'ry"}}'
 REFRESHED = '{"tokens": {"access_token": "paw-codex-probe-' + "r3fr" + 'esh"}}'
@@ -147,6 +151,7 @@ class ProbeCase(unittest.IsolatedAsyncioTestCase):
                 str(self.report),
             ),
             verified_versions=verified,
+            catalogs=fake_catalogs(),
         )
 
     async def probe(self, actions, *, hooks=None, adapter=None, release=True, **extra):
@@ -202,7 +207,7 @@ class LaunchTest(ProbeCase):
         self.assertNotIn("paw-codex-probe", json.dumps(sent["args"]))
 
     def test_the_probe_config_is_a_session_config_without_a_server(self):
-        config = tomllib.loads(probe_config())
+        config = tomllib.loads(probe_config(CATALOG))
         self.assertNotIn("mcp_servers", config)
         self.assertEqual(
             config["features"], {name: False for name in DISABLED_FEATURES}
@@ -655,6 +660,63 @@ class StreamTest(unittest.TestCase):
                 },
             )
             self.assertIsNone(stream.http_status, status)
+
+
+class CatalogTest(ProbeCase):
+    """Decision 0104, 5 A: the probe gets a node session's catalog."""
+
+    async def test_the_probe_names_the_overridden_catalog(self):
+        report = await self.probe(GOOD)
+        self.assertEqual(report.outcome, ProbeOutcome.CONNECTED)
+        sent = self.sent()
+        catalog = sent["catalog"]
+        self.assertEqual(sent["config"]["model_catalog_json"], catalog["path"])
+        self.assertTrue(catalog["exists"])
+        path = Path(catalog["path"])
+        self.assertEqual((path.name, path.parent.name), ("models.json", "config"))
+        self.assertEqual(catalog["entries"][MODEL]["tool_mode"], "direct")
+        self.assertIsNone(catalog["entries"][MODEL]["multi_agent_version"])
+        self.assertIs(catalog["entries"][MODEL]["supports_search_tool"], False)
+        self.assertEqual(self.directories(), [])  # released and given back
+
+    async def test_a_model_not_in_the_catalog_sends_nothing(self):
+        adapter = CodexProbeAdapter(
+            InteractiveSubprocessLauncher(),
+            model="gpt-not-in-it",
+            session_base=self.sessions,
+            credentials=CodexAuthFile(),
+            executable=self.adapter()._codex._executable,
+            verified_versions=frozenset({VERSION}),
+            catalogs=fake_catalogs(),
+        )
+        report = await self.probe(GOOD, adapter=adapter)
+        self.assertEqual(
+            (report.outcome, report.failure, report.keeps_status),
+            (ProbeOutcome.UNAVAILABLE, FailureCode.INVALID_RESPONSE, True),
+        )
+        self.assertTrue(self.version_checked())
+        self.assertFalse(self.report.exists())  # app-server never started
+        self.assertEqual(self.hooks.calls, [])  # not even bound
+        self.assertEqual(self.directories(), [])
+
+    async def test_initializes_version_must_be_the_catalogs(self):
+        report = await self.probe(
+            GOOD,
+            adapter=self.adapter(verified=frozenset({VERSION, "0.163.0"})),
+            user_agent_version="0.163.0",
+        )
+        self.assertEqual(
+            (report.outcome, report.failure, report.keeps_status),
+            (ProbeOutcome.UNAVAILABLE, FailureCode.INVALID_RESPONSE, True),
+        )
+        self.assertNotIn("thread/start", self.sent()["requests"])
+
+    def test_the_probe_config_needs_an_absolute_catalog_path(self):
+        with self.assertRaises(ValueError):
+            probe_config(Path("models.json"))
+        self.assertEqual(
+            tomllib.loads(probe_config(CATALOG))["model_catalog_json"], str(CATALOG)
+        )
 
 
 if __name__ == "__main__":

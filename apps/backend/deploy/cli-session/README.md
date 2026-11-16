@@ -27,7 +27,7 @@ Backend（User paw）
 
 Codex の Session（`launch.json` の `cli` が `codex`）は `codex app-server`（stdio の JSON-RPC の対話）なので、Program は `stream.sock` を Container の stdin と stdout の両方にする。Image は `codex_image`（`Containerfile.codex`、入口は `/opt/paw/start-codex`）。`credential.env` と `prompt` は書かない（Codex の Login は `CODEX_HOME` の `auth.json`。`credential.env` があれば拒否する）。版の確認（`codex --version`）と `app-server` は同じ Session の Unit を順に起動する。
 
-Codex の `CODEX_HOME`（Issue #239、Decision 0083 の 6、[Decision 0095](../../../../docs/decisions/0095-codex-auth-file-owner-and-mode.md)（Approved））: `launch.json` の `CODEX_HOME` は Session の Directory の `config` でなければならない（違えば拒否）。Program はそこに Container の tmpfs（`--mount type=tmpfs,destination=<dir>/config,tmpfs-mode=0700,chown=true,notmpcopyup`。所有者は Container の User = `paw-agent-cli`。`notmpcopyup` は下の Session の `config` の File を tmpfs に写さない: 写すと Podman が `paw` の File を chown しようとし、Subuid の Mapping なし（Issue #322）では crun が `chown ... Invalid argument`（exit 126）で止まる。Issue #339）を重ね、その中へ Session の `config.toml`（`:ro`）と `auth.json`（`:rw`）だけを Bind Mount する（Backend が書いたものだけ。普通の File でなければ拒否）。`auth.json` は Backend が作る 0660・所有者 `paw`・Group `paw-cli-bridge` の File で、Codex は Refresh した Login をこの File の Truncate と書き直しで保存し、Backend は Session の終わりに読み戻して Secret Store に書き戻す（Compare-and-swap）。Codex がその他に `CODEX_HOME` へ書く物（Log・状態）は Container の tmpfs に残り、Container と一緒に消える。Codex の Session は Connection ごとに同時に 1 つ（Backend の DB の Lease。`../../README.md` の「Codex の ChatGPT の Login」）。
+Codex の `CODEX_HOME`（Issue #239、Decision 0083 の 6、[Decision 0095](../../../../docs/decisions/0095-codex-auth-file-owner-and-mode.md)（Approved））: `launch.json` の `CODEX_HOME` は Session の Directory の `config` でなければならない（違えば拒否）。Program はそこに Container の tmpfs（`--mount type=tmpfs,destination=<dir>/config,tmpfs-mode=0700,chown=true,notmpcopyup`。所有者は Container の User = `paw-agent-cli`。`notmpcopyup` は下の Session の `config` の File を tmpfs に写さない: 写すと Podman が `paw` の File を chown しようとし、Subuid の Mapping なし（Issue #322）では crun が `chown ... Invalid argument`（exit 126）で止まる。Issue #339）を重ね、その中へ Session の `config.toml`（`:ro`）・`models.json`（`:ro`。Session の Model の Catalog。`config.toml` の `model_catalog_json` が指す。下の「Codex の Model の Catalog」）・`auth.json`（`:rw`）だけを Bind Mount する（Backend が書いたものだけ。普通の File でなければ拒否）。`auth.json` は Backend が作る 0660・所有者 `paw`・Group `paw-cli-bridge` の File で、Codex は Refresh した Login をこの File の Truncate と書き直しで保存し、Backend は Session の終わりに読み戻して Secret Store に書き戻す（Compare-and-swap）。Codex がその他に `CODEX_HOME` へ書く物（Log・状態）は Container の tmpfs に残り、Container と一緒に消える。Codex の Session は Connection ごとに同時に 1 つ（Backend の DB の Lease。`../../README.md` の「Codex の ChatGPT の Login」）。
 
 Container の出力は Backend だけのもの（Issue #324）: Program は `podman run --log-driver none` で Container の stdout / stderr をどこにも記録させない（Podman の既定の Log Driver は journald で、conmon が CLI の Stream（`stream-json` の本文: 応答・Tool の呼び出しと結果・Session の Id・利用量）を 1 行ずつ journal に書いていた。識別子は `paw-cli-<uuid>`）。`podman run` は Attach したままなので、stdout は今までどおり `stream.sock` に届き、stderr は Program が読む（Podman 自身の失敗の時だけ、その末尾を書く）。`podman --events-backend none` で Podman の Event（`create`・`start`・`attach` など）も記録しない（journald の Event の 1 件ごとに、その Entry の `_CMDLINE` に `podman run` の Command Line 全部、つまり CLI の引数（`--system-prompt` の本文・Session の Path）が残っていた）。
 
@@ -39,9 +39,23 @@ Egress（[Decision 0091](../../../../docs/decisions/0091-egress-per-session-sock
 
 Memory 不足（[Decision 0092](../../../../docs/decisions/0092-runtime-oom-kill-detection.md) の 4、Issue #251）: Unit は `OOMPolicy=stop`・`MemoryAccounting=yes` で、Program は `podman run --cgroups=split` で Container の cgroup を Unit の cgroup の下に置く。Container の中の OOM Kill で Unit 全体が止まり、`Result=oom-kill` で終わる。`systemctl stop` でその `Result` は消えうるので、Backend（`_UnitProcess.stop()`）は止める**前に** `ActiveState`・`Result`・`ExecMainStatus` を読んで覚える（CLI が自分で終わった後なら、Unit が `active` から離れるのを最大 10 秒待つ）。`submit` の前に OOM で終わった Session は `AgentOutOfMemory`。Session の Directory は終わりに Backend が消す（Token の File も一緒に消える）。
 
+## Codex の Model の Catalog（[Decision 0104](../../../../docs/decisions/0104-codex-model-catalog-override.md) の 1・2・5 の A、Decision 0105（PR #354）の 2 の A、Issue #341）
+
+`codex-cli 0.156.1` の Catalog の Model（`gpt-6-sol` など）はすべて `tool_mode = "code_mode_only"` で、そのままでは Codex が `additional_tools` で `exec`・`wait`・`collaboration` の Tool などを渡す（0101 の外）。Backend は Codex の Session（Node と Health の Probe の両方）ごとに、Repository の **その版の Catalog** の **Session の Model の項目だけ** 5 つの値を上書きした File を Session の `CODEX_HOME` に `models.json` として書き、`config.toml` の Top-level の `model_catalog_json` で指す（`paw_backend/agents/codex_catalog.py`。File は Session の Directory と一緒に消える）。上書きは Code の定数（`OVERRIDES`）で、ちょうど次の 5 つ: `tool_mode = "direct"`、`multi_agent_version = null`、`experimental_supported_tools = []`、`use_responses_lite = false`、`supports_search_tool = false`。他の値と他の Model は取ったままにする。
+
+Fail closed（Session は何も始めず、何も送らない。Node は `model_not_allowed`、Probe は `unavailable`（`invalid_response`、状態は保つ））: 版の Catalog の File が無い・読めない・形が違う（`{"models": [...]}`、各項目は文字列の `slug` が一意の Object。Key の重複や `NaN` も拒否）、Model が Catalog にちょうど 1 つ無い、上書きの後に Code Mode の値（`code_mode*` の Key、`code_mode` で始まる文字列の値）か Multi-agent の値（名前に `multi_agent` を含み `null` でない Key）が残る。`initialize` の版が `codex --version` の版（Catalog を選んだ版）と違うときも `thread/start` の前に止める。0101 の Tool の検査・Smoke の `additional_tools` の不合格・Item の検出はそのまま（上書きは余分な Tool を出させない手段で、検査を緩めない）。
+
+Catalog の File は `paw_backend/agents/codex_catalogs/codex-models-<版>.json`（Release は `paw_backend` の Package だけを入れるので Package の中に置く。0104 の 2 の例の `deploy/cli-session/` ではない）。版を上げる PR でその版の File を足す（Review で差分が見える）。
+
+`codex-models-0.156.1.json` の作り方（2026-11-16、Human）: **確かめ専用の ChatGPT の Login**（下の「専用の Login を作る」。本番の Login と `~/.codex` とは別）で `CODEX_HOME=<専用の Directory> codex debug models > codex-models-0.156.1.json`（`codex-cli 0.156.1`）。Login した Codex は Catalog を Server から取る。**Model は呼ばない**（Login の更新が起きても同じ `auth.json` に残る）。Login なしの `codex debug models`（CLI に組み込みの Catalog）とは違い、`gpt-5.5`・`gpt-5.4` が無く `gpt-reserve` がある。**`gpt-5.5` は ChatGPT の Account では使えない**（OpenAI が 400 `model_not_found`「not supported when using Codex with a ChatGPT account」を返した。Decision 0105 の背景）ので、Catalog に無く、Session は始まらない。`gpt-6-sol` の項目は Login なしのものと 5 つの値の外の 7 つ（`base_instructions`・`model_messages`・`default_service_tier`・`supports_experimental_context`（`true`）・`supports_reasoning_effort_updates`（`true`）・`available_access_programs`・`description`）が違い、Human は Login した Catalog の値を選んだ（Decision 0105 の 2 の A。比べた結果: `/data/results/paw-codex-live-check-2026-11-16/STATUS.md`）。SHA-256 は `990e2273ad7e49ae3b58088e0b5736d84b59bfef9f10e9bacd82d97dcad25a31`（`tests/test_agents_codex_catalog.py` が確かめる）。
+
+`gpt-6-astra` は上書きの後も `multi_agent_reasoning_effort = "xhigh"` が残るので、今は Fail closed で Session が始まらない（5 つの外の値を上書きに足すかは Human の判断。0104 の「未決」）。
+
+Session の Program（`paw_cli_session_run.py`）は `models.json` も Container の `CODEX_HOME` に Mount する。この版の Backend の Release を入れるときは、下の「Unit の Group と Podman を確かめる」の `install` で `paw_cli_session_run.py` も入れ直す（古い Program では `models.json` が Container に無く、Codex は Catalog を読めずに始まらない）。
+
 ## Codex の版を確かめる（[Decision 0101](../../../../docs/decisions/0101-codex-mcp-resource-tools-exception.md) の 4）
 
-`smoke_codex_recorder.py` は、本物の `CodexCliRuntime` → `CodexSessionAdapter`（`codex app-server`）→ Bridge → Relay を 1 つの Reviewer の Node で動かし、Session の `config.toml`（Backend の `session_config`）に `127.0.0.1` の記録用の Model Provider を 1 つ足す。`auth.json` は Dummy で、**OpenAI には何も送らない**。本物の Login（`~/.codex/auth.json` など）は使わない。`paw` ではなく開発する User で、確かめる版の `codex` を Scratch に置いて動かす（User の `codex` を上書きしない）:
+`smoke_codex_recorder.py` は、本物の `CodexCliRuntime` → `CodexSessionAdapter`（`codex app-server`）→ Bridge → Relay を 1 つの Reviewer の Node で動かし、Session の `config.toml`（Backend の `session_config`。Model の Catalog も Backend と同じ上書きの File で、Smoke 専用の上書きは持たない）に `127.0.0.1` の記録用の Model Provider を 1 つ足す。`--model` の既定は `gpt-6-sol`。`--without-catalog` は `config.toml` から `model_catalog_json` の行だけを外す（Codex は自分の Catalog を使う）: 上書きを外すと `gpt-6-sol` が不合格になることを見せるためのもの。結果の `catalog` に Repository の File の名前と SHA-256、Session の File の Model の項目の上書きした値を残す。`auth.json` は Dummy で、**OpenAI には何も送らない**。本物の Login（`~/.codex/auth.json` など）は使わない。`paw` ではなく開発する User で、確かめる版の `codex` を Scratch に置いて動かす（User の `codex` を上書きしない）:
 
 ```sh
 python3 -I deploy/cli-session/smoke_codex_recorder.py --codex <codex> --out <result.json> --sessions <短い Directory>
@@ -55,14 +69,14 @@ python3 -I deploy/cli-session/smoke_codex_recorder.py --codex <codex> --out <res
 
 本番の Backend は、検証した組（`agent_models/verified.py` の `VERIFIED_MODELS`）にない Model を送る前に止める。組を足す前の本物での確かめは、本番の Backend の外で `live_check_codex.py` で行う。**これは本物の OpenAI に送る**。走らせるのは Human だけで、Agent は走らせない。
 
-- 記録用の Smoke と同じ作り（本物の `CodexProbeAdapter`・`CodexSessionAdapter`・`CodexCliRuntime`・`McpBridge`・`paw_mcp_relay.py`、Backend の `probe_config`・`session_config`。Catalog の上書きはまだ無い）で、検証した組を **その Process の中だけ** Command Line の 1 組 `(--cli-version, --model)` に広げる。Repository の `VERIFIED_MODELS` と本番の Wiring は変えない。`--cli-version` は `VERIFIED_VERSIONS` にある版で、`codex --version` の答えと同じでなければ走らない。`--codex` は始めに 1 つの絶対 Path にする（`/` を含めば今の Directory から、名前だけなら走らせる User の `PATH` から。版を確かめる `codex` と Session が起動する `codex` を同じにするため）。実行できる File が無ければ `codex_not_found` で走らない。結果の `codex_executable` にその Path を残す。
+- 記録用の Smoke と同じ作り（本物の `CodexProbeAdapter`・`CodexSessionAdapter`・`CodexCliRuntime`・`McpBridge`・`paw_mcp_relay.py`、Backend の `probe_config`・`session_config`、Backend と同じ Catalog の上書き（上の「Codex の Model の Catalog」。Script 専用の上書きは持たない））で、検証した組を **その Process の中だけ** Command Line の 1 組 `(--cli-version, --model)` に広げる。Repository の `VERIFIED_MODELS` と本番の Wiring は変えない。`--cli-version` は `VERIFIED_VERSIONS` にある版で、`codex --version` の答えと同じでなければ走らない。`--codex` は始めに 1 つの絶対 Path にする（`/` を含めば今の Directory から、名前だけなら走らせる User の `PATH` から。版を確かめる `codex` と Session が起動する `codex` を同じにするため）。実行できる File が無ければ `codex_not_found` で走らない。結果の `codex_executable` にその Path を残す。Backend が Session の Catalog を作れない組（Catalog に無い Model、上書きの後に Code Mode の値が残る Model）は、何も起動する前に `catalog_<理由>` で走らない（`gpt-5.5` は `catalog_model_not_in_catalog`）。結果の `catalog` に Repository の File・SHA-256・上書きした 5 つの値を残す。
 - 確かめること: (1) Codex の Connection の Health の Probe（Decision 0100）が `connected`。(2) (1) が通ったら、Fixture の小さな差分 `live_check_codex_review.diff` で Reviewer の Node を 1 つ走らせ、Stream の検査（Decision 0089 の 2 の Item の検出、0101 の Tool）に引っかからず、`submit` の結果が Node の結果になる。両方が通れば Exit 0、駄目なら 1、走らなかった（何も送っていない。理由は結果の `refused`）ときは 2、更新した Login を書き戻せなかったときは 3。
 - Credential は、この確かめ専用の Login の `auth.json`（下の「専用の Login を作る」）。Script は中身を Memory に読み、Session ごとの `CODEX_HOME`（新しい一時の Directory（0700）の中）に `auth.json` として置き、終わりに（失敗や中断でも）一時の Directory ごと消す。Session の中で Codex が Login を更新したら（Refresh Token は 1 回しか使えない）、次の Session へ渡し、同時に `--auth` の File を **その場で書き換える**（同じ Directory の一時の File に書いて `fsync` し `rename`。元の File の Mode（0600）と Owner を保つ）。後の確かめが失敗しても、例外や中断でも、一時の Directory を消す前に書き戻す（失敗したらもう 1 回試す）。更新しなかったときは書かない。結果の JSON に `credential_refreshed` と `credential_written_back` を残す（中身は入れない）。書き戻せなかったときは Exit 3 で、`--auth` の File が古くなったかもしれないと（例外の Class の名前だけで）表示する。そのときは Login を作り直す。
 - `paw` の User（と root）では走らない。Backend の依存（`pydantic` など）が入っていない Python（System の `python3` など）では `backend_deps_missing` で走らない（下の venv の Python を使う）。`--auth` が無い・File でない・JSON の Object でないとき、本番の Secret Store（`/var/lib/paw/secrets` と `PAW_SECRET_STORE_DIR`）の下のとき、走らせる User 自身の `~/.codex` の下のとき（`personal_codex_login`）も走らない（どちらも Symlink の先も含む）。本番の DB・Orchestrator・Policy・`runtime.toml` は読まない。
 
 ### 専用の Login を作る（1 回だけ）
 
-本番の Connection の Login（Secret Store の中）や `~/.codex/auth.json` は **決して渡さない**（Script が Refresh Token を使うと、それらが使えなくなる）。この確かめ専用の Login を、空の Directory を `CODEX_HOME` にして 1 回だけ作り、以後の Run（`gpt-5.5` も後の `gpt-6-sol` も）で同じ File を渡す:
+本番の Connection の Login（Secret Store の中）や `~/.codex/auth.json` は **決して渡さない**（Script が Refresh Token を使うと、それらが使えなくなる）。この確かめ専用の Login を、空の Directory を `CODEX_HOME` にして 1 回だけ作り、以後の Run（`gpt-6-sol` など）と、Repository の Catalog を取るとき（上の「Codex の Model の Catalog」）に同じ File（Directory）を使う:
 
 ```sh
 install -d -m 0700 <専用の Directory>
@@ -84,16 +98,16 @@ Script は自分で `apps/backend` を `sys.path` に入れるので、`-I` の�
 
 ### 走らせる
 
-開発する User で、確かめる版の `codex` を Scratch に置いて走らせる。**最初は `0.156.1` と `gpt-5.5` で走らせる**（[Decision 0104](../../../../docs/decisions/0104-codex-model-catalog-override.md) の 4 の A。この結果で `(0.156.1, gpt-5.5)` を組に足す PR を作る）:
+開発する User で、確かめる版の `codex` を Scratch に置いて走らせる。**`0.156.1` と `gpt-6-sol` で走らせる**（Decision 0105（PR #354）の 1 と 3 の A: `gpt-5.5` は ChatGPT の Account で使えないので当面の既定は置かない。合格したら `(0.156.1, gpt-6-sol)` を組に足す PR を作る。0104 の PR の分け方の 5）:
 
 ```sh
 cd apps/backend
 <venv>/bin/python -I deploy/cli-session/live_check_codex.py --codex <codex 0.156.1> \
-    --cli-version 0.156.1 --model gpt-5.5 --auth <専用の Directory>/auth.json \
+    --cli-version 0.156.1 --model gpt-6-sol --auth <専用の Directory>/auth.json \
     --out <result.json> --sessions <短い Directory>
 ```
 
-結果の JSON は、各確かめの合否、版（`codex_version`・`backend_commit`）、Model、時刻、Fixture の Path と SHA-256、Review の答えの文（`node.review` の `summary`・`discovered_facts`・`unresolved_questions`）だけを持つ。Credential と Prompt の文は入れない。Review の答えの質は Human が目で見る。どちらかが駄目なら組に入れない。結果の JSON を `/data/results/` に残し、組を足す PR に記録用の Smoke（Node と Probe）の結果と一緒に Path を書く。専用の Login は次の Run のために残す（要らなくなったら Directory ごと消す）。
+結果の JSON は、各確かめの合否、版（`codex_version`・`backend_commit`）、Model、Catalog（File・SHA-256・上書きした値）、時刻、Fixture の Path と SHA-256、Review の答えの文（`node.review` の `summary`・`discovered_facts`・`unresolved_questions`）だけを持つ。Credential と Prompt の文は入れない。Review の答えの質は Human が目で見る（Code Mode を止めると質が落ちることがあると Codex は警告する。0104 のリスク）。どちらかが駄目なら組に入れない。結果の JSON を `/data/results/` に残し、組を足す PR に記録用の Smoke（Node と Probe）の結果と一緒に Path を書く。専用の Login は次の Run のために残す（要らなくなったら Directory ごと消す）。
 
 ## 配備（root）
 

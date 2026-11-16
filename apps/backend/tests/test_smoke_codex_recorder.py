@@ -1,15 +1,23 @@
 """The recorder of the Codex smoke test (Decision 0101, 4; issue #305): it
 answers the first request with a call of the namespaced PAW ``submit`` and
-records what the model was offered. The smoke itself runs a real ``codex``
-and is a human step (``deploy/cli-session/smoke_codex_recorder.py``)."""
+records what the model was offered. The session's config is the backend's
+with the recorder as its provider, and its catalog line only dropped with
+``--without-catalog`` (Decision 0104: no override of the smoke's own). The
+smoke itself runs a real ``codex`` and is a human step
+(``deploy/cli-session/smoke_codex_recorder.py``)."""
 
 import importlib.util
 import json
+import shutil
+import tempfile
+import tomllib
 import unittest
 import urllib.request
 from pathlib import Path
 
 from paw_backend.agents.codex_app_server import model_tool_names
+from paw_backend.agents.codex_catalog import REPOSITORY_CATALOGS
+from paw_backend.agents.codex_cli import probe_config
 
 SCRIPT = (
     Path(__file__).resolve().parents[1]
@@ -83,6 +91,62 @@ class RecorderTest(unittest.TestCase):
         self.assertEqual(content["text"], "PAW_PROBE_OK")
         (request,) = recorder.requests
         self.assertEqual((request["tools"], request["model_tool_names"]), ([], []))
+
+
+class ConfigTest(unittest.TestCase):
+    def setUp(self):
+        self.module = load()
+        self.directory = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.directory, ignore_errors=True)
+        self.catalog = self.directory / "models.json"
+        self.catalog.write_text(
+            REPOSITORY_CATALOGS.session_catalog("0.156.1", "gpt-6-sol")
+        )
+
+    def test_the_backends_config_with_the_recorder(self):
+        backend = probe_config(self.catalog)
+        config = tomllib.loads(self.module.with_recorder(backend, 4242))
+        self.assertEqual(config["model_catalog_json"], str(self.catalog))
+        self.assertEqual(config["model_provider"], "pawsmoke")
+        self.assertEqual(
+            config["model_providers"]["pawsmoke"]["base_url"],
+            "http://127.0.0.1:4242/v1",
+        )
+        # Everything else is the backend's.
+        del config["model_provider"], config["model_providers"]
+        self.assertEqual(config, tomllib.loads(backend))
+
+    def test_without_catalog_drops_only_that_line(self):
+        backend = probe_config(self.catalog)
+        text = self.module.with_recorder(backend, 4242, catalog=False)
+        config = tomllib.loads(text)
+        self.assertNotIn("model_catalog_json", config)
+        expected = tomllib.loads(backend)
+        del expected["model_catalog_json"]
+        del config["model_provider"], config["model_providers"]
+        self.assertEqual(config, expected)
+
+    def test_the_result_says_which_catalog_and_values(self):
+        seen = self.module.catalog_seen(
+            probe_config(self.catalog), "gpt-6-sol", "0.156.1"
+        )
+        self.assertTrue(seen["in_backend_config"])
+        self.assertEqual(seen["repository_file"], "codex-models-0.156.1.json")
+        self.assertRegex(seen["repository_sha256"], "^[0-9a-f]{64}$")
+        self.assertEqual(
+            seen["entry"],
+            {
+                "tool_mode": "direct",
+                "multi_agent_version": None,
+                "experimental_supported_tools": [],
+                "use_responses_lite": False,
+                "supports_search_tool": False,
+                "supports_experimental_context": True,
+            },
+        )
+
+    def test_the_default_model_is_the_catalog_model(self):
+        self.assertEqual(self.module.MODEL, "gpt-6-sol")
 
 
 if __name__ == "__main__":

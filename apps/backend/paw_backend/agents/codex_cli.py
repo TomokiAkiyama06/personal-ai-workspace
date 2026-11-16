@@ -13,7 +13,10 @@ attempt); a session that ended without either is ``no_submission``.
 ``$CODEX_HOME/config.toml`` (Decision 0089, 2: every default-on tool feature
 off, web search off, the orchestrator's skills off, the PAW relay as the only
 MCP server with its tools approved: the Tool Broker approves each call; and
-offered directly, never deferred behind ``tool_search``: issue #305), starts
+offered directly, never deferred behind ``tool_search``: issue #305) and the
+session's model catalog (``model_catalog_json``: ``codex_catalog``, Decision
+0104, 1 A and 2 A: the repository's catalog of the CLI's version with the
+model's Code Mode, multi-agent and extra tools turned off), starts
 ``codex app-server`` and
 talks to it (``codex_app_server.py``):
 
@@ -23,6 +26,11 @@ talks to it (``codex_app_server.py``):
   version and model that are not one (checked on ``codex --version``'s
   version before any login is placed, and again on ``initialize``'s before
   ``thread/start``): the attempt is ``model_not_allowed``;
+* a version without a repository catalog, a catalog that cannot be read or is
+  not one, a model that is not in it, a model whose entry keeps a Code Mode
+  value after the override: nothing is sent either (before any login is
+  placed; ``model_not_allowed``), nor after an ``initialize`` whose version
+  is not the one whose catalog was written (before ``thread/start``);
 * every growth of the thread's tokens is reported at once (``on_usage``); when
   the service answers ``False`` the CLI is stopped;
 * an item that can execute (or that the table does not know), a request from
@@ -89,6 +97,12 @@ from paw_backend.agents.codex_app_server import (
     notification,
     thread_start,
     turn_start,
+)
+from paw_backend.agents.codex_catalog import (
+    CATALOG_NAME,
+    REPOSITORY_CATALOGS,
+    CatalogRefused,
+    CodexCatalogs,
 )
 from paw_backend.agents.failures import ErrorClassifier, Failure, RuntimeFailure
 from paw_backend.agents.local import node_prompts
@@ -300,9 +314,10 @@ class CodexAttachment:
     model_refused: list[bool] = field(default_factory=list, repr=False)
 
 
-def session_config(spec: CliSessionSpec, tools: Iterable[str]) -> str:
+def session_config(spec: CliSessionSpec, tools: Iterable[str], catalog: Path) -> str:
     """The session's ``config.toml`` (Decision 0089, 2; the auth settings of
-    Decision 0087, 4)."""
+    Decision 0087, 4); ``catalog``: the session's model catalog file
+    (``model_catalog_json``, Decision 0104, 2 A)."""
     relay = spec.relay_command
     paw = {
         "command": relay[0],
@@ -322,18 +337,23 @@ def session_config(spec: CliSessionSpec, tools: Iterable[str]) -> str:
         "startup_timeout_sec": STARTUP_TIMEOUT_SECONDS,
         "tool_timeout_sec": TOOL_TIMEOUT_SECONDS,
     }
-    return _config(("mcp_servers.paw", paw))
+    return _config(catalog, ("mcp_servers.paw", paw))
 
 
-def probe_config() -> str:
+def probe_config(catalog: Path) -> str:
     """The ``config.toml`` of the connection's health probe (Decision 0100,
     10): a node session's (:func:`session_config`) without any MCP server, so
     that no tool at all is offered (with an MCP server Codex adds its resource
-    tools, Decision 0101: with none, none)."""
-    return _config()
+    tools, Decision 0101: with none, none); the same model catalog as a
+    node's (Decision 0104, 5 A)."""
+    return _config(catalog)
 
 
-def _config(*servers: tuple[str, Mapping[str, object]]) -> str:
+def _config(catalog: Path, *servers: tuple[str, Mapping[str, object]]) -> str:
+    if not isinstance(catalog, Path) or not catalog.is_absolute():
+        # Fail closed (Decision 0104, 2 A): never a session on Codex's own
+        # catalog.
+        raise ValueError("catalog")
     tables: list[tuple[str, Mapping[str, object]]] = [
         ("analytics", {"enabled": False}),
         (
@@ -354,6 +374,9 @@ def _config(*servers: tuple[str, Mapping[str, object]]) -> str:
         _toml_pair("forced_login_method", "chatgpt"),
         _toml_pair("web_search", "disabled"),
         _toml_pair("check_for_update_on_startup", False),
+        # Decision 0104, 2 A: the session's catalog (a top-level key, before
+        # the first table).
+        _toml_pair("model_catalog_json", str(catalog)),
     ]
     for name, values in tables:
         lines.append(f"\n[{name}]")
@@ -383,7 +406,9 @@ class CodexSessionAdapter:
     (:data:`~.codex_app_server.VERIFIED_VERSIONS` unless a test says
     otherwise). ``verified_models``: the verified ``(version, model)`` pairs
     (Decision 0103, 3 A: production's wiring passes the repository's;
-    ``None``: the version is the only check, as before it)."""
+    ``None``: the version is the only check, as before it). ``catalogs``: the
+    model catalogs of the CLI versions (``codex_catalog``: the repository's
+    unless a test says otherwise)."""
 
     kind = ConnectionKind.CODEX
     # One session per connection at a time (Decision 0083, 6): the ChatGPT
@@ -400,6 +425,7 @@ class CodexSessionAdapter:
         verified_versions: frozenset[str] = VERIFIED_VERSIONS,
         verified_models: frozenset[tuple[str, str]] | None = None,
         drain_seconds: float = DRAIN_SECONDS,
+        catalogs: CodexCatalogs = REPOSITORY_CATALOGS,
     ) -> None:
         require_async_method(launcher, "start", 1)
         if credentials is not None:
@@ -414,6 +440,9 @@ class CodexSessionAdapter:
         self._verified = frozenset(verified_versions)
         self._pairs = None if verified_models is None else frozenset(verified_models)
         self._drain = float(drain_seconds)
+        if not isinstance(catalogs, CodexCatalogs):
+            raise TypeError("catalogs")
+        self._catalogs = catalogs
 
     def __repr__(self) -> str:
         return "CodexSessionAdapter()"
@@ -425,6 +454,16 @@ class CodexSessionAdapter:
         """Decision 0103, 3 A: ``(version, model)`` is a verified pair (always,
         without the pairs)."""
         return self._pairs is None or (version, model) in self._pairs
+
+    def session_catalog(self, version: str, model: str) -> str | None:
+        """The text of the session's catalog file (Decision 0104, 1 A and 2
+        A), or ``None`` (logged with its fixed code): the session starts
+        nothing."""
+        try:
+            return self._catalogs.session_catalog(version, model)
+        except CatalogRefused as refused:
+            logger.warning("Codex session refused: catalog %s", refused.code)
+            return None
 
     def environment(self, attachment: CodexAttachment) -> dict[str, str]:
         env = {
@@ -477,14 +516,23 @@ class CodexSessionAdapter:
             logger.warning("Codex session refused: model")
             attachment.model_refused.append(True)
             return AgentSessionResult(failure=FailureCode.INVALID_RESPONSE)
+        catalog = self.session_catalog(version, request.model)
+        if catalog is None:
+            # Decision 0104, 2 A: fail closed, before any login is placed.
+            attachment.model_refused.append(True)
+            return AgentSessionResult(failure=FailureCode.INVALID_RESPONSE)
         codex_home = attachment.spec.config_dir
         # Decision 0096, 2 B: the session is recorded on the connection's slot
         # (with the credential's handle and version) before its login is
         # placed, so a session that outlives this process is collected later.
         if not await _bind(request, attachment):
             return AgentSessionResult(failure=FailureCode.UNAVAILABLE)
+        _write(codex_home / CATALOG_NAME, catalog)
         _write(
-            codex_home / CONFIG_NAME, session_config(attachment.spec, attachment.tools)
+            codex_home / CONFIG_NAME,
+            session_config(
+                attachment.spec, attachment.tools, codex_home / CATALOG_NAME
+            ),
         )
         # Checked again right before the login is placed (Codex review of
         # #292): a session paused after binding whose expired row the
@@ -499,7 +547,7 @@ class CodexSessionAdapter:
                 # The slot is no longer this session's (Decision 0096, 2's
                 # fencing): the unit is not started.
                 return AgentSessionResult(failure=FailureCode.UNAVAILABLE)
-            return await self._converse(request, attachment)
+            return await self._converse(request, attachment, version)
         finally:
             # After the CLI was stopped (``_converse``'s own ``finally``), run
             # to its end even through a cancellation: the refreshed login must
@@ -573,7 +621,7 @@ class CodexSessionAdapter:
             )
 
     async def _converse(
-        self, request: AgentSessionRequest, attachment: CodexAttachment
+        self, request: AgentSessionRequest, attachment: CodexAttachment, version: str
     ) -> AgentSessionResult:
         process = await self._start(
             CodexLaunch(
@@ -613,7 +661,11 @@ class CodexSessionAdapter:
                     failure = FailureCode.INVALID_RESPONSE
                     break
                 if isinstance(item, Initialized):
-                    if not self.verified_pair(item.version, request.model):
+                    if item.version != version or not self.verified_pair(
+                        item.version, request.model
+                    ):
+                        # The catalog written is ``version``'s (Decision
+                        # 0104, 2 A): another version's would not be.
                         # Decision 0103, 4 A, 2: before ``thread/start``.
                         logger.warning("Codex session refused: model")
                         attachment.model_refused.append(True)

@@ -6,8 +6,12 @@ provider (OpenAI): only a Human runs it, explicitly; no agent does.
 As the recorder smoke (``smoke_codex_recorder.py``) it builds the real
 ``CodexProbeAdapter``, ``CodexSessionAdapter``, ``CodexCliRuntime`` and
 ``McpBridge`` (with ``paw_mcp_relay.py``) and the backend's own
-``probe_config`` / ``session_config`` (unchanged: no catalog override yet,
-Decision 0104, "PR の分け方" 2), with ``InteractiveSubprocessLauncher``. The
+``probe_config`` / ``session_config`` and model catalog (Decision 0104, 2 A:
+the adapters write the repository's catalog of the version with the model's
+override, ``codex_catalog``; this script has no override of its own), with
+``InteractiveSubprocessLauncher``. A model that has no catalog the backend
+would run (not in the version's catalog, or a Code Mode value left after the
+override) is refused before anything starts (``catalog_<code>``). The
 verified pairs are widened to the one ``(--cli-version, --model)`` given, in
 this process only: the adapters are handed that pair, the runtime and the
 probe a gate that allows that model alone. The repository's
@@ -42,15 +46,16 @@ production secret store (``/var/lib/paw/secrets`` and
 configuration of production.
 
     <venv>/bin/python -I deploy/cli-session/live_check_codex.py \\
-        --codex <codex executable> --cli-version 0.156.1 --model gpt-5.5 \\
+        --codex <codex executable> --cli-version 0.156.1 --model gpt-6-sol \\
         --auth <the dedicated auth.json> --out <result.json> [--sessions <dir>]
 
 The exit code is 0 when both checks passed, 1 when not, 2 when it refused to
 run (nothing was sent), 3 when a refreshed login could not be written back
 (the ``--auth`` file may then be stale). The result JSON holds the checks' verdicts, the
-versions, the model, the times and the review's answer (its summary and
-findings); never the credential, and never the prompts (the fixture is named
-by its path and SHA-256).
+versions, the model, the catalog (the repository's file, its SHA-256 and
+the session model's overridden values), the times and the review's answer
+(its summary and findings); never the credential, and never the prompts
+(the fixture is named by its path and SHA-256).
 """
 
 import argparse
@@ -167,6 +172,7 @@ def personal_codex_homes(environ) -> list[Path]:
 #: What the check imports from the backend (and so its dependencies).
 BACKEND_MODULES = (
     "paw_backend.agents.codex_app_server",
+    "paw_backend.agents.codex_catalog",
     "paw_backend.agents.codex_cli",
     "paw_backend.agents.codex_credentials",
     "paw_backend.agents.codex_probe",
@@ -239,6 +245,30 @@ def check_pair(cli_version: str, model: str) -> None:
         validate_model("model", model)
     except Exception:
         raise Refused("model_invalid") from None
+
+
+def check_catalog(cli_version: str, model: str) -> dict:
+    """The session catalog the backend would write for the pair (Decision
+    0104, 2 A: the same ``codex_catalog`` as the adapters), or ``Refused``
+    (``catalog_<code>``); what the result says of it."""
+    from paw_backend.agents.codex_catalog import (
+        OVERRIDES,
+        REPOSITORY_CATALOGS,
+        CatalogRefused,
+        catalog_path,
+    )
+
+    try:
+        text = REPOSITORY_CATALOGS.session_catalog(cli_version, model)
+    except CatalogRefused as refused:
+        raise Refused(f"catalog_{refused.code}") from None
+    path = catalog_path(cli_version)
+    (entry,) = [e for e in json.loads(text)["models"] if e.get("slug") == model]
+    return {
+        "file": str(path.relative_to(BACKEND)),
+        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        "entry": {key: entry.get(key) for key in OVERRIDES},
+    }
 
 
 async def codex_version(executable: tuple[str, ...], scratch: Path) -> str | None:
@@ -438,6 +468,7 @@ async def run_node(
     launcher=None,
 ) -> dict:
     import paw_backend.agents.codex_cli as codex_cli
+    from paw_backend.agents.codex_catalog import CATALOG_NAME
     from paw_backend.agents.codex_credentials import CodexAuthFile
     from paw_backend.connections import AgentSessionRequest, SessionResult
     from paw_backend.orchestrator.domain import NodeRole
@@ -470,7 +501,11 @@ async def run_node(
                 "paw_tools": sorted(attachment.tools),
                 "mcp_servers": sorted(
                     tomllib.loads(
-                        codex_cli.session_config(attachment.spec, attachment.tools)
+                        codex_cli.session_config(
+                            attachment.spec,
+                            attachment.tools,
+                            attachment.spec.config_dir / CATALOG_NAME,
+                        )
                     ).get("mcp_servers", {})
                 ),
             }
@@ -655,6 +690,7 @@ def run(
         check_backend_modules()
         auth = check_auth_path(arguments.auth, environ)
         check_pair(arguments.cli_version, arguments.model)
+        result["catalog"] = check_catalog(arguments.cli_version, arguments.model)
         if executable is None:
             executable = (resolve_codex(str(arguments.codex), environ),)
             result["codex_executable"] = executable[0]

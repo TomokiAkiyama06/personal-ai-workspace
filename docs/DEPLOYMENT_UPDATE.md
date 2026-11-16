@@ -327,7 +327,9 @@ Order (root, the human; the agent never does this):
    `SupplementaryGroups=paw-cli-bridge`; Podman's `--sysctl net.ipv4.ping_group_range` and
    `--group-add keep-groups`; Podman's own failures in the unit's journal; issue #324:
    `podman --events-backend none run --log-driver none`, so the CLI's stream is no
-   longer copied into the journal), install both again, `systemctl daemon-reload`, and
+   longer copied into the journal; issue #341, Decision 0104: Codex's session model
+   catalog `models.json` is mounted into its `CODEX_HOME`, without which no Codex session
+   starts), install both again, `systemctl daemon-reload`, and
    run the check without Claude of that README ("Unit の Group と Podman を確かめる")
    before the health probe of step 4. After the probe, check the journal and decide on
    the entries already recorded ("Container の出力を journal に残さない" of the same
