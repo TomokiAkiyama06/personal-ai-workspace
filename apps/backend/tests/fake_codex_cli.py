@@ -14,7 +14,8 @@ params, the tools the bridge listed and the answers of the tool calls, and
 whether the credential file was there (its length, never its value).
 
 Without an MCP server in the config (the health probe's) no relay is started
-and no tool is listed. ``answer`` completes an agent message with the given
+and no tool is listed (and the scenario's ``probe_actions`` run, when given,
+instead of its ``actions``). ``answer`` completes an agent message with the given
 text; ``reroute`` sends ``model/rerouted``.
 """
 
@@ -164,7 +165,12 @@ def main() -> int:
             },
         )
 
-    for action in scenario["actions"]:
+    # ``probe_actions``: what a run without an MCP server (the health probe's)
+    # does instead, for a test that runs a probe and a node on one scenario.
+    actions = scenario["actions"]
+    if server is None and "probe_actions" in scenario:
+        actions = scenario["probe_actions"]
+    for action in actions:
         if "usage" in action:
             total[0] += action["usage"][0]
             total[1] += action["usage"][1]
