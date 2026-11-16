@@ -1,7 +1,8 @@
 # Codex の Catalog の Model（`gpt-6-sol` など）を、PAW が書く Model の Catalog（`model_catalog_json`）で Code Mode と Multi-agent を止めて使う（上書きする項目、Catalog の置き場所、本物での確かめ、当面の既定の Model、PR の分け方）
 
-- Status: Proposed
-- Date: 2026-11-12
+- Status: Approved
+- Approval: 2026-11-16、Human が作業 Session（Claude Code）内で、PR [#352](https://github.com/TomokiAkiyama06/personal-ai-workspace/pull/352) の 5 つの判断点（推奨つき）を受けたうえで、「推奨で大丈夫です」と回答して承認（approved as recommended, all 5 points: 末尾の「承認時の決定」）
+- Date: 2026-11-12（承認 2026-11-16）
 - Scope: Issue [#341](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/341)（[Decision 0103](0103-selectable-cli-agent-models.md) の PR の分け方の 5「本番での確かめ」で見つかった）。この Decision は設計だけで、コードは承認の後の下の「PR の分け方」の PR で書く。関係する既存の口: `apps/backend/paw_backend/agents/codex_cli.py`（`session_config`・`DISABLED_FEATURES`）、`agents/codex_probe.py`（`probe_config`）、`agent_models/verified.py`（`VERIFIED_MODELS`。#350 で入り、Codex の組は今は空）、`deploy/cli-session/smoke_codex_recorder.py`（`additional_tools` を記録して不合格にする）、`deploy/cli-session/Containerfile.codex`。
 - Supersedes: なし。次は書き換えず、その中で作る: [Decision 0101](0101-codex-mcp-resource-tools-exception.md)（Tool の検査の規則。**許す Tool は広げない**）、[Decision 0103](0103-selectable-cli-agent-models.md) の 3（検証した組を足す手順）と 10（本番の暫定の既定 `gpt-6-sol`。下の 4 で当面の既定を提案する）、[Decision 0100](0100-cli-connection-health-probe.md)（Probe は Tool を何も渡さない）、[Decision 0099](0099-claude-planner-and-node-assignment.md) の 5（Codex の Review は必須）。[REQUIREMENTS.md](../../REQUIREMENTS.md) の原文は書き換えない。
 
@@ -99,3 +100,15 @@
 承認されたら、Status を Approved とし、承認の内容を Approval の行と末尾の「承認時の決定」に記録する。README の表に 1 行を足す。
 実装は「PR の分け方」の 2〜5 の PR で行う（どれも「Refs #341」）。本番の `runtime.toml` の変更と Release は Human が行う。
 方針を変えるときは、この Decision を書き換えず、新しい Decision から `Supersedes` する。
+
+## 承認時の決定（2026-11-16）
+
+Human は、Claude Code の作業 Session で PR #352 の 5 つの判断点（推奨つき）を受け、すべてを推奨どおりと回答して承認した（「推奨で大丈夫です」）。
+
+1. **Catalog の Model をどう通すか**: A。PAW が書く Catalog（`model_catalog_json`）で、対象の Model の 5 つの値（`tool_mode`・`multi_agent_version`・`experimental_supported_tools`・`use_responses_lite`・`supports_search_tool`）だけを上書きし、Code Mode・Multi-agent・余分な Tool を止める。許す Tool は広げない（1）。
+2. **Catalog の置き場所**: A。CLI の版ごとの Catalog を Repository に置き、Backend が Session ごとに上書きを当てた File を `CODEX_HOME` に書いて指す。上書きの後に Code Mode の値が残れば Session を始めない（2）。
+3. **本物での確かめ**: A。本番の外で Human が走らせる確かめの Script（本番の Gate は緩めず、Process の中だけで 1 組を試す）の結果で、検証した組を足す（3）。
+4. **当面の既定の Model**: A。`(0.156.1, gpt-5.5)` を先に検証した組に足し、本番の `[agents.codex].model` を `gpt-5.5` にする。上書きが入り `gpt-6-sol` が 3 を通ったら、Admin の Policy で既定を変える（4）。
+5. **Probe にも当てるか**: A。Node と同じ上書きを Probe にも当てる（5）。
+
+実装は「PR の分け方」の 2〜5 の PR で行う。
