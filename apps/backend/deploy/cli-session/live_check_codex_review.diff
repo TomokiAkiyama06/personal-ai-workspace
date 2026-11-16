@@ -1,0 +1,11 @@
+diff --git a/pager.py b/pager.py
+--- a/pager.py
++++ b/pager.py
+@@ -1,3 +1,6 @@
+ def page(items, number, size):
+     """The items of page ``number`` (1-based), ``size`` items a page."""
+-    return items[(number - 1) * size : number * size]
++    if size <= 0:
++        raise ValueError("size")
++    start = number * size
++    return items[start : start + size]
