@@ -1,9 +1,10 @@
 # Codex の当面の既定の Model（Decision 0104 の 4）を置かず、Catalog の上書きを先に入れて `gpt-6-sol` を確かめる（ChatGPT の Login では `gpt-5.5` が使えなかった。当面の本番、PR の順、Catalog の出どころ）
 
-- Status: Proposed
-- Date: 2026-11-16
+- Status: Approved
+- Approval: 2026-11-16、Human が作業 Session（Claude Code）内で、PR [#354](https://github.com/TomokiAkiyama06/personal-ai-workspace/pull/354) の 3 つの判断点（推奨つき）を受けたうえで、「推奨で大丈夫です」と回答して承認（approved as recommended, all 3 points: 末尾の「承認時の決定」）
+- Date: 2026-11-16（承認 2026-11-16）
 - Scope: Issue [#341](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/341)（[Decision 0104](0104-codex-model-catalog-override.md) の PR の分け方の 2 の Script を Human が本物で走らせて分かった）。この Decision は設計だけで、コードは承認の後の下の「PR の分け方」の PR で書く。関係する既存の口: `apps/backend/deploy/cli-session/live_check_codex.py`（#353）、`agent_models/verified.py`（`VERIFIED_MODELS`。Codex の組は空）、`agents/codex_cli.py`（`session_config`・`probe_config`）。
-- Supersedes（一部。下の推奨どおりに承認されたとき）:
+- Supersedes（一部）:
   - [Decision 0104](0104-codex-model-catalog-override.md)（Approved）の 4（当面の既定の Model を `gpt-5.5` にする）と、PR の分け方の 3（`(0.156.1, gpt-5.5)` を足す PR）。
   - 次は書き換えず、その中で作る: 0104 の 1・2・3・5（上書きの 5 つの値、Catalog の置き場所、本番の外での確かめ、Probe にも当てる）と PR の分け方の 4・5。[Decision 0101](0101-codex-mcp-resource-tools-exception.md)（許す Tool は広げない）、[Decision 0103](0103-selectable-cli-agent-models.md)（検証した組の Gate）。[REQUIREMENTS.md](../../REQUIREMENTS.md) の原文は書き換えない。
 
@@ -56,3 +57,11 @@ Login した Codex は Catalog を Server から取り、その中身は組み�
 
 承認されたら、Status を Approved とし、承認の内容を Approval の行と末尾の「承認時の決定」に記録する。README の表に 1 行を足し、0104 の行は書き換えない。
 方針を変えるときは、この Decision を書き換えず、新しい Decision から `Supersedes` する。
+
+## 承認時の決定（2026-11-16）
+
+Human は、Claude Code の作業 Session で PR #354 の 3 つの判断点（推奨つき）を受け、すべてを推奨どおりと回答して承認した（「推奨で大丈夫です」）。
+
+1. **当面の既定の Model と本番**: A。当面の既定の Model は置かない。本番は今のまま（#350 の前の Release、`gpt-6-sol`、step 5）で、0104 の上書きの実装と `gpt-6-sol` の組を先に進める（1）。
+2. **Catalog の出どころ**: A。Repository の Catalog は Login なしの `codex debug models` の出力。実装の前に Human が確かめ専用の Login で取った Catalog の `gpt-6-sol` の項目と比べ、5 つの値の外に違いがあれば PR に書いて Human に聞く（2）。
+3. **確かめの Script**: A。今のままで、README と上書きは 0104 の 4 の PR で直す（3）。
