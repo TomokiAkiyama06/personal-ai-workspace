@@ -11,7 +11,9 @@ one JSON message per line, no ``"jsonrpc"`` field): it answers ``initialize``,
 the notifications the scenario says. The report file gets what the test
 checks: the arguments, the environment's names, the config, the requests'
 params, the tools the bridge listed and the answers of the tool calls, and
-whether the credential file was there (its length, never its value).
+whether the credential file was there (its length, never its value), and
+the model catalog the config's ``model_catalog_json`` names (where it is, and
+each model's values that the override of Decision 0104 sets).
 
 Without an MCP server in the config (the health probe's) no relay is started
 and no tool is listed (and the scenario's ``probe_actions`` run, when given,
@@ -44,7 +46,28 @@ def main() -> int:
     with open(os.path.join(home, "config.toml"), "rb") as handle:
         config = tomllib.load(handle)
     auth = os.path.join(home, "auth.json")
+    # The model catalog the config names (Decision 0104, 2 A): where it is,
+    # and the values of each model's entry that the override sets.
+    named = config.get("model_catalog_json")
+    catalog = None
+    if named is not None:
+        catalog = {"path": named, "exists": os.path.isfile(named), "entries": {}}
+        if catalog["exists"]:
+            with open(named, encoding="utf-8") as handle:
+                for entry in json.load(handle)["models"]:
+                    catalog["entries"][entry["slug"]] = {
+                        key: entry.get(key)
+                        for key in (
+                            "tool_mode",
+                            "multi_agent_version",
+                            "experimental_supported_tools",
+                            "use_responses_lite",
+                            "supports_search_tool",
+                            "base_instructions",
+                        )
+                    }
     report = {
+        "catalog": catalog,
         "args": args,
         "env": sorted(os.environ),
         "config": config,
@@ -54,8 +77,14 @@ def main() -> int:
     }
 
     def save():
-        with open(report_path, "w", encoding="utf-8") as handle:
+        # Atomically (a new file renamed over the report): the adapter may
+        # stop this CLI (SIGTERM) right after the last line it sent, while
+        # the last save runs; a report truncated in place was then empty
+        # (CI run 44014182685). Killed mid-save, the previous report stays.
+        partial = report_path + ".tmp"
+        with open(partial, "w", encoding="utf-8") as handle:
             json.dump(report, handle)
+        os.replace(partial, report_path)
 
     def out(message):
         sys.stdout.write(json.dumps(message) + "\n")

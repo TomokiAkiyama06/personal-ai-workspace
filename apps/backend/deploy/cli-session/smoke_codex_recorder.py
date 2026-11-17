@@ -20,6 +20,16 @@ never passed; Decision 0103, issue #341), and the submit's summary came back
 as the node's result. ``--model`` picks the model of the run (the pair of a
 version and a model, Decision 0103, 3 A).
 
+The session's model catalog is the backend's own (Decision 0104, 2 A: the
+adapters write the repository's catalog of the version with the model's
+override, ``codex_catalog``, and ``model_catalog_json`` names it): this
+script has no override of its own. ``--without-catalog`` drops the
+``model_catalog_json`` line from the session's ``config.toml`` (Codex then
+uses its own catalog), to show that the override is what makes a catalog
+model such as ``gpt-6-sol`` pass. The result's ``catalog`` names the
+repository's file (and its SHA-256) and the session model's overridden
+values as the session's file had them.
+
 With ``--probe`` it runs the Codex connection's health probe instead (Decision
 0100, 10: ``CodexProbeAdapter`` with the probe's own ``config.toml``, no MCP
 server): the recorder answers ``PAW_PROBE_OK`` and the result passes when
@@ -30,7 +40,7 @@ Run it as the user who develops, never with a real login, never as ``paw``::
 
     python3 -I deploy/cli-session/smoke_codex_recorder.py \\
         --codex <codex executable> --out <result.json> [--sessions <dir>] \\
-        [--probe] [--model <model>]
+        [--probe] [--model <model>] [--without-catalog]
 
 The exit code is 0 when it passed, 1 when not. The result JSON holds the
 requests (the tools, the model, the input item types; no prompt text).
@@ -38,6 +48,7 @@ requests (the tools, the model, the input item types; no prompt text).
 
 import argparse
 import asyncio
+import hashlib
 import json
 import sys
 import tempfile
@@ -50,7 +61,9 @@ from pathlib import Path
 
 BACKEND = Path(__file__).resolve().parents[2]
 RELAY = BACKEND / "deploy" / "cli-session" / "paw_mcp_relay.py"
-MODEL = "gpt-5.5-codex"
+MODEL = "gpt-6-sol"
+#: The session's ``config.toml`` line that names its catalog (Decision 0104).
+CATALOG_KEY = "model_catalog_json"
 DUMMY_AUTH = '{"OPENAI_API_KEY": null, "tokens": null}'
 USAGE = {
     "input_tokens": 1000,
@@ -102,6 +115,8 @@ class Recorder:
         self.requests.append(
             {
                 "model": body.get("model"),
+                # The request's top-level fields (names only, Decision 0104).
+                "body_keys": sorted(body),
                 "tools": tools,
                 "model_tool_names": names,
                 "input_item_types": [
@@ -143,6 +158,55 @@ class Recorder:
         ]
 
 
+def with_recorder(text: str, port: int, *, catalog: bool = True) -> str:
+    """The backend's ``config.toml`` with the recorder as its provider
+    (top-level keys come before the first table; the provider's last),
+    without its catalog line when ``catalog`` is false."""
+    if not catalog:
+        text = "".join(
+            line
+            for line in text.splitlines(keepends=True)
+            if not line.startswith(CATALOG_KEY + " ")
+        )
+    return (
+        'model_provider = "pawsmoke"\n' + text + "\n[model_providers.pawsmoke]\n"
+        'name = "paw smoke recorder"\n'
+        f'base_url = "http://127.0.0.1:{port}/v1"\n'
+        'wire_api = "responses"\n'
+        "requires_openai_auth = false\n"
+    )
+
+
+def catalog_seen(text: str, model: str, version: str) -> dict:
+    """What the result says of the session's catalog (see the module)."""
+    sys.path.insert(0, str(BACKEND))
+    from paw_backend.agents.codex_catalog import (
+        OVERRIDES,
+        OVERRIDES_IF_PRESENT,
+        catalog_path,
+    )
+
+    config = tomllib.loads(text)
+    named = config.get(CATALOG_KEY)
+    seen: dict = {"in_backend_config": named is not None}
+    repository = catalog_path(version)
+    seen["repository_file"] = repository.name
+    if repository.is_file():
+        seen["repository_sha256"] = hashlib.sha256(repository.read_bytes()).hexdigest()
+    if named is not None:
+        entries = json.loads(Path(named).read_text())["models"]
+        (entry,) = [e for e in entries if e.get("slug") == model]
+        seen["entry"] = {
+            key: entry.get(key)
+            for key in (
+                *OVERRIDES,
+                *(k for k in OVERRIDES_IF_PRESENT if k in entry),
+                "supports_experimental_context",
+            )
+        }
+    return seen
+
+
 async def _version(codex: str) -> str:
     process = await asyncio.create_subprocess_exec(
         codex, "--version", stdout=asyncio.subprocess.PIPE
@@ -151,7 +215,9 @@ async def _version(codex: str) -> str:
     return out.decode().split()[-1]
 
 
-async def smoke(codex: str, sessions: Path, model: str = MODEL) -> dict:
+async def smoke(
+    codex: str, sessions: Path, model: str = MODEL, *, catalog: bool = True
+) -> dict:
     sys.path.insert(0, str(BACKEND))
     import paw_backend.agents.codex_cli as codex_cli
     from paw_backend.agents.codex_app_server import model_tool_names, tool_check
@@ -165,19 +231,14 @@ async def smoke(codex: str, sessions: Path, model: str = MODEL) -> dict:
 
     recorder = Recorder(model_tool_names)
     sessions_seen: list[dict] = []
+    catalogs: list[dict] = []
     original = codex_cli.session_config
+    version = await _version(codex)
 
-    def session_config(spec, tools):
-        # Top-level keys come before the first table; the provider's last.
-        text = (
-            'model_provider = "pawsmoke"\n'
-            + original(spec, tools)
-            + "\n[model_providers.pawsmoke]\n"
-            'name = "paw smoke recorder"\n'
-            f'base_url = "http://127.0.0.1:{recorder.port}/v1"\n'
-            'wire_api = "responses"\n'
-            "requires_openai_auth = false\n"
-        )
+    def session_config(spec, tools, catalog_file):
+        backend = original(spec, tools, catalog_file)
+        catalogs.append(catalog_seen(backend, model, version))
+        text = with_recorder(backend, recorder.port, catalog=catalog)
         config = tomllib.loads(text)
         sessions_seen.append(
             {
@@ -237,7 +298,6 @@ async def smoke(codex: str, sessions: Path, model: str = MODEL) -> dict:
 
     codex_cli.session_config = session_config
     try:
-        version = await _version(codex)
         adapter = codex_cli.CodexSessionAdapter(
             codex_cli.InteractiveSubprocessLauncher(),
             credentials=Credentials(),
@@ -289,6 +349,9 @@ async def smoke(codex: str, sessions: Path, model: str = MODEL) -> dict:
     submitted = outcome.result is not None and outcome.result.summary == "ok"
     return {
         "codex_version": version,
+        "model": model,
+        "catalog_override": catalog,
+        "catalog": catalogs[0] if catalogs else None,
         "seconds": round(time.monotonic() - started, 1),
         "session": session,
         "tool_check": checks,
@@ -309,7 +372,9 @@ async def smoke(codex: str, sessions: Path, model: str = MODEL) -> dict:
     }
 
 
-async def probe_smoke(codex: str, sessions: Path, model: str = MODEL) -> dict:
+async def probe_smoke(
+    codex: str, sessions: Path, model: str = MODEL, *, catalog: bool = True
+) -> dict:
     """The health probe's smoke (see the module)."""
     sys.path.insert(0, str(BACKEND))
     import paw_backend.agents.codex_probe as codex_probe
@@ -319,18 +384,14 @@ async def probe_smoke(codex: str, sessions: Path, model: str = MODEL) -> dict:
 
     recorder = Recorder(model_tool_names, message="PAW_PROBE_OK")
     configs: list[dict] = []
+    catalogs: list[dict] = []
     original = codex_probe.probe_config
+    version = await _version(codex)
 
-    def probe_config():
-        text = (
-            'model_provider = "pawsmoke"\n'
-            + original()
-            + "\n[model_providers.pawsmoke]\n"
-            'name = "paw smoke recorder"\n'
-            f'base_url = "http://127.0.0.1:{recorder.port}/v1"\n'
-            'wire_api = "responses"\n'
-            "requires_openai_auth = false\n"
-        )
+    def probe_config(catalog_file):
+        backend = original(catalog_file)
+        catalogs.append(catalog_seen(backend, model, version))
+        text = with_recorder(backend, recorder.port, catalog=catalog)
         configs.append(
             {"mcp_servers": sorted(tomllib.loads(text).get("mcp_servers", {}))}
         )
@@ -354,7 +415,6 @@ async def probe_smoke(codex: str, sessions: Path, model: str = MODEL) -> dict:
 
     codex_probe.probe_config = probe_config
     try:
-        version = await _version(codex)
         adapter = codex_probe.CodexProbeAdapter(
             InteractiveSubprocessLauncher(),
             model=model,
@@ -389,6 +449,9 @@ async def probe_smoke(codex: str, sessions: Path, model: str = MODEL) -> dict:
     return {
         "mode": "probe",
         "codex_version": version,
+        "model": model,
+        "catalog_override": catalog,
+        "catalog": catalogs[0] if catalogs else None,
         "seconds": round(time.monotonic() - started, 1),
         "config": configs[0] if configs else None,
         "requests_count": len(recorder.requests),
@@ -420,12 +483,24 @@ def main(argv=None) -> int:
         action="store_true",
         help="run the connection's health probe instead of a node",
     )
+    parser.add_argument(
+        "--without-catalog",
+        action="store_true",
+        help="drop the session's model_catalog_json (Codex's own catalog)",
+    )
     arguments = parser.parse_args(argv)
     with tempfile.TemporaryDirectory(prefix="pawsm") as scratch:
         sessions = (arguments.sessions or Path(scratch)).resolve()
         sessions.mkdir(parents=True, exist_ok=True)
         run = probe_smoke if arguments.probe else smoke
-        result = asyncio.run(run(arguments.codex, sessions, arguments.model))
+        result = asyncio.run(
+            run(
+                arguments.codex,
+                sessions,
+                arguments.model,
+                catalog=not arguments.without_catalog,
+            )
+        )
         result["sessions_left"] = sorted(p.name for p in sessions.iterdir())
     arguments.out.write_text(json.dumps(result, indent=2, default=str))
     print(json.dumps({k: v for k, v in result.items() if k != "requests"}, default=str))

@@ -25,7 +25,8 @@ HERE = Path(__file__).resolve().parent
 FAKE = HERE / "fake_codex_cli.py"
 SCRIPT = HERE.parent / "deploy" / "cli-session" / "live_check_codex.py"
 VERSION = "0.156.1"
-MODEL = "gpt-5.5"
+# Decision 0105: the catalog model (the logged-in catalog has no gpt-5.5).
+MODEL = "gpt-6-sol"
 # A login built from pieces (no literal a scanner would flag).
 LOGIN = '{"tokens": {"access_token": "paw-live-check-' + "c4na" + 'ry"}}'
 REFRESHED = '{"tokens": {"access_token": "paw-live-check-' + "r3fr" + 'esh"}}'
@@ -145,6 +146,27 @@ class PassTest(LiveCheckCase):
         sent = json.loads(self.report.read_text())
         self.assertEqual(sent["auth_length"], len(LOGIN))
         self.assertEqual(sent["requests"]["thread/start"]["model"], MODEL)
+        # The backend's own catalog override (Decision 0104, 2 A): the
+        # session's model_catalog_json in its CODEX_HOME, and the result says
+        # which repository file and which values.
+        self.assertEqual(sent["config"]["model_catalog_json"], sent["catalog"]["path"])
+        self.assertEqual(Path(sent["catalog"]["path"]).name, "models.json")
+        expected = {
+            "tool_mode": "direct",
+            "multi_agent_version": None,
+            "experimental_supported_tools": [],
+            "use_responses_lite": False,
+            "supports_search_tool": False,
+        }
+        entry = dict(sent["catalog"]["entries"][MODEL])
+        entry.pop("base_instructions")
+        self.assertEqual(entry, expected)
+        self.assertEqual(
+            result["catalog"]["file"],
+            "paw_backend/agents/codex_catalogs/codex-models-0.156.1.json",
+        )
+        self.assertRegex(result["catalog"]["sha256"], "^[0-9a-f]{64}$")
+        self.assertEqual(result["catalog"]["entry"], expected)
         # ... and every copy of it went with the temporary directory.
         self.assertTrue(result["cleaned"])
         self.assertEqual(self.left(), [])
@@ -463,6 +485,15 @@ class RefusalTest(LiveCheckCase):
     def test_an_unverified_version_is_refused(self):
         code, result = self.check(arguments=self.arguments(cli_version="9.9.9"))
         self.assert_refused(code, result, "version_not_verified")
+
+    def test_a_model_without_a_session_catalog_is_refused(self):
+        # Decision 0104, 2 A: the same check as the adapters', before
+        # anything runs (not even ``codex --version``).
+        for model, why in (("gpt-5.5", "catalog_model_not_in_catalog"),):
+            with self.subTest(model):
+                code, result = self.check(arguments=self.arguments(model=model))
+                self.assert_refused(code, result, why)
+                self.assertFalse(Path(str(self.report) + ".probes").exists())
 
     def test_another_cli_version_is_refused_before_any_login(self):
         code, result = self.check(version="0.162.1")

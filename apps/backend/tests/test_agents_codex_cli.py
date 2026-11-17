@@ -25,12 +25,17 @@ import re
 import shutil
 import sys
 import tempfile
+import tomllib
 import unittest
 import uuid
 from pathlib import Path
 from unittest.mock import patch
 
-from paw_backend.agents.cli_session import UnitNotStoppedError
+from paw_backend.agents.cli_session import (
+    UnitNotStoppedError,
+    create_session,
+    remove_session,
+)
 from paw_backend.agents.codex_app_server import (
     MCP_RESOURCE_TOOLS,
     VERIFIED_VERSIONS,
@@ -41,11 +46,13 @@ from paw_backend.agents.codex_app_server import (
     tool_check,
     version_of,
 )
+from paw_backend.agents.codex_catalog import REPOSITORY_CATALOGS, CodexCatalogs
 from paw_backend.agents.codex_cli import (
     DISABLED_FEATURES,
     CodexCliRuntime,
     CodexSessionAdapter,
     InteractiveSubprocessLauncher,
+    session_config,
 )
 from paw_backend.connections import (
     AgentSessionRequest,
@@ -55,6 +62,8 @@ from paw_backend.connections import (
 )
 from paw_backend.orchestrator.domain import NodeRole
 from paw_backend.orchestrator.runtime import NodeAssignment
+
+from .codex_catalog_support import fake_catalogs
 
 HERE = Path(__file__).resolve().parent
 FAKE = HERE / "fake_codex_cli.py"
@@ -166,7 +175,9 @@ class CodexCase(unittest.IsolatedAsyncioTestCase):
         self.models = None
         self.model = "gpt-5.5-codex"
 
-    def adapter(self, *, verified=frozenset({VERSION}), credentials=True):
+    def adapter(
+        self, *, verified=frozenset({VERSION}), credentials=True, catalogs=None
+    ):
         return CodexSessionAdapter(
             InteractiveSubprocessLauncher(),
             drain_seconds=1.0,
@@ -181,6 +192,7 @@ class CodexCase(unittest.IsolatedAsyncioTestCase):
                 str(self.report),
             ),
             verified_versions=verified,
+            catalogs=catalogs or fake_catalogs(),
             verified_models=self.pairs,
         )
 
@@ -450,9 +462,13 @@ class VersionTest(CodexCase):
         self.assertEqual(outcome.error_class, "ValueError")
 
     async def test_the_shipped_list_runs_the_verified_version(self):
+        # With the repository's catalog of that version (Decision 0104, 2 A).
+        self.model = "gpt-6-sol"
         outcome = await self.run_node(
             [{"call": "submit", "arguments": {"summary": "ok"}}, {"usage": [3, 1]}],
-            adapter=self.adapter(verified=VERIFIED_VERSIONS),
+            adapter=self.adapter(
+                verified=VERIFIED_VERSIONS, catalogs=REPOSITORY_CATALOGS
+            ),
             version="0.156.1",
         )
         self.assertEqual(outcome.result.summary, "ok")
@@ -629,6 +645,7 @@ class OutOfMemoryTest(CodexCase):
                 str(self.report),
             ),
             verified_versions=frozenset({VERSION}),
+            catalogs=fake_catalogs(),
         )
 
     async def test_without_a_submit_it_is_agent_out_of_memory(self):
@@ -691,6 +708,7 @@ class UnstoppedTest(CodexCase):
                 str(self.report),
             ),
             verified_versions=frozenset({VERSION}),
+            catalogs=fake_catalogs(),
         )
 
     async def test_a_cli_that_cannot_be_stopped_keeps_its_directory(self):
@@ -940,6 +958,7 @@ class BoundaryTest(CodexCase):
             credentials=self.credentials,
             executable=(missing,),
             verified_versions=frozenset({VERSION}),
+            catalogs=fake_catalogs(),
         )
 
     async def test_a_missing_executable_is_an_adapter_error(self):
@@ -980,6 +999,7 @@ class BoundaryTest(CodexCase):
             credentials=self.credentials,
             executable=("codex",),
             verified_versions=frozenset({VERSION}),
+            catalogs=fake_catalogs(),
         )
 
 
@@ -1129,6 +1149,103 @@ class StreamTest(unittest.TestCase):
         with self.assertRaises(StreamRefused):
             CodexStream(set()).feed("{not json")
         self.assertIsNone(CodexStream(set()).feed("  "))
+
+
+class CatalogTest(CodexCase):
+    """Decision 0104, 1 A and 2 A: the session's model catalog."""
+
+    SUBMIT = [{"call": "submit", "arguments": {"summary": "ok"}}, {"usage": [3, 1]}]
+
+    async def test_the_config_names_the_overridden_catalog_in_codex_home(self):
+        outcome = await self.run_node(self.SUBMIT)
+        self.assertEqual(outcome.result.summary, "ok")
+        report = self.read_report()
+        catalog = report["catalog"]
+        self.assertEqual(report["config"]["model_catalog_json"], catalog["path"])
+        self.assertTrue(catalog["exists"])
+        # In the session's CODEX_HOME (``<session>/config``), as models.json.
+        path = Path(catalog["path"])
+        self.assertEqual(path.name, "models.json")
+        self.assertEqual(path.parent.name, "config")
+        self.assertEqual(path.parent.parent.parent, self.sessions)
+        entries = catalog["entries"]
+        self.assertEqual(
+            entries["gpt-5.5-codex"],
+            {
+                "tool_mode": "direct",
+                "multi_agent_version": None,
+                "experimental_supported_tools": [],
+                "use_responses_lite": False,
+                "supports_search_tool": False,
+                "base_instructions": "You are a test model.",
+            },
+        )
+        # Only the session's model: the others as in the catalog.
+        self.assertEqual(entries["gpt-6-sol"]["tool_mode"], "code_mode_only")
+        # The file goes with the session's directory (nothing is left).
+        self.assertEqual(list(self.sessions.iterdir()), [])
+
+    async def test_a_model_not_in_the_catalog_places_no_login(self):
+        self.model = "gpt-not-in-it"
+        with self.assertLogs("paw_backend.agents.codex_cli", "WARNING") as logs:
+            outcome = await self.run_node(self.SUBMIT)
+        self.assertEqual(outcome.message, "model_not_allowed")
+        self.assertIn("catalog model_not_in_catalog", "\n".join(logs.output))
+        self.assertEqual(self.probes(), 1)  # the version only
+        self.assertFalse(self.report.exists())  # app-server never started
+        self.assertEqual(self.credentials.placed, [])
+        self.assertEqual(list(self.sessions.iterdir()), [])
+
+    async def test_a_version_without_a_catalog_places_no_login(self):
+        adapter = self.adapter(
+            catalogs=fake_catalogs(versions=("0.1.0",)),
+        )
+        outcome = await self.run_node(self.SUBMIT, adapter=adapter)
+        self.assertEqual(outcome.message, "model_not_allowed")
+        self.assertFalse(self.report.exists())
+        self.assertEqual(self.credentials.placed, [])
+
+    async def test_a_code_mode_value_left_places_no_login(self):
+        catalogs = CodexCatalogs(
+            catalogs={
+                VERSION: {
+                    "models": [
+                        {"slug": "gpt-5.5-codex", "code_mode_host_tools": ["exec"]}
+                    ]
+                }
+            }
+        )
+        outcome = await self.run_node(
+            self.SUBMIT, adapter=self.adapter(catalogs=catalogs)
+        )
+        self.assertEqual(outcome.message, "model_not_allowed")
+        self.assertFalse(self.report.exists())
+        self.assertEqual(self.credentials.placed, [])
+
+    async def test_initializes_version_must_be_the_catalogs(self):
+        # Both versions verified and with a catalog, no pairs: the catalog
+        # written is --version's, so another initialize version is refused.
+        outcome = await self.run_node(
+            self.SUBMIT,
+            adapter=self.adapter(verified=frozenset({VERSION, "0.163.0"})),
+            user_agent_version="0.163.0",
+        )
+        self.assertEqual(outcome.message, "model_not_allowed")
+        self.assertNotIn("thread/start", self.read_report()["requests"])
+
+    def test_the_config_needs_an_absolute_catalog_path(self):
+        spec = create_session(self.sessions, ("relay",))
+        self.addCleanup(remove_session, spec)
+        for catalog in (None, "models.json", Path("models.json")):
+            with self.subTest(catalog):
+                with self.assertRaises(ValueError):
+                    session_config(spec, {"submit"}, catalog)
+        config = tomllib.loads(
+            session_config(spec, {"submit"}, spec.config_dir / "models.json")
+        )
+        self.assertEqual(
+            config["model_catalog_json"], str(spec.config_dir / "models.json")
+        )
 
 
 if __name__ == "__main__":

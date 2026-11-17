@@ -37,9 +37,11 @@ account; issue #239) must be the session's ``config`` directory. Over it the
 container gets a tmpfs of its own (``tmpfs-mode=0700``, owned by the CLI's
 account: ``chown``; ``notmpcopyup``: nothing of the session's ``config``
 directory under it is copied in, issue #339), into which only the session's
-``config.toml`` (read-only) and ``auth.json`` (read-write: Codex rewrites it
-in place when it refreshes its login, and the backend reads it back from the
-session's directory) are mounted, each when the backend wrote it. Everything
+``config.toml`` (read-only), ``models.json`` (read-only: the session's model
+catalog, which ``config.toml``'s ``model_catalog_json`` names; Decision 0104,
+2 A) and ``auth.json`` (read-write: Codex rewrites it in place when it
+refreshes its login, and the backend reads it back from the session's
+directory) are mounted, each when the backend wrote it. Everything
 else Codex writes there (its logs, state, caches) stays in the container's
 tmpfs and goes with the container.
 
@@ -92,7 +94,7 @@ ALLOWED_CREDENTIALS = frozenset({"CLAUDE_CODE_OAUTH_TOKEN"})
 #: Codex's ``CODEX_HOME``: the session's directory's ``config``; the files of
 #: it that are mounted into the container's own tmpfs there, and how.
 CODEX_HOME_NAME = "config"
-CODEX_HOME_FILES = (("config.toml", "ro"), ("auth.json", "rw"))
+CODEX_HOME_FILES = (("config.toml", "ro"), ("models.json", "ro"), ("auth.json", "rw"))
 EGRESS_IN_CONTAINER = "/run/paw-egress.sock"
 #: Where systemd makes each session's egress socket (Decision 0091, 1).
 DEFAULT_EGRESS_SESSION_DIR = "/run/paw-egress/session"
@@ -190,8 +192,8 @@ def codex_home_mounts(directory: Path, env: dict[str, str]) -> list[str]:
         # Podman's default copies what is there into the tmpfs and chowns it.
         # The backend's files (``paw``'s) have no uid in the container
         # without subuid ranges (issue #322): crun's chown failed (EINVAL,
-        # exit 126) and no Codex session started. The two files are mounted
-        # below; nothing else of the directory belongs in CODEX_HOME.
+        # exit 126) and no Codex session started. The backend's files are
+        # mounted below; nothing else of the directory belongs in CODEX_HOME.
         f"type=tmpfs,destination={home},tmpfs-mode=0700,chown=true,notmpcopyup",
     ]
     for name, mode in CODEX_HOME_FILES:
