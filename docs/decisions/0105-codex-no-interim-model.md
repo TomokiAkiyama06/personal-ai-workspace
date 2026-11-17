@@ -7,7 +7,8 @@
 - Supersedes（一部）:
   - [Decision 0104](0104-codex-model-catalog-override.md)（Approved）の 4（当面の既定の Model を `gpt-5.5` にする）と、PR の分け方の 3（`(0.156.1, gpt-5.5)` を足す PR）。
   - 0104 の 2 の「Catalog は Login なしの `codex debug models` の出力」（Human の選択で Login した状態の出力に変える。末尾の「2 の比較の結果と Human の選択」）。
-  - 次は書き換えず、その中で作る: 0104 の 1・2 の残り・3・5（上書きの 5 つの値、Catalog の置き場所、本番の外での確かめ、Probe にも当てる）と PR の分け方の 4・5。[Decision 0101](0101-codex-mcp-resource-tools-exception.md)（許す Tool は広げない）、[Decision 0103](0103-selectable-cli-agent-models.md)（検証した組の Gate）。[REQUIREMENTS.md](../../REQUIREMENTS.md) の原文は書き換えない。
+  - 0104 の 1 の上書きの値の数（5 つ → 6 つ。`multi_agent_reasoning_effort` を足す。末尾の「`gpt-6-astra` の 6 つ目の値」）。
+  - 次は書き換えず、その中で作る: 0104 の 1 の残り・2 の残り・3・5（上書きの 5 つの値、Catalog の置き場所、本番の外での確かめ、Probe にも当てる）と PR の分け方の 4・5。[Decision 0101](0101-codex-mcp-resource-tools-exception.md)（許す Tool は広げない）、[Decision 0103](0103-selectable-cli-agent-models.md)（検証した組の Gate）。[REQUIREMENTS.md](../../REQUIREMENTS.md) の原文は書き換えない。
 
 ## 背景
 
@@ -72,3 +73,11 @@ Human は、Claude Code の作業 Session で PR #354 の 3 つの判断点（�
 Human が確かめ専用の Login で取った Catalog（`/data/results/paw-codex-live-check-2026-11-16/catalog-login.json`）と Login なしの Catalog を比べると、`gpt-6-sol` の項目は 41 の Key のうち 7 つが違った（上書きの 5 つの値は同じ）: `base_instructions`・`model_messages`（Skill / Plugin の節の書き方）、`default_service_tier`（Login なし `priority` / Login あり なし）、`supports_experimental_context`（`false` / `true`）、`supports_reasoning_effort_updates`（`false` / `true`）、`available_access_programs`（なし / `cyber: standard`）、`description`。証拠: 同じ Directory の `STATUS.md`。
 
 2 の A の手順どおり Human に聞き、Human は **Login した状態の Catalog の値を使う** と答えた（今の本番の Codex が使っている Server の値と同じにするため）。このため、Repository に置く 0.156.1 の Catalog は、0104 の 2 と上の 2 の A の「Login なしの `codex debug models` の出力」ではなく、**確かめ専用の Login で取った `codex debug models` の出力（Model は呼ばない）** とする。0104 の 2 の「Login なしの出力」の部分はこの Decision で Supersede する（Catalog を版ごとに Repository に置くこと・上書きの 5 つの値・Fail closed は 0104 の 2 のまま）。作り直すときも、確かめ専用の Login で取る。
+
+### `gpt-6-astra` の 6 つ目の値（2026-11-17、0104 の「未決」の 1 つ目）
+
+上書きの実装（0104 の 4、PR #355）の記録用の Server の Smoke で、`gpt-6-astra` の項目は 5 つの値を上書きした後も `multi_agent_reasoning_effort = "xhigh"` が残り、Fail closed（`multi_agent` を名に含む Key が null でない）で止まった（証拠: `/data/results/paw-codex-catalog-override-2026-11-16/STATUS.md`）。Login した Catalog でこの Key を持つのは `gpt-6-astra` だけ。
+
+Human に「今は足さない」（推奨）と「足す」を聞き、Human は **足す** と答えた。このため、上書きの値を 6 つにする: 0104 の 1 の 5 つに **`multi_agent_reasoning_effort` を null にする** を加える（Key がある項目だけ。無い項目には足さない）。Multi-agent は `multi_agent_version` を null にして止めるので、この値は使われない値を消すだけで、許す Tool は広げない。Fail closed の検査（`code_mode*`・`multi_agent` を名に含む Key が残れば始めない）は変えない。
+
+`gpt-6-astra` を検証した組に足すには、`gpt-6-sol` と同じく、記録用の Server の Smoke と 0104 の 3 の確かめ（Human が本物で走らせる）を通す。0104 の「未決」の 1 つ目のうち `gpt-6-luna` は、同じ上書きのまま、確かめてから足す。
