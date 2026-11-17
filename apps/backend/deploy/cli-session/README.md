@@ -39,7 +39,7 @@ Egress（[Decision 0091](../../../../docs/decisions/0091-egress-per-session-sock
 
 Memory 不足（[Decision 0092](../../../../docs/decisions/0092-runtime-oom-kill-detection.md) の 4、Issue #251）: Unit は `OOMPolicy=stop`・`MemoryAccounting=yes` で、Program は `podman run --cgroups=split` で Container の cgroup を Unit の cgroup の下に置く。Container の中の OOM Kill で Unit 全体が止まり、`Result=oom-kill` で終わる。`systemctl stop` でその `Result` は消えうるので、Backend（`_UnitProcess.stop()`）は止める**前に** `ActiveState`・`Result`・`ExecMainStatus` を読んで覚える（CLI が自分で終わった後なら、Unit が `active` から離れるのを最大 10 秒待つ）。`submit` の前に OOM で終わった Session は `AgentOutOfMemory`。Session の Directory は終わりに Backend が消す（Token の File も一緒に消える）。
 
-## Codex の Model の Catalog（[Decision 0104](../../../../docs/decisions/0104-codex-model-catalog-override.md) の 1・2・5 の A、Decision 0105（PR #354）の 2 の A、Issue #341）
+## Codex の Model の Catalog（[Decision 0104](../../../../docs/decisions/0104-codex-model-catalog-override.md) の 1・2・5 の A、[Decision 0105](../../../../docs/decisions/0105-codex-no-interim-model.md) の 2 の A、Issue #341）
 
 `codex-cli 0.156.1` の Catalog の Model（`gpt-6-sol` など）はすべて `tool_mode = "code_mode_only"` で、そのままでは Codex が `additional_tools` で `exec`・`wait`・`collaboration` の Tool などを渡す（0101 の外）。Backend は Codex の Session（Node と Health の Probe の両方）ごとに、Repository の **その版の Catalog** の **Session の Model の項目だけ** 6 つ（Key があるときだけの 1 つを含む）の値を上書きした File を Session の `CODEX_HOME` に `models.json` として書き、`config.toml` の Top-level の `model_catalog_json` で指す（`paw_backend/agents/codex_catalog.py`。File は Session の Directory と一緒に消える）。上書きは Code の定数で、全部で 6 つ。必ず書く 5 つ（`OVERRIDES`）: `tool_mode = "direct"`、`multi_agent_version = null`、`experimental_supported_tools = []`、`use_responses_lite = false`、`supports_search_tool = false`。と、Key があるときだけの 1 つ（下の 6 つ目の値）。他の値と他の Model は取ったままにする。
 
@@ -49,7 +49,7 @@ Catalog の File は `paw_backend/agents/codex_catalogs/codex-models-<版>.json`
 
 `codex-models-0.156.1.json` の作り方（2026-11-16、Human）: **確かめ専用の ChatGPT の Login**（下の「専用の Login を作る」。本番の Login と `~/.codex` とは別）で `CODEX_HOME=<専用の Directory> codex debug models > codex-models-0.156.1.json`（`codex-cli 0.156.1`）。Login した Codex は Catalog を Server から取る。**Model は呼ばない**（Login の更新が起きても同じ `auth.json` に残る）。Login なしの `codex debug models`（CLI に組み込みの Catalog）とは違い、`gpt-5.5`・`gpt-5.4` が無く `gpt-reserve` がある。**`gpt-5.5` は ChatGPT の Account では使えない**（OpenAI が 400 `model_not_found`「not supported when using Codex with a ChatGPT account」を返した。Decision 0105 の背景）ので、Catalog に無く、Session は始まらない。`gpt-6-sol` の項目は Login なしのものと上書きする 5 つの値の外の 7 つ（`base_instructions`・`model_messages`・`default_service_tier`・`supports_experimental_context`（`true`）・`supports_reasoning_effort_updates`（`true`）・`available_access_programs`・`description`）が違い、Human は Login した Catalog の値を選んだ（Decision 0105 の 2 の A。比べた結果: `/data/results/paw-codex-live-check-2026-11-16/STATUS.md`）。SHA-256 は `990e2273ad7e49ae3b58088e0b5736d84b59bfef9f10e9bacd82d97dcad25a31`（`tests/test_agents_codex_catalog.py` が確かめる）。
 
-6 つ目の値（Decision 0105（PR #354）の「`gpt-6-astra` の 6 つ目の値」、2026-11-17 の Human の回答）: 項目に `multi_agent_reasoning_effort` の Key があるときだけ `null` にする（`OVERRIDES_IF_PRESENT`。0.156.1 の Catalog では `gpt-6-astra` の `"xhigh"` だけ。Key の無い項目には足さない）。Multi-agent は `multi_agent_version` で止まるので、使われない値を消すだけで許す Tool は広げない。Fail closed の検査は変えない。
+6 つ目の値（[Decision 0105](../../../../docs/decisions/0105-codex-no-interim-model.md) の「`gpt-6-astra` の 6 つ目の値」、2026-11-17 の Human の回答）: 項目に `multi_agent_reasoning_effort` の Key があるときだけ `null` にする（`OVERRIDES_IF_PRESENT`。0.156.1 の Catalog では `gpt-6-astra` の `"xhigh"` だけ。Key の無い項目には足さない）。Multi-agent は `multi_agent_version` で止まるので、使われない値を消すだけで許す Tool は広げない。Fail closed の検査は変えない。
 
 Session の Program（`paw_cli_session_run.py`）は `models.json` も Container の `CODEX_HOME` に Mount する。この版の Backend の Release を入れるときは、下の「Unit の Group と Podman を確かめる」の `install` で `paw_cli_session_run.py` も入れ直す（古い Program では `models.json` が Container に無く、Codex は Catalog を読めずに始まらない）。
 
@@ -98,7 +98,7 @@ Script は自分で `apps/backend` を `sys.path` に入れるので、`-I` の�
 
 ### 走らせる
 
-開発する User で、確かめる版の `codex` を Scratch に置いて走らせる。**`0.156.1` と `gpt-6-sol` で走らせる**（Decision 0105（PR #354）の 1 と 3 の A: `gpt-5.5` は ChatGPT の Account で使えないので当面の既定は置かない。合格したら `(0.156.1, gpt-6-sol)` を組に足す PR を作る。0104 の PR の分け方の 5）:
+開発する User で、確かめる版の `codex` を Scratch に置いて走らせる。**`0.156.1` と `gpt-6-sol` で走らせる**（[Decision 0105](../../../../docs/decisions/0105-codex-no-interim-model.md) の 1 と 3 の A: `gpt-5.5` は ChatGPT の Account で使えないので当面の既定は置かない。合格したら `(0.156.1, gpt-6-sol)` を組に足す PR を作る。0104 の PR の分け方の 5）:
 
 ```sh
 cd apps/backend
