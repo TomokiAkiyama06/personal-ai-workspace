@@ -180,7 +180,11 @@ def with_recorder(text: str, port: int, *, catalog: bool = True) -> str:
 def catalog_seen(text: str, model: str, version: str) -> dict:
     """What the result says of the session's catalog (see the module)."""
     sys.path.insert(0, str(BACKEND))
-    from paw_backend.agents.codex_catalog import OVERRIDES, catalog_path
+    from paw_backend.agents.codex_catalog import (
+        OVERRIDES,
+        OVERRIDES_IF_PRESENT,
+        catalog_path,
+    )
 
     config = tomllib.loads(text)
     named = config.get(CATALOG_KEY)
@@ -193,7 +197,12 @@ def catalog_seen(text: str, model: str, version: str) -> dict:
         entries = json.loads(Path(named).read_text())["models"]
         (entry,) = [e for e in entries if e.get("slug") == model]
         seen["entry"] = {
-            key: entry.get(key) for key in (*OVERRIDES, "supports_experimental_context")
+            key: entry.get(key)
+            for key in (
+                *OVERRIDES,
+                *(k for k in OVERRIDES_IF_PRESENT if k in entry),
+                "supports_experimental_context",
+            )
         }
     return seen
 

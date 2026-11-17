@@ -489,10 +489,7 @@ class RefusalTest(LiveCheckCase):
     def test_a_model_without_a_session_catalog_is_refused(self):
         # Decision 0104, 2 A: the same check as the adapters', before
         # anything runs (not even ``codex --version``).
-        for model, why in (
-            ("gpt-5.5", "catalog_model_not_in_catalog"),
-            ("gpt-6-astra", "catalog_code_mode_left"),
-        ):
+        for model, why in (("gpt-5.5", "catalog_model_not_in_catalog"),):
             with self.subTest(model):
                 code, result = self.check(arguments=self.arguments(model=model))
                 self.assert_refused(code, result, why)

@@ -253,6 +253,7 @@ def check_catalog(cli_version: str, model: str) -> dict:
     (``catalog_<code>``); what the result says of it."""
     from paw_backend.agents.codex_catalog import (
         OVERRIDES,
+        OVERRIDES_IF_PRESENT,
         REPOSITORY_CATALOGS,
         CatalogRefused,
         catalog_path,
@@ -267,7 +268,10 @@ def check_catalog(cli_version: str, model: str) -> dict:
     return {
         "file": str(path.relative_to(BACKEND)),
         "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-        "entry": {key: entry.get(key) for key in OVERRIDES},
+        "entry": {
+            key: entry.get(key)
+            for key in (*OVERRIDES, *(k for k in OVERRIDES_IF_PRESENT if k in entry))
+        },
     }
 
 

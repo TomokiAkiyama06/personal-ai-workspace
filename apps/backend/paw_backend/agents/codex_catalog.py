@@ -9,8 +9,10 @@ the features of ``DISABLED_FEATURES`` do not remove them (the catalog's values
 win). Codex reads a replacement catalog from the file that ``config.toml``'s
 top-level ``model_catalog_json`` names. So every Codex session (a node's and
 the connection's health probe, Decision 0104, 5 A) gets the repository's
-catalog of its CLI version with :data:`OVERRIDES` applied to the session
-model's entry only (every other value, and every other model, as captured),
+catalog of its CLI version with :data:`OVERRIDES` (and, where the entry has
+the key, :data:`OVERRIDES_IF_PRESENT`: six values in all, Decision 0105,
+"``gpt-6-astra`` の 6 つ目の値") applied to the session model's entry only
+(every other value, and every other model, as captured),
 written into the session's ``CODEX_HOME`` as :data:`CATALOG_NAME` (it goes with
 the session's directory).
 
@@ -52,7 +54,7 @@ CATALOG_NAME: Final = "models.json"
 #: ``multi_agent_v1__*`` (v1); ``experimental_supported_tools``:
 #: ``request_user_input_async``, ``clock__curr_time``; ``use_responses_lite``:
 #: the tools in an ``additional_tools`` item; ``supports_search_tool``:
-#: ``tool_search``). Exactly these five: another one is a Human's decision.
+#: ``tool_search``). Set on the entry whether it had the key or not.
 OVERRIDES: Final[Mapping[str, object]] = MappingProxyType(
     {
         "tool_mode": "direct",
@@ -61,6 +63,14 @@ OVERRIDES: Final[Mapping[str, object]] = MappingProxyType(
         "use_responses_lite": False,
         "supports_search_tool": False,
     }
+)
+#: The sixth value (Decision 0105, "``gpt-6-astra`` の 6 つ目の値", the
+#: Human's answer of 2026-11-17): set only on an entry that has the key (in
+#: 0.156.1's catalog, ``gpt-6-astra``'s ``"xhigh"``), never added to another.
+#: Multi-agent is off by ``multi_agent_version``; this only clears a value
+#: that is then unused. Exactly these six: another one is a Human's decision.
+OVERRIDES_IF_PRESENT: Final[Mapping[str, object]] = MappingProxyType(
+    {"multi_agent_reasoning_effort": None}
 )
 #: A catalog file is a few hundred KiB (0.156.1's: 461 KiB).
 MAX_CATALOG_BYTES: Final = 8 * 1024 * 1024
@@ -110,7 +120,8 @@ def parse_catalog(data: bytes | str) -> dict:
 
 def overridden(catalog: Mapping, model: str) -> dict:
     """``catalog`` (as :func:`parse_catalog` returns it) with
-    :data:`OVERRIDES` applied to ``model``'s entry only; a new object (the
+    :data:`OVERRIDES` (and :data:`OVERRIDES_IF_PRESENT` for the keys the
+    entry has) applied to ``model``'s entry only; a new object (the
     given one is not changed). :class:`CatalogRefused` when ``model`` is not
     in it or its entry still has a Code Mode or multi-agent value."""
     entries = catalog["models"]
@@ -121,6 +132,9 @@ def overridden(catalog: Mapping, model: str) -> dict:
     entry = dict(entries[index])
     for key, value in OVERRIDES.items():
         entry[key] = list(value) if isinstance(value, tuple) else value
+    for key, value in OVERRIDES_IF_PRESENT.items():
+        if key in entry:
+            entry[key] = value
     check_entry(entry)
     models = list(entries)
     models[index] = entry
@@ -225,6 +239,7 @@ __all__ = [
     "CATALOG_DIR",
     "CATALOG_NAME",
     "OVERRIDES",
+    "OVERRIDES_IF_PRESENT",
     "REPOSITORY_CATALOGS",
     "CatalogRefused",
     "CodexCatalogs",

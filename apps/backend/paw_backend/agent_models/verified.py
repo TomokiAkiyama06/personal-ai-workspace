@@ -37,10 +37,11 @@ answer 2) wait for their own smoke the same way.
 
 Decision 0104 (as amended by Decision 0105) is that form: every Codex session
 gets the repository's catalog of its version with the model's Code Mode,
-multi-agent and extra tools turned off (``agents/codex_catalog.py``). With it
-the recorder smoke of ``0.156.1`` x ``gpt-6-sol`` passes (node and probe,
-2026-11-16, ``/data/results/paw-codex-catalog-override-2026-11-16/``); the
-pair is added only after the Human's live check (``live_check_codex.py``,
+multi-agent and extra tools turned off (``agents/codex_catalog.py``, six
+values). With it the recorder smoke of ``0.156.1`` x ``gpt-6-sol`` and
+``gpt-6-astra`` passes (node and probe, 2026-11-17,
+``/data/results/paw-codex-catalog-override-2026-11-16/``); a pair is added
+only after the Human's live check (``live_check_codex.py``,
 Decision 0104, "PR の分け方" 5), not here. ``gpt-5.5`` is not in that
 catalog (a ChatGPT account cannot use it).
 """

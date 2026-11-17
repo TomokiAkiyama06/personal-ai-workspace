@@ -7,9 +7,10 @@ by Decision 0105, 2 A; issue #341).
   nothing else (the other values, the other models, the given catalog);
 * every verified version has a catalog, and every verified Codex pair's model
   is in it and overrides cleanly;
+* the sixth value (Decision 0105): ``multi_agent_reasoning_effort`` nulled
+  where the entry has it (``gpt-6-astra``), never added elsewhere;
 * fail closed: a model not in the catalog, a Code Mode or multi-agent value
-  left after the override (``gpt-6-astra``'s ``multi_agent_reasoning_effort``
-  included), a missing, unreadable or malformed catalog.
+  left after the override, a missing, unreadable or malformed catalog.
 """
 
 import copy
@@ -26,6 +27,7 @@ from paw_backend.agents.codex_app_server import VERIFIED_VERSIONS
 from paw_backend.agents.codex_catalog import (
     CATALOG_DIR,
     OVERRIDES,
+    OVERRIDES_IF_PRESENT,
     REPOSITORY_CATALOGS,
     CatalogRefused,
     CodexCatalogs,
@@ -127,12 +129,32 @@ class RepositoryCatalogTest(unittest.TestCase):
             "0.156.1", "gpt-5.5",
         )  # fmt: skip
 
-    def test_gpt_6_astra_keeps_a_multi_agent_value(self):
-        # Its entry has ``multi_agent_reasoning_effort = "xhigh"``, which the
-        # five values do not cover: fail closed (a Human's decision).
-        (astra,) = [e for e in self.catalog["models"] if e["slug"] == "gpt-6-astra"]
-        self.assertEqual(astra["multi_agent_reasoning_effort"], "xhigh")
-        refused(self, "code_mode_left", overridden, self.catalog, "gpt-6-astra")
+    def test_gpt_6_astra_gets_the_sixth_value(self):
+        # Its entry has ``multi_agent_reasoning_effort = "xhigh"``: nulled
+        # (Decision 0105, the Human's answer of 2026-11-17), the rest kept.
+        (before,) = [e for e in self.catalog["models"] if e["slug"] == "gpt-6-astra"]
+        self.assertEqual(before["multi_agent_reasoning_effort"], "xhigh")
+        result = overridden(self.catalog, "gpt-6-astra")
+        (after,) = [e for e in result["models"] if e["slug"] == "gpt-6-astra"]
+        self.assertIsNone(after["multi_agent_reasoning_effort"])
+        self.assertEqual({k: after[k] for k in EXPECTED}, EXPECTED)
+        self.assertEqual(set(after), set(before))
+        for key in set(before) - set(EXPECTED) - {"multi_agent_reasoning_effort"}:
+            self.assertEqual(after[key], before[key], key)
+
+    def test_only_astra_has_the_sixth_key(self):
+        having = [
+            e["slug"]
+            for e in self.catalog["models"]
+            if "multi_agent_reasoning_effort" in e
+        ]
+        self.assertEqual(having, ["gpt-6-astra"])
+        (sol,) = [
+            e
+            for e in overridden(self.catalog, "gpt-6-sol")["models"]
+            if e["slug"] == "gpt-6-sol"
+        ]
+        self.assertNotIn("multi_agent_reasoning_effort", sol)
 
     def test_every_verified_version_and_pair_has_its_catalog(self):
         for version in VERIFIED_VERSIONS:
@@ -152,6 +174,29 @@ class OverrideTest(unittest.TestCase):
         )
         with self.assertRaises(TypeError):
             OVERRIDES["shell_type"] = None
+        self.assertEqual(
+            dict(OVERRIDES_IF_PRESENT), {"multi_agent_reasoning_effort": None}
+        )
+
+    def test_the_sixth_value_only_where_the_key_is(self):
+        catalog = {
+            "models": [
+                {"slug": "a", "multi_agent_reasoning_effort": "xhigh"},
+                {"slug": "b"},
+            ]
+        }
+        self.assertEqual(
+            overridden(catalog, "a")["models"][0],
+            {"slug": "a", "multi_agent_reasoning_effort": None, **EXPECTED},
+        )
+        self.assertEqual(
+            overridden(catalog, "b")["models"][1], {"slug": "b", **EXPECTED}
+        )
+        # Not applied to another model's entry.
+        self.assertEqual(
+            overridden(catalog, "b")["models"][0],
+            {"slug": "a", "multi_agent_reasoning_effort": "xhigh"},
+        )
 
     def test_only_the_models_entry_changes(self):
         catalog = fake_catalog(("a", "b"))
@@ -174,7 +219,7 @@ class OverrideTest(unittest.TestCase):
         for name, extra in {
             "a code_mode key": {"code_mode_host": False},
             "a code_mode value": {"shell_type": "code_mode"},
-            "another multi-agent value": {"multi_agent_reasoning_effort": "xhigh"},
+            "another multi-agent value": {"multi_agent_max_depth": 2},
             "a multi_agent key": {"default_multi_agent": "v1"},
         }.items():
             with self.subTest(name):
