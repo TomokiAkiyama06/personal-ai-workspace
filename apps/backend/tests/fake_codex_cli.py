@@ -77,8 +77,14 @@ def main() -> int:
     }
 
     def save():
-        with open(report_path, "w", encoding="utf-8") as handle:
+        # Atomically (a new file renamed over the report): the adapter may
+        # stop this CLI (SIGTERM) right after the last line it sent, while
+        # the last save runs; a report truncated in place was then empty
+        # (CI run 44014182685). Killed mid-save, the previous report stays.
+        partial = report_path + ".tmp"
+        with open(partial, "w", encoding="utf-8") as handle:
             json.dump(report, handle)
+        os.replace(partial, report_path)
 
     def out(message):
         sys.stdout.write(json.dumps(message) + "\n")
