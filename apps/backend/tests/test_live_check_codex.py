@@ -356,6 +356,7 @@ class FailTest(LiveCheckCase):
         self.assertFalse(result["passed"])
         self.assertTrue(result["probe"]["passed"])
         self.assertTrue(result["node"]["stream_refused"])
+        self.assertEqual(result["node"]["refused_items"], ["commandExecution"])
         self.assertFalse(result["node"]["tool_check_passed"])
         self.assertIsNone(result["node"]["review"])
         self.assertEqual(self.left(), [])

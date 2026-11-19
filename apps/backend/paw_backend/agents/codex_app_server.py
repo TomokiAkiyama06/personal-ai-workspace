@@ -78,6 +78,34 @@ PASSING_ITEMS: Final = frozenset(
     {"userMessage", "agentMessage", "reasoning", "contextCompaction"}
 )
 MCP_ITEM: Final = "mcpToolCall"
+#: Every ``ThreadItem`` type of ``rust-v0.156.1``'s app-server protocol
+#: (``codex app-server generate-json-schema``). A refused item is named by
+#: its type only when it is one of these (``unknown`` otherwise), and an MCP
+#: call also by its server's kind (``paw`` / ``other``): nothing else of the
+#: item (its arguments, output or text) is kept.
+KNOWN_ITEMS: Final = frozenset(
+    {
+        "agentMessage",
+        "collabAgentToolCall",
+        "commandExecution",
+        "contextCompaction",
+        "dynamicToolCall",
+        "enteredReviewMode",
+        "exitedReviewMode",
+        "fileChange",
+        "functionCallOutput",
+        "hookPrompt",
+        "imageGeneration",
+        "imageView",
+        "mcpToolCall",
+        "plan",
+        "reasoning",
+        "sleep",
+        "subAgentActivity",
+        "userMessage",
+        "webSearch",
+    }
+)
 AGENT_MESSAGE: Final = "agentMessage"
 #: The notification of a turn the provider moved to another model
 #: (``v2`` ``ModelReroutedNotification``: ``fromModel``, ``toModel``).
@@ -98,11 +126,13 @@ _VERSION = re.compile(r"[^/\s]+/([0-9]+\.[0-9]+\.[0-9]+[0-9A-Za-z.+-]*)")
 class StreamRefused(Exception):
     """The stream shows a session this backend does not run. ``reason`` is a
     fixed code (``version``, ``usage``, ``item``, ``request``, ``protocol``,
-    ``malformed``)."""
+    ``malformed``). ``item``: for ``item``, what was refused (``refused_item``:
+    a type of ``KNOWN_ITEMS`` or ``unknown``, nothing of its content)."""
 
-    def __init__(self, reason: str) -> None:
+    def __init__(self, reason: str, item: str | None = None) -> None:
         super().__init__(reason)
         self.reason = reason
+        self.item = item
 
 
 @dataclass(frozen=True, slots=True)
@@ -462,7 +492,8 @@ class CodexStream:
         if kind in PASSING_ITEMS:
             return
         if self._probe:
-            raise StreamRefused("item")  # a probe offers no tool at all
+            # a probe offers no tool at all
+            raise StreamRefused("item", refused_item(item))
         if (
             kind == MCP_ITEM
             and item.get("server") == PAW_SERVER
@@ -494,7 +525,23 @@ class CodexStream:
         # Everything else can execute something (a command, a file change,
         # another agent, a search, an image), or is a type this table does
         # not know: refused (Decision 0089, 2).
-        raise StreamRefused("item")
+        raise StreamRefused("item", refused_item(item))
+
+
+def refused_item(item: Mapping[str, Any]) -> str:
+    """A refused item's name for the log: its type if known, ``unknown``
+    otherwise; an MCP call as ``mcpToolCall:paw`` or ``mcpToolCall:other``
+    (with the tool's name only when it is one PAW knows: a resource tool)."""
+    kind = item.get("type")
+    if not isinstance(kind, str) or kind not in KNOWN_ITEMS:
+        return "unknown"
+    if kind != MCP_ITEM:
+        return kind
+    server = "paw" if item.get("server") == PAW_SERVER else "other"
+    tool = item.get("tool")
+    if server == "paw" and tool in MCP_RESOURCE_TOOLS:
+        return f"{kind}:{server}:{tool}"
+    return f"{kind}:{server}"
 
 
 def _model_name(value: object) -> str:
@@ -554,6 +601,7 @@ __all__ = [
     "Initialized",
     "Ready",
     "StreamRefused",
+    "refused_item",
     "Turn",
     "initialize",
     "model_tool_names",

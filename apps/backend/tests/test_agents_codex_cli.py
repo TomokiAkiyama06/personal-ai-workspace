@@ -533,7 +533,15 @@ class StopTest(CodexCase):
             "somethingNew",
         ):
             with self.subTest(kind=kind):
-                await self.assert_stopped([{"item": {"type": kind, "id": "i"}}])
+                with self.assertLogs("paw_backend.agents.codex_cli", "WARNING") as logs:
+                    await self.assert_stopped(
+                        [{"item": {"type": kind, "id": "i", "command": "secret"}}]
+                    )
+                # The item's name only (unknown if not a known type), not
+                # its content.
+                name = "unknown" if kind == "somethingNew" else kind
+                self.assertIn(f"Codex session refused: item {name}", logs.output[0])
+                self.assertNotIn("secret", "".join(logs.output))
 
     async def test_another_servers_tool_stops_the_cli(self):
         item = {"type": "mcpToolCall", "id": "i", "server": "other", "tool": "submit"}

@@ -33,7 +33,7 @@ from pathlib import Path
 
 from paw_backend.agents.claude_probe import PROBE_PROMPT, PROBE_SYSTEM_PROMPT
 from paw_backend.agents.cli_session import UnitNotStoppedError
-from paw_backend.agents.codex_app_server import CodexStream, StreamRefused
+from paw_backend.agents.codex_app_server import CodexStream, StreamRefused, refused_item
 from paw_backend.agents.codex_cli import (
     DISABLED_FEATURES,
     InteractiveSubprocessLauncher,
@@ -586,6 +586,10 @@ class StreamTest(unittest.TestCase):
                     },
                 )
             self.assertEqual(refused.exception.reason, "item")
+            expected = (
+                "mcpToolCall:paw" if tool == "submit" else f"mcpToolCall:paw:{tool}"
+            )
+            self.assertEqual(refused.exception.item, expected)
         with self.assertRaises(ValueError):
             CodexStream({"submit"}, probe=True)
 
@@ -721,3 +725,31 @@ class CatalogTest(ProbeCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RefusedItemTest(unittest.TestCase):
+    def test_a_refused_item_is_named_by_its_type_only(self):
+        cases = [
+            ({"type": "commandExecution", "command": "rm -rf /"}, "commandExecution"),
+            ({"type": "plan", "text": "x"}, "plan"),
+            ({"type": "somethingNew"}, "unknown"),
+            ({"type": "rm -rf /"}, "unknown"),
+            ({"type": 3}, "unknown"),
+            ({}, "unknown"),
+            (
+                {"type": "mcpToolCall", "server": "paw", "tool": "bash"},
+                "mcpToolCall:paw",
+            ),
+            (
+                {"type": "mcpToolCall", "server": "evil", "tool": "x"},
+                "mcpToolCall:other",
+            ),
+            ({"type": "mcpToolCall", "tool": "read_mcp_resource"}, "mcpToolCall:other"),
+            (
+                {"type": "mcpToolCall", "server": "paw", "tool": "read_mcp_resource"},
+                "mcpToolCall:paw:read_mcp_resource",
+            ),
+        ]
+        for item, name in cases:
+            with self.subTest(item=item):
+                self.assertEqual(refused_item(item), name)
