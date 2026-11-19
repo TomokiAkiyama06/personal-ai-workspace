@@ -744,7 +744,26 @@ class RefusedItemTest(unittest.TestCase):
                 {"type": "mcpToolCall", "server": "evil", "tool": "x"},
                 "mcpToolCall:other",
             ),
-            ({"type": "mcpToolCall", "tool": "read_mcp_resource"}, "mcpToolCall:other"),
+            (
+                {"type": "mcpToolCall", "tool": "read_mcp_resource"},
+                "mcpToolCall:other:read_mcp_resource",
+            ),
+            (
+                {
+                    "type": "mcpToolCall",
+                    "server": "codex",
+                    "tool": "list_mcp_resources",
+                },
+                "mcpToolCall:codex:list_mcp_resources",
+            ),
+            (
+                {"type": "mcpToolCall", "server": "codex", "tool": "bash"},
+                "mcpToolCall:codex",
+            ),
+            (
+                {"type": "mcpToolCall", "server": "evil", "tool": "list_mcp_resources"},
+                "mcpToolCall:other:list_mcp_resources",
+            ),
             (
                 {"type": "mcpToolCall", "server": "paw", "tool": "read_mcp_resource"},
                 "mcpToolCall:paw:read_mcp_resource",
