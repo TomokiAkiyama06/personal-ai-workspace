@@ -580,6 +580,8 @@ async def run_node(
         "passed": tool_check and submitted and "cli_left_running" not in seen,
         "tool_check_passed": tool_check,
         "stream_refused": refused,
+        # What was refused: an item's type only (``refused_item``).
+        "refused_items": [] if attachment is None else list(attachment.refused_items),
         "model_refused": model_refused,
         "submitted": submitted,
         "error_class": outcome.error_class,

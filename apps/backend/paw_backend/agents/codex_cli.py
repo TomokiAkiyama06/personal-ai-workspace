@@ -312,6 +312,21 @@ class CodexAttachment:
     # Set by the adapter when the CLI's version and the model are not a
     # verified pair (Decision 0103, 4 A, 2): nothing was sent.
     model_refused: list[bool] = field(default_factory=list, repr=False)
+    # Set with ``refused`` when an item was refused: its name only
+    # (``refused_item``: a known type or ``unknown``), for the log and the
+    # live check (Decision 0104, 3).
+    refused_items: list[str] = field(default_factory=list, repr=False)
+
+
+def _log_refused(refused: StreamRefused, attachment: CodexAttachment) -> None:
+    """Keeps a stream refusal on the attachment (Decision 0089, 2) and logs
+    its fixed code, with a refused item's name (no content)."""
+    if refused.item is None:
+        logger.warning("Codex session refused: %s", refused.reason)
+    else:
+        logger.warning("Codex session refused: %s %s", refused.reason, refused.item)
+        attachment.refused_items.append(refused.item)
+    attachment.refused.append(True)
 
 
 def session_config(spec: CliSessionSpec, tools: Iterable[str], catalog: Path) -> str:
@@ -656,8 +671,7 @@ class CodexSessionAdapter:
                 try:
                     item = stream.feed(line)
                 except StreamRefused as refused:
-                    logger.warning("Codex session refused: %s", refused.reason)
-                    attachment.refused.append(True)
+                    _log_refused(refused, attachment)
                     failure = FailureCode.INVALID_RESPONSE
                     break
                 if isinstance(item, Initialized):
@@ -766,8 +780,7 @@ class CodexSessionAdapter:
                     try:
                         item = stream.feed(line)
                     except StreamRefused as refused:
-                        logger.warning("Codex session refused: %s", refused.reason)
-                        attachment.refused.append(True)
+                        _log_refused(refused, attachment)
                         break
                     if isinstance(item, Turn):
                         if not await request.on_usage(
