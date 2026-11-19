@@ -571,7 +571,13 @@ class StopTest(CodexCase):
                 item = {"type": "mcpToolCall", "id": "r", "tool": "read_mcp_resource"}
                 if server is not None:
                     item["server"] = server
-                await self.assert_stopped([{"item": item}])
+                with self.assertLogs("paw_backend.agents.codex_cli", "WARNING") as logs:
+                    await self.assert_stopped([{"item": item}])
+                kind = "codex" if server == "codex" else "other"
+                self.assertIn(
+                    f"refused: item mcpToolCall:{kind}:read_mcp_resource",
+                    logs.output[0],
+                )
 
     async def test_a_paw_call_of_an_unknown_tool_stops_the_cli(self):
         item = {"type": "mcpToolCall", "id": "r", "server": "paw", "tool": "bash"}
