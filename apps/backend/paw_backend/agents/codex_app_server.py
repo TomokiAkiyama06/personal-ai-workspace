@@ -78,11 +78,15 @@ PASSING_ITEMS: Final = frozenset(
     {"userMessage", "agentMessage", "reasoning", "contextCompaction"}
 )
 MCP_ITEM: Final = "mcpToolCall"
+#: The ``server`` of a resource call made without a ``server`` argument
+#: (Decision 0101: refused, as any server other than ``paw``).
+CODEX_SERVER: Final = "codex"
 #: Every ``ThreadItem`` type of ``rust-v0.156.1``'s app-server protocol
 #: (``codex app-server generate-json-schema``). A refused item is named by
 #: its type only when it is one of these (``unknown`` otherwise), and an MCP
-#: call also by its server's kind (``paw`` / ``other``): nothing else of the
-#: item (its arguments, output or text) is kept.
+#: call also by its server's kind (``paw`` / ``codex`` / ``other``) and, for a
+#: resource tool, the tool: nothing else of the item (its arguments, output or
+#: text) is kept.
 KNOWN_ITEMS: Final = frozenset(
     {
         "agentMessage",
@@ -530,16 +534,19 @@ class CodexStream:
 
 def refused_item(item: Mapping[str, Any]) -> str:
     """A refused item's name for the log: its type if known, ``unknown``
-    otherwise; an MCP call as ``mcpToolCall:paw`` or ``mcpToolCall:other``
-    (with the tool's name only when it is one PAW knows: a resource tool)."""
+    otherwise; an MCP call as ``mcpToolCall:<server>`` with ``paw``, ``codex``
+    (what a resource call without a ``server`` argument says, Decision 0101)
+    or ``other``, and the tool's name only when it is one PAW knows (a
+    resource tool): ``mcpToolCall:codex:list_mcp_resources``."""
     kind = item.get("type")
     if not isinstance(kind, str) or kind not in KNOWN_ITEMS:
         return "unknown"
     if kind != MCP_ITEM:
         return kind
-    server = "paw" if item.get("server") == PAW_SERVER else "other"
+    named = item.get("server")
+    server = named if named in (PAW_SERVER, CODEX_SERVER) else "other"
     tool = item.get("tool")
-    if server == "paw" and tool in MCP_RESOURCE_TOOLS:
+    if tool in MCP_RESOURCE_TOOLS:
         return f"{kind}:{server}:{tool}"
     return f"{kind}:{server}"
 
