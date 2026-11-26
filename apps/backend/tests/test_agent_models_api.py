@@ -25,7 +25,8 @@ from .test_connections_probe_api import HeldProbe, ProbeHttpCase
 
 PATH = "/api/v1/admin/agent-models"
 CODEX, CLAUDE = ConnectionKind.CODEX, ConnectionKind.CLAUDE
-# No Codex pair is verified in the code yet: the tests run on a test pair
+# The tests run on a test pair (the shipped Codex pair ``0.156.1 x gpt-6-sol``
+# is in the code since 2026-11-26)
 # (``agent_models_support``); ``ShippedPairsTest`` runs on the shipped ones.
 MODEL = TEST_CODEX_MODEL
 SOL = {"model": MODEL, "default": True, "description": "Coding"}

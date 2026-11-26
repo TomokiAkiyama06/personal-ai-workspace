@@ -2,8 +2,9 @@
 10; approved 2026-11-08; issue #341). No database: the policy's store is a
 fake; the CLIs are the fakes of the runtime and probe tests.
 
-* the repository's verified pairs: ``(2.1.301, claude-opus-5-5)`` only (no
-  Codex pair: ``0.156.1 x gpt-6-sol`` failed its recorder smoke); no hidden
+* the repository's verified pairs: ``(2.1.301, claude-opus-5-5)`` and
+  ``(0.156.1, gpt-6-sol)`` only (Codex with the catalog override, Decision
+  0104 / 0105; live check 2026-11-26); no hidden
   Codex model, no Claude alias; every Codex version is one the version check
   runs. The rules and the gate are tested on a test pair of Codex
   (``agent_models_support``);
@@ -109,7 +110,7 @@ class VerifiedTest(unittest.TestCase):
         self.assertEqual(
             dict(VERIFIED_MODELS),
             {
-                CODEX: frozenset(),
+                CODEX: frozenset({("0.156.1", "gpt-6-sol")}),
                 CLAUDE: frozenset({("2.1.301", "claude-opus-5-5")}),
             },
         )
@@ -118,12 +119,17 @@ class VerifiedTest(unittest.TestCase):
         self.assertFalse(is_verified(CLAUDE, None, "claude-opus-5-5"))
         self.assertEqual(verified_versions(CLAUDE, "claude-opus-5-5"), ("2.1.301",))
 
-    def test_gpt_6_sol_is_not_verified(self):
-        # Its recorder smoke on 0.156.1 offered tools outside ``tools``
-        # (``additional_tools``: ``exec``, ``spawn_agent``, ...): not a pair.
-        self.assertFalse(is_verified(CODEX, "0.156.1", "gpt-6-sol"))
-        with self.assertRaises(ModelNotVerifiedError):
-            check_policy(CODEX, [AllowedModel("gpt-6-sol", True)])
+    def test_gpt_6_sol_is_verified_on_0_156_1_only(self):
+        # With the catalog override (Decision 0104 / 0105) its smokes and the
+        # Human's live check passed on 0.156.1 (2026-11-26): that pair only.
+        self.assertTrue(is_verified(CODEX, "0.156.1", "gpt-6-sol"))
+        self.assertFalse(is_verified(CODEX, "0.157.0", "gpt-6-sol"))
+        self.assertFalse(is_verified(CODEX, None, "gpt-6-sol"))
+        self.assertEqual(verified_versions(CODEX, "gpt-6-sol"), ("0.156.1",))
+        check_policy(CODEX, [AllowedModel("gpt-6-sol", True)])
+        for model in ("gpt-6-astra", "gpt-6-luna", "gpt-5.5"):
+            with self.subTest(model), self.assertRaises(ModelNotVerifiedError):
+                check_policy(CODEX, [AllowedModel(model, True)])
 
     def test_no_hidden_codex_model_and_no_claude_alias(self):
         codex = verified_models(CODEX)
@@ -152,7 +158,7 @@ class PolicyRulesTest(unittest.TestCase):
     def test_a_model_the_repository_has_not_verified(self):
         for models in (
             [AllowedModel("gpt-6-astra", True)],  # not yet smoke-tested
-            [AllowedModel("gpt-6-sol", True)],  # its smoke failed
+            [AllowedModel("gpt-6-sol", True)],  # not a test pair
             [AllowedModel("gpt-5.4", True)],  # hidden
             [AllowedModel("claude-opus-5-5", True)],  # the other kind's
         ):
