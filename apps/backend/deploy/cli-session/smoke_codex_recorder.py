@@ -30,6 +30,21 @@ model such as ``gpt-6-sol`` pass. The result's ``catalog`` names the
 repository's file (and its SHA-256) and the session model's overridden
 values as the session's file had them.
 
+With ``--serverless-list`` (Decision 0106, 3 A; issue #341) the recorder's
+first answer is a call of ``list_mcp_resources`` without any argument (no
+``server``: the item says ``codex``), and the ``submit`` comes in the answer
+after it. The result's ``serverless_list`` then says what happened: the MCP
+items the stream saw (type, server, tool), the bridge's lines of methods it
+does not serve, and the call's output the model got back (its first 300
+characters). It passes when the item came as ``mcpToolCall`` with ``server
+= "codex"``, the bridge logged exactly one ``resources/list`` (and no other
+unserved method), ``paw`` was the session's only MCP server, the model got
+nothing of a resource back (``list_call_output_kinds`` is ``["error"]`` or
+``["empty_list"]``: an error, or Codex's empty list ``{"resources": []}``;
+Decision 0106, the Human's choice of 2026-11-26; a list with something in it,
+``resources``, fails), and the following ``submit`` came back as the node's
+result.
+
 With ``--probe`` it runs the Codex connection's health probe instead (Decision
 0100, 10: ``CodexProbeAdapter`` with the probe's own ``config.toml``, no MCP
 server): the recorder answers ``PAW_PROBE_OK`` and the result passes when
@@ -40,7 +55,7 @@ Run it as the user who develops, never with a real login, never as ``paw``::
 
     python3 -I deploy/cli-session/smoke_codex_recorder.py \\
         --codex <codex executable> --out <result.json> [--sessions <dir>] \\
-        [--probe] [--model <model>] [--without-catalog]
+        [--probe | --serverless-list] [--model <model>] [--without-catalog]
 
 The exit code is 0 when it passed, 1 when not. The result JSON holds the
 requests (the tools, the model, the input item types; no prompt text).
@@ -50,6 +65,7 @@ import argparse
 import asyncio
 import hashlib
 import json
+import logging
 import sys
 import tempfile
 import threading
@@ -65,6 +81,11 @@ MODEL = "gpt-6-sol"
 #: The session's ``config.toml`` line that names its catalog (Decision 0104).
 CATALOG_KEY = "model_catalog_json"
 DUMMY_AUTH = '{"OPENAI_API_KEY": null, "tokens": null}'
+#: The ``--serverless-list`` step's call (Decision 0106, 3 A).
+LIST_CALL_ID = "call_list"
+#: The keys of a resource list's output (``list_mcp_resources``,
+#: ``list_mcp_resource_templates``).
+LIST_KEYS = ("resources", "resourceTemplates")
 USAGE = {
     "input_tokens": 1000,
     "input_tokens_details": {"cached_tokens": 200},
@@ -81,10 +102,13 @@ def _sse(event: dict) -> bytes:
 class Recorder:
     """The 127.0.0.1 model provider: records the requests, calls submit once."""
 
-    def __init__(self, model_tool_names, message: str = "done") -> None:
+    def __init__(
+        self, model_tool_names, message: str = "done", *, serverless_list=False
+    ) -> None:
         self.requests: list[dict] = []
         self._names = model_tool_names
         self._message = message
+        self._serverless_list = serverless_list
         recorder = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -132,10 +156,31 @@ class Recorder:
                     for i in body.get("input") or []
                     if isinstance(i, dict) and i.get("type") == "additional_tools"
                 ],
+                # Decision 0106, 3 A: what the model got back for the step's
+                # call (the recorder's own call: no prompt text).
+                "list_call_outputs": [o[:300] for o in list_call_outputs(body)],
             }
         )
+        # Codex review of #359: the kind of the whole output, before the
+        # recorded text is cut (a long resource list cut short is not JSON).
+        outputs = list_call_outputs(body)
+        self.requests[-1]["list_call_output_kinds"] = [output_kind(o) for o in outputs]
         rid = f"resp_{uuid.uuid4().hex[:12]}"
-        if len(self.requests) == 1 and "mcp__paw__submit" in names:
+        submit_at = 2 if self._serverless_list else 1
+        if (
+            self._serverless_list
+            and len(self.requests) == 1
+            and "list_mcp_resources" in names
+        ):
+            # A top-level function call without ``server`` (Decision 0106).
+            item = {
+                "type": "function_call",
+                "id": "fc_list",
+                "call_id": LIST_CALL_ID,
+                "name": "list_mcp_resources",
+                "arguments": "{}",
+            }
+        elif len(self.requests) == submit_at and "mcp__paw__submit" in names:
             item = {
                 "type": "function_call",
                 "id": "fc_1",
@@ -215,8 +260,24 @@ async def _version(codex: str) -> str:
     return out.decode().split()[-1]
 
 
+class _Lines(logging.Handler):
+    """The bridge's log lines (their fixed text, Decision 0101, 3)."""
+
+    def __init__(self) -> None:
+        super().__init__(logging.INFO)
+        self.lines: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.lines.append(record.getMessage())
+
+
 async def smoke(
-    codex: str, sessions: Path, model: str = MODEL, *, catalog: bool = True
+    codex: str,
+    sessions: Path,
+    model: str = MODEL,
+    *,
+    catalog: bool = True,
+    serverless_list: bool = False,
 ) -> dict:
     sys.path.insert(0, str(BACKEND))
     import paw_backend.agents.codex_cli as codex_cli
@@ -229,11 +290,28 @@ async def smoke(
     from paw_backend.orchestrator.domain import NodeRole
     from paw_backend.orchestrator.runtime import NodeAssignment
 
-    recorder = Recorder(model_tool_names)
+    recorder = Recorder(model_tool_names, serverless_list=serverless_list)
     sessions_seen: list[dict] = []
     catalogs: list[dict] = []
     original = codex_cli.session_config
+    original_stream = codex_cli.CodexStream
     version = await _version(codex)
+    mcp_items: list[dict] = []
+
+    class RecordingStream(original_stream):
+        """The adapter's own stream; records each MCP item's type, server and
+        tool (nothing else of it) before the stream's check."""
+
+        def _item(self, item):
+            if isinstance(item, dict) and item.get("type") == "mcpToolCall":
+                mcp_items.append(
+                    {key: item.get(key) for key in ("type", "server", "tool", "status")}
+                )
+            return super()._item(item)
+
+    bridge_log = logging.getLogger("paw_backend.agents.bridge")
+    bridge_lines = _Lines()
+    bridge_level = bridge_log.level
 
     def session_config(spec, tools, catalog_file):
         backend = original(spec, tools, catalog_file)
@@ -297,6 +375,9 @@ async def smoke(
             return SessionResult(uuid.uuid4(), raw.submission, 0, 0, raw.failure, None)
 
     codex_cli.session_config = session_config
+    codex_cli.CodexStream = RecordingStream
+    bridge_log.addHandler(bridge_lines)
+    bridge_log.setLevel(logging.INFO)
     try:
         adapter = codex_cli.CodexSessionAdapter(
             codex_cli.InteractiveSubprocessLauncher(),
@@ -335,6 +416,9 @@ async def smoke(
         outcome = await asyncio.wait_for(runtime.run_node(assignment), 200)
     finally:
         codex_cli.session_config = original
+        codex_cli.CodexStream = original_stream
+        bridge_log.removeHandler(bridge_lines)
+        bridge_log.setLevel(bridge_level)
         recorder.close()
     session = (
         sessions_seen[0] if sessions_seen else {"paw_tools": [], "mcp_servers": []}
@@ -347,17 +431,29 @@ async def smoke(
     ]
     raw = Connections.raw
     submitted = outcome.result is not None and outcome.result.summary == "ok"
+    passed = bool(checks) and not any(checks) and submitted
+    step = None
+    if serverless_list:
+        step = serverless_list_seen(
+            mcp_items, bridge_lines.lines, recorder.requests, session
+        )
+        passed = passed and step["passed"]
     return {
         "codex_version": version,
         "model": model,
         "catalog_override": catalog,
+        "serverless_list": step,
         "catalog": catalogs[0] if catalogs else None,
         "seconds": round(time.monotonic() - started, 1),
         "session": session,
         "tool_check": checks,
         "tool_check_passed": bool(checks) and not any(checks),
         "submitted": submitted,
-        "passed": bool(checks) and not any(checks) and submitted,
+        "passed": passed,
+        "mcp_items": mcp_items,
+        "bridge_unserved_lines": [
+            line for line in bridge_lines.lines if "is not served" in line
+        ],
         "placement_recorded": placement.recorded,
         "turns_reported": connections.turns,
         "adapter_failure": None
@@ -369,6 +465,79 @@ async def smoke(
         "outcome": repr(outcome)[:500],
         "auth_file_present_at_collect": Credentials.collected,
         "requests": recorder.requests,
+    }
+
+
+def list_call_outputs(body: dict) -> list[str]:
+    """The whole outputs of the step's call in one request's input: a string,
+    or the text of an output's content items."""
+    outputs = []
+    for i in body.get("input") or []:
+        if (
+            isinstance(i, dict)
+            and i.get("type") == "function_call_output"
+            and i.get("call_id") == LIST_CALL_ID
+        ):
+            output = i.get("output")
+            if isinstance(output, list):
+                output = "".join(
+                    str(part.get("text", ""))
+                    for part in output
+                    if isinstance(part, dict)
+                )
+            outputs.append(output if isinstance(output, str) else json.dumps(output))
+    return outputs
+
+
+def output_kind(output: str) -> str:
+    """What the list call gave the model back: ``empty_list`` (Codex's
+    ``{"resources": []}`` or ``{"resourceTemplates": []}``), ``resources`` (a
+    list with something in it) or ``error`` (anything that is not a resource
+    list)."""
+    try:
+        value = json.loads(output)
+    except ValueError:
+        return "error"
+    if not isinstance(value, dict):
+        return "error"
+    lists = [value.get(key) for key in LIST_KEYS if key in value]
+    if not lists or not all(isinstance(listed, list) for listed in lists):
+        return "error"
+    return "resources" if any(lists) else "empty_list"
+
+
+def serverless_list_seen(
+    items: list[dict], lines: list[str], requests: list[dict], session: dict
+) -> dict:
+    """The ``--serverless-list`` step's checks (Decision 0106, 3 A). The
+    call's output is the one of the first request that carries it (every
+    later request resends the conversation)."""
+    unserved = [line for line in lines if "is not served" in line]
+    listed = [line for line in unserved if "method resources/list " in line]
+    item_seen = any(
+        i["type"] == "mcpToolCall"
+        and i["server"] == "codex"
+        and i["tool"] == "list_mcp_resources"
+        for i in items
+    )
+    first = next((r for r in requests if r["list_call_outputs"]), None)
+    outputs = [] if first is None else first["list_call_outputs"]
+    # Classified by the recorder from the whole output (not the cut text).
+    kinds = [] if first is None else first["list_call_output_kinds"]
+    only_paw = session.get("mcp_servers") == ["paw"]
+    one_line = len(listed) == 1 and len(unserved) == 1
+    # Decision 0106 (the Human's choice of 2026-11-26): an error or an empty
+    # list passes; a list with something in it does not.
+    nothing_back = kinds in (["error"], ["empty_list"])
+    return {
+        "item_codex_list_mcp_resources": item_seen,
+        "only_paw_configured": only_paw,
+        "bridge_resources_list_lines": len(listed),
+        "bridge_unserved_lines": len(unserved),
+        "list_call_outputs": outputs,
+        "list_call_output_kinds": kinds,
+        "no_content_returned_to_model": nothing_back,
+        "passed": item_seen and only_paw and one_line and nothing_back,
     }
 
 
@@ -484,23 +653,37 @@ def main(argv=None) -> int:
         help="run the connection's health probe instead of a node",
     )
     parser.add_argument(
+        "--serverless-list",
+        action="store_true",
+        help="first call list_mcp_resources without server (Decision 0106, 3 A)",
+    )
+    parser.add_argument(
         "--without-catalog",
         action="store_true",
         help="drop the session's model_catalog_json (Codex's own catalog)",
     )
     arguments = parser.parse_args(argv)
+    if arguments.probe and arguments.serverless_list:
+        parser.error("--serverless-list is a node's step, not the probe's")
     with tempfile.TemporaryDirectory(prefix="pawsm") as scratch:
         sessions = (arguments.sessions or Path(scratch)).resolve()
         sessions.mkdir(parents=True, exist_ok=True)
-        run = probe_smoke if arguments.probe else smoke
-        result = asyncio.run(
-            run(
+        if arguments.probe:
+            run = probe_smoke(
                 arguments.codex,
                 sessions,
                 arguments.model,
                 catalog=not arguments.without_catalog,
             )
-        )
+        else:
+            run = smoke(
+                arguments.codex,
+                sessions,
+                arguments.model,
+                catalog=not arguments.without_catalog,
+                serverless_list=arguments.serverless_list,
+            )
+        result = asyncio.run(run)
         result["sessions_left"] = sorted(p.name for p in sessions.iterdir())
     arguments.out.write_text(json.dumps(result, indent=2, default=str))
     print(json.dumps({k: v for k, v in result.items() if k != "requests"}, default=str))

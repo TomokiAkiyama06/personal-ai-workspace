@@ -38,6 +38,7 @@ from paw_backend.agents.cli_session import (
 )
 from paw_backend.agents.codex_app_server import (
     MCP_RESOURCE_TOOLS,
+    SERVERLESS_LIST_TOOLS,
     VERIFIED_VERSIONS,
     CodexStream,
     StreamRefused,
@@ -52,6 +53,7 @@ from paw_backend.agents.codex_cli import (
     CodexCliRuntime,
     CodexSessionAdapter,
     InteractiveSubprocessLauncher,
+    config_mcp_servers,
     session_config,
 )
 from paw_backend.connections import (
@@ -375,6 +377,30 @@ class TotalsTest(CodexCase):
         self.assertIsNone(raw.failure)
         self.assertEqual((raw.input_tokens, raw.output_tokens), (112, 13))
 
+    async def test_a_serverless_list_call_before_the_submit_keeps_the_totals(self):
+        # Decision 0106, 1 A: counted as a resource call that names paw.
+        outcome = await self.run_node(
+            [
+                {"usage": [100, 10]},
+                {
+                    "item": {
+                        "type": "mcpToolCall",
+                        "id": "r",
+                        "server": "codex",
+                        "tool": "list_mcp_resources",
+                    }
+                },
+                {"usage": [7, 2]},
+                {"call": "submit", "arguments": {"summary": "done"}},
+                {"usage": [5, 1]},
+                {"sleep": 30},
+            ]
+        )
+        raw = self.connections.raw
+        self.assertIsNone(raw.failure)
+        self.assertEqual((raw.input_tokens, raw.output_tokens), (112, 13))
+        self.assertEqual(outcome.result.summary, "done")
+
     async def test_a_submit_whose_call_was_not_counted_leaves_them_unknown(self):
         await self.run_node(
             [
@@ -576,6 +602,89 @@ class StopTest(CodexCase):
                 kind = "codex" if server == "codex" else "other"
                 self.assertIn(
                     f"refused: item mcpToolCall:{kind}:read_mcp_resource",
+                    logs.output[0],
+                )
+
+    async def test_a_serverless_list_call_passes_while_paw_is_the_only_server(self):
+        # Decision 0106, 1 A and 2 A: without "server" the item says "codex";
+        # the session's config has only paw, so it reaches only the bridge.
+        self.assertEqual(
+            SERVERLESS_LIST_TOOLS, {"list_mcp_resources", "list_mcp_resource_templates"}
+        )
+        for tool in sorted(SERVERLESS_LIST_TOOLS):
+            with self.subTest(tool=tool):
+                item = {
+                    "type": "mcpToolCall",
+                    "id": "r",
+                    "server": "codex",
+                    "tool": tool,
+                }
+                await self.run_node(
+                    [
+                        {"usage": [3, 1]},
+                        {"item": item},
+                        {"usage": [5, 2]},
+                        {"complete": "completed"},
+                    ]
+                )
+                raw = self.connections.raw
+                self.assertIsNone(raw.failure)
+                self.assertEqual((raw.input_tokens, raw.output_tokens), (8, 3))
+
+    async def test_a_serverless_list_call_stops_the_cli_unless_only_paw(self):
+        # Decision 0106, 2 A: any other server list, or none known, refuses.
+        for servers in (("paw", "other"), ("other",), (), None):
+            for tool in sorted(SERVERLESS_LIST_TOOLS):
+                with self.subTest(servers=servers, tool=tool):
+                    item = {
+                        "type": "mcpToolCall",
+                        "id": "r",
+                        "server": "codex",
+                        "tool": tool,
+                    }
+                    with (
+                        patch(
+                            "paw_backend.agents.codex_cli.config_mcp_servers",
+                            return_value=servers,
+                        ),
+                        self.assertLogs(
+                            "paw_backend.agents.codex_cli", "WARNING"
+                        ) as logs,
+                    ):
+                        await self.assert_stopped([{"item": item}])
+                    self.assertIn(
+                        f"refused: item mcpToolCall:codex:{tool}", logs.output[0]
+                    )
+
+    async def test_a_serverless_read_or_paw_tool_call_stops_the_cli(self):
+        # Decision 0106, 1 A: "codex" with read_mcp_resource (it needs a
+        # server) or a PAW tool's name is refused, even with only paw.
+        for tool, name in (
+            ("read_mcp_resource", "mcpToolCall:codex:read_mcp_resource"),
+            ("submit", "mcpToolCall:codex"),
+        ):
+            with self.subTest(tool=tool):
+                item = {
+                    "type": "mcpToolCall",
+                    "id": "r",
+                    "server": "codex",
+                    "tool": tool,
+                }
+                with self.assertLogs("paw_backend.agents.codex_cli", "WARNING") as logs:
+                    await self.assert_stopped([{"item": item}])
+                self.assertIn(f"refused: item {name}", logs.output[0])
+
+    async def test_a_list_call_of_another_server_stops_the_cli(self):
+        # Decision 0106, 1 A: neither paw nor codex: refused as before.
+        for server in ("other", None):
+            with self.subTest(server=server):
+                item = {"type": "mcpToolCall", "id": "r", "tool": "list_mcp_resources"}
+                if server is not None:
+                    item["server"] = server
+                with self.assertLogs("paw_backend.agents.codex_cli", "WARNING") as logs:
+                    await self.assert_stopped([{"item": item}])
+                self.assertIn(
+                    "refused: item mcpToolCall:other:list_mcp_resources",
                     logs.output[0],
                 )
 
@@ -1163,6 +1272,97 @@ class StreamTest(unittest.TestCase):
         with self.assertRaises(StreamRefused):
             CodexStream(set()).feed("{not json")
         self.assertIsNone(CodexStream(set()).feed("  "))
+
+    def stream_with(self, servers, *, probe=False):
+        stream = CodexStream(
+            () if probe else {"submit"},
+            frozenset({VERSION}),
+            probe=probe,
+            mcp_servers=servers,
+        )
+        stream.feed(json.dumps({"id": 1, "result": {"userAgent": f"x/{VERSION} (L)"}}))
+        stream.feed(json.dumps({"id": 2, "result": {"thread": {"id": "t"}}}))
+        return stream
+
+    def item(self, server, tool, ident="r", method="item/started"):
+        item = {"type": "mcpToolCall", "id": ident, "tool": tool}
+        if server is not None:
+            item["server"] = server
+        return json.dumps({"method": method, "params": {"item": item}})
+
+    def test_a_serverless_list_call_passes_only_with_exactly_paw(self):
+        # Decision 0106, 1 A and 2 A.
+        refusing = (["paw", "other"], ["other"], ["paw", "paw"], [], None, "paw")
+        for tool in sorted(SERVERLESS_LIST_TOOLS):
+            for servers in (["paw"], ("paw",)):
+                with self.subTest(tool=tool, servers=servers):
+                    stream = self.stream_with(servers)
+                    self.assertIsNone(stream.feed(self.item("codex", tool)))
+            for servers in refusing:
+                with self.subTest(tool=tool, servers=servers):
+                    with self.assertRaises(StreamRefused) as refused:
+                        self.stream_with(servers).feed(self.item("codex", tool))
+                    self.assertEqual(refused.exception.reason, "item")
+                    self.assertEqual(
+                        refused.exception.item, f"mcpToolCall:codex:{tool}"
+                    )
+
+    def test_the_default_stream_refuses_a_serverless_list_call(self):
+        # No server list given: fail closed (Decision 0106, 2 A).
+        with self.assertRaises(StreamRefused):
+            self.ready().feed(self.item("codex", "list_mcp_resources"))
+
+    def test_codex_passes_no_other_tool_and_other_servers_stay_refused(self):
+        for server, tool in (
+            ("codex", "read_mcp_resource"),
+            ("codex", "submit"),
+            ("codex", "bash"),
+            ("other", "list_mcp_resources"),
+            ("other", "list_mcp_resource_templates"),
+            (None, "list_mcp_resources"),
+            ("Codex", "list_mcp_resources"),
+        ):
+            with self.subTest(server=server, tool=tool):
+                with self.assertRaises(StreamRefused):
+                    self.stream_with(["paw"]).feed(self.item(server, tool))
+
+    def test_a_probe_refuses_a_serverless_list_call_even_with_only_paw(self):
+        with self.assertRaises(StreamRefused):
+            self.stream_with(["paw"], probe=True).feed(
+                self.item("codex", "list_mcp_resources")
+            )
+
+    def test_a_serverless_list_call_orders_the_reports_but_is_no_bridge_call(self):
+        # Decision 0106, 1 A: as a resource call that names paw (0101, 3).
+        stream = self.stream_with(["paw"])
+        stream.feed(self.usage(10, 1))
+        self.assertTrue(stream.complete)
+        stream.feed(self.item("codex", "list_mcp_resources"))
+        # started, then completed: counted once
+        stream.feed(self.item("codex", "list_mcp_resources", method="item/completed"))
+        self.assertEqual(stream.calls_seen, 0)
+        self.assertFalse(stream.call_counted)
+        self.assertFalse(stream.complete)  # the call after it is not reported yet
+        stream.feed(self.usage(15, 2))
+        self.assertTrue(stream.call_counted)
+        self.assertTrue(stream.complete)
+        stream.feed(self.item("codex", "list_mcp_resource_templates", ident="r2"))
+        self.assertFalse(stream.complete)
+        stream.feed(self.item("paw", "submit", ident="s"))
+        self.assertEqual(stream.calls_seen, 1)
+        stream.feed(self.usage(20, 3))
+        self.assertTrue(stream.complete)
+
+    def test_the_config_names_its_mcp_servers(self):
+        text = '[features]\nx = false\n\n[mcp_servers.paw]\ncommand = "r"\n'
+        self.assertEqual(config_mcp_servers(text), ("paw",))
+        self.assertEqual(
+            config_mcp_servers(text + '\n[mcp_servers.other]\ncommand = "o"\n'),
+            ("paw", "other"),
+        )
+        self.assertEqual(config_mcp_servers("[features]\n"), ())
+        self.assertIsNone(config_mcp_servers('mcp_servers = "paw"\n'))
+        self.assertIsNone(config_mcp_servers("[not toml"))
 
 
 class CatalogTest(CodexCase):

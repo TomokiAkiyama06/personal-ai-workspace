@@ -64,6 +64,7 @@ import json
 import logging
 import os
 import re
+import tomllib
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -355,6 +356,20 @@ def session_config(spec: CliSessionSpec, tools: Iterable[str], catalog: Path) ->
     return _config(catalog, ("mcp_servers.paw", paw))
 
 
+def config_mcp_servers(config: str) -> tuple[str, ...] | None:
+    """The MCP servers a session's ``config.toml`` names (its
+    ``[mcp_servers.<name>]`` tables, in order), or ``None`` when the text is
+    not TOML or ``mcp_servers`` is not a table: the stream then lets no
+    resource call without ``server`` pass (Decision 0106, 2 A: fail closed)."""
+    try:
+        servers = tomllib.loads(config).get("mcp_servers", {})
+    except tomllib.TOMLDecodeError:
+        return None
+    if not isinstance(servers, dict):
+        return None
+    return tuple(servers)
+
+
 def probe_config(catalog: Path) -> str:
     """The ``config.toml`` of the connection's health probe (Decision 0100,
     10): a node session's (:func:`session_config`) without any MCP server, so
@@ -543,12 +558,13 @@ class CodexSessionAdapter:
         if not await _bind(request, attachment):
             return AgentSessionResult(failure=FailureCode.UNAVAILABLE)
         _write(codex_home / CATALOG_NAME, catalog)
-        _write(
-            codex_home / CONFIG_NAME,
-            session_config(
-                attachment.spec, attachment.tools, codex_home / CATALOG_NAME
-            ),
+        config = session_config(
+            attachment.spec, attachment.tools, codex_home / CATALOG_NAME
         )
+        _write(codex_home / CONFIG_NAME, config)
+        # Decision 0106, 2 A: the stream learns the MCP servers of the config
+        # the CLI reads (not of what it was meant to be).
+        servers = config_mcp_servers(config)
         # Checked again right before the login is placed (Codex review of
         # #292): a session paused after binding whose expired row the
         # collection took over meanwhile stops here, before it writes into the
@@ -562,7 +578,7 @@ class CodexSessionAdapter:
                 # The slot is no longer this session's (Decision 0096, 2's
                 # fencing): the unit is not started.
                 return AgentSessionResult(failure=FailureCode.UNAVAILABLE)
-            return await self._converse(request, attachment, version)
+            return await self._converse(request, attachment, version, servers)
         finally:
             # After the CLI was stopped (``_converse``'s own ``finally``), run
             # to its end even through a cancellation: the refreshed login must
@@ -636,7 +652,11 @@ class CodexSessionAdapter:
             )
 
     async def _converse(
-        self, request: AgentSessionRequest, attachment: CodexAttachment, version: str
+        self,
+        request: AgentSessionRequest,
+        attachment: CodexAttachment,
+        version: str,
+        servers: tuple[str, ...] | None,
     ) -> AgentSessionResult:
         process = await self._start(
             CodexLaunch(
@@ -644,7 +664,7 @@ class CodexSessionAdapter:
             ),
             attachment,
         )
-        stream = CodexStream(attachment.tools, self._verified)
+        stream = CodexStream(attachment.tools, self._verified, mcp_servers=servers)
         ended: Ended | None = None
         failure: FailureCode | None = None
         stopped = False
@@ -1055,6 +1075,7 @@ __all__ = [
     "CodexSessionAdapter",
     "InteractiveSubprocessLauncher",
     "SystemdCodexLauncher",
+    "config_mcp_servers",
     "probe_config",
     "session_config",
 ]
