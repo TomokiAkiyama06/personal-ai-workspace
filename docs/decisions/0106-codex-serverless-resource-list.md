@@ -1,7 +1,8 @@
 # Codex の Session で、Server を指定しない MCP の Resource の一覧の呼び出し（`server = "codex"`）を通す（Decision 0101 の 3 の一部を変える。通す Tool、守りの条件、確かめ方）
 
-- Status: Proposed
-- Date: 2026-11-23
+- Status: Approved
+- Approval: 2026-11-26、Human が作業 Session（Claude Code）内で、PR [#358](https://github.com/TomokiAkiyama06/personal-ai-workspace/pull/358) の 3 つの判断点（推奨つき）を受けたうえで、1〜3 をすべて A と回答して承認（approved as recommended, all 3 points: 末尾の「承認時の決定」）
+- Date: 2026-11-23（承認 2026-11-26）
 - Scope: Issue [#341](https://github.com/TomokiAkiyama06/personal-ai-workspace/issues/341)（[Decision 0105](0105-codex-no-interim-model.md) の PR の分け方の 4 で、Human が `gpt-6-sol` を本物で確かめて分かった）。この Decision は設計だけで、コードは承認の後の PR で書く。関係する既存の口: `apps/backend/paw_backend/agents/codex_app_server.py`（`CodexStream._item`・`MCP_RESOURCE_TOOLS`・`refused_item`）、`agents/bridge.py`（`resources/*` に `Method not found` を返し、1 行の Log を残す）、`agents/codex_cli.py`（`session_config`・`DISABLED_FEATURES`）、`deploy/cli-session/smoke_codex_recorder.py`・`live_check_codex.py`。
 - Supersedes（一部）:
   - [Decision 0101](0101-codex-mcp-resource-tools-exception.md)（Approved）の 3 と、その「承認時の決定」の 1 のうち **「`server` を省いた（`"codex"`）呼び出しは止める」** の部分。下の 1 の 2 つの一覧の Tool に限って通す。
@@ -71,3 +72,11 @@ Human は、確かめ専用の ChatGPT の Login で `live_check_codex.py` を 3
 
 承認されたら、Status を Approved とし、承認の内容を Approval の行と末尾の「承認時の決定」に記録する。README の表に 1 行を足し、0101 の行は書き換えない。
 方針を変えるときは、この Decision を書き換えず、新しい Decision から `Supersedes` する。
+
+## 承認時の決定（2026-11-26）
+
+Human は、Claude Code の作業 Session で PR #358 の 3 つの判断点（推奨つき）を受け、すべてを推奨どおり A と回答して承認した。
+
+1. **どの呼び出しを通すか**: A。`mcpToolCall` で `server == "codex"` かつ `tool` が `list_mcp_resources` か `list_mcp_resource_templates` なら通す。PAW の Tool の呼び出しの順の数え方に入れ、Bridge の呼び出しの数には入れない。`server = "codex"` の `read_mcp_resource`、`paw` でも `codex` でもない宛先は、今のとおり止める（1）。
+2. **守りの条件**: A。1 の例外は、Session の設定で MCP の Server が `paw` だけ（`["paw"]`）のときに限る。`CodexStream` に Session の Server の一覧を渡し、そうでなければ今のとおり止める（2）。
+3. **確かめ方**: A。実装の PR で記録用の Server の Smoke に `server` なしの `list_mcp_resources` の手順を足し、3 の 3 点を確かめて結果を `/data/results/` に残す。その後 Human が `live_check_codex.py` を `gpt-6-sol` で走らせ、合格したら 0105 の PR の分け方の 4 に進む（3）。
