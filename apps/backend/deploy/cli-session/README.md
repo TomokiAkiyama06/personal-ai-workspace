@@ -100,7 +100,7 @@ Script は自分で `apps/backend` を `sys.path` に入れるので、`-I` の�
 
 ### 走らせる
 
-開発する User で、確かめる版の `codex` を Scratch に置いて走らせる。**`0.156.1` と `gpt-6-sol` で走らせる**（[Decision 0105](../../../../docs/decisions/0105-codex-no-interim-model.md) の 1 と 3 の A: `gpt-5.5` は ChatGPT の Account で使えないので当面の既定は置かない。合格したら `(0.156.1, gpt-6-sol)` を組に足す PR を作る。0104 の PR の分け方の 5）:
+開発する User で、確かめる版の `codex` を Scratch に置いて走らせる。**`0.156.1` と `gpt-6-sol` で走らせる**（[Decision 0105](../../../../docs/decisions/0105-codex-no-interim-model.md) の 1 と 3 の A: `gpt-5.5` は ChatGPT の Account で使えないので当面の既定は置かない。合格したら `(0.156.1, gpt-6-sol)` を組に足す PR を作る。0104 の PR の分け方の 5。2026-11-26 に合格し（Backend `639fe82`、`/data/results/paw-codex-live-check-2026-11-17/gpt-6-sol-4.json`）、組に足した）:
 
 ```sh
 cd apps/backend

@@ -15,6 +15,8 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import MappingProxyType
+from unittest import mock
 
 from paw_backend.agent_models import verified
 from paw_backend.agents import cli_wiring
@@ -118,6 +120,17 @@ class LiveCheckCase(unittest.TestCase):
 
 class PassTest(LiveCheckCase):
     def test_both_checks_pass_and_the_widening_stays_in_the_run(self):
+        # The pair is in the repository since 2026-11-26 (this check passed
+        # on the real model): without it, the widening must stay in the run.
+        self.enterContext(
+            mock.patch.object(
+                verified,
+                "VERIFIED_MODELS",
+                MappingProxyType(
+                    {**verified.VERIFIED_MODELS, ConnectionKind.CODEX: frozenset()}
+                ),
+            )
+        )
         before = dict(verified.VERIFIED_MODELS)
         mapping = verified.VERIFIED_MODELS
         code, result = self.check()

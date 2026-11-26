@@ -24,10 +24,23 @@ The pairs listed, with their evidence:
   ``system/init`` tool check passed (the image of ``/etc/paw/cli-session.toml``,
   Claude Code 2.1.301 since 2026-10-16).
 
-No Codex pair is listed. The recorder smoke of codex-cli ``0.156.1`` with
-``gpt-6-sol`` (``smoke_codex_recorder.py --model gpt-6-sol``, 2026-11-08) did
-not pass: the model's requests carry no ``tools``; the tools come in an
-``additional_tools`` input item instead, and it offers, besides the PAW
+* Codex ``0.156.1`` x ``gpt-6-sol`` (Decision 0104 / 0105, "PR の分け方" 4;
+  issue #341), with the repository's catalog override: the recorder smoke's
+  node and probe (2026-11-17,
+  ``/data/results/paw-codex-catalog-override-2026-11-16/``), the server-less
+  resource list smoke of Decision 0106 (2026-11-26, run 2,
+  ``/data/results/paw-codex-serverless-list-2026-11-26/``) and the Human's
+  live check on the real model (``live_check_codex.py``, backend ``639fe82``,
+  2026-11-26 08:25 UTC, ``passed: true``: probe ``connected``, node submitted,
+  no refused item; ``/data/results/paw-codex-live-check-2026-11-17/gpt-6-sol-4.json``).
+  The production probe checks it after the release, and the Admin allows it
+  by policy (Decision 0105, 4).
+
+Until 2026-11-26 no Codex pair was listed. The recorder smoke of codex-cli
+``0.156.1`` with ``gpt-6-sol`` (``smoke_codex_recorder.py --model gpt-6-sol``,
+2026-11-08, before the catalog override) did not pass: the model's requests
+carry no ``tools``; the tools come in an ``additional_tools`` input item
+instead, and it offers, besides the PAW
 ``submit``, the built-in ``exec``, ``wait`` and ``request_user_input_async``
 and the ``collaboration`` tools (``spawn_agent`` and others), which Decision
 0101 does not allow (the probe's run offers them too). A pair is added once
@@ -56,7 +69,7 @@ from paw_backend.connections.domain import ConnectionKind
 VERIFIED_MODELS: Final[Mapping[ConnectionKind, frozenset[tuple[str, str]]]] = (
     MappingProxyType(
         {
-            ConnectionKind.CODEX: frozenset(),
+            ConnectionKind.CODEX: frozenset({("0.156.1", "gpt-6-sol")}),
             ConnectionKind.CLAUDE: frozenset({("2.1.301", "claude-opus-5-5")}),
         }
     )

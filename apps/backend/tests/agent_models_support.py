@@ -1,8 +1,8 @@
 """The repository's verified pairs as a test says (Decision 0103, 3 A).
 
-No Codex pair is verified in the code yet (``agent_models/verified.py``), so a
-test that needs a verified Codex model runs under :func:`verified_pairs_of`
-with a pair of its own; the shipped pairs are tested as they are in
+A test that needs a verified Codex model runs under :func:`verified_pairs_of`
+with a pair of its own (independent of the shipped ``0.156.1 x gpt-6-sol`` in
+``agent_models/verified.py``); the shipped pairs are tested as they are in
 ``test_agents_cli_models``.
 """
 
