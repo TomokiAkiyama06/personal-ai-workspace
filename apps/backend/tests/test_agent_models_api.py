@@ -224,17 +224,26 @@ class UpdateTest(AgentModelsCase):
 class ShippedPairsTest(AgentModelsCase):
     shipped_pairs = True
 
-    def test_gpt_6_sol_is_not_verified_and_codex_has_no_candidate(self):
-        # Its recorder smoke on 0.156.1 failed (``agent_models/verified.py``).
+    def test_gpt_6_sol_is_the_only_codex_candidate(self):
+        # ``0.156.1 x gpt-6-sol`` is shipped since 2026-11-26 (its smokes and
+        # the Human's live check passed: ``agent_models/verified.py``); the
+        # other catalog models are not verified yet.
         self.fake_passkey_step_up(self.admin)
-        response = self.put(
-            {"kind": "codex", "models": [{"model": "gpt-6-sol", "default": True}]}
+        astra = self.put(
+            {"kind": "codex", "models": [{"model": "gpt-6-astra", "default": True}]}
         )
         self.assertEqual(
-            (response.status_code, error_code(response)), (422, "model_not_verified")
+            (astra.status_code, error_code(astra)), (422, "model_not_verified")
         )
         kinds = self.kinds(self.call("GET", PATH, token=self.admin))
-        self.assertEqual(kinds["codex"]["candidates"], [])
+        self.assertEqual(
+            kinds["codex"]["candidates"],
+            [{"model": "gpt-6-sol", "versions": ["0.156.1"]}],
+        )
+        sol = self.put(
+            {"kind": "codex", "models": [{"model": "gpt-6-sol", "default": True}]}
+        )
+        self.assertEqual(sol.status_code, 200, sol.text)
         claude = self.put(
             {
                 "kind": "claude",
