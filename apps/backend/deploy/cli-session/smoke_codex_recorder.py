@@ -38,10 +38,12 @@ items the stream saw (type, server, tool), the bridge's lines of methods it
 does not serve, and the call's output the model got back (its first 300
 characters). It passes when the item came as ``mcpToolCall`` with ``server
 = "codex"``, the bridge logged exactly one ``resources/list`` (and no other
-unserved method), ``paw`` was the session's only MCP server, the model got an
-error back (``list_call_output_kinds`` is ``["error"]``; Codex's empty list
-``{"resources": []}`` is ``empty_list``, not an error), and the following
-``submit`` came back as the node's result.
+unserved method), ``paw`` was the session's only MCP server, the model got
+nothing of a resource back (``list_call_output_kinds`` is ``["error"]`` or
+``["empty_list"]``: an error, or Codex's empty list ``{"resources": []}``;
+Decision 0106, the Human's choice of 2026-11-26; a list with something in it,
+``resources``, fails), and the following ``submit`` came back as the node's
+result.
 
 With ``--probe`` it runs the Codex connection's health probe instead (Decision
 0100, 10: ``CodexProbeAdapter`` with the probe's own ``config.toml``, no MCP
@@ -81,6 +83,9 @@ CATALOG_KEY = "model_catalog_json"
 DUMMY_AUTH = '{"OPENAI_API_KEY": null, "tokens": null}'
 #: The ``--serverless-list`` step's call (Decision 0106, 3 A).
 LIST_CALL_ID = "call_list"
+#: The keys of a resource list's output (``list_mcp_resources``,
+#: ``list_mcp_resource_templates``).
+LIST_KEYS = ("resources", "resourceTemplates")
 USAGE = {
     "input_tokens": 1000,
     "input_tokens_details": {"cached_tokens": 200},
@@ -153,15 +158,13 @@ class Recorder:
                 ],
                 # Decision 0106, 3 A: what the model got back for the step's
                 # call (the recorder's own call: no prompt text).
-                "list_call_outputs": [
-                    str(i.get("output"))[:300]
-                    for i in body.get("input") or []
-                    if isinstance(i, dict)
-                    and i.get("type") == "function_call_output"
-                    and i.get("call_id") == LIST_CALL_ID
-                ],
+                "list_call_outputs": [o[:300] for o in list_call_outputs(body)],
             }
         )
+        # Codex review of #359: the kind of the whole output, before the
+        # recorded text is cut (a long resource list cut short is not JSON).
+        outputs = list_call_outputs(body)
+        self.requests[-1]["list_call_output_kinds"] = [output_kind(o) for o in outputs]
         rid = f"resp_{uuid.uuid4().hex[:12]}"
         submit_at = 2 if self._serverless_list else 1
         if (
@@ -465,18 +468,42 @@ async def smoke(
     }
 
 
+def list_call_outputs(body: dict) -> list[str]:
+    """The whole outputs of the step's call in one request's input: a string,
+    or the text of an output's content items."""
+    outputs = []
+    for i in body.get("input") or []:
+        if (
+            isinstance(i, dict)
+            and i.get("type") == "function_call_output"
+            and i.get("call_id") == LIST_CALL_ID
+        ):
+            output = i.get("output")
+            if isinstance(output, list):
+                output = "".join(
+                    str(part.get("text", ""))
+                    for part in output
+                    if isinstance(part, dict)
+                )
+            outputs.append(output if isinstance(output, str) else json.dumps(output))
+    return outputs
+
+
 def output_kind(output: str) -> str:
     """What the list call gave the model back: ``empty_list`` (Codex's
-    ``{"resources": []}``), ``resources`` (a list with something in it) or
-    ``error`` (anything that is not a resource list)."""
+    ``{"resources": []}`` or ``{"resourceTemplates": []}``), ``resources`` (a
+    list with something in it) or ``error`` (anything that is not a resource
+    list)."""
     try:
         value = json.loads(output)
     except ValueError:
         return "error"
-    listed = value.get("resources") if isinstance(value, dict) else None
-    if not isinstance(listed, list):
+    if not isinstance(value, dict):
         return "error"
-    return "resources" if listed else "empty_list"
+    lists = [value.get(key) for key in LIST_KEYS if key in value]
+    if not lists or not all(isinstance(listed, list) for listed in lists):
+        return "error"
+    return "resources" if any(lists) else "empty_list"
 
 
 def serverless_list_seen(
@@ -493,13 +520,15 @@ def serverless_list_seen(
         and i["tool"] == "list_mcp_resources"
         for i in items
     )
-    outputs = next(
-        (r["list_call_outputs"] for r in requests if r["list_call_outputs"]), []
-    )
-    kinds = [output_kind(o) for o in outputs]
+    first = next((r for r in requests if r["list_call_outputs"]), None)
+    outputs = [] if first is None else first["list_call_outputs"]
+    # Classified by the recorder from the whole output (not the cut text).
+    kinds = [] if first is None else first["list_call_output_kinds"]
     only_paw = session.get("mcp_servers") == ["paw"]
     one_line = len(listed) == 1 and len(unserved) == 1
-    error_back = kinds == ["error"]
+    # Decision 0106 (the Human's choice of 2026-11-26): an error or an empty
+    # list passes; a list with something in it does not.
+    nothing_back = kinds in (["error"], ["empty_list"])
     return {
         "item_codex_list_mcp_resources": item_seen,
         "only_paw_configured": only_paw,
@@ -507,8 +536,8 @@ def serverless_list_seen(
         "bridge_unserved_lines": len(unserved),
         "list_call_outputs": outputs,
         "list_call_output_kinds": kinds,
-        "error_returned_to_model": error_back,
-        "passed": item_seen and only_paw and one_line and error_back,
+        "no_content_returned_to_model": nothing_back,
+        "passed": item_seen and only_paw and one_line and nothing_back,
     }
 
 

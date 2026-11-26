@@ -80,3 +80,13 @@ Human は、Claude Code の作業 Session で PR #358 の 3 つの判断点（�
 1. **どの呼び出しを通すか**: A。`mcpToolCall` で `server == "codex"` かつ `tool` が `list_mcp_resources` か `list_mcp_resource_templates` なら通す。PAW の Tool の呼び出しの順の数え方に入れ、Bridge の呼び出しの数には入れない。`server = "codex"` の `read_mcp_resource`、`paw` でも `codex` でもない宛先は、今のとおり止める（1）。
 2. **守りの条件**: A。1 の例外は、Session の設定で MCP の Server が `paw` だけ（`["paw"]`）のときに限る。`CodexStream` に Session の Server の一覧を渡し、そうでなければ今のとおり止める（2）。
 3. **確かめ方**: A。実装の PR で記録用の Server の Smoke に `server` なしの `list_mcp_resources` の手順を足し、3 の 3 点を確かめて結果を `/data/results/` に残す。その後 Human が `live_check_codex.py` を `gpt-6-sol` で走らせ、合格したら 0105 の PR の分け方の 4 に進む（3）。
+
+### 3 の 3 点目の確かめの結果と Human の選択（2026-11-26）
+
+実装の PR（[#359](https://github.com/TomokiAkiyama06/personal-ai-workspace/pull/359)）で、記録用の Server の Smoke（`smoke_codex_recorder.py --serverless-list`、`codex-cli 0.156.1`、`gpt-6-sol`、`127.0.0.1`、Dummy の Login。OpenAI には何も送っていない）を走らせた。証拠: `/data/results/paw-codex-serverless-list-2026-11-26/STATUS.md`（1 回目は `run1/`、この選択の後の 2 回目は `run2/`）。
+
+- 3 の 1 点目（Item が `mcpToolCall`・`server = "codex"` で来る）と 2 点目（Bridge の Log に `resources/list` が 1 行だけ、MCP の Server は `paw` だけ）は合格した。
+- 3 点目のうち、続く `submit` は Node の結果まで通った。しかし Model に返ったのは Error ではなく、**中身のない空の一覧 `{"resources":[]}`** だった。Codex 0.156.1 は、`server` を省いた一覧の呼び出しでは、各 Server の失敗（Bridge の `Method not found`）を Model に返さず、空の一覧にまとめる。
+- 2 の守りの目的はこれでも保たれている: 中身は出ない（Bridge は Resource を出さない）し、宛先は `paw` だけ（Bridge の Log の 1 行）。
+
+Human に聞き、Human は **3 の 3 点目の「Model に Error が返り」を、「Model に Error か、中身のない空の一覧（`resources`・`resourceTemplates` が空）が返り」として合格とする** と答えた。中身のある一覧が返れば、今までどおり不合格とする。上の 3 の本文は書き換えず、この節で補う。新しい Decision は作らない（Human の指示）。
