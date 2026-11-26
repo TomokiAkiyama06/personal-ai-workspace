@@ -93,6 +93,83 @@ class RecorderTest(unittest.TestCase):
         self.assertEqual((request["tools"], request["model_tool_names"]), ([], []))
 
 
+LIST = {
+    "type": "function",
+    "name": "list_mcp_resources",
+    "parameters": {"type": "object", "properties": {"cursor": {}, "server": {}}},
+}
+
+
+class ServerlessListTest(unittest.TestCase):
+    """``--serverless-list`` (Decision 0106, 3 A): the list call without
+    ``server`` first, then the submit, then a message."""
+
+    def setUp(self):
+        self.recorder = load().Recorder(model_tool_names, serverless_list=True)
+        self.addCleanup(self.recorder.close)
+
+    post = RecorderTest.post
+
+    def test_the_first_answer_calls_the_list_without_server(self):
+        events = self.post({"model": "m", "tools": [PAW, LIST], "input": []})
+        item = events[1]["item"]
+        self.assertEqual(item["type"], "function_call")
+        self.assertEqual(item["name"], "list_mcp_resources")
+        self.assertNotIn("namespace", item)
+        self.assertEqual(json.loads(item["arguments"]), {})
+        output = {
+            "type": "function_call_output",
+            "call_id": item["call_id"],
+            "output": "resources/list failed: Method not found",
+        }
+        events = self.post({"model": "m", "tools": [PAW, LIST], "input": [output]})
+        self.assertEqual(events[1]["item"]["name"], "submit")
+        events = self.post({"model": "m", "tools": [PAW, LIST], "input": []})
+        self.assertEqual(events[1]["item"]["type"], "message")
+        outputs = [r["list_call_outputs"] for r in self.recorder.requests]
+        self.assertEqual(outputs, [[], ["resources/list failed: Method not found"], []])
+
+    def test_the_step_checks(self):
+        seen = load().serverless_list_seen
+        item = {"type": "mcpToolCall", "server": "codex", "tool": "list_mcp_resources"}
+        line = "MCP bridge: method resources/list is not served"
+        error = "resources/list failed: Method not found"
+        # Every later request resends the call's output: the first counts.
+        requests = [
+            {"list_call_outputs": []},
+            {"list_call_outputs": [error]},
+            {"list_call_outputs": [error]},
+        ]
+        paw = {"mcp_servers": ["paw"]}
+        result = seen([item], [line], requests, paw)
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["list_call_output_kinds"], ["error"])
+        empty = [{"list_call_outputs": []}, {"list_call_outputs": ['{"resources":[]}']}]
+        result = seen([item], [line], empty, paw)
+        self.assertEqual(result["list_call_output_kinds"], ["empty_list"])
+        self.assertFalse(result["error_returned_to_model"])
+        self.assertFalse(result["passed"])
+        for items, lines, outputs, session in (
+            ([dict(item, server="paw")], [line], requests, paw),
+            ([item], [], requests, paw),
+            ([item], [line, line], requests, paw),
+            ([item], [line, line.replace("list", "read")], requests, paw),
+            ([item], [line], requests[:1], paw),
+            ([item], [line], [{"list_call_outputs": ['{"resources":[{}]}']}], paw),
+            ([item], [line], requests, {"mcp_servers": ["paw", "other"]}),
+        ):
+            with self.subTest(items=items, lines=lines, session=session):
+                self.assertFalse(seen(items, lines, outputs, session)["passed"])
+
+    def test_the_output_kinds(self):
+        kind = load().output_kind
+        self.assertEqual(kind('{"resources":[]}'), "empty_list")
+        self.assertEqual(kind('{"resources":[{"uri":"x"}]}'), "resources")
+        for text in ("Method not found", '{"error":"x"}', "[]", '{"resources":1}'):
+            with self.subTest(text=text):
+                self.assertEqual(kind(text), "error")
+
+
 class ConfigTest(unittest.TestCase):
     def setUp(self):
         self.module = load()

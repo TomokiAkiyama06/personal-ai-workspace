@@ -25,8 +25,11 @@ rpc.rs`` of ``rust-v0.162.1``). A session is:
   parts of them: Decision 0089, 3);
 * ``item/started`` / ``item/completed``: the item's ``type`` against the closed
   table of Decision 0089, 2 (a non-tool item passes; a PAW MCP call passes; an
-  MCP resource call that names ``paw`` passes, Decision 0101, 3; an item that
-  can execute, or a type not in the table, is refused, ``item``);
+  MCP resource call that names ``paw`` passes, Decision 0101, 3; a resource
+  list call made without a ``server`` argument (``server = "codex"``) passes
+  only while the session's MCP servers are exactly ``["paw"]``, Decision 0106,
+  1 and 2; an item that can execute, or a type not in the table, is refused,
+  ``item``);
 
 :func:`tool_check` is the smoke test's check of one model request's ``tools``
 (Decision 0101, 1: the PAW tools, and only the MCP resource tools besides).
@@ -79,8 +82,18 @@ PASSING_ITEMS: Final = frozenset(
 )
 MCP_ITEM: Final = "mcpToolCall"
 #: The ``server`` of a resource call made without a ``server`` argument
-#: (Decision 0101: refused, as any server other than ``paw``).
+#: (Decision 0101: refused, as any server other than ``paw``; Decision 0106:
+#: but for :data:`SERVERLESS_LIST_TOOLS`).
 CODEX_SERVER: Final = "codex"
+#: The resource tools whose call without a ``server`` argument (the item
+#: says ``codex``) passes while ``paw`` is the session's only MCP server
+#: (Decision 0106, 1 A and 2 A): it then sends ``resources/list`` (or
+#: ``resources/templates/list``) to the bridge only, as a call that names
+#: ``paw`` does. ``read_mcp_resource`` needs ``server``: ``codex`` names a
+#: server that does not exist, refused.
+SERVERLESS_LIST_TOOLS: Final = frozenset(
+    {"list_mcp_resources", "list_mcp_resource_templates"}
+)
 #: Every ``ThreadItem`` type of ``rust-v0.156.1``'s app-server protocol
 #: (``codex app-server generate-json-schema``). A refused item is named by
 #: its type only when it is one of these (``unknown`` otherwise), and an MCP
@@ -322,9 +335,18 @@ class CodexStream:
         verified_versions: frozenset[str] = VERIFIED_VERSIONS,
         *,
         probe: bool = False,
+        mcp_servers: Iterable[str] | None = None,
     ) -> None:
         self._tools = frozenset(expected_tools)
         self._probe = probe
+        # Decision 0106, 2 A: the session config's MCP servers. Only exactly
+        # ``["paw"]`` lets a resource list call without ``server`` pass; any
+        # other list, or none given, refuses it (fail closed).
+        self._only_paw = (
+            mcp_servers is not None
+            and not isinstance(mcp_servers, str)
+            and list(mcp_servers) == [PAW_SERVER]
+        )
         if probe and self._tools:
             raise ValueError("a probe expects no tool")
         #: A probe's last completed agent message (see the module).
@@ -509,17 +531,13 @@ class CodexStream:
                 self._seen += 1
                 self._last_call = self._seen
             return
-        if (
-            kind == MCP_ITEM
-            and item.get("server") == PAW_SERVER
-            and item.get("tool") in MCP_RESOURCE_TOOLS
-        ):
+        if kind == MCP_ITEM and self._resource_call(item):
             # Decision 0101, 3: a resource call that names ``paw`` reaches
             # only the bridge, which serves no resources (``Method not
             # found``). The model answers it with another call, so it orders
             # the reports as a tool call does, but the bridge does not count
-            # it (``calls_seen``). Without ``server`` the item says ``codex``:
-            # refused below, as any other server.
+            # it (``calls_seen``). Decision 0106: a list call without
+            # ``server`` (``codex``) too, while ``paw`` is the only server.
             ident = item.get("id")
             if ident not in self._resource_ids:
                 self._resource_ids.add(ident)
@@ -530,6 +548,18 @@ class CodexStream:
         # another agent, a search, an image), or is a type this table does
         # not know: refused (Decision 0089, 2).
         raise StreamRefused("item", refused_item(item))
+
+    def _resource_call(self, item: Mapping[str, Any]) -> bool:
+        """A resource call that reaches only the bridge: it names ``paw``
+        (Decision 0101, 3), or it is a list call without ``server`` while the
+        session's MCP servers are exactly ``["paw"]`` (Decision 0106, 1 A and
+        2 A). Any other server, and ``codex`` otherwise, is refused."""
+        server, tool = item.get("server"), item.get("tool")
+        if server == PAW_SERVER:
+            return tool in MCP_RESOURCE_TOOLS
+        return (
+            server == CODEX_SERVER and tool in SERVERLESS_LIST_TOOLS and self._only_paw
+        )
 
 
 def refused_item(item: Mapping[str, Any]) -> str:
@@ -602,6 +632,7 @@ __all__ = [
     "PASSING_ITEMS",
     "RATE_ERRORS",
     "REROUTED",
+    "SERVERLESS_LIST_TOOLS",
     "VERIFIED_VERSIONS",
     "CodexStream",
     "Ended",
